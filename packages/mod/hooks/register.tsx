@@ -142,18 +142,21 @@ async function resolveLanguage($: EngineInterface, s: Settings): Promise<Lang> {
     const host = langFrom(typeof value === 'string' ? value : undefined)
     if (host) return host
   } catch (error) { await report($, 'language settings', error) }
-  const locale = langFrom(await $.env.get('LANG')) ?? langFrom(await $.env.get('LC_ALL'))
-  if (locale) return locale
+  // On a Mac the system language comes before LANG: a session the desktop app starts can carry
+  // LANG=en_US on a Korean Mac (seen 2026-10-10: Korean headless, English in the Code tab).
   // The engine exposes no platform noun. Avoid running macOS defaults elsewhere.
-  if (await $.env.get('OS') === 'Windows_NT') return 'en'
-  try {
-    const platform = await $.process.run(['uname', '-s'], { timeoutMs: 2000 })
-    if (platform.exitCode !== 0 || platform.stdout.trim() !== 'Darwin') return 'en'
-    const apple = await $.process.run(['defaults', 'read', '-g', 'AppleLocale'], { timeoutMs: 2000 })
-    if (apple.exitCode === 0) return langFrom(apple.stdout) ?? 'en'
-    await report($, 'language locale', apple.stderr)
-  } catch (error) { await report($, 'language locale', error) }
-  return 'en'
+  if (await $.env.get('OS') !== 'Windows_NT') {
+    try {
+      const platform = await $.process.run(['uname', '-s'], { timeoutMs: 2000 })
+      if (platform.exitCode === 0 && platform.stdout.trim() === 'Darwin') {
+        const apple = await $.process.run(['defaults', 'read', '-g', 'AppleLocale'], { timeoutMs: 2000 })
+        const mac = apple.exitCode === 0 ? langFrom(apple.stdout) : undefined
+        if (mac) return mac
+        if (apple.exitCode !== 0) await report($, 'language locale', apple.stderr)
+      }
+    } catch (error) { await report($, 'language locale', error) }
+  }
+  return langFrom(await $.env.get('LANG')) ?? langFrom(await $.env.get('LC_ALL')) ?? 'en'
 }
 async function registerAuto($: EngineInterface, s: Settings): Promise<void> {
   if (s.agentAuto === 'off') return

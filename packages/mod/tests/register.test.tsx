@@ -155,12 +155,20 @@ test('auto prefers Claude Code language over LANG and LC_ALL', async ($, on) => 
   expect(b.processes).toEqual([])
 })
 
-test('auto checks LANG then LC_ALL when the host setting is unsupported', async ($, on) => {
+test('off macOS, auto checks LANG then LC_ALL when the host setting is unsupported', async ($, on) => {
   const b = boundaries(on, {}, { language: 12, env: { LANG: 'zh-Hans', LC_ALL: 'pt_BR' } })
   http(on)
   await start($)
   expectLanguage(b, 'zh')
-  expect(b.processes).toEqual([])
+  expect(b.processes).toEqual([{ argv: ['uname', '-s'], timeoutMs: 2000 }])
+})
+
+// The desktop app can start a session with LANG=en_US on a Mac set to Korean (2026-10-10).
+test('on macOS the system language wins over LANG', async ($, on) => {
+  const b = boundaries(on, {}, { env: { LANG: 'en_US.UTF-8' }, platform: 'Darwin', appleLocale: 'ko_KR\n' })
+  http(on)
+  await start($)
+  expectLanguage(b, 'ko')
 })
 
 test('auto accepts LC_ALL after an unsupported LANG', async ($, on) => {
@@ -168,7 +176,7 @@ test('auto accepts LC_ALL after an unsupported LANG', async ($, on) => {
   http(on)
   await start($)
   expectLanguage(b, 'es')
-  expect(b.processes).toEqual([])
+  expect(b.processes).toEqual([{ argv: ['uname', '-s'], timeoutMs: 2000 }])
 })
 
 test('auto reads AppleLocale only on macOS with a two-second timeout', async ($, on) => {
