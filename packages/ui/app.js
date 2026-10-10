@@ -2934,7 +2934,6 @@ function modJudgeCard() {
     } else {
       rows.push(el("div", { class: "cell-note", text: t("mod.jevKeyNote") }));
     }
-    footers.push(el("p", { class: "group-footer warn-text", text: t(s.jevSource === "zen" ? "mod.zenWarning" : "mod.jevWarning") }));
   }
   if (s.judge === "model") {
     const models = modModels().map((model) => ({ value: model.model, label: `${model.name || model.model} · ${model.provider}` }));
