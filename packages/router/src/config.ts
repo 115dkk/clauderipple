@@ -392,6 +392,10 @@ export const DEFAULTS: Config = {
   log: { maxBytes: 5 * 1024 * 1024, keep: 3 },
 };
 
+export function adminPort(cfg: Config): number {
+  return cfg.admin?.port ?? cfg.listen.port + 1;
+}
+
 export function homeDir(): string {
   return process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
 }

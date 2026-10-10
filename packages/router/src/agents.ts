@@ -13,9 +13,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { homeDir, type Config, type Provider } from "./config.ts";
+import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { declaredBy } from "./routing.ts";
-import { adminPort } from "./admin.ts";
+import { isJudgeOnlyModel } from "./model-policy.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
 
 /** The least a caller has to offer as a logger; `console` qualifies, so startup can pass one. */
@@ -142,7 +142,7 @@ function scanDir(dir: string, log?: AgentLog): Map<string, AgentEntry> {
 export function agentAliases(dir: string, log?: AgentLog): Record<string, string> {
   const out: Record<string, string> = {};
   for (const entry of scanDir(dir, log).values()) {
-    if (!entry.model) continue;
+    if (!entry.model || isJudgeOnlyModel(entry.model)) continue;
     out[entry.name] = entry.model.replace(/@[a-z]+$/i, "");
   }
   return out;
@@ -205,6 +205,24 @@ function readManifest(file: string): Manifest {
   return { agents: [] };
 }
 
+export type GeneratedAgent = { name: string; model: string; provider: string };
+
+/** Owned files that still exist and name a configured worker, not hand-written agents. */
+export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPath = path.join(homeDir(), "generated-agents.json"), log?: AgentLog): GeneratedAgent[] {
+  const owned = new Set(readManifest(manifestPath).agents);
+  const result: GeneratedAgent[] = [];
+  for (const entry of scanDir(dir, log).values()) {
+    if (!owned.has(entry.name) || !entry.model || isJudgeOnlyModel(entry.model)) continue;
+    const model = entry.model.replace(/@[a-z]+$/i, "");
+    const owners = declaredBy(model, cfg);
+    const provider = owners.length === 1 ? owners[0] : undefined;
+    const target = provider ? cfg.providers[provider] : undefined;
+    if (!provider || !target || (target.type === "anthropic" && !target.accountPool)) continue;
+    result.push({ name: entry.name, model, provider });
+  }
+  return result.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function writeManifest(file: string, manifest: Manifest, log?: AgentLog): void {
   try {
     fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
@@ -243,6 +261,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
     if (provider.type === "anthropic" && !provider.accountPool) continue;
     for (const model of provider.models ?? []) {
+      if (isJudgeOnlyModel(model.id)) continue;
       const owners = declaredBy(model.id, cfg);
       if (owners.length !== 1) {
         if (owners.length > 1) log?.warn(`agent files: "${model.id}" is declared by ${owners.join(", ")}; not generating an agent for it`);

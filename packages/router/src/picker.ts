@@ -10,8 +10,10 @@
 // heuristically (anything that is not the claude.ai chat surface); the ids we saw are
 // logged once so the heuristic can be tightened.
 
-import type { CliModel } from "./config.ts";
+import type { CliModel, Config } from "./config.ts";
+import { resolve } from "./routing.ts";
 import { clampEffort } from "./compat.ts";
+import { isJudgeOnlyModel } from "./model-policy.ts";
 
 export const BOOTSTRAP_PATHS = ["/edge-api/bootstrap", "/api/bootstrap"];
 
@@ -59,6 +61,11 @@ function narrowThinking(entry: ModelEntry, levels: string[]): void {
   entry.thinking = { ...thinking, effort_options: kept.map(({ recommended: _recommended, ...option }) => (option.id === preferred ? { ...option, recommended: true } : option)) };
 }
 
+/** Resolve aliases/routes before advertising an entry; a chat-looking alias can target a judge. */
+export function chatPickerModels(cfg: Config): CliModel[] {
+  return cfg.cli.extraModels.filter(entry => !isJudgeOnlyModel(entry.model) && !isJudgeOnlyModel(resolve(entry.model, {}, cfg)?.model ?? cfg.aliases[entry.model.split("@")[0]!] ?? ""));
+}
+
 export type PickerModelEntry = { id: string; name: string };
 export type InjectResult = { injected: number; surfaces: { id: string; models: string[]; entries: PickerModelEntry[] }[] };
 
@@ -68,6 +75,7 @@ export type InjectResult = { injected: number; surfaces: { id: string; models: s
  */
 export function injectPickerModels(json: Record<string, unknown>, extra: CliModel[], contextWindow?: number, effortFor?: (model: string) => string[] | undefined): InjectResult {
   const result: InjectResult = { injected: 0, surfaces: [] };
+  extra = extra.filter(e => !isJudgeOnlyModel(e.model));
   const msc = json.model_selector_config;
   if (!Array.isArray(msc) || extra.length === 0) return result;
   for (const surface of msc as Surface[]) {

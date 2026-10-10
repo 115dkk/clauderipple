@@ -37,7 +37,7 @@ import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/inde
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, searchProviderFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
-import { injectPickerModels, isBootstrapPath } from "./picker.ts";
+import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevelsForModel } from "./admin.ts";
 import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
@@ -1263,7 +1263,7 @@ export class Proxy {
           } else if (status === 200 && isPickerBootstrap) {
             try {
               const j = JSON.parse(out.toString("utf8")) as Record<string, unknown>;
-              const r = injectPickerModels(j, cfg.cli.extraModels, cfg.cli.autoCompactWindow, (model) => effortLevelsForModel(cfg, model));
+              const r = injectPickerModels(j, chatPickerModels(cfg), cfg.cli.autoCompactWindow, (model) => effortLevelsForModel(cfg, model));
               if (r.surfaces.length > 0) {
                 this.lastPickerInjection = { at: new Date().toISOString(), ...r };
                 out = Buffer.from(JSON.stringify(j));

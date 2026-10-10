@@ -4,6 +4,7 @@ import path from "node:path";
 import type { Dataset, Effort, Model } from "../../../scripts/aa-dataset-lib.mjs";
 import { homeDir, type Config } from "./config.ts";
 import { declaredBy, resolve } from "./routing.ts";
+import { isJudgeOnlyModel } from "./model-policy.ts";
 
 export const AA_DATA_URL = "https://raw.githubusercontent.com/PBJ-2/clauderipple/data/aa-models.json";
 const ATTRIBUTION = "Data: Artificial Analysis (artificialanalysis.ai)";
@@ -116,7 +117,7 @@ export class ModelScoreCatalog {
 export function buildModelScores(cfg: Config, dataset: ScoreDataset | null): ModelScores {
   const targets = new Map<string, { model: string; provider: string }>();
   const add = (model: string, provider: string): void => {
-    if (cfg.providers[provider]) targets.set(`${provider}\0${model}`, { model, provider });
+    if (cfg.providers[provider] && !isJudgeOnlyModel(model)) targets.set(`${provider}\0${model}`, { model, provider });
   };
   const declared = new Set(Object.values(cfg.providers).flatMap(p => (p.models ?? []).map(m => m.id)));
   const candidates = new Set([...declared, ...Object.values(cfg.aliases), ...cfg.cli.extraModels.map(m => m.model), ...Object.values(cfg.cli.models ?? {}), ...Object.keys(cfg.routes)]);
