@@ -168,17 +168,20 @@ export function esc(text: string): string {
 
 /**
  * A width estimate for SVG text, in px, so chips can be sized before the frame lays them out.
- * Errs wide: a chip with a little air reads better than clipped text.
+ * Errs wide: a chip with a little air reads better than clipped text. East Asian wide characters
+ * (Hangul, kana, CJK ideographs, fullwidth forms, emoji) take a full em: measured 2026-10-10 in
+ * Chromium, Hangul at 12px weight 500 draws 10.4px, Latin lower case about 6.5px.
  */
 export function textWidth(text: string, size = 12, weight: 'normal' | 'bold' = 'normal'): number {
   let units = 0
   for (const char of text) {
-    if (/[ilI.,:;|'!]/.test(char)) units += 0.3
+    if (ZERO.test(char)) continue
+    if (WIDE.test(char)) units += 1.04
+    else if (/[ilI.,:;|'!]/.test(char)) units += 0.3
     else if (/[mwMW@%]/.test(char)) units += 0.86
     else if (/[A-Z0-9]/.test(char)) units += 0.64
     else if (char === ' ') units += 0.3
-    else if (char.charCodeAt(0) > 0x2e80) units += 1
-    else units += 0.55
+    else units += 0.58
   }
   return Math.ceil(units * size * (weight === 'bold' ? 1.06 : 1))
 }

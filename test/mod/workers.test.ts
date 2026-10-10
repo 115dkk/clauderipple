@@ -125,3 +125,27 @@ test('spawn suffix and takeover retain named-worker and fork boundaries', () => 
   assert.equal(takesOver({ subagentType: 'general-purpose', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), true)
   assert.equal(takesOver({ subagentType: 'general-purpose', model: 'sonnet', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), false)
 })
+
+test('allow-lists pick by worker agent, so one model from two providers is told apart; provider names still match', async () => {
+  const { allowed, shownVariant, workerAgents, workerOptions } = await import('../../packages/mod/hooks/workers.ts')
+  const twins: WorkerCandidate[] = [
+    { target: { agent: 'deepseek-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
+    { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'opencode-go' },
+    ...candidates.slice(1),
+  ]
+  const data: ModelScore[] = [...scores, { model: 'deepseek-v4.1-flash', provider: 'opencode-go', variants: [{ effort: 'max', intelligence: 39.46, costPerTask: 0.2652 }] }]
+  const light = { ...verdict, level: 'light' as const }
+  const go = normalizeSettings({ rules: { general: { mode: 'auto', allow: ['deepseek-v4-1-flash', 'gpt-6-1-sol'] } } })
+  assert.equal(pick(go, light, data, twins).target?.agent, 'deepseek-v4-1-flash')
+  const direct = normalizeSettings({ rules: { general: { mode: 'auto', allow: ['deepseek-flash'] } } })
+  assert.equal(pick(direct, light, data, twins).target?.agent, 'deepseek-flash')
+  assert.equal(allowed(twins[1]!, ['opencode-go']), true)
+  assert.equal(allowed(twins[0]!, ['opencode-go']), false)
+  assert.equal(allowed(twins[0]!, []), true)
+  assert.deepEqual(workerAgents({ agents: [{ name: 'a', model: 'm', provider: 'p' }, { name: 'b', model: 3, provider: 'p' }, null] }), [{ name: 'a', model: 'm', provider: 'p' }])
+  const variants: ModelScore = { model: 'm', provider: 'p', variants: [{ effort: 'low', intelligence: 40, costPerTask: 0.1 }, { effort: 'high', intelligence: 50, costPerTask: 0.4 }, { effort: 'medium', intelligence: 46, costPerTask: 0.2 }] }
+  assert.deepEqual(shownVariant(variants, 45), { effort: 'medium', intelligence: 46, costPerTask: 0.2 })
+  assert.deepEqual(shownVariant(variants, 60), { effort: 'high', intelligence: 50, costPerTask: 0.4 })
+  assert.equal(shownVariant(undefined, 45), undefined)
+  assert.deepEqual(workerOptions([{ name: 'a', model: 'm', provider: 'p' }, { name: 'b', model: 'm', provider: 'q' }], [variants], 45), [{ name: 'a', model: 'm', provider: 'p', aa: { effort: 'medium', intelligence: 46, costPerTask: 0.2 } }, { name: 'b', model: 'm', provider: 'q' }])
+})

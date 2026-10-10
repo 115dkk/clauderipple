@@ -79,8 +79,13 @@ prose when they disagree.
   Jev asks separate `domain`, `level` and `effort` choice questions. Failure defaults to
   `general / standard / high`. Judge input remains description + first 3,000 prompt characters.
 - **Rules, not a mixed tier table:** `rules: Record<Domain, Rule>`; Rule is a Pin with
-  `targets: Partial<Record<Level, TierTarget>>`, an Auto with `allow: string[]` (provider names,
-  empty = all enabled), or `{mode:'inherit'}` (use general). General itself cannot inherit;
+  `targets: Partial<Record<Level, TierTarget>>`, an Auto with `allow: string[]` (generated worker
+  agent names, empty = all), or `{mode:'inherit'}` (use general). Allow names workers, not
+  providers, because one model can come from two providers (deepseek-v4.1-flash via the DeepSeek
+  API and via OpenCode Go) and a person wants one of them. Settings saved before this named
+  providers: resolution still matches a provider name against a candidate's provider, and
+  `normalizeSettings(raw, workers)` with the worker list known turns each provider name into that
+  provider's workers (unknown names are kept); the mod's Save stores the migrated list. General itself cannot inherit;
   invalid general-inherit normalizes to the default Pin. Pin/Auto may carry effort calibration
   (`effortOffset: -2..2`, `floor`, `ceiling`). `TierTarget` remains `{agent, model?}`.
 - Defaults: general Pin light → `deepseek-v4-1-flash`, standard → `gpt-6-1-sol`, deep →
@@ -109,8 +114,10 @@ prose when they disagree.
 
 ### 2a. Resolution and controls (implemented 2026-10-10)
 
-- There is no global `workerMode`: choose Pin/Auto/Same as general independently per domain.
-  Design defaults to Pin because AA does not measure taste, but can explicitly opt into Auto.
+- There is no global `workerMode`. `rules.general` is the **main choice** (Auto or Fixed = Pin);
+  every other domain whose rule is not `inherit` is an **exception**. Design defaults to an
+  exception (Fixed: Claude Sonnet, deep → Opus) because AA does not measure taste, but can
+  explicitly opt into Auto.
 - **Pin:** resolve inheritance; use the selected level's target, walking upwards for missing
   files/empty targets. Quota exhaustion or an off provider does not silently choose a dearer
   pinned level: try usable entries named in `preference: string[]` (provider/model ids, first
@@ -122,7 +129,7 @@ prose when they disagree.
     the router's declared model/provider catalogue × measured effort variants from
     GET `/api/model-scores`. Scores live in a session atom for 10 minutes; retrieval failure logs
     and retains the previous cache (or no data), never calls AA or needs an AA key in the mod;
-  - drop off/out-of-quota providers and those outside the rule's allow-list. Drop variants outside
+  - drop off/out-of-quota providers and workers outside the rule's allow-list. Drop variants outside
     effort floor/ceiling; positive offset permits only efforts at/above the offset-adjusted judged
     effort, negative offset only at/below it. Offset zero imposes no judged-effort restriction.
     Never change a selected measured effort afterwards while claiming the old score. A null-effort
@@ -134,12 +141,35 @@ prose when they disagree.
   - no variant reaches the floor → highest intelligence available, then cost. No usable AA data →
     general Pin, or default general Pin if general is Auto; preserve on/off, availability, allow-list
     and the Auto rule's effort calibration. Report the fallback reason. No enabled target → refuse.
-- **UI:** Workers settings and setup step 2 share the existing controls, with a selector for
-  Providers, Preference and each domain. Provider toggles, preference up/down/remove/add, Pin
-  per-level Selects, Auto allow toggles/index floors/tie band, and effort calibration are paged
-  inside the band's row budget. Every Auto page shows `cheapest above index N · Data: Artificial
-  Analysis (artificialanalysis.ai)`. Agents show domain/level and `index 50.2 · $0.32/task
-  (next: …)` with the same attribution.
+- **UI (revised 2026-10-10; the router's web page uses the same structure):** Workers settings
+  and setup step 2 share one card.
+  1. *How workers are picked*: **Auto (recommended)** / **Fixed** — the main choice.
+  2. Auto → *Candidates*: one switch row per generated worker from GET `<admin>/api/mod-options`
+     `agents` (`{name, model, provider}`), title = model id, quiet second line = provider and the
+     AA variant Auto would use for standard work (cheapest at or above the standard floor, else
+     the strongest): `opencode-go · 39.5 · $0.27 at max`, or `no AA data`. All on by default
+     (`allow: []`); switching one off stores the others by name, all on again stores `[]`, the
+     last one cannot go off. The list and its scores are cached in a session atom for 10 minutes
+     like the scores; without the router's answer the readable worker files on the router's
+     catalogue stand in. Index floors, tie band and effort calibration sit behind a collapsed
+     *Auto details* switch, with `cheapest above index N · Data: Artificial Analysis
+     (artificialanalysis.ai)`.
+  3. Fixed → light / standard / deep Selects of workers labelled `model · provider` (Claude's own
+     as `Claude Sonnet`); *More options* holds the fallback and effort calibration.
+  4. *Exceptions by field*: only the fields that differ from the main choice, each a button
+     (`Design · Fixed`) that opens it in place of the main choice, with Back and Remove
+     exception. *Add exception…* picks a field; it starts from the field's own default (Design:
+     Claude) or a copy of the main choice, then Fixed per difficulty or Auto limited to chosen
+     candidates.
+  The Providers on/off and Preference sections are gone from the panel; `providers`,
+  `preference` and `fallback` keep working as settings for compatibility. Rows past the band's
+  budget page. Agents show domain/level and `index 50.2 · $0.32/task (next: …)` with the same
+  attribution.
+- **Desktop pill widths:** labels are drawn in SVG sized from `textWidth` before layout, so the
+  estimate errs wide: East Asian wide characters (Hangul, kana, CJK, fullwidth, emoji) count
+  1.04 em, Latin lower case 0.58 em (Chromium 2026-10-10 at 12px/500: Hangul 0.87 em). A
+  pressable chip never shrinks (`flexShrink: 0`): an overflow-hidden flex item may otherwise be
+  squeezed below its picture and cut the label.
 - **Data:** a daily GitHub Action (`.github/workflows/aa-data.yml`, secret `AA_API_KEY`) reads the
   AA API (index, prices per variant) and each tracked variant's model page (its embedded record's
   `intelligenceIndexCostPerTask.cost.total`; the free API has no cost per task), and force-pushes

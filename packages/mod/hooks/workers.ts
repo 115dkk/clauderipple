@@ -1,4 +1,4 @@
-import type { AaScore, Calibration, Domain, Effort, Level, ModelScore, RouterModel, Rule, Settings, TierTarget, WorkerCandidate, WorkerVerdict } from '../types'
+import type { AaScore, Calibration, Domain, Effort, Level, ModelScore, RouterModel, Rule, Settings, TierTarget, WorkerAgent, WorkerCandidate, WorkerOption, WorkerVerdict } from '../types'
 import { DEFAULTS, DOMAINS, EFFORTS, LEVELS } from './settings'
 import { MARKER, agentModel } from './worker'
 import { t } from './i18n'
@@ -102,6 +102,33 @@ function rank(candidate: WorkerCandidate, settings: Settings): number {
   const at = settings.preference.findIndex(p => p === candidate.provider || p === candidate.model || p === candidate.target.agent)
   return at < 0 ? Number.MAX_SAFE_INTEGER : at
 }
+/** Allow-lists name worker agents; provider names from settings saved before 2026-10-10 still match. */
+export function allowed(candidate: WorkerCandidate, allow: readonly string[]): boolean {
+  return !allow.length || allow.includes(candidate.target.agent) || allow.includes(candidate.provider)
+}
+/** The router's generated-worker list (GET /api/mod-options `agents`), validated at the boundary. */
+export function workerAgents(raw: unknown): WorkerAgent[] {
+  return list(record(raw).agents).flatMap(value => {
+    const agent = record(value)
+    return typeof agent.name === 'string' && agent.name && typeof agent.model === 'string' && agent.model && typeof agent.provider === 'string' && agent.provider
+      ? [{ name: agent.name, model: agent.model, provider: agent.provider }] : []
+  })
+}
+/**
+ * The measured variant shown beside a worker: what Auto would use for standard work (the cheapest
+ * variant at or above `floor`), else its strongest variant.
+ */
+export function shownVariant(score: ModelScore | undefined, floor: number): (AaScore & { effort: Effort | null }) | undefined {
+  const measured = (score?.variants ?? []).flatMap(v => v.intelligence === null || v.costPerTask === null ? [] : [{ effort: v.effort, intelligence: v.intelligence, costPerTask: v.costPerTask }])
+  const qualified = measured.filter(v => v.intelligence >= floor).sort((a, b) => a.costPerTask - b.costPerTask || b.intelligence - a.intelligence)
+  return qualified[0] ?? measured.sort((a, b) => b.intelligence - a.intelligence || a.costPerTask - b.costPerTask)[0]
+}
+export function workerOptions(agents: readonly WorkerAgent[], scores: readonly ModelScore[], floor: number): WorkerOption[] {
+  return agents.map(agent => {
+    const aa = shownVariant(scores.find(s => s.model === agent.model && s.provider === agent.provider), floor)
+    return aa ? { ...agent, aa } : { ...agent }
+  })
+}
 export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean): boolean {
   return settings.providers[candidate.provider] !== false && (candidate.provider !== 'chatgpt' || chatgpt)
 }
@@ -114,7 +141,7 @@ export type Resolution = { target?: TierTarget; effort: Effort; fallbackReason?:
 /** Pinned level, higher levels for missing files, then preferred quota fallback and the configured fallback. */
 function pin(level: Level, effort: Effort, rule: Extract<Rule, { mode: 'pin' }>, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = []): Resolution {
   let reason: string | undefined
-  const usable = (candidate: WorkerCandidate): boolean => candidateUsable(candidate, settings, chatgpt) && (!allow.length || allow.includes(candidate.provider))
+  const usable = (candidate: WorkerCandidate): boolean => candidateUsable(candidate, settings, chatgpt) && allowed(candidate, allow)
   const eligible = candidates.filter(usable)
   for (const next of LEVELS.slice(LEVELS.indexOf(level))) {
     const target = rule.targets[next]
@@ -136,7 +163,7 @@ function pin(level: Level, effort: Effort, rule: Extract<Rule, { mode: 'pin' }>,
 export function resolveWorker(verdict: WorkerVerdict, settings: Settings, candidates: readonly WorkerCandidate[], scores: readonly ModelScore[], chatgpt: boolean, lang: Lang = 'en', pinnedCandidates: readonly WorkerCandidate[] = candidates): Resolution {
   const rule = resolvedRule(verdict.domain, settings)
   if (rule.mode === 'pin') return pin(verdict.level, verdict.effort, rule, settings, candidates, chatgpt, lang)
-  const measured = candidates.filter(c => candidateUsable(c, settings, chatgpt) && (!rule.allow.length || rule.allow.includes(c.provider))).flatMap(candidate => {
+  const measured = candidates.filter(c => candidateUsable(c, settings, chatgpt) && allowed(c, rule.allow)).flatMap(candidate => {
     const score = scores.find(s => s.model === candidate.model && s.provider === candidate.provider)
     return (score?.variants ?? []).flatMap(variant => {
       const effort = variant.effort ?? calibratedEffort(verdict.effort, rule)

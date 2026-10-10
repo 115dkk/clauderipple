@@ -63,8 +63,13 @@ export type WorkerCandidate = { target: TierTarget; model: string; provider: str
 export type AaScore = { intelligence: number; costPerTask: number }
 export type ModelScore = { model: string; provider: string; variants: { effort: Effort | null; intelligence: number | null; costPerTask: number | null }[] }
 export type ScoreCache = { until: number; models: ModelScore[] }
-export type WorkerSection = 'providers' | 'preference' | Domain
-export type WorkerUi = { section: WorkerSection; page: number }
+/** A generated worker as the router lists it (GET /api/mod-options `agents`). */
+export type WorkerAgent = { name: string; model: string; provider: string }
+/** A worker Auto may pick, with the measured variant shown beside it (none: no AA data). */
+export type WorkerOption = WorkerAgent & { aa?: AaScore & { effort: Effort | null } }
+/** The Workers card: `general` is the main choice, any other domain an exception being edited. */
+export type WorkerSection = Domain
+export type WorkerUi = { section: WorkerSection; page: number; details?: boolean }
 
 /** An agent to spawn: a dispatchable `subagentType`, and a model only for Claude's own agents. */
 export type TierTarget = { agent: string; model?: string }
@@ -249,6 +254,7 @@ declare module 'claude-code' {
       agentOptions: AgentOption[]
       routerModels: RouterModel[]
       modelScores: ScoreCache | null
+      workerList: { until: number; agents: WorkerAgent[]; scores: ModelScore[] } | null
       workerUi: WorkerUi
       skills: string[]
       judgeDownHidden: string | null

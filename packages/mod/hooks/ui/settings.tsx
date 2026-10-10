@@ -5,9 +5,9 @@
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
-import type { Calibration, Domain, Effort, Rule, Settings, WorkerSection } from '../../types'
-import { DEFAULTS, DOMAINS, LEVELS } from '../settings'
-import { action, chip, segmented, toggle } from './parts'
+import type { Calibration, Domain, Effort, Rule, Settings, WorkerOption } from '../../types'
+import { DEFAULTS, DOMAINS, LEVELS, allowedWorkers, toggleAllow } from '../settings'
+import { action, chip, segmented, switchRow, switchRowWidth, toggle } from './parts'
 import type { Els } from './parts'
 import { svgDoc, textTone, v } from './theme'
 import type { Frame, SettingsActions, SettingsTab, SettingsView } from './view'
@@ -116,63 +116,128 @@ export function effortCard(el: Els, frame: Frame, d: Settings, a: SettingsAction
   ]
 }
 
+/** A worker's quiet second line: provider, then the AA variant Auto would use for standard work. */
+export function workerSub(lang: Frame['lang'], w: WorkerOption): string {
+  const aa = w.aa
+  const score = !aa
+    ? t(lang, 'workers.noAa')
+    : t(lang, aa.effort ? 'workers.aaShown' : 'workers.aaShownNoEffort', { index: aa.intelligence.toFixed(1), cost: aa.costPerTask.toFixed(2), effort: aa.effort ? effortName(aa.effort, lang).toLowerCase() : '' })
+  return w.provider + ' · ' + score
+}
+
+function copyRule(rule: Rule): Rule {
+  return JSON.parse(JSON.stringify(rule)) as Rule
+}
+
+/** A new exception starts from the field's own default (Design: Claude), else from the main choice. */
+export function exceptionStart(domain: Domain, d: Settings): Rule {
+  const preset = DEFAULTS.rules[domain]
+  if (preset.mode !== 'inherit') return copyRule(preset)
+  const main = d.rules.general
+  return main.mode === 'inherit' ? copyRule(DEFAULTS.rules.general) : copyRule(main)
+}
+
+/**
+ * Workers: how workers are picked (Auto over switched-on candidates, or Fixed per difficulty), then
+ * the fields that differ from that choice. Opening an exception edits it in place of the main
+ * choice. Rows beyond the band's budget page.
+ */
 export function workersCard(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode[] {
   const { Box, Text } = el
   const d = view.draft
-  const section = view.workerUi.section
+  const ui = view.workerUi
   const label = (key: string) => t(frame.lang, 'workers.' + key)
-  const providers = [...new Set([...view.routerModels.map(m => m.provider), 'anthropic', ...Object.keys(d.providers)])]
-  const options = [{ value: '', label: label('noTarget') }, ...view.agents.map(o => ({ value: o.value, label: o.label + (o.available ? '' : t(frame.lang, 'settings.unavailable')) }))]
-  const out: RenderNode[] = [
-    row(el, 'agent-auto', t(frame.lang, 'settings.takesOver'), segmented(el, frame, 'agent-auto', [{ value: 'off', label: t(frame.lang, 'band.off') }, { value: 'auto', label: t(frame.lang, 'settings.autoAgent') }, { value: 'all', label: t(frame.lang, 'settings.allSpawns') }] as const, d.agentAuto, agentAuto => a.patch({ agentAuto }))),
-    row(el, 'worker-section', label('domain'), picker(el, 'worker-section', ['providers', 'preference', ...DOMAINS].map(value => ({ value, label: label(value) })), section, value => a.setWorkerUi({ section: value as WorkerSection, page: 0 }))),
-  ]
-  const size = Math.max(1, Math.min(4, frame.maxRows - 7))
-  const paged = (items: readonly string[], draw: (item: string, index: number) => RenderNode): void => {
-    const pages = Math.max(1, Math.ceil(items.length / size))
-    const page = Math.min(pages - 1, view.workerUi.page)
-    out.push(...items.slice(page * size, (page + 1) * size).map((item, index) => draw(item, page * size + index)))
-    if (pages > 1) out.push(<Box key="worker-pages" flexDirection="row" columnGap={1}>{action(el, frame, 'worker-previous', label('previous'), () => a.setWorkerUi({ page: Math.max(0, page - 1) }))}<Text dimColor>{t(frame.lang, 'workers.page', { page: page + 1, pages })}</Text>{action(el, frame, 'worker-next', label('next'), () => a.setWorkerUi({ page: Math.min(pages - 1, page + 1) }))}</Box>)
-  }
-  if (section === 'providers') {
-    paged(providers, provider => row(el, 'provider-' + provider, provider, toggle(el, frame, 'provider-' + provider, d.providers[provider] === false ? t(frame.lang, 'band.off') : t(frame.lang, 'band.on'), d.providers[provider] !== false, () => a.patch({ providers: { ...d.providers, [provider]: d.providers[provider] === false } }))))
-    out.push(row(el, 'fallback', t(frame.lang, 'settings.fallback'), picker(el, 'fallback', options.filter(o => o.value), targetValue(d.fallback), value => a.setFallback(targetOf(value))), label('fallbackHint')))
-    return out
-  }
-  if (section === 'preference') {
-    const move = (index: number, delta: number): void => { const order = [...d.preference]; const other = index + delta; if (other < 0 || other >= order.length) return; [order[index], order[other]] = [order[other]!, order[index]!]; a.patch({ preference: order }) }
-    paged(d.preference, (item, index) => row(el, 'preference-' + index, item, <Box flexDirection="row" columnGap={1}>{action(el, frame, 'preference-up-' + index, label('up'), () => move(index, -1))}{action(el, frame, 'preference-down-' + index, label('down'), () => move(index, 1))}{action(el, frame, 'preference-remove-' + index, label('remove'), () => a.patch({ preference: d.preference.filter((_, i) => i !== index) }))}</Box>))
-    const names = [...new Set([...providers, ...view.routerModels.map(m => m.value)])].filter(name => !d.preference.includes(name))
-    out.push(row(el, 'preference-add', label('preference'), picker(el, 'preference-add', [{ value: '', label: label('addPreference') }, ...names.map(value => ({ value }))], '', value => { if (value) a.patch({ preference: [...d.preference, value] }) })))
-    out.push(<Text key="preference-hint" dimColor>{label('preferenceHint')}</Text>)
-    return out
-  }
-  const domain: Domain = section
+  const field = (domain: Domain) => label(domain)
+  const editing = ui.section !== 'general' && DOMAINS.includes(ui.section) && d.rules[ui.section].mode !== 'inherit'
+  const domain: Domain = editing ? ui.section : 'general'
   const rule = d.rules[domain]
-  const modes: { value: Rule['mode']; label: string }[] = [{ value: 'pin', label: label('pin') }, { value: 'auto', label: label('auto') }, ...(domain === 'general' ? [] : [{ value: 'inherit' as const, label: label('inherit') }])]
-  out.push(row(el, 'rule-mode', label('mode'), segmented(el, frame, 'rule-mode', modes, rule.mode, mode => { a.setWorkerUi({ page: 0 }); a.setRule(domain, mode === 'inherit' ? { mode } : mode === 'auto' ? { mode, allow: [] } : DEFAULTS.rules[domain].mode === 'pin' ? DEFAULTS.rules[domain] : { mode, targets: {} }) })))
-  if (rule.mode === 'inherit') return out
-  const calibrate = (change: Calibration): void => a.setRule(domain, { ...rule, ...change })
-  if (rule.mode === 'pin') {
-    for (const level of LEVELS) out.push(row(el, 'pin-' + level, t(frame.lang, 'settings.' + level), picker(el, 'pin-' + level, options, rule.targets[level] ? targetValue(rule.targets[level]!) : '', value => { const targets = { ...rule.targets }; if (value) targets[level] = targetOf(value); else delete targets[level]; a.setRule(domain, { ...rule, targets }) })))
-  } else {
-    for (const provider of providers) out.push(row(el, 'allow-' + provider, provider, toggle(el, frame, 'allow-' + provider, label('allow'), rule.allow.includes(provider), () => a.setRule(domain, { ...rule, allow: rule.allow.includes(provider) ? rule.allow.filter(p => p !== provider) : [...rule.allow, provider] }))))
-    out.push(<Text key="allow-hint" dimColor>{label('allEnabled')}</Text>)
-    for (const level of LEVELS) out.push(row(el, 'index-' + level, t(frame.lang, 'workers.indexFloor', { level: t(frame.lang, 'settings.' + level) }), picker(el, 'index-' + level, [...new Set([30, 45, 50, 53, d.autoFloors[level]])].map(n => ({ value: String(n) })), String(d.autoFloors[level]), value => a.patch({ autoFloors: { ...d.autoFloors, [level]: Number(value) } }))))
-    out.push(row(el, 'tie-band', label('tieBand'), picker(el, 'tie-band', [...new Set([0, 1, 2, 3, 5, d.autoTieBand])].map(n => ({ value: String(n) })), String(d.autoTieBand), value => a.patch({ autoTieBand: Number(value) }))))
+  if (rule.mode === 'inherit') return []
+  const calibration = (r: Rule): Calibration => (r.mode === 'inherit' ? {} : { ...(r.effortOffset !== undefined ? { effortOffset: r.effortOffset } : {}), ...(r.floor ? { floor: r.floor } : {}), ...(r.ceiling ? { ceiling: r.ceiling } : {}) })
+  const options = [{ value: '', label: label('noTarget') }, ...view.agents.map(o => ({ value: o.value, label: o.label + (o.available ? '' : t(frame.lang, 'settings.unavailable')) }))]
+  const main = d.rules.general.mode === 'inherit' ? DEFAULTS.rules.general : d.rules.general
+
+  // ---- Head: who is taken over, and how this rule picks --------------------------------------
+  const head: RenderNode[] = [
+    row(el, 'agent-auto', t(frame.lang, 'settings.takesOver'), segmented(el, frame, 'agent-auto', [{ value: 'off', label: t(frame.lang, 'band.off') }, { value: 'auto', label: t(frame.lang, 'settings.autoAgent') }, { value: 'all', label: t(frame.lang, 'settings.allSpawns') }] as const, d.agentAuto, agentAuto => a.patch({ agentAuto }))),
+  ]
+  const pickMode = (mode: 'auto' | 'pin'): void => {
+    a.setWorkerUi({ page: 0, details: false })
+    if (mode === rule.mode) return
+    if (mode === 'auto') a.setRule(domain, { mode: 'auto', allow: domain !== 'general' && main.mode === 'auto' ? [...main.allow] : [], ...calibration(rule) })
+    else {
+      const preset = DEFAULTS.rules[domain].mode === 'pin' ? DEFAULTS.rules[domain] : main.mode === 'pin' && domain !== 'general' ? main : DEFAULTS.rules.general
+      a.setRule(domain, { ...(copyRule(preset) as Extract<Rule, { mode: 'pin' }>), ...calibration(rule) })
+    }
   }
-  const effortOptions = [{ value: '', label: label('anyEffort') }, ...EFFORTS.map(value => ({ value, label: effortName(value, frame.lang) }))]
-  out.push(row(el, 'offset', label('offset'), picker(el, 'rule-offset', [-2, -1, 0, 1, 2].map(n => ({ value: String(n) })), String(rule.effortOffset ?? 0), value => calibrate({ effortOffset: Number(value) as Calibration['effortOffset'] }))))
-  out.push(row(el, 'rule-floor', t(frame.lang, 'settings.floor'), picker(el, 'rule-floor', effortOptions, rule.floor ?? '', value => calibrate({ floor: value ? value as Effort : undefined }))))
-  out.push(row(el, 'rule-ceiling', t(frame.lang, 'settings.ceiling'), picker(el, 'rule-ceiling', effortOptions, rule.ceiling ?? '', value => calibrate({ ceiling: value ? value as Effort : undefined }))))
-  const controls = out.slice(3)
-  const capacity = Math.max(1, frame.maxRows - (rule.mode === 'auto' ? 9 : 8))
-  const pages = Math.max(1, Math.ceil(controls.length / capacity))
-  const page = Math.min(pages - 1, view.workerUi.page)
-  const visible = [...out.slice(0, 3), ...controls.slice(page * capacity, (page + 1) * capacity)]
-  if (rule.mode === 'auto') visible.push(<Text key="aa-line" dimColor>{t(frame.lang, 'workers.autoLine', { floor: d.autoFloors.standard })}</Text>)
-  if (pages > 1) visible.push(<Box key="worker-pages" flexDirection="row" columnGap={1}>{action(el, frame, 'worker-previous', label('previous'), () => a.setWorkerUi({ page: Math.max(0, page - 1) }))}<Text dimColor>{t(frame.lang, 'workers.page', { page: page + 1, pages })}</Text>{action(el, frame, 'worker-next', label('next'), () => a.setWorkerUi({ page: Math.min(pages - 1, page + 1) }))}</Box>)
-  return visible
+  if (editing) {
+    head.push(
+      row(el, 'exception', label('exception'), (
+        <Box flexDirection="row" alignItems="center" columnGap={2} flexWrap="wrap">
+          <Text bold>{field(domain)}</Text>
+          {action(el, frame, 'exception-back', label('back'), () => a.setWorkerUi({ section: 'general', page: 0, details: false }))}
+          {action(el, frame, 'exception-remove', label('removeException'), () => { a.setRule(domain, { mode: 'inherit' }); a.setWorkerUi({ section: 'general', page: 0, details: false }) })}
+        </Box>
+      )),
+      row(el, 'rule-mode', label('mode'), segmented(el, frame, 'rule-mode', [{ value: 'pin', label: label('pin') }, { value: 'auto', label: label('autoChosen') }] as const, rule.mode, pickMode)),
+    )
+  } else {
+    head.push(row(el, 'rule-mode', label('howPicked'), segmented(el, frame, 'rule-mode', [{ value: 'auto', label: label('autoRecommended') }, { value: 'pin', label: label('pin') }] as const, rule.mode, pickMode)))
+  }
+
+  // ---- Body: candidates, per-difficulty pins, or the details -----------------------------------
+  const body: RenderNode[] = []
+  const calibrate = (change: Calibration): void => a.setRule(domain, { ...rule, ...change })
+  if (ui.details) {
+    if (rule.mode === 'auto') {
+      for (const level of LEVELS) body.push(row(el, 'index-' + level, t(frame.lang, 'workers.indexFloor', { level: t(frame.lang, 'settings.' + level) }), picker(el, 'index-' + level, [...new Set([30, 45, 50, 53, d.autoFloors[level]])].map(n => ({ value: String(n) })), String(d.autoFloors[level]), value => a.patch({ autoFloors: { ...d.autoFloors, [level]: Number(value) } }))))
+      body.push(row(el, 'tie-band', label('tieBand'), picker(el, 'tie-band', [...new Set([0, 1, 2, 3, 5, d.autoTieBand])].map(n => ({ value: String(n) })), String(d.autoTieBand), value => a.patch({ autoTieBand: Number(value) }))))
+    } else if (domain === 'general') {
+      body.push(row(el, 'fallback', t(frame.lang, 'settings.fallback'), picker(el, 'fallback', options.filter(o => o.value), targetValue(d.fallback), value => a.setFallback(targetOf(value))), label('fallbackHint')))
+    }
+    const effortOptions = [{ value: '', label: label('anyEffort') }, ...EFFORTS.map(value => ({ value, label: effortName(value, frame.lang) }))]
+    body.push(row(el, 'offset', label('offset'), picker(el, 'rule-offset', [-2, -1, 0, 1, 2].map(n => ({ value: String(n) })), String(rule.effortOffset ?? 0), value => calibrate({ effortOffset: Number(value) as Calibration['effortOffset'] }))))
+    body.push(row(el, 'rule-floor', t(frame.lang, 'settings.floor'), picker(el, 'rule-floor', effortOptions, rule.floor ?? '', value => calibrate({ floor: value ? value as Effort : undefined }))))
+    body.push(row(el, 'rule-ceiling', t(frame.lang, 'settings.ceiling'), picker(el, 'rule-ceiling', effortOptions, rule.ceiling ?? '', value => calibrate({ ceiling: value ? value as Effort : undefined }))))
+    if (rule.mode === 'auto') body.push(<Text key="aa-line" dimColor>{t(frame.lang, 'workers.autoLine', { floor: d.autoFloors.standard })}</Text>)
+  } else if (rule.mode === 'pin') {
+    for (const level of LEVELS) body.push(row(el, 'pin-' + level, t(frame.lang, 'settings.' + level), picker(el, 'pin-' + level, options, rule.targets[level] ? targetValue(rule.targets[level]!) : '', value => { const targets = { ...rule.targets }; if (value) targets[level] = targetOf(value); else delete targets[level]; a.setRule(domain, { ...rule, targets }) })))
+  } else if (!view.workers.length) {
+    body.push(row(el, 'candidates', label('candidates'), <Text dimColor>{label('none')}</Text>))
+  } else {
+    const on = allowedWorkers(rule.allow, view.workers)
+    const width = Math.max(...view.workers.map(w => switchRowWidth(w.model, workerSub(frame.lang, w))))
+    view.workers.forEach((w, i) => body.push(row(el, 'candidate-' + w.name, i ? '' : label('candidates'), switchRow(el, frame, 'candidate-' + w.name, w.model, workerSub(frame.lang, w), on.includes(w.name), () => a.setRule(domain, { ...rule, allow: toggleAllow(rule.allow, w.name, view.workers) }), width))))
+  }
+
+  // ---- Tail: the details switch, and on the main choice the exceptions -------------------------
+  const tail: RenderNode[] = [
+    row(el, 'details', '', toggle(el, frame, 'worker-details', label(rule.mode === 'auto' ? 'autoDetails' : 'pinDetails'), ui.details === true, () => a.setWorkerUi({ details: !ui.details, page: 0 }))),
+  ]
+  if (!editing) {
+    const exceptions = DOMAINS.filter(x => x !== 'general' && d.rules[x].mode !== 'inherit')
+    const free = DOMAINS.filter(x => x !== 'general' && d.rules[x].mode === 'inherit')
+    const modeName = (r: Rule) => label(r.mode === 'auto' ? 'auto' : 'pin')
+    tail.push(row(el, 'exceptions', label('exceptions'), (
+      <Box flexDirection="row" alignItems="center" columnGap={isRich(frame) ? 1 : 3} rowGap={isRich(frame) ? 1 : 0} flexWrap="wrap">
+        {exceptions.length ? exceptions.map(x => action(el, frame, 'exception-' + x, field(x) + ' · ' + modeName(d.rules[x]), () => a.setWorkerUi({ section: x, page: 0, details: false }))) : <Text dimColor>{label('noExceptions')}</Text>}
+        {free.length ? picker(el, 'exception-add', [{ value: '', label: label('addException') }, ...free.map(x => ({ value: x, label: field(x) }))], '', value => {
+          if (!value) return
+          a.setRule(value as Domain, exceptionStart(value as Domain, d))
+          a.setWorkerUi({ section: value as Domain, page: 0, details: false })
+        }) : null}
+      </Box>
+    )))
+  }
+
+  // ---- Paging inside the band's rows -----------------------------------------------------------
+  const overhead = 3 + (!isRich(frame) && frame.columns < 110 ? 1 : 0)
+  const capacity = Math.max(2, frame.maxRows - overhead - head.length - tail.length - 1)
+  if (rule.mode === 'auto' && !ui.details && body.length + 1 <= capacity) body.unshift(<Text key="candidates-hint" dimColor wrap="wrap">{label('candidatesHint')}</Text>)
+  const pages = Math.max(1, Math.ceil(body.length / capacity))
+  const page = Math.min(pages - 1, ui.page)
+  const out = [...head, ...body.slice(page * capacity, (page + 1) * capacity)]
+  if (pages > 1) out.push(<Box key="worker-pages" flexDirection="row" alignItems="center" columnGap={1}>{action(el, frame, 'worker-previous', label('previous'), () => a.setWorkerUi({ page: Math.max(0, page - 1) }))}<Text dimColor>{t(frame.lang, 'workers.page', { page: page + 1, pages })}</Text>{action(el, frame, 'worker-next', label('next'), () => a.setWorkerUi({ page: Math.min(pages - 1, page + 1) }))}</Box>)
+  return [...out, ...tail]
 }
 
 export function judgeCard(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode[] {

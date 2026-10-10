@@ -104,6 +104,13 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
   return { clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
+// GET /api/mod-options: one model from two providers, and a worker without AA data.
+const MOD_OPTIONS = { agents: [
+  { name: 'deepseek-flash', model: 'deepseek-v4.1-flash', provider: 'deepseek' },
+  { name: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash', provider: 'opencode-go' },
+  { name: 'glm-5-3-flash', model: 'glm-5.3-flash', provider: 'opencode-go' },
+  { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt' },
+], scores: AA }
 function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
   on('http.fetch', ($, e, next) => {
@@ -113,7 +120,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
       zen(e)
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
     }
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : { requests: [] }
+    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : e.url.endsWith('/api/mod-options') ? MOD_OPTIONS : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
@@ -726,6 +733,26 @@ test('settings draft saves only on Save, and the dashboard title remains ClaudeR
   expect(b.saved.get('bandHidden')).toBe(true)
   await $.command.run({ command: 'ripple-bar', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: '' })
   expect(b.saved.get('bandHidden')).toBe(false)
+})
+
+test('Workers lists generated workers from mod-options; Save stores provider allow-lists as worker names', async ($, on) => {
+  const b = boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: ['opencode-go'] } } }).rules })
+  const urls = http(on)
+  await start($)
+  const ui = await band($)
+  await ui.press({ key: 'settings' })
+  await ui.press({ key: 'tab-workers' })
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('● deepseek-v4.1-flash')
+  expect(drawn).toContain('○ deepseek-v4.1-flash')
+  expect(drawn).toContain('deepseek · 39.5 · $0.27 at max')
+  expect(drawn).toContain('opencode-go · no AA data')
+  expect(await ui.find({ type: 'Text', text: '● unsaved' })).toBeUndefined()
+  await ui.press({ key: 'candidate-glm-5-3-flash' })
+  await ui.press({ key: 'save' })
+  expect(b.router().settings.rules.general).toEqual({ mode: 'auto', allow: ['deepseek-v4-1-flash'] })
+  await ui.press({ key: 'settings' })
+  expect(urls.filter(url => url.endsWith('/api/mod-options')).length).toBe(1)
 })
 
 test('host survey wins; minimal layout renders through SessionMode', async ($, on) => {

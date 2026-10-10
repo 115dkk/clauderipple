@@ -72,3 +72,26 @@ test('unrelated valid settings survive and invalid values retain defaults', () =
   for (const n of [-1, NaN, Infinity]) assert.equal(normalizeSettings({ autoTieBand: n }).autoTieBand, 2)
   for (const n of [-1, 101, NaN, Infinity]) assert.equal(normalizeSettings({ swampAt: n }).swampAt, 50)
 })
+test('Auto allow-lists name workers; provider names from old settings migrate to that provider\'s workers', async () => {
+  const { allowedWorkers, migrateAllow, toggleAllow } = await import('../../packages/mod/hooks/settings.ts')
+  const workers = [
+    { name: 'deepseek-flash', provider: 'deepseek' },
+    { name: 'deepseek-v4-1-flash', provider: 'opencode-go' },
+    { name: 'glm-5-3-flash', provider: 'opencode-go' },
+    { name: 'gpt-6-1-sol', provider: 'chatgpt' },
+  ]
+  assert.deepEqual(migrateAllow(['opencode-go', 'gpt-6-1-sol', 'gone-worker'], workers), ['deepseek-v4-1-flash', 'glm-5-3-flash', 'gpt-6-1-sol', 'gone-worker'])
+  const old = { rules: { general: { mode: 'auto', allow: ['chatgpt'] }, backend: { mode: 'auto', allow: ['opencode-go'], floor: 'high' } } }
+  assert.deepEqual(normalizeSettings(old).rules.backend, { mode: 'auto', allow: ['opencode-go'], floor: 'high' })
+  const migrated = normalizeSettings(old, workers)
+  assert.deepEqual(migrated.rules.general, { mode: 'auto', allow: ['gpt-6-1-sol'] })
+  assert.deepEqual(migrated.rules.backend, { mode: 'auto', allow: ['deepseek-v4-1-flash', 'glm-5-3-flash'], floor: 'high' })
+  assert.deepEqual(normalizeSettings(migrated, workers), migrated)
+  assert.deepEqual(allowedWorkers([], workers), workers.map(w => w.name))
+  assert.deepEqual(allowedWorkers(['opencode-go'], workers), ['deepseek-v4-1-flash', 'glm-5-3-flash'])
+  // [] is everything; switching one off lists the rest, all on again is [], the last one stays on.
+  assert.deepEqual(toggleAllow([], 'deepseek-flash', workers), ['deepseek-v4-1-flash', 'glm-5-3-flash', 'gpt-6-1-sol'])
+  assert.deepEqual(toggleAllow(['deepseek-v4-1-flash', 'glm-5-3-flash', 'gpt-6-1-sol'], 'deepseek-flash', workers), [])
+  assert.deepEqual(toggleAllow(['gpt-6-1-sol'], 'gpt-6-1-sol', workers), ['gpt-6-1-sol'])
+  assert.deepEqual(toggleAllow(['opencode-go'], 'glm-5-3-flash', workers), ['deepseek-v4-1-flash'])
+})

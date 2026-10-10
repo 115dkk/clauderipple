@@ -49,10 +49,41 @@ function rule(raw: unknown, fallback: Rule, general = false): Rule {
   return { mode: 'pin', targets, ...calibration(v.mode === 'pin' ? v : fallback) }
 }
 
-/** Persisted settings may be old; migrate tiers once and never alias nested default data. */
-export function normalizeSettings(raw: unknown): Settings {
+type Worker = { name: string; provider: string }
+
+/**
+ * Auto's allow-list names worker agents. Settings saved before 2026-10-10 named providers there;
+ * with the worker list known, a provider name becomes that provider's workers (names it does not
+ * know are kept: a worker may be missing only for now).
+ */
+export function migrateAllow(allow: readonly string[], workers: readonly Worker[]): string[] {
+  const agents = new Set(workers.map(w => w.name))
+  return [...new Set(allow.flatMap(entry => agents.has(entry) || !workers.some(w => w.provider === entry) ? [entry] : workers.filter(w => w.provider === entry).map(w => w.name)))]
+}
+
+/** The workers switched on by an allow-list; empty means every worker. */
+export function allowedWorkers(allow: readonly string[], workers: readonly Worker[]): string[] {
+  if (!allow.length) return workers.map(w => w.name)
+  const on = new Set(migrateAllow(allow, workers))
+  return workers.filter(w => on.has(w.name)).map(w => w.name)
+}
+
+/** Switches one worker; every worker on again is stored as [], and the last one cannot go off. */
+export function toggleAllow(allow: readonly string[], name: string, workers: readonly Worker[]): string[] {
+  const on = allowedWorkers(allow, workers)
+  const next = on.includes(name) ? on.filter(n => n !== name) : workers.filter(w => w.name === name || on.includes(w.name)).map(w => w.name)
+  if (!next.length) return [...allow]
+  return next.length === workers.length ? [] : next
+}
+
+/**
+ * Persisted settings may be old; migrate tiers once and never alias nested default data. With
+ * `workers`, provider names in Auto allow-lists become those providers' workers.
+ */
+export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Settings {
   const value = object(raw)
   const rules = Object.fromEntries(DOMAINS.map(domain => [domain, rule(object(value.rules)[domain], DEFAULTS.rules[domain], domain === 'general')])) as Record<Domain, Rule>
+  if (workers?.length) for (const domain of DOMAINS) { const r = rules[domain]; if (r.mode === 'auto' && r.allow.length) r.allow = migrateAllow(r.allow, workers) }
   const old = object(value.tiers)
   if (!Object.hasOwn(object(value.rules), 'general') && Object.keys(old).length) {
     const defaults = DEFAULTS.rules.general

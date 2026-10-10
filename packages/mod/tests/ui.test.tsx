@@ -93,6 +93,13 @@ const AGENT_OPTIONS = [
   { value: 'gpt-6-astra', label: 'gpt-6-astra', available: false },
   { value: 'general-purpose+sonnet', label: 'Claude Sonnet', available: true },
 ]
+// One model from two providers: the candidate list tells them apart by provider.
+const WORKERS = [
+  { name: 'deepseek-flash', model: 'deepseek-v4.1-flash', provider: 'deepseek', aa: { intelligence: 39.46, costPerTask: 0.2652, effort: 'max' as const } },
+  { name: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash', provider: 'opencode-go', aa: { intelligence: 39.46, costPerTask: 0.2652, effort: 'max' as const } },
+  { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt', aa: { intelligence: 50.24, costPerTask: 0.3191, effort: 'high' as const } },
+  { name: 'glm-5-3-flash', model: 'glm-5.3-flash', provider: 'opencode-go' },
+]
 
 type Draw = (el: Parameters<typeof renderBand>[0], surface: Surface) => ReturnType<typeof renderBand>
 
@@ -313,7 +320,7 @@ test('every settings card draws on both surfaces without the affiliation footer'
   for (const tab of TABS) {
     for (const judge of tab === 'judge' ? (['haiku', 'jev', 'model'] as const) : (['haiku'] as const)) {
       drawPane(on, 'settings-' + tab + '-' + judge, (el, surface) =>
-        renderSettings(el, frameOf(surface, 120, 14), { tab, draft: { ...SETTINGS, judge }, dirty: false, agents: AGENT_OPTIONS, routerModels: [{ value: 'deepseek-v4.1-flash', label: 'deepseek-v4.1-flash · deepseek', provider: 'deepseek' }], workerUi: { section: 'general', page: 0 }, skills: ['handoff'], jev: { source: 'file', test: { state: 'ok' } } }, actions),
+        renderSettings(el, frameOf(surface, 120, 14), { tab, draft: { ...SETTINGS, judge }, dirty: false, agents: AGENT_OPTIONS, routerModels: [{ value: 'deepseek-v4.1-flash', label: 'deepseek-v4.1-flash · deepseek', provider: 'deepseek' }], workers: WORKERS, workerUi: { section: 'general', page: 0 }, skills: ['handoff'], jev: { source: 'file', test: { state: 'ok' } } }, actions),
       )
     }
   }
@@ -332,7 +339,7 @@ test('every settings card draws on both surfaces without the affiliation footer'
 test('settings controls reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = { setTab: fn('tab'), patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
-  const view = (tab: SettingsTab) => ({ tab, draft: SETTINGS, dirty: true, agents: AGENT_OPTIONS, routerModels: [], workerUi: { section: 'general' as const, page: 0 }, skills: [], jev: { source: null, test: { state: 'idle' as const } } })
+  const view = (tab: SettingsTab) => ({ tab, draft: SETTINGS, dirty: true, agents: AGENT_OPTIONS, routerModels: [], workers: WORKERS, workerUi: { section: 'general' as const, page: 0 }, skills: [], jev: { source: null, test: { state: 'idle' as const } } })
   drawPane(on, 'effort', (el, surface) => renderSettings(el, frameOf(surface), view('effort'), actions))
   drawPane(on, 'workers', (el, surface) => renderSettings(el, frameOf(surface), view('workers'), actions))
   drawPane(on, 'judge', (el, surface) => renderSettings(el, frameOf(surface), view('judge'), actions))
@@ -364,23 +371,52 @@ test('settings controls reach their callbacks', async ($, on) => {
   expect(calls).toEqual([...once, ...once])
 })
 
-test('workers pages retain provider/preference controls and AA attribution on narrow surfaces', async ($, on) => {
+test('workers: Auto candidates per worker, details, exceptions and paging on narrow surfaces', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = { setTab: fn('tab'), patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
-  const draft = normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } }, preference: ['chatgpt', 'deepseek'] })
-  for (const section of ['general', 'providers', 'preference'] as const) drawPane(on, 'workers-' + section, (el, surface) => renderSettings(el, frameOf(surface, 80, 12), { tab: 'workers', draft, dirty: false, agents: AGENT_OPTIONS, routerModels: [{ value: 'gpt-6.1-sol', label: 'Sol · chatgpt', provider: 'chatgpt' }, { value: 'deepseek-v4.1-flash', label: 'Flash · deepseek', provider: 'deepseek' }], skills: [], jev: { source: null, test: { state: 'idle' } }, workerUi: { section, page: 0 } }, actions))
+  const draft = normalizeSettings({ rules: { general: { mode: 'auto', allow: ['deepseek-v4-1-flash', 'gpt-6-1-sol'] } } })
+  const view = (workerUi: { section: 'general' | 'design'; page: number; details?: boolean }, rows = 12) => (el: Parameters<Draw>[0], surface: Surface) => renderSettings(el, frameOf(surface, 80, rows), { tab: 'workers', draft, dirty: false, agents: AGENT_OPTIONS, routerModels: [], workers: WORKERS, skills: [], jev: { source: null, test: { state: 'idle' } }, workerUi }, actions)
+  drawPane(on, 'workers-auto', view({ section: 'general', page: 0 }, 20))
+  drawPane(on, 'workers-paged', view({ section: 'general', page: 0 }, 9))
+  drawPane(on, 'workers-details', view({ section: 'general', page: 0, details: true }, 20))
+  drawPane(on, 'workers-design', view({ section: 'design', page: 0 }, 20))
   for (const surface of SURFACES) {
-    const auto = await mount($, 'workers-general', surface, 80)
-    expect(await auto.find({ type: 'Text', text: /cheapest above index 45.*Data: Artificial Analysis/ })).toBeDefined()
-    await auto.press({ key: 'worker-next' })
-    const providers = await mount($, 'workers-providers', surface, 80)
-    await providers.press({ key: 'provider-chatgpt' })
-    const preference = await mount($, 'workers-preference', surface, 80)
-    await preference.press({ key: 'preference-up-1' })
+    const auto = await mount($, 'workers-auto', surface, 80)
+    // Desktop draws the second line inside the candidate's picture, so read the whole tree.
+    const drawn = JSON.stringify(await auto.drawn())
+    expect(drawn).toMatch(/deepseek · 39\.5 · \$0\.27 at max/)
+    expect(drawn).toMatch(/opencode-go · 39\.5 · \$0\.27 at max/)
+    expect(drawn).toMatch(/opencode-go · no AA data/)
+    expect(await auto.find({ key: 'provider-chatgpt' })).toBeUndefined()
+    await auto.press({ key: 'candidate-deepseek-flash' })
+    await auto.press({ key: 'candidate-gpt-6-1-sol' })
+    await auto.press({ key: 'exception-design' })
+    await auto.select({ key: 'exception-add', value: 'docs' })
+    await auto.press({ key: 'rule-mode-pin' })
+    const paged = await mount($, 'workers-paged', surface, 80)
+    await paged.press({ key: 'worker-next' })
+    const details = await mount($, 'workers-details', surface, 80)
+    expect(await details.find({ type: 'Text', text: /cheapest above index 45.*Data: Artificial Analysis/ })).toBeDefined()
+    await details.select({ key: 'tie-band', value: '3' })
+    const design = await mount($, 'workers-design', surface, 80)
+    await design.select({ key: 'pin-deep', value: 'gpt-6-1-sol' })
+    await design.press({ key: 'exception-remove' })
   }
-  expect(calls.filter(c => c === 'workerUi:[{"page":1}]').length).toBe(2)
-  expect(calls.filter(c => c === 'patch:[{"providers":{"chatgpt":false}}]').length).toBe(2)
-  expect(calls.filter(c => c === 'patch:[{"preference":["deepseek","chatgpt"]}]').length).toBe(2)
+  const once = [
+    'rule:["general",{"mode":"auto","allow":["deepseek-flash","deepseek-v4-1-flash","gpt-6-1-sol"]}]',
+    'rule:["general",{"mode":"auto","allow":["deepseek-v4-1-flash"]}]',
+    'workerUi:[{"section":"design","page":0,"details":false}]',
+    'rule:["docs",{"mode":"auto","allow":["deepseek-v4-1-flash","gpt-6-1-sol"]}]',
+    'workerUi:[{"section":"docs","page":0,"details":false}]',
+    'workerUi:[{"page":0,"details":false}]',
+    'rule:["general",{"mode":"pin","targets":{"light":{"agent":"deepseek-v4-1-flash"},"standard":{"agent":"gpt-6-1-sol"},"deep":{"agent":"gpt-6-astra"}}}]',
+    'workerUi:[{"page":1}]',
+    'patch:[{"autoTieBand":3}]',
+    'rule:["design",{"mode":"pin","targets":{"light":{"agent":"general-purpose","model":"sonnet"},"standard":{"agent":"general-purpose","model":"sonnet"},"deep":{"agent":"gpt-6-1-sol"}}}]',
+    'rule:["design",{"mode":"inherit"}]',
+    'workerUi:[{"section":"general","page":0,"details":false}]',
+  ]
+  expect(calls).toEqual([...once, ...once])
 })
 
 test('setup steps draw on both surfaces and move on', async ($, on) => {
@@ -388,7 +424,7 @@ test('setup steps draw on both surfaces and move on', async ($, on) => {
   const actions = { patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), jevKey: fn('key'), testJev: fn('test'), back: fn('back'), next: fn('next'), finish: fn('finish'), skip: fn('skip') }
   for (const step of [1, 2, 3, 4] as const) {
     drawPane(on, 'setup-' + step, (el, surface) =>
-      renderSetup(el, frameOf(surface), { step, draft: SETTINGS, agents: AGENT_OPTIONS, routerModels: [], workerUi: { section: 'general' as const, page: 0 }, jev: { source: 'env', test: { state: 'idle' } } }, actions),
+      renderSetup(el, frameOf(surface), { step, draft: SETTINGS, agents: AGENT_OPTIONS, routerModels: [], workers: WORKERS, workerUi: { section: 'general' as const, page: 0 }, jev: { source: 'env', test: { state: 'idle' } } }, actions),
     )
   }
   for (const surface of SURFACES) {
@@ -396,7 +432,7 @@ test('setup steps draw on both surfaces and move on', async ($, on) => {
     await (await mount($, 'setup-2', surface)).press({ key: 'back' })
     await (await mount($, 'setup-3', surface)).press({ key: 'set-warm' })
     const done = await mount($, 'setup-4', surface)
-    expect(await done.find({ type: 'Text', text: /General → Pin/ }), "done { type: 'Text', text: /General → Pin/ } " + surface).toBeDefined()
+    expect(await done.find({ type: 'Text', text: /^Fixed · exceptions: Design → Fixed$/ }), "done { type: 'Text', text: /Fixed · exceptions: Design → Fixed/ } " + surface).toBeDefined()
     expect(await done.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
     await done.press({ key: 'finish' })
   }

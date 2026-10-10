@@ -2,12 +2,12 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, ModelScore, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerAgent, WorkerPick, WorkerVerdict } from '../types'
 import { DOMAINS, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerCandidates, workerJudgeInput, zenJev } from './workers'
+import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerAgents, workerCandidates, workerJudgeInput, workerOptions, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
@@ -79,6 +79,7 @@ const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test
 const agentOptions = atom({ plugin: 'ripple', key: 'agentOptions' } as const, [])
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const modelScores = atom({ plugin: 'ripple', key: 'modelScores' } as const, null)
+const workerList = atom({ plugin: 'ripple', key: 'workerList' } as const, null)
 const workerUi = atom({ plugin: 'ripple', key: 'workerUi' } as const, { section: 'general', page: 0 })
 const skills = atom({ plugin: 'ripple', key: 'skills' } as const, [])
 const demo = atom({ plugin: 'ripple', key: 'demo' } as const, null)
@@ -366,7 +367,14 @@ async function choices($: EngineInterface): Promise<void> {
   const targets: TierTarget[] = [...files.keys()].map(agent => ({ agent }))
   targets.push(...['sonnet', 'opus', 'haiku'].map(model => ({ agent: 'general-purpose', model })), ...DOMAINS.flatMap(domain => { const r = s.rules[domain]; return r.mode === 'pin' ? Object.values(r.targets) : [] }), s.fallback)
   const unique = [...new Map(targets.map(t => [targetValue(t), t])).values()]
-  await update($, agentOptions, () => unique.map(t => ({ value: targetValue(t), label: targetLabel(t), available: t.agent === 'general-purpose' || files.has(t.agent) })))
+  // A worker reads as `model · provider`: one model can come from two providers.
+  const workerLabel = (target: TierTarget): string => {
+    const file = target.agent === 'general-purpose' ? undefined : files.get(target.agent)
+    const model = file ? agentModel(file)?.replace(/@[^@]*$/, '') : undefined
+    const provider = file ? agentProvider(file) : undefined
+    return model ? model + (provider ? ' · ' + provider : '') : targetLabel(target)
+  }
+  await update($, agentOptions, () => unique.map(t => ({ value: targetValue(t), label: workerLabel(t), available: t.agent === 'general-purpose' || files.has(t.agent) })))
   await refreshModels($)
   const commands = await $.command.list()
   await update($, skills, () => commands.filter(c => c.source !== 'builtin' && !c.name.startsWith('ripple')).map(c => c.name))
@@ -392,6 +400,36 @@ async function scores($: EngineInterface): Promise<import('../types').ModelScore
     await report($, 'model scores', error)
     await update($, modelScores, () => ({ until: now + 600000, models: cached?.models ?? [] }))
     return cached?.models ?? []
+  }
+}
+/**
+ * Auto's candidates for the Workers card: the router's generated workers with their AA scores
+ * (GET /api/mod-options), cached like the scores. Without the router's answer, the readable worker
+ * files on the router's catalogue stand in, and the previous list is kept.
+ */
+async function refreshWorkerList($: EngineInterface): Promise<{ agents: WorkerAgent[]; scores: ModelScore[] }> {
+  const now = await $.clock.now()
+  const cached = await read($, workerList)
+  if (cached && cached.until > now) return cached
+  try {
+    const response = await $.http.fetch(`${await adminUrl($)}/api/mod-options`)
+    if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
+    const raw = JSON.parse(response.text)
+    const value = { until: now + 600000, agents: workerAgents(raw), scores: scoreModels(object(raw).scores) }
+    await update($, workerList, () => value)
+    return value
+  } catch (error) {
+    await report($, 'worker list', error)
+    let agents = cached?.agents ?? []
+    if (!agents.length) {
+      try {
+        await refreshModels($)
+        agents = workerCandidates(await workerFiles($), await read($, routerModels)).map(c => ({ name: c.target.agent, model: c.model, provider: c.provider }))
+      } catch (inner) { await report($, 'worker catalogue', inner) }
+    }
+    const value = { until: now + 600000, agents, scores: cached?.scores ?? (await read($, modelScores))?.models ?? [] }
+    await update($, workerList, () => value)
+    return value
   }
 }
 async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Promise<string | undefined> {
@@ -583,8 +621,11 @@ async function manualPick($: EngineInterface, effort: Effort): Promise<void> {
 // A draft is cloned through normalization, never aliased to saved settings.
 async function startPanel($: EngineInterface, which: 'settings' | 'setup'): Promise<void> {
   const s = await currentSettings($)
+  // The base stays as saved, so saving the draft also stores migrated allow-lists.
   await update($, settingsDraft, () => normalizeSettings(s))
   await update($, settingsBase, () => normalizeSettings(s))
+  const { agents } = await refreshWorkerList($)
+  await update($, settingsDraft, value => normalizeSettings(value ?? s, agents))
   if (which === 'setup') await update($, setupStep, () => 1)
   await update($, panel, () => which)
   await choices($)
@@ -808,9 +849,12 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
-  const s = await currentSettings($)
-  const draft = normalizeSettings(await read($, settingsDraft) ?? s)
-  return { tab: await read($, settingsTab), draft, dirty: JSON.stringify(draft) !== JSON.stringify(s), agents: await read($, agentOptions), routerModels: await read($, routerModels), skills: await read($, skills), jev: await read($, jev), workerUi: await read($, workerUi) }
+  const list = await read($, workerList)
+  const agents = list?.agents ?? []
+  // Saved settings may still name providers in Auto allow-lists; compare as the draft shows them.
+  const s = normalizeSettings(await currentSettings($), agents)
+  const draft = normalizeSettings(await read($, settingsDraft) ?? s, agents)
+  return { tab: await read($, settingsTab), draft, dirty: JSON.stringify(draft) !== JSON.stringify(s), agents: await read($, agentOptions), routerModels: await read($, routerModels), workers: workerOptions(agents, list?.scores ?? [], draft.autoFloors.standard), skills: await read($, skills), jev: await read($, jev), workerUi: await read($, workerUi) }
 }
 async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)

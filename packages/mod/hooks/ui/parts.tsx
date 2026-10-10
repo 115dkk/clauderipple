@@ -53,7 +53,8 @@ export function chip(el: Els, spec: ChipSpec): RenderNode {
   const onPress = spec.onPress
   if (!onPress) return picture
   return (
-    <Box key={'chip-' + spec.key} position="relative" overflow="hidden">
+    // flexShrink 0: an overflow-hidden flex item may shrink below its content, cutting the label.
+    <Box key={'chip-' + spec.key} position="relative" overflow="hidden" flexShrink={0}>
       {picture}
       <Box position="absolute" top={0} left={0} right={0} bottom={0} overflow="hidden">
         <Button key={spec.key} plain label={hitLabel(spec.width)} onPress={() => onPress()} />
@@ -210,13 +211,17 @@ export type PillOptions = {
   toggle?: boolean
   /** A small count badge after the label. */
   badge?: string
+  /** A quiet second line under the label (a candidate's provider and score). */
+  sub?: string
+  /** At least this wide, so a list of pills lines up. */
+  minWidth?: number
   height?: number
   alt?: string
 }
 
 /** A pressable pill (desktop): plate, optional glyph or switch, label, optional badge. */
 export function pill(el: Els, frame: Frame, o: PillOptions): RenderNode {
-  const ht = o.height ?? PILL_H
+  const ht = o.height ?? (o.sub ? 40 : PILL_H)
   if (!o.label && o.glyph) {
     // An icon alone: a square plate.
     return chip(el, {
@@ -239,8 +244,13 @@ export function pill(el: Els, frame: Frame, o: PillOptions): RenderNode {
     x += 20
   }
   const labelTone = o.primary ? '#fff' : o.lit ? v('accent') : v('ink')
-  body += text(x, ht / 2 + 4.2, 'lbl', o.label, labelTone)
-  x += lw
+  if (o.sub) {
+    body += text(x, ht / 2 - 2, 'lbl', o.label, labelTone) + text(x, ht / 2 + 11.5, 'sub', o.sub)
+    x += Math.max(lw, textWidth(o.sub, 11.5))
+  } else {
+    body += text(x, ht / 2 + 4.2, 'lbl', o.label, labelTone)
+    x += lw
+  }
   if (o.badge) {
     const bw = Math.max(16, textWidth(o.badge, 10.5) + 9)
     x += 6
@@ -249,12 +259,12 @@ export function pill(el: Els, frame: Frame, o: PillOptions): RenderNode {
       '<text x="' + (x + bw / 2) + '" y="' + (ht / 2 + 3.8) + '" text-anchor="middle" style="fill:#fff;font-size:10.5px;font-weight:700">' + esc(o.badge) + '</text>'
     x += bw
   }
-  const w = Math.ceil(x + 11)
+  const w = Math.max(o.minWidth ?? 0, Math.ceil(x + 11))
   const plateMarkup = o.primary ? primaryPlate(w, ht) : plate(w, ht, o.lit === true)
   return chip(el, {
     key: o.key,
     source: svgDoc(w, ht, frame.appearance, plateMarkup + body),
-    alt: o.alt ?? o.label + (o.toggle !== undefined ? (o.toggle ? t(frame.lang, 'settings.onSuffix') : t(frame.lang, 'settings.offSuffix')) : o.lit ? t(frame.lang, 'settings.selected') : ''),
+    alt: o.alt ?? o.label + (o.sub ? ', ' + o.sub : '') + (o.toggle !== undefined ? (o.toggle ? t(frame.lang, 'settings.onSuffix') : t(frame.lang, 'settings.offSuffix')) : o.lit ? t(frame.lang, 'settings.selected') : ''),
     width: w,
     height: ht,
     onPress: o.onPress,
@@ -292,6 +302,23 @@ export function segmented<T extends string>(
 export function toggle(el: Els, frame: Frame, key: string, label: string, on: boolean, onPress: () => void, hotkey?: string): RenderNode {
   if (frame.surface === 'desktop' || frame.surface === 'vscode') return pill(el, frame, { key, label, toggle: on, onPress, height: 26 })
   return textButton(el, key, (on ? '● ' : '○ ') + label, onPress, hotkey)
+}
+
+/** The desktop width of a switchRow pill, for lining a list of them up. */
+export function switchRowWidth(title: string, sub: string): number {
+  return Math.ceil(11 + 29 + Math.max(textWidth(title, 12), textWidth(sub, 11.5)) + 11)
+}
+
+/** A switch with a title and a quiet second line: one two-line pill, or `● title` and dim text. */
+export function switchRow(el: Els, frame: Frame, key: string, title: string, sub: string, on: boolean, onPress: () => void, minWidth?: number): RenderNode {
+  if (frame.surface === 'desktop' || frame.surface === 'vscode') return pill(el, frame, { key, label: title, sub, toggle: on, onPress, ...(minWidth ? { minWidth } : {}) })
+  const { Box, Text } = el
+  return (
+    <Box key={'switch-' + key} flexDirection="row" columnGap={2} flexWrap="wrap">
+      {textButton(el, key, (on ? '● ' : '○ ') + title, onPress)}
+      <Text dimColor>{sub}</Text>
+    </Box>
+  )
 }
 
 /** A button: the desktop pill (primary filled) or a terminal button. */

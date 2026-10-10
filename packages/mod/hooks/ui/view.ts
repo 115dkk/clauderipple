@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Domain, Effort, HandoffKind, JudgeKind, RouterModel, Rule, Settings, StatusRequest, TierTarget, WorkerUi } from '../../types'
+import type { AgentRec, Domain, Effort, HandoffKind, JudgeKind, RouterModel, Rule, Settings, StatusRequest, TierTarget, WorkerOption, WorkerUi } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -154,6 +154,8 @@ export type SettingsView = {
   agents: readonly AgentOption[]
   /** Router model ids the `model` judge can ask. */
   routerModels: readonly RouterModel[]
+  /** Generated workers Auto may pick, with their shown AA variant. */
+  workers: readonly WorkerOption[]
   workerUi: WorkerUi
   /** Skills a full handoff can run. */
   skills: readonly string[]
@@ -181,6 +183,8 @@ export type SetupView = {
   draft: Settings
   agents: readonly AgentOption[]
   routerModels: readonly RouterModel[]
+  /** Generated workers Auto may pick, with their shown AA variant. */
+  workers: readonly WorkerOption[]
   workerUi: WorkerUi
   jev: JevState
 }

@@ -4,6 +4,7 @@
 import { t } from '../i18n'
 import { DOMAINS } from '../settings'
 import type { RenderNode } from 'claude-code'
+import type { Domain } from '../../types'
 
 import { action, chip } from './parts'
 import type { Els } from './parts'
@@ -17,6 +18,13 @@ const STEPS = [
   { title: 'setup.workersTitle', blurb: 'workers.setupBlurb' },
   { title: 'setup.cacheTitle', blurb: 'setup.cacheBlurb' },
 ] as const
+
+/** `Auto · exceptions: Design → Fixed`: the main choice, then only the fields that differ. */
+function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
+  const mode = (domain: Domain) => t(lang, 'workers.' + (d.rules[domain].mode === 'auto' ? 'auto' : 'pin'))
+  const exceptions = DOMAINS.filter(domain => domain !== 'general' && d.rules[domain].mode !== 'inherit')
+  return mode('general') + (exceptions.length ? ' · ' + t(lang, 'workers.exceptionsSummary', { list: exceptions.map(domain => t(lang, 'workers.' + domain) + ' → ' + mode(domain)).join(', ') }) : '')
+}
 
 function dots(el: Els, frame: Frame, step: number): RenderNode {
   const tone = textTone(frame.appearance)
@@ -43,7 +51,7 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, actions: Set
   const rich = isRich(frame)
   const tone = textTone(frame.appearance)
   // The settings cards draw the controls; setup lends them its draft and handlers.
-  const asSettings: SettingsView = { tab: 'judge', draft: view.draft, dirty: false, agents: view.agents, routerModels: view.routerModels, skills: [], jev: view.jev, workerUi: view.workerUi }
+  const asSettings: SettingsView = { tab: 'judge', draft: view.draft, dirty: false, agents: view.agents, routerModels: view.routerModels, workers: view.workers, skills: [], jev: view.jev, workerUi: view.workerUi }
   const noop = () => undefined
   const asActions: SettingsActions = {
     setTab: noop,
@@ -62,7 +70,7 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, actions: Set
   const body: RenderNode[] = done
     ? [
         row(el, 'sum-effort', t(frame.lang, 'band.effort'), <Text>{t(frame.lang, 'setup.effortSummary', { state: t(frame.lang, d.effortAuto ? 'band.on' : 'band.off').toLowerCase(), judge: d.judge === 'haiku' ? t(frame.lang, 'settings.haiku') : d.judge === 'jev' ? t(frame.lang, 'settings.jev') : d.judgeModel })}</Text>),
-        row(el, 'sum-workers', t(frame.lang, 'settings.workers'), <Text wrap="wrap">{DOMAINS.map(domain => t(frame.lang, 'workers.' + domain) + ' → ' + t(frame.lang, 'workers.' + (d.rules[domain].mode === 'inherit' ? 'inherit' : d.rules[domain].mode))).join(' · ')}</Text>),
+        row(el, 'sum-workers', t(frame.lang, 'settings.workers'), <Text wrap="wrap">{workersSummary(frame.lang, d)}</Text>),
         row(el, 'sum-cache', t(frame.lang, 'band.cache'), <Text>{d.keepWarm ? t(frame.lang, 'setup.cacheSummary', { hours: d.keepWarmHours }) : t(frame.lang, 'setup.cacheOff')}</Text>),
         <Text dimColor>
           {rich ? t(frame.lang, 'setup.changeRich') : t(frame.lang, 'setup.changeText')}
