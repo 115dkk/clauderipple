@@ -155,6 +155,42 @@ let chatgptLoginMessage = "";
 function selectOption(value, text) { return el("option", { value }, [text]); }
 function badge(kind, text) { return el("span", { class: `badge ${kind} dot`, text }, []); }
 function hint(text) { return el("p", { class: "hint", text }, []); }
+/** One row of an inset group: a label (and quieter lines under it) on the left, a value or control on the right. */
+function cell(label, value, sub, extraClass) {
+  const lines = (Array.isArray(sub) ? sub : [sub]).filter(Boolean).map((line) => typeof line === "string" ? el("span", { class: "cell-sub", text: line }) : line);
+  return el("div", { class: `cell${extraClass ? ` ${extraClass}` : ""}` }, [
+    el("div", { class: "cell-text" }, [typeof label === "string" ? el("span", { class: "cell-label", text: label }) : label, ...lines]),
+    value ? el("div", { class: "cell-value" }, Array.isArray(value) ? value : [value]) : null,
+  ]);
+}
+/** A titled group of rows with an optional note under it — the System Settings section shape. */
+function section(title, rows, footer, action) {
+  return el("section", { class: "section" }, [
+    title || action ? el("div", { class: "section-head" }, [title ? el("h3", { class: "section-title", text: title }) : el("span"), action || null]) : null,
+    el("div", { class: "group" }, rows.filter(Boolean)),
+    ...(Array.isArray(footer) ? footer : [footer]).filter(Boolean).map((text) => el("p", { class: "group-footer", text })),
+  ]);
+}
+const SVG_NS = "http://www.w3.org/2000/svg";
+/** A small line icon; the paths are drawn in currentColor so the icon follows the text around it. */
+function svgIcon(viewBox, paths, cls) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", viewBox);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.7");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  if (cls) svg.setAttribute("class", cls);
+  for (const d of paths) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.appendChild(path);
+  }
+  return svg;
+}
+function chevronIcon() { return svgIcon("0 0 8 13", ["M1.5 1.5l5 5-5 5"], "chevron"); }
 
 function showView(name) {
   for (const button of $all(".nav-btn")) button.classList.toggle("active", button.dataset.view === name);
@@ -169,20 +205,22 @@ for (const button of $all(".nav-btn")) button.addEventListener("click", () => sh
 window.addEventListener("hashchange", () => showView((location.hash || "#health").slice(1)));
 showView((location.hash || "#health").slice(1) || "health");
 
+// The sidebar carries one language menu and About another (the sidebar is a tab bar on a phone).
 (function setupLanguage() {
-  const select = $("#lang-toggle");
   const lang = (typeof CURRENT_LANG !== "undefined" && CURRENT_LANG) || "en";
-  for (const [code, name] of LANGUAGES) {
-    const option = document.createElement("option");
-    option.value = code;
-    option.textContent = name;
-    option.selected = code === lang;
-    select.append(option);
+  for (const select of $all(".lang-select")) {
+    for (const [code, name] of LANGUAGES) {
+      const option = document.createElement("option");
+      option.value = code;
+      option.textContent = name;
+      option.selected = code === lang;
+      select.append(option);
+    }
+    select.addEventListener("change", () => {
+      try { localStorage.setItem("clauderipple_lang", select.value); } catch { /* unavailable */ }
+      location.reload();
+    });
   }
-  select.addEventListener("change", () => {
-    try { localStorage.setItem("clauderipple_lang", select.value); } catch { /* unavailable */ }
-    location.reload();
-  });
 })();
 
 async function loadCatalogs() {
@@ -198,7 +236,7 @@ async function refreshHealth() {
   try {
     status = await api("/api/status");
   } catch (error) {
-    $("#health-desktop").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.desktop") }), badge("bad", t("health.disconnected"))]));
+    $("#health-desktop").replaceChildren(cell(t("health.connection"), badge("bad", t("health.disconnected"))));
     return;
   }
   // Served files changed underneath an open window (e.g. after an update): reload, unless a form is open.
@@ -207,18 +245,19 @@ async function refreshHealth() {
     else if (loadedUiRevision !== status.uiRevision && $("#modal-backdrop").hidden) location.reload();
   }
   const desktop = $("#health-desktop");
-  desktop.replaceChildren(
-    el("div", { class: "row" }, [el("span", { class: "k", text: t("health.connection") }), status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected"))]),
-    hint(status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp")),
-  );
-  $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", status.stats) })]));
+  desktop.replaceChildren(cell(
+    t("health.connection"),
+    status.settings.pointsAtRouter ? badge("ok", t("health.connected")) : badge("bad", t("health.notConnected")),
+    status.settings.pointsAtRouter ? t("health.connectedHelp") : t("health.notConnectedHelp"),
+  ));
+  $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) })]));
   renderHealthProviders();
   if (clientsLoaded) renderClients();
   const details = $("#health-details");
   details.replaceChildren(
     versionRow(),
     // Which files answer, and since when: the only way to see that an update actually replaced the router.
-    ...(status.runtime ? [el("div", { class: "row" }, [el("span", { class: "k", text: t("health.runtime") }), el("span", { class: "v", text: `${status.runtime.router || "?"} · ${new Date(status.runtime.startedAt).toLocaleString()}` })])] : []),
+    ...(status.runtime ? [cell(t("health.runtime"), null, [el("span", { class: "cell-sub mono", text: status.runtime.router || "?" }), new Date(status.runtime.startedAt).toLocaleString()])] : []),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.routes") }), el("span", { class: "v", text: String(status.routes) })]),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.cli") }), el("span", { class: "v", text: status.cliVersion })]),
   );
@@ -230,22 +269,25 @@ async function refreshHealth() {
 let updateState = { busy: false, check: null };
 function versionRow() {
   const check = updateState.check;
-  const children = [el("span", { class: "k", text: t("health.version") }), el("span", { class: "v", text: status.version })];
+  // The version reads as the row's label; what the update check found sits under it, the action on the right.
+  let note = null;
+  let button = null;
   if (check && check.newer && check.kind === "checkout") {
-    children.push(el("span", { class: "small", text: t("update.checkout", { latest: check.latest }) }));
+    note = t("update.checkout", { latest: check.latest });
   } else {
     const action = check && check.newer;
     const label = updateState.busy ? t("update.checking")
       : check && check.running ? t("update.running")
       : action ? (check.kind === "packaged" ? t("update.download", { latest: check.latest }) : t("update.install", { latest: check.latest }))
       : t("update.check");
-    const button = el("button", { class: "btn secondary compact", type: "button", text: label });
+    button = el("button", { class: action ? "btn" : "btn secondary", type: "button", text: label });
     button.disabled = updateState.busy || Boolean(check && check.running);
     button.addEventListener("click", () => void (action ? startUpdate() : checkForUpdate()));
-    children.push(button);
-    if (check && !check.newer && !updateState.busy) children.push(el("span", { class: "small", text: t("update.latest") }));
+    if (check && !check.newer && !updateState.busy) note = t("update.latest");
   }
-  return el("div", { class: "row", id: "health-version-row" }, children);
+  const row = cell(el("span", { class: "cell-label", text: `${t("health.version")} ${status.version}` }), button, note);
+  row.id = "health-version-row";
+  return row;
 }
 function renderVersionRow() {
   const row = $("#health-version-row");
@@ -407,14 +449,9 @@ function renderHealthProviders() {
   }
   box.replaceChildren(...providers.map(([name, provider]) => {
     const live = status && status.providers && status.providers[name];
-    const line = el("div", { class: "provider-status" }, [
-      el("strong", { text: name }),
-      providerState(name, provider),
-      live && live.needsLogin && provider.type === "chatgpt" ? chatgptLoginButton(() => renderHealthProviders()) : null,
-      live && live.needsLogin && provider.type === "chatgpt" && chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
-    ].filter(Boolean));
+    const lines = [];
     const quota = quotaLine(name);
-    if (quota) line.appendChild(el("div", { class: "small", text: quota }));
+    if (quota) lines.push(el("span", { class: "cell-sub", text: quota }));
     // Claude subscription accounts, one line each: the current login and every account added here.
     // Before the config has loaded the rows come from the status, which names the sign-in source
     // rather than the auth mode.
@@ -423,11 +460,23 @@ function renderHealthProviders() {
         .map((account) => ({ account, text: chatgptQuotaText(account.quota) }))
         .filter(({ text }) => text)
         .map(({ account, text }) => el("div", { text: `${claudeAccountLabel(account)} · ${text}` }));
-      if (usage.length) line.appendChild(el("div", { class: "small account-usage" }, usage));
+      if (usage.length) lines.push(el("div", { class: "cell-sub account-usage" }, usage));
     }
     const pool = credentialLine(name);
-    if (pool) line.appendChild(pool);
-    return line;
+    if (pool) lines.push(pool);
+    if (live && live.needsLogin && provider.type === "chatgpt") {
+      lines.push(el("div", { class: "cell-actions" }, [
+        chatgptLoginButton(() => renderHealthProviders()),
+        chatgptLoginMessage ? el("span", { class: "small", text: chatgptLoginMessage }) : null,
+      ]));
+    }
+    // The row opens the provider's own page; a button inside it keeps its own click.
+    const row = cell(el("span", { class: "cell-label", text: name }), [providerState(name, provider), chevronIcon()], lines, "provider-status link");
+    row.tabIndex = 0;
+    const open = (event) => { if (!event.target.closest("button, a")) openProvider(name, provider); };
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target === row) open(event); });
+    return row;
   }));
 }
 
@@ -439,41 +488,48 @@ function renderClients() {
   const picker = status.picker || { enabled: false, last: null };
   const last = picker.last || null;
   const names = status.pickerModels || [];
-  $("#client-picker-rows").replaceChildren(...[
-    el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), picker.enabled ? badge("ok", t("picker.on")) : el("span", { class: "small", text: t("picker.off") })]),
-    picker.enabled ? el("div", { class: "small", text: t("picker.models", { count: names.length, names: names.join(", ") || "—" }) }) : null,
-    picker.enabled ? (last && last.at ? el("div", { class: "small", text: t("picker.lastAt", { at: new Date(last.at).toLocaleString() }) }) : hint(t("picker.never"))) : null,
-  ].filter(Boolean));
-  const pickerButton = $("#client-picker-toggle");
-  pickerButton.textContent = picker.enabled ? t("picker.turnOff") : t("picker.turnOn");
-  pickerButton.className = picker.enabled ? "btn secondary" : "btn";
-  pickerButton.disabled = pickerBusy;
-  pickerButton.onclick = () => togglePicker(!picker.enabled);
+  // The switch rows are static markup, so a five-second refresh never takes keyboard focus off one;
+  // only the rows after the switch are rebuilt.
+  const pickerGroup = $("#client-picker-rows");
+  while (pickerGroup.children.length > 1) pickerGroup.lastElementChild.remove();
+  if (picker.enabled) {
+    pickerGroup.append(
+      el("div", { class: "cell-note", text: t("picker.models", { count: names.length, names: names.join(", ") || "—" }) }),
+      el("div", { class: "cell-note", text: last && last.at ? t("picker.lastAt", { at: new Date(last.at).toLocaleString() }) : t("picker.never") }),
+    );
+  }
+  const pickerSwitch = $("#client-picker-toggle");
+  pickerSwitch.checked = Boolean(picker.enabled);
+  pickerSwitch.disabled = pickerBusy;
+  // Turning it on asks first (the OS trust prompt follows); a "no" puts the switch back.
+  pickerSwitch.onchange = () => {
+    if (!picker.enabled && !confirm(t("picker.confirmOn"))) { pickerSwitch.checked = false; return; }
+    pickerSwitch.disabled = true;
+    void togglePicker(!picker.enabled, true);
+  };
   renderClientPickerModels(picker.enabled);
   renderModelSlots();
   const agentEnabled = Boolean(status.agentTitle);
-  $("#client-agent-title-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), agentEnabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
-  const agentButton = $("#client-agent-title-toggle");
-  agentButton.textContent = agentEnabled ? t("agentTitle.turnOff") : t("agentTitle.turnOn");
-  agentButton.className = agentEnabled ? "btn secondary" : "btn";
-  agentButton.disabled = agentTitleBusy;
-  agentButton.onclick = () => toggleAgentTitle(!agentEnabled);
+  const agentSwitch = $("#client-agent-title-toggle");
+  agentSwitch.checked = agentEnabled;
+  agentSwitch.disabled = agentTitleBusy;
+  agentSwitch.onchange = () => { agentSwitch.disabled = true; void toggleAgentTitle(!agentEnabled); };
   const modEnabled = Boolean(status.statusMod);
-  $("#client-status-mod-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), modEnabled ? badge("ok", t("agentTitle.on")) : el("span", { class: "small", text: t("agentTitle.off") })]));
-  const modButton = $("#client-status-mod-toggle");
-  modButton.textContent = modEnabled ? t("statusMod.turnOff") : t("statusMod.turnOn");
-  modButton.className = modEnabled ? "btn secondary" : "btn";
-  modButton.disabled = statusModBusy;
-  modButton.onclick = () => toggleStatusMod(!modEnabled);
+  const modSwitch = $("#client-status-mod-toggle");
+  modSwitch.checked = modEnabled;
+  modSwitch.disabled = statusModBusy;
+  modSwitch.onchange = () => { modSwitch.disabled = true; void toggleStatusMod(!modEnabled); };
   const toolsLimited = Boolean(currentConfig.cli && currentConfig.cli.limitWorkerTools);
-  $("#client-worker-tools-rows").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), toolsLimited ? badge("ok", t("workerTools.on")) : el("span", { class: "small", text: t("workerTools.off") })]));
-  const toolsButton = $("#client-worker-tools-toggle");
-  toolsButton.textContent = toolsLimited ? t("workerTools.turnOff") : t("workerTools.turnOn");
-  toolsButton.className = toolsLimited ? "btn secondary" : "btn";
-  toolsButton.onclick = () => toggleWorkerTools(!toolsLimited);
+  const toolsSwitch = $("#client-worker-tools-toggle");
+  toolsSwitch.checked = toolsLimited;
+  toolsSwitch.onchange = () => { toolsSwitch.disabled = true; void toggleWorkerTools(!toolsLimited).finally(() => { toolsSwitch.disabled = false; }); };
   void renderCodexClient();
-  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => `${labelOf(claudeModels.find((model) => model.id === source) || { id: source })} → ${labelOf((groupedModels(currentConfig).find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model })}`);
-  $("#client-claude-code-rows").replaceChildren(el("div", { class: "small", text: mapped.join(" · ") || t("slots.noChanges") }));
+  const groups = groupedModels(currentConfig);
+  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => cell(
+    labelOf(claudeModels.find((model) => model.id === source) || { id: source }),
+    el("span", { text: labelOf((groups.find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model }) }),
+  ));
+  $("#client-claude-code-rows").replaceChildren(...(mapped.length ? mapped : [el("div", { class: "cell-note", text: t("slots.noChanges") })]));
 }
 function renderClientPickerModels(enabled) {
   const card = $("#client-picker-models-card");
@@ -552,11 +608,8 @@ function renderModelSlots() {
     }
     select.onchange = () => void saveModelSlots();
     select.dataset.slot = slot;
-    return el("div", { class: "slot-row" }, [
-      el("span", { class: "k", text: t(`slots.slot.${slot}`) }),
-      select,
-      el("span", { class: "hint", text: t(`slots.slotHelp.${slot}`) }),
-    ]);
+    select.setAttribute("aria-label", t(`slots.slot.${slot}`));
+    return cell(t(`slots.slot.${slot}`), select, t(`slots.slotHelp.${slot}`), "slot-row");
   }));
 }
 
@@ -660,17 +713,19 @@ async function toggleWorkerTools(enabled) {
   renderClients();
 }
 async function renderCodexClient() {
-  const rows = $("#client-codex-rows");
-  const button = $("#client-codex-toggle");
+  const path = $("#client-codex-rows");
+  const toggle = $("#client-codex-toggle");
   try {
     const codex = await api("/api/codex");
-    rows.replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("picker.state") }), codex.enabled ? badge("ok", t("picker.on")) : el("span", { class: "small", text: t("picker.off") })]), el("div", { class: "small", text: codex.configPath }));
-    button.textContent = codex.enabled ? t("clients.codex.turnOff") : t("clients.codex.turnOn");
-    button.className = codex.enabled ? "btn secondary" : "btn";
-    button.disabled = codexBusy;
-    button.onclick = () => toggleCodex(!codex.enabled);
+    path.textContent = codex.configPath || "";
+    path.classList.remove("bad-text");
+    toggle.checked = Boolean(codex.enabled);
+    toggle.disabled = codexBusy;
+    toggle.onchange = () => { toggle.disabled = true; void toggleCodex(!codex.enabled); };
   } catch (error) {
-    rows.replaceChildren(el("div", { class: "small bad-text", text: error.message }));
+    path.textContent = error.message;
+    path.classList.add("bad-text");
+    toggle.disabled = true;
   }
 }
 async function toggleCodex(enabled) {
@@ -716,14 +771,19 @@ function routeFromTarget(value) {
     return provider && model ? { provider, model } : null;
   } catch { return null; }
 }
+// One mapping per row: the Claude model, what answers it, and its effort. On a narrow window the
+// three stack, so each carries its own small label (hidden where the column heads show).
 function slotRow(id, route) {
-  const row = el("tr", {});
+  const row = el("div", { class: "map-row" });
   const source = claudeSelect(id);
   const target = targetSelect(route);
+  source.setAttribute("aria-label", t("slots.th.claude"));
+  target.setAttribute("aria-label", t("slots.th.target"));
   const initialTarget = routeFromTarget(target.value);
   const effort = effortSelect(route && route.effort, initialTarget ? effortLevelsFor(initialTarget.provider, initialTarget.model) : ["high"]);
-  const effortCell = el("td", {}, [effort]);
-  const remove = el("button", { class: "icon-btn", type: "button", title: t("common.remove"), text: "×", onclick: () => { row.remove(); updateSlotSummary(); scheduleSlotsSave(); } });
+  effort.setAttribute("aria-label", t("slots.th.effort"));
+  const effortCell = el("div", { class: "map-col map-effort" }, [el("span", { class: "map-label", text: t("slots.th.effort") }), effort]);
+  const remove = el("button", { class: "icon-btn remove", type: "button", title: t("common.remove"), "aria-label": t("common.remove"), onclick: () => { row.remove(); updateSlotSummary(); scheduleSlotsSave(); } }, [svgIcon("0 0 20 20", ["M10 2.8a7.2 7.2 0 1 0 0 14.4 7.2 7.2 0 0 0 0-14.4z", "M6.6 10h6.8"])]);
   function sync() {
     const selected = routeFromTarget(target.value);
     const levels = selected ? effortLevelsFor(selected.provider, selected.model) : [];
@@ -745,7 +805,13 @@ function slotRow(id, route) {
   target.addEventListener("change", () => { sync(); scheduleSlotsSave(); });
   source.addEventListener("change", () => { updateSlotSummary(); scheduleSlotsSave(); });
   effort.addEventListener("change", scheduleSlotsSave);
-  row.append(el("td", {}, [source]), el("td", {}, [target]), effortCell, el("td", { class: "icon-cell" }, [remove]));
+  row.append(
+    el("div", { class: "map-col map-source" }, [el("span", { class: "map-label", text: t("slots.th.claude") }), source]),
+    el("span", { class: "map-arrow", "aria-hidden": "true", text: "→" }),
+    el("div", { class: "map-col map-target" }, [el("span", { class: "map-label", text: t("slots.th.target") }), target]),
+    effortCell,
+    el("div", { class: "map-remove" }, [remove]),
+  );
   row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.value });
   sync();
   return row;
@@ -755,7 +821,7 @@ async function loadSlots() {
   try {
     await loadCatalogs();
     currentConfig = await api("/api/config");
-    const rows = $("#slots-table tbody");
+    const rows = $("#slots-list");
     rows.replaceChildren();
     const routes = currentConfig.routes || {};
     const ids = [...claudeModels.map((model) => model.id), ...Object.keys(routes).filter((id) => !claudeModels.some((model) => model.id === id))];
@@ -767,7 +833,7 @@ async function loadSlots() {
 }
 $("#slots-add").addEventListener("click", () => {
   if (!currentConfig) return;
-  $("#slots-table tbody").appendChild(slotRow(claudeModels[0].id, null));
+  $("#slots-list").appendChild(slotRow(claudeModels[0].id, null));
   updateSlotSummary();
 });
 function allKnownModelIds(config) { return new Set(groupedModels(config).flatMap((group) => group.models.map((model) => model.id))); }
@@ -836,7 +902,7 @@ function applyPickerSelections(next, selections) {
   return next;
 }
 function updateSlotSummary() {
-  const summaries = $all("#slots-table tbody tr").map((row) => row._get()).filter((item) => item.route).slice(0, 3).map((item) => {
+  const summaries = $all("#slots-list .map-row").map((row) => row._get()).filter((item) => item.route).slice(0, 3).map((item) => {
     const source = claudeModels.find((model) => model.id === item.id);
     const group = groupedModels(currentConfig).find((itemGroup) => itemGroup.name === item.route.provider);
     const target = group && group.models.find((model) => model.id === item.route.model);
@@ -864,7 +930,7 @@ async function saveSlots() {
   const next = clone(await latestConfig());
   const routes = {};
   const seen = new Set();
-  for (const row of $all("#slots-table tbody tr")) {
+  for (const row of $all("#slots-list .map-row")) {
     const item = row._get();
     if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); slotsSaving = false; return; }
     seen.add(item.id);
@@ -1026,12 +1092,25 @@ function providerRailItem(name, provider) {
     ]),
     providerState(name, provider),
   ]);
-  button.addEventListener("click", () => {
-    selectedProviderName = name;
-    providerDetailTab = provider.type === "anthropic" && provider.auth === "claude-code" ? "accounts" : "overview";
-    renderProviderWorkspace();
-  });
+  button.addEventListener("click", () => openProvider(name, provider));
   return button;
+}
+
+/**
+ * Show one provider's page, from its list or from the Status screen. A narrow window shows the list
+ * and the page one at a time (`show-detail`), so this is also the "push" to the page.
+ */
+function openProvider(name, provider) {
+  selectedProviderName = name;
+  providerDetailTab = provider.type === "anthropic" && provider.auth === "claude-code" ? "accounts" : "overview";
+  $("#view-providers").classList.add("show-detail");
+  if (!$("#view-providers").classList.contains("active")) showView("providers");
+  if (currentConfig && currentConfig.providers && currentConfig.providers[name]) renderProviderWorkspace();
+  window.scrollTo(0, 0);
+}
+function closeProviderDetail() {
+  $("#view-providers").classList.remove("show-detail");
+  window.scrollTo(0, 0);
 }
 
 function renderProviderRail() {
@@ -1058,6 +1137,7 @@ async function removeProvider(name, provider) {
     providerDetailTab = "overview";
     slotsLoaded = false;
     clientsLoaded = false;
+    closeProviderDetail();
     renderProviderWorkspace();
     toast(t("common.saved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
@@ -1077,36 +1157,36 @@ function providerTabs(name, provider) {
 function providerOverview(name, provider) {
   const state = stateFor(name);
   const live = status && status.providers && status.providers[name];
-  const connection = el("section", { class: "detail-section" }, [
-    el("h3", { text: t("providers.connection") }),
-    el("div", { class: "detail-setting-row" }, [
-      el("div", { class: "setting-copy" }, [el("strong", { text: providerConnection(name).text }), el("span", { text: providerKind(name, provider) })]),
-      providerState(name, provider),
+  const connection = section(t("providers.connection"), [
+    // The kind is already under the page title; this row is only the verdict and what to do about it.
+    cell(t("health.connection"), providerState(name, provider), [
+      state && !state.ok && state.error ? el("span", { class: "cell-sub bad-text", text: shortError(state.error), title: state.error }) : null,
+      live && live.needsLogin && provider.type === "chatgpt" ? el("div", { class: "cell-actions" }, [chatgptLoginButton(renderProviderDetail)]) : null,
     ]),
-    state && !state.ok && state.error ? el("p", { class: "bad-text small provider-detail-error", text: shortError(state.error), title: state.error }) : null,
-    live && live.needsLogin && provider.type === "chatgpt" ? chatgptLoginButton(renderProviderDetail) : null,
-  ].filter(Boolean));
-  const models = modelsOf(provider);
-  const modelSummary = el("section", { class: "detail-section" }, [
-    el("h3", { text: t("providers.selectedModels") }),
-    models.length ? el("div", { class: "model-chip-list" }, models.map((model) => el("span", { class: "model-chip", text: labelOf(model) }))) : hint(t("providers.noModels")),
   ]);
+  const models = modelsOf(provider);
   const measuring = measureStates.get(name);
-  if (measuring && measuring.state === "running") {
-    modelSummary.appendChild(el("p", { class: "small", text: t("measure.running", { done: measuring.done, total: measuring.total }) }));
-    modelSummary.appendChild(hint(t("measure.help")));
-  }
+  const running = measuring && measuring.state === "running";
+  // Names only, as one quiet line: the Models tab is where each one is listed and edited.
+  const modelSummary = section(t("providers.selectedModels"), [
+    models.length ? el("div", { class: "cell-note" }, [el("span", { class: "cell-label", text: models.map(labelOf).join(", ") })]) : el("div", { class: "cell-note", text: t("providers.noModels") }),
+    running ? el("div", { class: "cell-note", text: t("measure.running", { done: measuring.done, total: measuring.total }) }) : null,
+  ], running ? t("measure.help") : null);
   const quota = quotaLine(name);
-  return el("div", { class: "provider-panel" }, [connection, quota ? el("section", { class: "detail-section" }, [el("h3", { text: t("health.quota", { percent: "", reset: "" }).trim() }), el("p", { text: quota })]) : null, modelSummary].filter(Boolean));
+  return el("div", { class: "provider-panel" }, [
+    connection,
+    quota ? section(null, [cell(t("providers.usage"), el("span", { text: quota }))]) : null,
+    modelSummary,
+  ]);
 }
 
 function providerModelsPanel(name, provider) {
   const models = modelsOf(provider);
+  const edit = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) });
   return el("div", { class: "provider-panel" }, [
-    el("section", { class: "detail-section" }, [
-      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.selectedModels") }), hint(t("providers.modelsHelp"))]), el("button", { class: "btn secondary", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) })]),
-      models.length ? el("div", { class: "provider-model-list" }, models.map((model) => el("div", { class: "provider-model-row" }, [el("strong", { text: labelOf(model) }), el("span", { class: "small", text: model.id }), modelEffortTag(model) ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: modelEffortTag(model) }) : null].filter(Boolean)))) : hint(t("providers.noModels")),
-    ]),
+    section(t("providers.selectedModels"), models.length
+      ? models.map((model) => cell(labelOf(model), modelEffortTag(model) ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: modelEffortTag(model) }) : null, el("span", { class: "cell-sub mono", text: model.id }), "provider-model-row"))
+      : [el("div", { class: "cell-note", text: t("providers.noModels") })], t("providers.modelsHelp"), edit),
   ]);
 }
 
@@ -1163,11 +1243,13 @@ function renderClaudeAccountRows(target, data, name, generation) {
   const choosable = (data.current ? 1 : 0) + stored.length > 1;
   const firstBadge = (id) => (choosable && id === leader ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null);
   const rows = [];
-  const currentRow = data.current ? el("article", { class: "account-card current" }, [
-    el("div", { class: "account-card-copy" }, [el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp"))].filter(Boolean)),
-    el("div", { class: "account-card-badges" }, [firstBadge("current"), el("span", { class: "badge ok", text: t("providers.anthropicCurrent") })].filter(Boolean)),
-    choosable && leader !== "current" ? el("div", { class: "account-card-actions" }, [claudePreferButton(name, null, false)]) : null,
-  ].filter(Boolean)) : null;
+  const currentRow = data.current ? el("article", { class: "cell account-card current" }, [
+    el("div", { class: "cell-text account-card-copy" }, [
+      el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp")),
+      choosable && leader !== "current" ? el("div", { class: "account-card-actions" }, [claudePreferButton(name, null, false)]) : null,
+    ]),
+    el("div", { class: "account-card-badges" }, [firstBadge("current"), el("span", { class: "badge ok", text: t("providers.anthropicCurrent") })]),
+  ]) : null;
   if (currentRow && preferredIndex < 0) rows.push(currentRow);
   for (const account of stored) {
     const unavailable = account.needsReauth || account.expiresAt <= Date.now();
@@ -1191,15 +1273,18 @@ function renderClaudeAccountRows(target, data, name, generation) {
       reauth.addEventListener("click", () => openClaudeAccountConsent(name));
       actions.unshift(reauth);
     }
-    rows.push(el("article", { class: "account-card" }, [
-      el("div", { class: "account-card-copy" }, [el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp"))].filter(Boolean)),
-      el("div", { class: "account-card-badges" }, [firstBadge(account.id), el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") })].filter(Boolean)),
-      el("div", { class: "account-card-actions" }, actions),
+    rows.push(el("article", { class: "cell account-card" }, [
+      el("div", { class: "cell-text account-card-copy" }, [
+        el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp")),
+        el("div", { class: "account-card-actions" }, actions),
+      ]),
+      el("div", { class: "account-card-badges" }, [firstBadge(account.id), el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") })]),
     ]));
     if (currentRow && rows.length === 1 && preferredIndex >= 0) rows.push(currentRow);
   }
-  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.anthropicNoAccounts") })]));
-  if (choosable) target.appendChild(hint(t("providers.preferHelp")));
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.anthropicNoAccounts") })]));
+  const preferNote = $("#claude-account-prefer");
+  if (preferNote) preferNote.hidden = !choosable;
   const count = (data.current ? 1 : 0) + stored.length;
   const countNode = $("#claude-account-count");
   if (countNode) countNode.textContent = t("providers.accountCount", { count });
@@ -1217,24 +1302,32 @@ function anthropicAccountsPanel(name, provider) {
   const rotation = el("input", { type: "checkbox", checked: Boolean(provider.accountPool) });
   const rotationMessage = el("span", { class: "small" });
   rotation.addEventListener("change", () => void saveAnthropicRotation(name, provider, rotation.checked, rotation, rotationMessage));
-  const add = el("button", { class: "btn", type: "button", text: t("providers.addClaudeAccount") });
+  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addClaudeAccount") });
   add.addEventListener("click", () => openClaudeAccountConsent(name));
-  const removeAll = el("button", { class: "btn danger", type: "button", text: t("providers.anthropicLogoutAll") });
+  const removeAll = el("button", { class: "cell-button destructive", type: "button", text: t("providers.anthropicLogoutAll") });
   removeAll.addEventListener("click", async () => {
     if (!confirm(t("providers.anthropicLogoutAllConfirm"))) return;
     try { await api("/api/claude-logout", { method: "POST" }); await refreshClaudeAccountPanel(name); }
     catch (error) { toast(t("common.actionFailed"), true, error.message); }
   });
-  const rows = el("div", { id: "claude-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  rotation.setAttribute("role", "switch");
+  rotation.setAttribute("aria-label", t("providers.anthropicPool"));
+  const rows = el("div", { id: "claude-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  // The rotation switch first (it decides whether added accounts are used at all), then the
+  // accounts with "Add" at the end of their list, then the one destructive act on its own.
   const panel = el("div", { class: "provider-panel" }, [
-    el("section", { class: "detail-section account-summary" }, [
-      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.accountPoolTitle") }), el("p", { id: "claude-account-count", class: "account-count", text: t("providers.accountCount", { count: 0 }) }), hint(t("providers.accountCountHelp"))]), add]),
-      el("div", { class: "detail-setting-row rotation-row" }, [el("div", { class: "setting-copy" }, [el("strong", { text: t("providers.anthropicPool") }), el("span", { text: t("providers.accountPoolSubtitle") })]), el("label", { class: "switch" }, [rotation, el("span")])]),
-      !provider.accountPool ? el("div", { class: "notice warn" }, [el("strong", { text: t("providers.rotationOff") }), el("span", { text: t("providers.rotationRequired") })]) : null,
-      rotationMessage,
+    el("section", { class: "section" }, [
+      el("div", { class: "group" }, [cell(t("providers.anthropicPool"), el("label", { class: "switch" }, [rotation, el("span")]), [t("providers.accountPoolSubtitle"), rotationMessage])]),
+      !provider.accountPool ? el("div", { class: "group-footer notice" }, [el("strong", { text: t("providers.rotationOff") }), el("span", { text: t("providers.rotationRequired") })]) : null,
     ]),
-    el("section", { class: "detail-section" }, [rows]),
-    el("section", { class: "detail-section danger-section" }, [el("h3", { text: t("providers.dangerZone") }), hint(t("providers.anthropicLogoutAllConfirm")), removeAll]),
+    el("section", { class: "section" }, [
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.accountPoolTitle") }), el("span", { id: "claude-account-count", class: "small", text: t("providers.accountCount", { count: 0 }) })]),
+      rows,
+      el("div", { class: "group stacked-add" }, [add]),
+      el("p", { class: "group-footer", text: t("providers.accountCountHelp") }),
+      el("p", { id: "claude-account-prefer", class: "group-footer", text: t("providers.preferHelp"), hidden: "" }),
+    ]),
+    section(t("providers.dangerZone"), [removeAll], t("providers.anthropicLogoutAllConfirm")),
   ]);
   queueMicrotask(() => void refreshClaudeAccountPanel(name));
   return panel;
@@ -1318,18 +1411,18 @@ function renderChatgptAccountRows(target, data, name, generation) {
     const quota = chatgptQuotaText(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
     const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? t("providers.chatgptOwnHelp") : t("providers.chatgptCodexHelp");
-    return el("article", { class: `account-card stacked${account.active ? " current" : ""}` }, [
-      el("div", { class: "account-card-copy" }, [
+    return el("article", { class: `cell account-card${account.active ? " current" : ""}` }, [
+      el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
         quota ? el("p", { class: "small account-quota", text: quota }) : null,
         hint(help),
-      ].filter(Boolean)),
-      chatgptStateBadge(account),
-      actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
-    ].filter(Boolean));
+        actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
+      ]),
+      el("div", { class: "account-card-badges" }, [chatgptStateBadge(account)]),
+    ]);
   });
-  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.chatgptNoAccounts") })]));
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.chatgptNoAccounts") })]));
   const countNode = $("#chatgpt-account-count");
   if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
 }
@@ -1421,17 +1514,17 @@ function renderGoogleAccountRows(target, data, name, generation) {
     });
     actions.push(pause, rename, remove);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.projectId ? t("providers.googleProject", { id: account.projectId }) : null].filter(Boolean).join(" · ");
-    return el("article", { class: `account-card stacked${account.active ? " current" : ""}` }, [
-      el("div", { class: "account-card-copy" }, [
+    return el("article", { class: `cell account-card${account.active ? " current" : ""}` }, [
+      el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
         hint(account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : account.state === "needs-verification" ? t("providers.googleVerifyHelp") : t("providers.googleOwnHelp")),
-      ].filter(Boolean)),
-      chatgptStateBadge(account),
-      el("div", { class: "account-card-actions" }, actions),
-    ].filter(Boolean));
+        el("div", { class: "account-card-actions" }, actions),
+      ]),
+      el("div", { class: "account-card-badges" }, [chatgptStateBadge(account)]),
+    ]);
   });
-  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "empty-card", text: t("providers.googleNoAccounts") })]));
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.googleNoAccounts") })]));
   const countNode = $("#google-account-count");
   if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: accounts.length });
 }
@@ -1445,17 +1538,19 @@ async function refreshGoogleAccountPanel(name) {
 }
 
 function googleAccountsPanel(name) {
-  const add = el("button", { class: "btn", type: "button", text: t("providers.addGoogleAccount") });
+  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addGoogleAccount") });
   add.disabled = googleLoginBusy;
   add.addEventListener("click", () => void startGoogleLogin(() => { renderProviderDetail(); void refreshGoogleAccountPanel(name); }));
-  const rows = el("div", { id: "google-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const rows = el("div", { id: "google-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   const panel = el("div", { class: "provider-panel" }, [
-    el("section", { class: "detail-section account-summary" }, [
-      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.googleAccountsTitle") }), el("p", { id: "google-account-count", class: "account-count", text: t("providers.chatgptAccountCount", { count: 0 }) }), hint(t("providers.googleAccountsSubtitle"))]), add]),
-      googleLoginBusy ? el("p", { class: "small", text: t("providers.googleLoginWaiting") }) : null,
-      el("p", { class: "small warn-text", text: t("providers.googleWarningShort") }),
-    ].filter(Boolean)),
-    el("section", { class: "detail-section" }, [rows]),
+    el("section", { class: "section" }, [
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.googleAccountsTitle") }), el("span", { id: "google-account-count", class: "small", text: t("providers.chatgptAccountCount", { count: 0 }) })]),
+      rows,
+      el("div", { class: "group stacked-add" }, [add]),
+      googleLoginBusy ? el("p", { class: "group-footer", text: t("providers.googleLoginWaiting") }) : null,
+      el("p", { class: "group-footer", text: t("providers.googleAccountsSubtitle") }),
+      el("div", { class: "group-footer notice" }, [el("strong", { text: t("providers.googleWarningShort") })]),
+    ]),
   ]);
   queueMicrotask(() => void refreshGoogleAccountPanel(name));
   return panel;
@@ -1470,17 +1565,20 @@ async function refreshChatgptAccountPanel(name) {
 }
 
 function chatgptAccountsPanel(name) {
-  const add = el("button", { class: "btn", type: "button", text: t("providers.addChatgptAccount") });
+  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addChatgptAccount") });
   add.disabled = chatgptLoginBusy;
-  const waiting = el("p", { class: "small", text: chatgptLoginBusy ? t("providers.chatgptAddWaiting") : "" });
+  const waiting = el("p", { class: "group-footer", text: chatgptLoginBusy ? t("providers.chatgptAddWaiting") : "" });
+  waiting.hidden = !chatgptLoginBusy;
   add.addEventListener("click", () => void startChatgptLogin(() => { renderProviderDetail(); void refreshChatgptAccountPanel(name); }, true));
-  const rows = el("div", { id: "chatgpt-account-rows", class: "account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
+  const rows = el("div", { id: "chatgpt-account-rows", class: "group account-card-list" }, [el("div", { class: "small", text: t("providers.checking") })]);
   const panel = el("div", { class: "provider-panel" }, [
-    el("section", { class: "detail-section account-summary" }, [
-      el("div", { class: "section-heading" }, [el("div", {}, [el("h3", { text: t("providers.chatgptAccountsTitle") }), el("p", { id: "chatgpt-account-count", class: "account-count", text: t("providers.chatgptAccountCount", { count: 0 }) }), hint(t("providers.chatgptAccountsSubtitle"))]), add]),
+    el("section", { class: "section" }, [
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.chatgptAccountsTitle") }), el("span", { id: "chatgpt-account-count", class: "small", text: t("providers.chatgptAccountCount", { count: 0 }) })]),
+      rows,
+      el("div", { class: "group stacked-add" }, [add]),
       waiting,
+      el("p", { class: "group-footer", text: t("providers.chatgptAccountsSubtitle") }),
     ]),
-    el("section", { class: "detail-section" }, [rows]),
   ]);
   queueMicrotask(() => void refreshChatgptAccountPanel(name));
   return panel;
@@ -1498,10 +1596,12 @@ function renderProviderDetail() {
   const check = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   check.addEventListener("click", async () => { check.disabled = true; await probeProvider(name, provider); check.disabled = false; renderProviderWorkspace(); });
   const edit = el("button", { class: "btn secondary", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) });
-  const remove = el("button", { class: "btn danger", type: "button", text: t("common.remove"), onclick: () => void removeProvider(name, provider) });
+  // Removing is the one destructive act on this page, so it sits apart at the bottom, not beside Edit.
+  const remove = el("button", { class: "cell-button destructive", type: "button", text: t("providers.remove"), onclick: () => void removeProvider(name, provider) });
+  const back = el("button", { class: "provider-back", type: "button", onclick: closeProviderDetail }, [svgIcon("0 0 9 15", ["M7.5 1.5l-6 6 6 6"]), el("span", { text: t("nav.providers") })]);
   const header = el("header", { class: "provider-detail-header" }, [
     el("div", {}, [el("div", { class: "provider-title-line" }, [el("h2", { text: name }), providerState(name, provider)]), el("p", { class: "small", text: providerKind(name, provider) })]),
-    el("div", { class: "provider-detail-actions" }, [check, edit, remove]),
+    el("div", { class: "provider-detail-actions" }, [check, edit]),
   ]);
   let content;
   if (providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code") content = anthropicAccountsPanel(name, provider);
@@ -1509,7 +1609,7 @@ function renderProviderDetail() {
   else if (providerDetailTab === "accounts" && provider.type === "google" && provider.auth === "antigravity") content = googleAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
-  detail.replaceChildren(header, providerTabs(name, provider), content);
+  detail.replaceChildren(back, header, providerTabs(name, provider), content, el("div", { class: "group provider-remove" }, [remove]));
 }
 
 function renderProviderWorkspace() {
@@ -1655,35 +1755,34 @@ async function openClaudeAccountSignIn(providerName, manual) {
   } catch (error) { showError({ ok: false, error: error.message }); }
 }
 
+// The services one can connect, as grouped lists: sign-in subscriptions first, then the API-key
+// presets by the format they speak (the "paste a key" note is said once per group, not per row),
+// then the manual entry on its own.
 function openProviderChooser() {
   const grid = el("div", { class: "chooser-grid" });
-  const anthropic = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.anthropic") }), el("span", { text: t("providers.anthropicHelp") })]);
-  anthropic.addEventListener("click", () => openProviderForm({ kind: "anthropic" }));
-  grid.appendChild(anthropic);
-  const chatgpt = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.chatgpt") }), el("span", { text: t("providers.chatgptHelp") })]);
-  chatgpt.addEventListener("click", () => openProviderForm({ kind: "chatgpt" }));
-  grid.appendChild(chatgpt);
-  const google = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.google") }), el("span", { text: t("providers.googleHelp") })]);
-  google.addEventListener("click", () => openProviderForm({ kind: "google" }));
-  grid.appendChild(google);
+  function tile(title, help, options) {
+    const button = el("button", { class: "chooser-tile", type: "button" }, [el("span", { class: "cell-text" }, [el("strong", { text: title }), help ? el("span", { text: help }) : null]), chevronIcon()]);
+    button.addEventListener("click", () => openProviderForm(options));
+    return button;
+  }
+  function group(title, tiles, footer, single) {
+    if (!tiles.length) return;
+    grid.appendChild(el("section", { class: "chooser-section" }, [
+      title ? el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: title })]) : null,
+      el("div", { class: `group chooser-group chooser-tiles${single ? " single" : ""}` }, tiles),
+      footer ? el("p", { class: "group-footer", text: footer }) : null,
+    ]));
+  }
+  group(t("providers.subscriptionGroup"), [
+    tile(t("providers.anthropic"), t("providers.anthropicHelp"), { kind: "anthropic" }),
+    tile(t("providers.chatgpt"), t("providers.chatgptHelp"), { kind: "chatgpt" }),
+    tile(t("providers.google"), t("providers.googleHelp"), { kind: "google" }),
+  ], null, true);
   const native = presets.filter((preset) => (preset.kind || "anthropic-compatible") === "anthropic-compatible");
-  for (const preset of native) {
-    const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
-    tile.addEventListener("click", () => openProviderForm({ preset }));
-    grid.appendChild(tile);
-  }
+  group(t("providers.anthropicGroup"), native.map((preset) => tile(preset.name, null, { preset })), t("providers.presetHelp"));
   const openai = presets.filter((preset) => preset.kind === "openai-compatible");
-  if (openai.length) {
-    grid.appendChild(el("div", { class: "chooser-group" }, [el("strong", { text: t("providers.openaiGroup") }), el("span", { text: t("providers.openaiGroupHelp") })]));
-    for (const preset of openai) {
-      const tile = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: preset.name }), el("span", { text: t("providers.presetHelp") })]);
-      tile.addEventListener("click", () => openProviderForm({ preset }));
-      grid.appendChild(tile);
-    }
-  }
-  const custom = el("button", { class: "chooser-tile", type: "button" }, [el("strong", { text: t("providers.custom") }), el("span", { text: t("providers.customHelp") })]);
-  custom.addEventListener("click", () => openProviderForm({ kind: "custom" }));
-  grid.appendChild(custom);
+  group(t("providers.openaiGroup"), openai.map((preset) => tile(preset.name, null, { preset })), `${t("providers.presetHelp")} ${t("providers.openaiGroupHelp")}`);
+  group(null, [tile(t("providers.custom"), t("providers.customHelp"), { kind: "custom" })], null, true);
   showModal(el("div", {}, [el("h1", { id: "modal-title", text: t("providers.choose") }), hint(t("providers.chooseHelp")), grid]));
 }
 function inputRow(label, control, helpText) {
@@ -2364,14 +2463,15 @@ function requestRow(record) {
   const status = record.resent
     ? el("span", { class: "status-text resent", text: `${t("logs.status.resent")} ${record.status}`, title: t("logs.status.resentHelp") })
     : el("span", { class: `status-text ${record.ok ? "ok" : "bad"}`, text: `${record.ok ? t("logs.status.ok") : t("logs.status.error")} ${record.status}` });
+  // Column classes let a narrow window lay the same row out as a two-line list item.
   row.append(
-    el("td", { text: timeOf(record.at) }),
-    el("td", {}, [model]),
-    el("td", { text: record.effort || t("common.notAvailable") }),
-    el("td", {}, [input]),
-    el("td", { class: record.usage ? "" : "no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
-    el("td", { text: formatSeconds(record.ms) }),
-    el("td", {}, [status]),
+    el("td", { class: "c-time", text: timeOf(record.at) }),
+    el("td", { class: "c-model" }, [model]),
+    el("td", { class: "c-effort", text: record.effort || t("common.notAvailable") }),
+    el("td", { class: "c-in" }, [input]),
+    el("td", { class: record.usage ? "c-out" : "c-out no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
+    el("td", { class: "c-dur", text: formatSeconds(record.ms) }),
+    el("td", { class: "c-status" }, [status]),
   );
   return row;
 }
