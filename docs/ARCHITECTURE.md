@@ -206,6 +206,32 @@ request went, and a `Pane` holds the request log.
   `clauderipple-status` is added or removed (`clauderipple mod on|off`, the
   Clients screen switch).
 
+### 3b. Shared mod settings and judge-only models (2026-10-10)
+
+The router persists the mod's opaque settings object in `<homeDir()>/mod-settings.json`.
+`GET /api/mod-settings` returns `{settings:null, revision:0}` before the first write;
+`PUT` accepts `{settings, revision?}`, increments the revision under the account stores'
+`withFileLock` and `writeJsonAtomic` helpers (0600), and returns the current snapshot.
+A stale supplied revision returns 409 with that snapshot. The router checks only a
+JSON object, its 64 KiB UTF-8 serialized size (413), and case-insensitive key names
+containing `key`, `token` or `secret` at any depth (400); schema normalization belongs
+to the mod. This literal secret-name rule also refuses `keepWarmMinTokens` in the
+current mod schema: clients must not send that field until the contract is reconciled.
+
+`GET /api/mod-options` returns `agents` (owned manifest entries with existing agent
+files), all configured `models` (`model`, `provider`, `name`, `judgeOnly`), `providers`
+(`name`, `type`, `usable`), `zen:{configured,model}`, and `scores`. ChatGPT usability
+shares `/api/status`'s quota refresh and account states, including purchased credits;
+AA scores reuse `model-scores.ts` and retain its attribution. No provider key is exposed.
+
+`model-policy.ts:isJudgeOnlyModel` is the single judge-only rule: ids beginning with
+`jev` are not chat models (the OpenCode Zen note in `presets.ts`: `/systemone` only).
+Desktop/CLI picker injection (including aliases/routes targeting Jev), derived worker
+aliases, generated agents, AA auto-worker score candidates, OpenAI model lists and
+Codex catalogs exclude them; the next enabled agent sync removes previously
+owned Jev files, never hand-written ones. Provider configuration and mod options keep
+them available as judge candidates. Tests: `test/admin.test.ts`, `test/model-policy.test.ts`.
+
 ## 4. Provider adapters
 
 ### Artificial Analysis model scores (2026-10-10)

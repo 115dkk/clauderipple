@@ -25,7 +25,12 @@ import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderModel } from "./config.ts";
-import { homeDir, searchProviderFor, validate } from "./config.ts";
+import { adminPort, homeDir, searchProviderFor, validate } from "./config.ts";
+export { adminPort } from "./config.ts";
+import { generatedAgents } from "./agents.ts";
+import { isJudgeOnlyModel } from "./model-policy.ts";
+import { ModSettingsInputError, readModSettings, writeModSettings } from "./mod-settings.ts";
+import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
@@ -48,7 +53,7 @@ import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oa
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
 import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
-import { IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
+import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
@@ -135,6 +140,8 @@ export type AdminDeps = {
   /** The public model catalogue (models.dev) a measurement reads before asking. Supplied by the
    * router; absent in tests, which then measure everything by request as before. */
   modelCatalog?: () => Promise<unknown>;
+  /** Agent directory boundary; defaults to ~/.claude/agents, isolated in admin tests. */
+  agentDir?: string;
   /** External AA dataset fetch boundary; the same cache/TTL is used in tests and production. */
   modelScoresFetch?: typeof fetch;
   /** Test seams for the Claude subscription sign-in: the token endpoint and the browser. */
@@ -319,10 +326,6 @@ async function claudeModelList(deps: AdminDeps): Promise<(ModelEntry & { name: s
 }
 
 
-export function adminPort(cfg: Config): number {
-  return cfg.admin?.port ?? cfg.listen.port + 1;
-}
-
 function settingsPath(): string {
   return process.env.CLAUDE_SETTINGS_PATH ?? path.join(os.homedir(), ".claude", "settings.json");
 }
@@ -418,6 +421,78 @@ export function googleHealth(accounts: GoogleAccountStatus[]): { needsLogin: boo
   return inRotation.length > 0 && inRotation.every((a) => a.state === "needs-verification") ? { needsLogin: false, needsVerification: true } : { needsLogin: false };
 }
 
+type ChatgptStatus = {
+  quota: Record<string, Record<string, unknown> | null>;
+  auth: Record<string, string>;
+  signedIn: Record<string, boolean>;
+  accounts: Record<string, ChatGptAccountStatus[]>;
+  stale?: true;
+  staleReason?: Record<string, string>;
+};
+
+/** Shared by status and mod options: refresh old quota, then read per-account rotation state. */
+async function chatgptStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<ChatgptStatus> {
+  const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
+  const staleReasons: Record<string, string> = {};
+  const now = Date.now();
+  for (const [name, q] of Object.entries(chatgpt.quota)) {
+    if (!chatgpt.refresh) break;
+    const at = q && typeof q.at === "number" ? q.at : 0;
+    if (!opts.refresh && at && now - at < 10 * 60 * 1000) continue;
+    const fresh = await chatgpt.refresh(name);
+    if (fresh) chatgpt.quota[name] = fresh;
+    else staleReasons[name] = opts.refresh ? "refresh requested but lookup failed" : "lookup failed; showing last known value";
+  }
+  const signedIn: Record<string, boolean> = {};
+  for (const [name, p] of Object.entries(deps.config().providers)) {
+    if (p.type === "chatgpt") signedIn[name] = chatgptSignedIn(p.auth);
+  }
+  return {
+    quota: chatgpt.quota, auth: chatgpt.auth, signedIn, accounts: chatgpt.accounts?.() ?? {},
+    ...(Object.keys(staleReasons).length ? { stale: true, staleReason: staleReasons } : {}),
+  };
+}
+
+export type ModOptions = {
+  agents: ReturnType<typeof generatedAgents>;
+  models: { model: string; provider: string; name: string; judgeOnly: boolean }[];
+  providers: { name: string; type: Provider["type"]; usable: boolean }[];
+  zen: { configured: boolean; model: string | null };
+  scores: ReturnType<typeof buildModelScores>;
+};
+
+async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<ModOptions> {
+  const cfg = deps.config();
+  const chatgpt = await chatgptStatus(deps);
+  const google = deps.google?.().accounts() ?? {};
+  const credentials = deps.credentials?.() ?? {};
+  const providers = Object.entries(cfg.providers).map(([name, p]) => {
+    let usable = true;
+    if (p.type === "chatgpt") {
+      const accounts = chatgpt.accounts[name];
+      usable = accounts ? accounts.some(a => a.state === "ready" && !exhaustedForMs(a.quota))
+        : chatgpt.signedIn[name] === true && !exhaustedForMs(chatgpt.quota[name]);
+    } else if (p.type === "google") {
+      usable = p.auth === "antigravity" ? (google[name] ?? []).some(a => a.state === "ready")
+        : !!(p.apiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+    } else if (p.type === "anthropic") {
+      usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY) : claudeAuthStore(deps).describeSource() !== null;
+    }
+    if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready");
+    return { name, type: p.type, usable };
+  });
+  const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
+  const zen = Object.values(cfg.providers).find(p => {
+    if (!p.models?.some(m => isJudgeOnlyModel(m.id))) return false;
+    if ("preset" in p && p.preset === "opencode-zen") return true;
+    if (!("url" in p) || !p.url) return false;
+    const url = new URL(p.url);
+    return url.hostname === "opencode.ai" && /^\/zen\/v1(?:\/|$)/.test(url.pathname);
+  });
+  const model = zen?.models?.find(m => isJudgeOnlyModel(m.id))?.id ?? null;
+  return { agents: generatedAgents(cfg, deps.agentDir, undefined, deps.log), models, providers, zen: { configured: model !== null, model }, scores: buildModelScores(cfg, await scores.get()) };
+}
+
 async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
   const cfg = deps.config();
   const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null; accountCount?: number }> = {};
@@ -469,31 +544,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     }),
   );
   for (const [name, entry] of checked) providers[name] = entry;
-  const chatgpt = deps.chatgpt?.() ?? { quota: {}, auth: {} };
-  // A snapshot from response headers ages the moment GPT traffic stops: measured 2026-09-20, the
-  // status route showed 1% from 11 hours earlier while the account was at 40%. Past ten minutes,
-  // ask the backend directly. The lookup shares one in-flight promise per provider, so concurrent
-  // status polls (the GUI does one every 5s) collapse into a single request. A failed lookup keeps
-  // the last good numbers and says why, rather than blanking the read the budget decision uses.
-  const STALE_MS = 10 * 60 * 1000;
-  const staleReasons: Record<string, string> = {};
-  const refresh = deps.chatgpt?.().refresh;
-  if (refresh) {
-    const now = Date.now();
-    for (const [name, q] of Object.entries(chatgpt.quota)) {
-      const at = q && typeof q.at === "number" ? q.at : 0;
-      if (!opts.refresh && at && now - at < STALE_MS) continue;
-      const fresh = await refresh(name);
-      if (fresh) chatgpt.quota[name] = fresh;
-      else staleReasons[name] = opts.refresh ? "refresh requested but lookup failed" : "lookup failed; showing last known value";
-    }
-  }
-  const stale = Object.keys(staleReasons).length > 0;
-  const signedIn: Record<string, boolean> = {};
-  for (const [name, p] of Object.entries(cfg.providers)) {
-    if (p.type !== "chatgpt") continue;
-    signedIn[name] = chatgptSignedIn(p.auth);
-  }
+  const chatgpt = await chatgptStatus(deps, opts);
   const env = readSettingsEnv();
   const wantProxy = `http://127.0.0.1:${cfg.listen.port}`;
   const picker = deps.picker?.() ?? { enabled: false, hosts: [], last: null };
@@ -531,7 +582,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     cliVersion: cliVersion(),
     // `quota` stays one snapshot per provider (the account in use) for the readers that want one
     // number; `accounts` is the per-account view, read after the refresh above so it is as fresh.
-    chatgpt: { ...chatgpt, signedIn, accounts: chatgpt.accounts?.() ?? {}, ...(stale ? { stale: true, staleReason: staleReasons } : {}) },
+    chatgpt,
     ...(deps.claudeUsage && hasClaudeSubscription(cfg) ? { claude: { accounts: await claudeAccountUsage(deps) } } : {}),
     // Only present for providers that declare a pool; a provider with one credential has nothing
     // to report and would only add a row that never changes.
@@ -539,7 +590,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     picker,
     agentTitle: agentTitleHookEnabled(),
     statusMod: statusModEnabled(),
-    pickerModels: cfg.cli.extraModels.map((m) => m.name || m.model),
+    pickerModels: chatPickerModels(cfg).map((m) => m.name || m.model),
     uiRevision: uiRevision(),
   };
 }
@@ -679,15 +730,16 @@ export function parseImageRequest(raw: unknown): ImageRequest | string {
   return out;
 }
 
-function readBody(req: http.IncomingMessage, limit = MAX_BODY): Promise<Buffer> {
+function readBody(req: http.IncomingMessage, limit = MAX_BODY, overflowError?: Error): Promise<Buffer> {
   return new Promise((resolveP, reject) => {
     const chunks: Buffer[] = [];
     let n = 0;
     req.on("data", (c: Buffer) => {
       n += c.length;
       if (n > limit) {
-        reject(new Error("body too large"));
-        req.destroy();
+        chunks.length = 0;
+        reject(overflowError ?? new Error("body too large"));
+        if (!overflowError) req.destroy(); // mod saves must receive their 413, not a reset
         return;
       }
       chunks.push(c);
@@ -1301,7 +1353,7 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
     const injected = new Set(deps.config().cli.extraModels.map((m) => m.model));
     const seen = new Set<string>();
     const models = entries.filter((e) => {
-      if (injected.has(e.id) || seen.has(e.id)) return false;
+      if (injected.has(e.id) || seen.has(e.id) || isJudgeOnlyModel(e.id)) return false;
       seen.add(e.id);
       return true;
     });
@@ -1424,6 +1476,23 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (pathname === "/api/status" && method === "GET") {
         const refresh = new URL(url, "http://127.0.0.1").searchParams.get("refresh") === "1";
         sendJson(res, 200, await buildStatus(deps, { refresh }));
+        return;
+      }
+      if (pathname === "/api/mod-settings" && method === "GET") {
+        sendJson(res, 200, readModSettings());
+        return;
+      }
+      if (pathname === "/api/mod-settings" && method === "PUT") {
+        const bytes = await readBody(req, MAX_BODY, new ModSettingsInputError("body too large", 413));
+        let parsed: unknown;
+        try { parsed = JSON.parse(bytes.toString("utf8")); }
+        catch { throw new ModSettingsInputError("invalid JSON"); }
+        const result = writeModSettings(parsed);
+        sendJson(res, result.stale ? 409 : 200, result.current);
+        return;
+      }
+      if (pathname === "/api/mod-options" && method === "GET") {
+        sendJson(res, 200, await modOptions(deps, scores));
         return;
       }
       if (pathname === "/api/presets" && method === "GET") {
@@ -2132,6 +2201,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       sendJson(res, 404, { error: "not found" });
     } catch (e) {
+      if (e instanceof ModSettingsInputError && !res.headersSent) {
+        sendJson(res, e.status, { error: e.message });
+        return;
+      }
       deps.log.error(`admin error: ${(e as Error).stack ?? e}`);
       if (!res.headersSent) sendJson(res, 500, { error: (e as Error).message });
       else res.destroy();

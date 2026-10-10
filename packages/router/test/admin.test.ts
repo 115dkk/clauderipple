@@ -16,6 +16,8 @@ import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthro
 import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModelScores } from "../src/model-scores.ts";
+import type { ModOptions } from "../src/admin.ts";
+import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
   // port 0: let the OS pick a free ephemeral port so parallel tests never collide.
@@ -26,6 +28,8 @@ async function withAdmin(
   cfgInit: Config,
   fn: (ctx: { port: number; configFile: string; home: string; setCfg: (c: Config) => void }) => Promise<void>,
   extraDeps: {
+    agentDir?: string;
+    credentials?: NonNullable<AdminDeps["credentials"]>;
     shutdown?: () => void;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
     startCliDetached?: (args: string[], log: string) => void;
@@ -36,7 +40,7 @@ async function withAdmin(
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     modelCatalog?: () => Promise<unknown>;
     modelScoresFetch?: typeof fetch;
-    chatgpt?: () => { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; refresh?: (name: string) => Promise<Record<string, unknown> | null>; models?: (name: string) => Promise<ProviderModel[] | null> };
+    chatgpt?: NonNullable<AdminDeps["chatgpt"]>;
     google?: () => { accounts: () => Record<string, GoogleAccountStatus[]>; models?: (name: string) => Promise<ProviderModel[] | null>; clearCooldown?: (id: string) => void };
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
@@ -79,6 +83,132 @@ async function withAdmin(
 }
 
 const base = () => `http://127.0.0.1`;
+
+const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}/api/mod-settings`, {
+  method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+});
+
+test("admin mod-settings round-trips opaque settings, persists revision and increments unconditional writes", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: null, revision: 0 });
+    const settings = { effortAuto: false, rules: { general: { mode: "auto", allow: ["sol"] } }, future: [1, null, { nested: true }] };
+    const saved = await putModSettings(port, { settings, revision: 0 });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(await saved.json(), { settings, revision: 1 });
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings, revision: 1 });
+    const file = path.join(home, "mod-settings.json");
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { settings, revision: 1 });
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal((await (await putModSettings(port, { settings })).json() as ModSettingsSnapshot).revision, 2);
+    assert.deepEqual(fs.readdirSync(home).filter(name => /mod-settings.*(tmp|lock)/.test(name)), []);
+  });
+});
+
+test("admin mod-settings stale revisions return current settings; concurrent CAS has one winner", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const responses = await Promise.all([putModSettings(port, { settings: { winner: "a" }, revision: 0 }), putModSettings(port, { settings: { winner: "b" }, revision: 0 })]);
+    assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
+    const current = await (await fetch(`${base()}:${port}/api/mod-settings`)).json() as ModSettingsSnapshot;
+    for (const response of responses) assert.deepEqual(await response.json(), current);
+    const stale = await putModSettings(port, { settings: {}, revision: 0 });
+    assert.equal(stale.status, 409);
+    assert.deepEqual(await stale.json(), current);
+  });
+});
+
+test("admin mod-settings refuses nonobjects, invalid revisions and secrets at any depth without changing the store", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    for (const settings of [null, [], "text", 1, { apiKey: "hidden" }, { nested: [{ TOKEN: "hidden" }] }, { deep: { clientSecret: "hidden" } }]) {
+      const response = await putModSettings(port, { settings });
+      assert.equal(response.status, 400, JSON.stringify(settings));
+      assert.doesNotMatch(await response.text(), /hidden/);
+    }
+    for (const revision of [-1, 0.5, null, "0"]) assert.equal((await putModSettings(port, { settings: {}, revision })).status, 400);
+    const malformed = await fetch(`${base()}:${port}/api/mod-settings`, { method: "PUT", body: "{" });
+    assert.equal(malformed.status, 400);
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: null, revision: 0 });
+    // A count named for tokens is a setting the mod has, not a credential.
+    assert.equal((await putModSettings(port, { settings: { keepWarmMinTokens: 30000, rules: { general: { mode: "pin" } } } })).status, 200);
+  });
+});
+
+test("admin mod-settings enforces the UTF-8 64 KiB object limit at the exact boundary", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const limit = 64 * 1024;
+    const overhead = Buffer.byteLength(JSON.stringify({ text: "" }));
+    const settings = { text: "é".repeat(Math.floor((limit - overhead) / 2)) + "a".repeat((limit - overhead) % 2) };
+    assert.equal(Buffer.byteLength(JSON.stringify(settings)), limit);
+    assert.equal((await putModSettings(port, { settings })).status, 200);
+    assert.equal((await putModSettings(port, { settings: { text: settings.text + "a" } })).status, 413);
+    assert.equal((await putModSettings(port, { settings: { text: "a".repeat(1024 * 1024) } })).status, 413, "oversized HTTP bodies receive an error, not a connection reset");
+    assert.equal((await (await fetch(`${base()}:${port}/api/mod-settings`)).json() as ModSettingsSnapshot).revision, 1);
+  });
+});
+
+test("admin mod-settings refuses to overwrite corrupt persistence", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const file = path.join(home, "mod-settings.json");
+    fs.writeFileSync(file, "{");
+    assert.equal((await putModSettings(port, { settings: {} })).status, 500);
+    assert.equal(fs.readFileSync(file, "utf8"), "{");
+  });
+});
+
+test("admin mod-options offers owned workers, every provider model, judge candidates and attributed AA scores", async () => {
+  const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-mod-options-"));
+  const full = { rate_limits: { primary: { used_percent: 100, reset_after_seconds: 600 } } };
+  let refreshed = 0;
+  let credit = false;
+  const cfg = makeCfg({ providers: {
+    codex: { type: "chatgpt", models: [{ id: "gpt-6.1-sol", name: "Sol" }] },
+    zen: { type: "openai-compatible", preset: "opencode-zen", url: "http://127.0.0.1:9", headers: { authorization: "Bearer hidden-credential" }, models: [{ id: "jev-1.13", name: "Jev" }, { id: "deepseek-v4.1-flash" }] },
+    custom: { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "custom-chat" }] },
+    native: { type: "anthropic", auth: "api-key", apiKey: "hidden-api-key", models: [{ id: "claude-sonnet-5-5" }] },
+    google: { type: "google", auth: "antigravity", models: [{ id: "gemini-3.8-flash" }] },
+  }, routes: {}, direct: [], aliases: {} });
+  try {
+    fs.writeFileSync(path.join(agents, "gpt-6-1-sol.md"), "---\nname: gpt-6-1-sol\nmodel: gpt-6.1-sol@high\n---\n");
+    fs.writeFileSync(path.join(agents, "jev-1-13.md"), "---\nname: jev-1-13\nmodel: jev-1.13\n---\n");
+    fs.writeFileSync(path.join(agents, "hand.md"), "---\nname: hand\nmodel: custom-chat\n---\n");
+    await withAdmin(cfg, async ({ port, home, setCfg }) => {
+      fs.writeFileSync(path.join(home, "generated-agents.json"), JSON.stringify({ agents: ["gpt-6-1-sol", "jev-1-13", "missing"] }));
+      const get = async () => {
+        const response = await fetch(`${base()}:${port}/api/mod-options`);
+        assert.equal(response.status, 200);
+        const text = await response.text();
+        assert.doesNotMatch(text, /hidden-credential|hidden-api-key/);
+        return JSON.parse(text) as ModOptions;
+      };
+      const options = await get();
+      assert.deepEqual(options.agents, [{ name: "gpt-6-1-sol", model: "gpt-6.1-sol", provider: "codex" }]);
+      assert.deepEqual(options.models.find(m => m.model === "jev-1.13"), { model: "jev-1.13", provider: "zen", name: "Jev", judgeOnly: true });
+      assert.equal(options.models.length, 6);
+      assert.deepEqual(options.zen, { configured: true, model: "jev-1.13" });
+      assert.equal(options.providers.find(p => p.name === "codex")?.usable, false);
+      assert.equal(options.providers.find(p => p.name === "google")?.usable, false);
+      assert.equal(options.providers.find(p => p.name === "native")?.usable, true);
+      assert.equal(options.scores.attribution, "Data: Artificial Analysis (artificialanalysis.ai)");
+      assert.equal(options.scores.models.find(m => m.model === "gpt-6.1-sol")?.variants[0]?.intelligence, 50.24);
+      assert.equal(refreshed, 1);
+      credit = true;
+      assert.equal((await get()).providers.find(p => p.name === "codex")?.usable, true, "purchased credits keep a full account usable");
+      setCfg(makeCfg({ providers: { zen: { type: "openai-compatible", url: "https://opencode.ai/zen/v1", models: [{ id: "jev-2" }] } }, routes: {}, aliases: {}, direct: [] }));
+      assert.deepEqual((await get()).zen, { configured: true, model: "jev-2" }, "hand-entered Zen URLs need no preset");
+      setCfg(makeCfg({ providers: {}, routes: {}, aliases: {}, direct: [] }));
+      const empty = await get();
+      assert.deepEqual(empty.zen, { configured: false, model: null });
+      assert.deepEqual(empty.models, []);
+      assert.deepEqual(empty.agents, []);
+    }, {
+      agentDir: agents,
+      chatgpt: () => ({ quota: { codex: null }, auth: { codex: "ok" }, refresh: async () => { refreshed++; return { at: Date.now(), ...full }; }, accounts: () => ({ codex: [
+        { id: "ready", label: "Ready", expiresAt: Date.now() + 10000, needsReauth: false, paused: false, source: "own", state: "ready", quota: { ...full, ...(credit ? { credits: { has_credits: true } } : {}) }, active: true },
+        { id: "paused", label: "Paused", expiresAt: Date.now() + 10000, needsReauth: false, paused: true, source: "own", state: "paused", quota: null, active: false },
+      ] }) }),
+      modelScoresFetch: async () => Response.json({ source: "https://artificialanalysis.ai", attribution: "Data: Artificial Analysis (artificialanalysis.ai)", generatedAt: "2026-10-10T00:00:00Z", models: [{ slug: "gpt-6-1-sol-high", base: "gpt-6-1-sol", effort: "high", intelligence: 50.24, costPerTask: 0.3191 }] }),
+    });
+  } finally { fs.rmSync(agents, { recursive: true, force: true }); }
+});
 
 // The admin endpoint exercises the external fetch boundary and real local HTTP listener.
 test("admin model-scores lists matched and unknown configured targets with attribution, cached across GET/HEAD", async () => {
