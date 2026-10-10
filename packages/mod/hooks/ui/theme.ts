@@ -183,7 +183,37 @@ export function textWidth(text: string, size = 12, weight: 'normal' | 'bold' = '
   return Math.ceil(units * size * (weight === 'bold' ? 1.06 : 1))
 }
 
-/** Cuts text to at most `max` characters with an ellipsis. */
+// East Asian Wide and Fullwidth ranges (UAX #11), and the emoji planes terminals draw two wide.
+const WIDE = /[ᄀ-ᅟ⌚⌛〈〉⏩-⏬⏰⏳◽◾☔☕♈-♓♿⚓⚡⚪⚫⚽⚾⛄⛅⛎⛔⛪⛲⛳⛵⛺⛽✅✊✋✨❌❎❓-❕❗➕-➗➰➿⬛⬜⭐⭕⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏ꥠ-꥿가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦\u{16FE0}-\u{16FE4}\u{17000}-\u{18CFF}\u{1B000}-\u{1B2FF}\u{1F004}\u{1F0CF}\u{1F18E}\u{1F191}-\u{1F19A}\u{1F200}-\u{1F251}\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F7E0}-\u{1F7EB}\u{1F90C}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
+// Combining marks, zero-width spaces and joiners, variation selectors: no cell of their own.
+const ZERO = /[\p{Mn}\p{Me}​-‏⁠-⁤﻿︀-️]/u
+
+/** Terminal cells a code point takes: 2 for East Asian Wide/Fullwidth, 0 for combining and controls, else 1. */
+function cellWidth(char: string): number {
+  const code = char.codePointAt(0)!
+  if (code < 0x20 || (code >= 0x7f && code < 0xa0)) return 0
+  if (ZERO.test(char)) return 0
+  return WIDE.test(char) ? 2 : 1
+}
+
+/** Terminal columns `text` takes: East Asian Wide/Fullwidth count 2, combining marks 0. */
+export function displayWidth(text: string): number {
+  let width = 0
+  for (const char of text) width += cellWidth(char)
+  return width
+}
+
+/** Cuts text to at most `max` terminal columns, the ellipsis included. */
 export function clip(text: string, max: number): string {
-  return text.length <= max ? text : text.slice(0, Math.max(1, max - 1)) + '…'
+  if (displayWidth(text) <= max) return text
+  const room = Math.max(1, max - 1)
+  let out = ''
+  let used = 0
+  for (const char of text) {
+    const w = cellWidth(char)
+    if (used + w > room) break
+    out += char
+    used += w
+  }
+  return out + '…'
 }

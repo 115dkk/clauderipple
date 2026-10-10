@@ -13,6 +13,7 @@
 //   negative delay computed from a stable anchor, and markup stays byte-identical when nothing
 //   it shows changed.
 
+import { t } from '../i18n'
 import type { ElementTable, RenderNode } from 'claude-code'
 
 import type { Frame } from './view'
@@ -253,7 +254,7 @@ export function pill(el: Els, frame: Frame, o: PillOptions): RenderNode {
   return chip(el, {
     key: o.key,
     source: svgDoc(w, ht, frame.appearance, plateMarkup + body),
-    alt: o.alt ?? o.label + (o.toggle !== undefined ? (o.toggle ? ' (on)' : ' (off)') : o.lit ? ' (selected)' : ''),
+    alt: o.alt ?? o.label + (o.toggle !== undefined ? (o.toggle ? t(frame.lang, 'settings.onSuffix') : t(frame.lang, 'settings.offSuffix')) : o.lit ? t(frame.lang, 'settings.selected') : ''),
     width: w,
     height: ht,
     onPress: o.onPress,

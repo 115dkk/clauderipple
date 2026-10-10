@@ -1,6 +1,8 @@
 import type { ModelForkResult } from 'claude-code'
 import type { CacheMemo, Settings, Usage, WarmState } from '../types'
 import { weighted } from './stats'
+import { t } from './i18n.ts'
+import type { Lang } from './i18n.ts'
 
 const HOUR = 3600000
 const FIVE_MINUTES = 300000
@@ -43,10 +45,10 @@ export function shouldPing(input: {
 }
 
 /** Failed forks stop once; answered cache misses still count the real tokens they spent. */
-export function afterPing(warm: WarmState, forkResult: ModelForkResult | null, now: number): WarmState {
-  if (!forkResult?.isAnswered) return { ...warm, stopped: 'Keep warm stopped: no fork reply' }
+export function afterPing(warm: WarmState, forkResult: ModelForkResult | null, now: number, lang: Lang = 'en'): WarmState {
+  if (!forkResult?.isAnswered) return { ...warm, stopped: t(lang, 'toasts.warmNoReply') }
   const next: WarmState = { pings: warm.pings + 1, cost: warm.cost + weighted(forkResult.usage), lastPingAt: now }
-  if (forkResult.usage.cache_read_input_tokens <= 0) next.stopped = 'Keep warm stopped: cache was not read'
+  if (forkResult.usage.cache_read_input_tokens <= 0) next.stopped = t(lang, 'toasts.warmNoCache')
   return next
 }
 

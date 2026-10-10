@@ -3,9 +3,11 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
-import { normalizeSettings } from './settings'
+import { DOMAINS, normalizeSettings } from './settings'
+import { debugText, langFrom, t } from './i18n'
+import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, agentProvider, chatgptUsable, parseWorkerVerdict, readMarker, resolveTarget, spawnModel, takesOver, workerJudgeInput } from './workers'
+import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerCandidates, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
@@ -19,7 +21,7 @@ import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
 import { renderAgents } from './ui/agents'
 import { renderLog } from './ui/log'
-import { EFFORTS, TIERS, countdown, modelName, routeOf, targetLabel, targetValue } from './ui/view'
+import { EFFORTS, countdown, modelName, routeOf, targetLabel, targetValue } from './ui/view'
 import type { AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
@@ -29,6 +31,7 @@ const logOpen = atom({ plugin: 'ripple', key: 'logOpen' } as const, false)
 const onlySession = atom({ plugin: 'ripple', key: 'onlySession' } as const, false)
 const bandHidden = atom({ plugin: 'ripple', key: 'bandHidden' } as const, false)
 const settings = atom({ plugin: 'ripple', key: 'settings' } as const, null)
+const lang = atom({ plugin: 'ripple', key: 'lang' } as const, 'en')
 const pick = atom({ plugin: 'ripple', key: 'pick' } as const, null)
 const deciding = atom({ plugin: 'ripple', key: 'deciding' } as const, false)
 const decidingSince = atom({ plugin: 'ripple', key: 'decidingSince' } as const, null)
@@ -73,6 +76,8 @@ const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const agentOptions = atom({ plugin: 'ripple', key: 'agentOptions' } as const, [])
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
+const modelScores = atom({ plugin: 'ripple', key: 'modelScores' } as const, null)
+const workerUi = atom({ plugin: 'ripple', key: 'workerUi' } as const, { section: 'general', page: 0 })
 const skills = atom({ plugin: 'ripple', key: 'skills' } as const, [])
 const demo = atom({ plugin: 'ripple', key: 'demo' } as const, null)
 
@@ -103,7 +108,7 @@ function reason(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 async function report($: EngineInterface, where: string, error: unknown): Promise<void> {
-  await $.ui.log(`ClaudeRipple ${where}: ${reason(error)}`, { to: 'debug' })
+  await $.ui.log(t(await read($, lang), 'commands.debugLog', { where, reason: reason(error) }), { to: 'debug' })
 }
 async function userHome($: EngineInterface): Promise<string> {
   return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '~'
@@ -130,6 +135,26 @@ async function adminUrl($: EngineInterface): Promise<string> {
 async function currentSettings($: EngineInterface): Promise<Settings> {
   return normalizeSettings(await read($, settings))
 }
+async function resolveLanguage($: EngineInterface, s: Settings): Promise<Lang> {
+  if (s.language !== 'auto') return s.language
+  try {
+    const value = (await $.settings.read()).language
+    const host = langFrom(typeof value === 'string' ? value : undefined)
+    if (host) return host
+  } catch (error) { await report($, 'language settings', error) }
+  const locale = langFrom(await $.env.get('LANG')) ?? langFrom(await $.env.get('LC_ALL'))
+  if (locale) return locale
+  // The engine exposes no platform noun. Avoid running macOS defaults elsewhere.
+  if (await $.env.get('OS') === 'Windows_NT') return 'en'
+  try {
+    const platform = await $.process.run(['uname', '-s'], { timeoutMs: 2000 })
+    if (platform.exitCode !== 0 || platform.stdout.trim() !== 'Darwin') return 'en'
+    const apple = await $.process.run(['defaults', 'read', '-g', 'AppleLocale'], { timeoutMs: 2000 })
+    if (apple.exitCode === 0) return langFrom(apple.stdout) ?? 'en'
+    await report($, 'language locale', apple.stderr)
+  } catch (error) { await report($, 'language locale', error) }
+  return 'en'
+}
 async function registerAuto($: EngineInterface, s: Settings): Promise<void> {
   if (s.agentAuto === 'off') return
   await $.agent.register({ name: 'auto', description: 'Delegate any task here; ClaudeRipple picks the model and reasoning effort for it.', prompt: EXECUTOR, disallowedTools: ['Agent'] })
@@ -138,6 +163,8 @@ async function loadSettings($: EngineInterface): Promise<void> {
   const s = normalizeSettings(await $.store.get('settings'))
   if ((await $.store.get('setupDone')) === true) s.setupDone = true
   await update($, settings, () => s)
+  const resolved = await resolveLanguage($, s)
+  await update($, lang, () => resolved)
   const hidden = (await $.store.get('bandHidden')) === true
   await update($, bandHidden, () => hidden)
   if (!(await read($, pick))) {
@@ -155,6 +182,8 @@ async function saveSettings($: EngineInterface, s: Settings): Promise<void> {
   const normalized = normalizeSettings(s)
   await $.store.set('settings', normalized)
   await update($, settings, () => normalized)
+  const resolved = await resolveLanguage($, normalized)
+  await update($, lang, () => resolved)
   await registerAuto($, normalized)
   if (!normalized.effortAuto) await update($, heldPick, () => null)
   if (normalized.keepWarm && !previous.keepWarm) await update($, warm, value => ({ ...value, stopped: undefined }))
@@ -177,17 +206,19 @@ async function syncPanes($: EngineInterface): Promise<void> {
   if (agent !== await read($, agentsOpen)) await update($, agentsOpen, () => agent)
 }
 async function toggleLog($: EngineInterface): Promise<boolean> {
+  const language = await read($, lang)
   const open = await isLogUp($)
   if (open) await $.ui.close({ id: LOG_PANE })
-  else await $.ui.open({ id: LOG_PANE, title: 'ClaudeRipple' })
+  else await $.ui.open({ id: LOG_PANE, title: t(language, 'commands.logTitle') })
   await syncPanes($)
   if (!open) await refreshRouter($)
   return !open
 }
 async function toggleAgents($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
   const open = (await $.ui.panes()).some(p => p.id === AGENTS_PANE)
   if (open) await $.ui.close({ id: AGENTS_PANE })
-  else await $.ui.open({ id: AGENTS_PANE, title: 'ClaudeRipple Agents' })
+  else await $.ui.open({ id: AGENTS_PANE, title: t(language, 'commands.agentsTitle') })
   await syncPanes($)
 }
 async function toggleBar($: EngineInterface): Promise<boolean> {
@@ -197,6 +228,7 @@ async function toggleBar($: EngineInterface): Promise<boolean> {
   return !hidden
 }
 async function refreshRouter($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
   if (polling) return
   polling = true
   try {
@@ -206,10 +238,10 @@ async function refreshRouter($: EngineInterface): Promise<void> {
     const session = await $.session.id()
     const admin = await adminUrl($)
     const own = await $.http.fetch(`${admin}/api/requests?kind=messages&n=${open ? 60 : 1}&session=${encodeURIComponent(session)}`)
-    if (!own.ok) throw new Error(`router HTTP ${own.status}`)
+    if (!own.ok) throw new Error(t(language, 'commands.routerHttp', { status: own.status }))
     const mine = (object(JSON.parse(own.text)).requests ?? []) as StatusRequest[]
     const newest = mine[0] ?? null
-    const notice = newest && newest.session === undefined ? 'ClaudeRipple: restart the router to show routes here' : null
+    const notice = newest && newest.session === undefined ? t(language, 'band.routerRestart') : null
     if (notice !== await read($, line)) await update($, line, () => notice)
     // Do not show a route belonging to another chat from a router without session support.
     const route = notice ? null : newest
@@ -218,13 +250,13 @@ async function refreshRouter($: EngineInterface): Promise<void> {
     let shown = mine
     if (!await read($, onlySession)) {
       const all = await $.http.fetch(`${admin}/api/requests?kind=messages&n=60`)
-      if (!all.ok) throw new Error(`router HTTP ${all.status}`)
+      if (!all.ok) throw new Error(t(language, 'commands.routerHttp', { status: all.status }))
       shown = (object(JSON.parse(all.text)).requests ?? []) as StatusRequest[]
     }
     const rows = shown.map(record => ({ ...record, mine: record.session === session }))
     if (JSON.stringify(rows) !== JSON.stringify(await read($, requests))) await update($, requests, () => rows)
   } catch (error) {
-    if (await read($, line) !== 'ClaudeRipple: router not answering') await update($, line, () => 'ClaudeRipple: router not answering')
+    if (await read($, line) !== t(language, 'band.routerDown')) await update($, line, () => t(language, 'band.routerDown'))
     await report($, 'router poll', error)
   } finally { polling = false }
 }
@@ -259,18 +291,44 @@ async function choices($: EngineInterface): Promise<void> {
   const files = await workerFiles($)
   const s = await currentSettings($)
   const targets: TierTarget[] = [...files.keys()].map(agent => ({ agent }))
-  targets.push(...['sonnet', 'opus', 'haiku'].map(model => ({ agent: 'general-purpose', model })), ...TIERS.map(t => s.tiers[t]), s.fallback)
+  targets.push(...['sonnet', 'opus', 'haiku'].map(model => ({ agent: 'general-purpose', model })), ...DOMAINS.flatMap(domain => { const r = s.rules[domain]; return r.mode === 'pin' ? Object.values(r.targets) : [] }), s.fallback)
   const unique = [...new Map(targets.map(t => [targetValue(t), t])).values()]
   await update($, agentOptions, () => unique.map(t => ({ value: targetValue(t), label: targetLabel(t), available: t.agent === 'general-purpose' || files.has(t.agent) })))
-  const models = [...new Set([...files.values()].map(f => agentModel(f)!.replace(/@[^@]*$/, '')))]
-  if (!models.includes(s.judgeModel)) models.push(s.judgeModel)
-  await update($, routerModels, () => models)
+  await refreshModels($)
   const commands = await $.command.list()
   await update($, skills, () => commands.filter(c => c.source !== 'builtin' && !c.name.startsWith('ripple')).map(c => c.name))
   await jevKey($)
 }
 
-async function jevKey($: EngineInterface): Promise<string | undefined> {
+async function refreshModels($: EngineInterface): Promise<void> {
+  const response = await $.http.fetch(`${await adminUrl($)}/api/config`)
+  if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
+  await update($, routerModels, () => routerModelOptions(JSON.parse(response.text)))
+}
+async function scores($: EngineInterface): Promise<import('../types').ModelScore[]> {
+  const now = await $.clock.now()
+  const cached = await read($, modelScores)
+  if (cached && cached.until > now) return cached.models
+  try {
+    const response = await $.http.fetch(`${await adminUrl($)}/api/model-scores`)
+    if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
+    const models = scoreModels(JSON.parse(response.text))
+    await update($, modelScores, () => ({ until: now + 600000, models }))
+    return models
+  } catch (error) {
+    await report($, 'model scores', error)
+    await update($, modelScores, () => ({ until: now + 600000, models: cached?.models ?? [] }))
+    return cached?.models ?? []
+  }
+}
+async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Promise<string | undefined> {
+  const selected = jevSource ?? normalizeSettings(await read($, settingsDraft) ?? await read($, settings)).jevSource
+  if (selected === 'zen') {
+    const file = await optionalFile($, `${await rippleHome($)}/config.json`)
+    const key = file ? zenJev(JSON.parse(file)).authorization : undefined
+    await update($, jev, value => ({ ...value, source: key ? 'zen' as const : null }))
+    return key
+  }
   const env = (await $.env.get('TYPESAFE_API_KEY'))?.trim()
   if (env) {
     if ((await read($, jev)).source !== 'env') await update($, jev, value => ({ ...value, source: 'env' as const }))
@@ -283,8 +341,9 @@ async function jevKey($: EngineInterface): Promise<string | undefined> {
   return key
 }
 async function saveJevKey($: EngineInterface, input: string): Promise<void> {
+  const language = await read($, lang)
   const key = parseJevKey(input) ?? input.trim()
-  if (!key || /[\r\n]/.test(key)) throw new Error('Paste a single TypeSafe API key')
+  if (!key || /[\r\n]/.test(key)) throw new Error(t(language, 'toasts.keySingle'))
   const path = `${await userHome($)}/.config/jev/.env`
   const old = await optionalFile($, path) ?? ''
   const entry = `TYPESAFE_API_KEY=${key}`
@@ -293,15 +352,15 @@ async function saveJevKey($: EngineInterface, input: string): Promise<void> {
     : old + (old && !old.endsWith('\n') ? '\n' : '') + entry + '\n'
   await $.fs.write(path, text)
   const mode = await $.process.run(['chmod', '600', path])
-  if (mode.exitCode !== 0) throw new Error('Could not make the Jev key file private (chmod 600)')
+  if (mode.exitCode !== 0) throw new Error(t(language, 'toasts.keyPrivateFailed'))
   await update($, jev, () => ({ source: 'pasted' as const, test: { state: 'idle' as const } }))
   await update($, judgeDown, () => null)
-  await $.ui.toast('ClaudeRipple: Jev key saved privately; environment keys still take priority.')
+  await $.ui.toast(t(language, 'toasts.keySaved'))
 }
 async function down($: EngineInterface, message: string): Promise<void> {
   if (await read($, judgeDown) !== message) {
     await update($, judgeDown, () => message)
-    await $.ui.toast(`ClaudeRipple: ${message}; keeping the current effort or asking Haiku.`)
+    await $.ui.toast(t(await read($, lang), 'toasts.judgeDown', { reason: message }))
   }
 }
 
@@ -310,6 +369,7 @@ async function completeJudge($: EngineInterface, model: string, system: string, 
   return $.model.complete({ model, system, prompt, maxTokens: 160, timeoutMs: 6000, effort: 'low' })
 }
 async function judge($: EngineInterface, s: Settings, input: JudgeInput | { description: string; prompt: string }, worker: boolean, testing = false): Promise<Judged> {
+  const language = await read($, lang)
   const started = await $.clock.now()
   const system = worker ? WORKER_JUDGE_SYSTEM : EFFORT_JUDGE_SYSTEM
   const prompt = 'description' in input ? workerJudgeInput(input) : judgeContext(input)
@@ -318,19 +378,24 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
   let verdict: Verdict | WorkerVerdict | undefined
   if (s.judge === 'jev') {
     try {
-      const key = await jevKey($)
-      if (!key) throw new Error('Jev key missing')
+      const key = await jevKey($, s.jevSource)
+      if (!key) throw new Error(t(language, s.jevSource === 'zen' ? 'jev.zenMissing' : 'toasts.keyMissing'))
       const body = 'description' in input ? jevWorkerRequest(input) : jevEffortRequest(input)
+      let model = 'jev-latest'
+      if (s.jevSource === 'zen') {
+        const file = await optionalFile($, `${await rippleHome($)}/config.json`)
+        model = file ? zenJev(JSON.parse(file)).model : model
+      }
       const response = await Promise.race([
-        $.http.fetch('https://api.typesafe.ai/v1/systemone', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` }, body: JSON.stringify(body) }),
+        $.http.fetch(s.jevSource === 'zen' ? 'https://opencode.ai/zen/v1/systemone' : 'https://api.typesafe.ai/v1/systemone', { method: 'POST', headers: { 'content-type': 'application/json', authorization: s.jevSource === 'zen' ? key : `Bearer ${key}` }, body: JSON.stringify({ ...body, model }) }),
         $.clock.sleep(3000).then(() => null),
       ])
-      if (!response) throw new Error(jevFailure('timeout'))
-      if (!response.ok) throw new Error(jevFailure(response.status))
+      if (!response) throw new Error(jevFailure('timeout', language))
+      if (!response.ok) throw new Error(jevFailure(response.status, language))
       const json: unknown = JSON.parse(response.text)
       verdict = worker ? parseJevWorker(json) : parseJevEffort(json)
       await update($, stats, value => addJudge(value, 'jev', 0, jevUsage(json)))
-      if (!verdict || (verdict.sure !== undefined && verdict.sure < 0.5)) throw new Error('Jev was unsure or returned no verdict')
+      if (!verdict || (verdict.sure !== undefined && verdict.sure < 0.5)) throw new Error(t(language, 'toasts.jevUnsure'))
     } catch (error) { failure = reason(error); verdict = undefined }
   }
   if (s.judge === 'model') {
@@ -338,7 +403,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
       const answer = await completeJudge($, s.judgeModel, system, prompt)
       await update($, stats, value => addJudge(value, 'model', 0, answer.usage.input_tokens + answer.usage.output_tokens))
       verdict = answer.isAnswered ? (worker ? parseWorkerVerdict(answer.text) : parseEffortVerdict(answer.text)) : undefined
-      if (!verdict) failure = 'Router judge returned no verdict'
+      if (!verdict) failure = t(language, 'toasts.routerNoVerdict')
     } catch (error) { failure = reason(error) }
   }
   if (!verdict) {
@@ -351,7 +416,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
         await update($, stats, value => addJudge(value, 'haiku', 0, answer.usage.input_tokens + answer.usage.output_tokens))
       }
       verdict = answer.isAnswered ? (worker ? parseWorkerVerdict(answer.text) : parseEffortVerdict(answer.text)) : undefined
-      if (!verdict) failure ??= 'Haiku returned no verdict'
+      if (!verdict) failure ??= t(language, 'toasts.haikuNoVerdict')
     } catch (error) { failure ??= reason(error) }
   }
   const ms = Math.max(0, await $.clock.now() - started)
@@ -363,24 +428,28 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
   return { verdict, by, ms, ...(failure ? { error: failure } : {}) }
 }
 async function testJudge($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
   await update($, jev, value => ({ ...value, test: { state: 'testing' as const } }))
   try {
     const s = normalizeSettings(await read($, settingsDraft) ?? await read($, settings))
     const judged = await judge($, s, { messages: [], next: 'Rename a local variable in one function and verify the result.' }, false, true)
     const ok = !!judged.verdict && !judged.error
-    await update($, jev, value => ({ ...value, test: { state: ok ? 'ok' as const : 'fail' as const, message: `${judged.ms} ms · ${judged.verdict?.effort ?? 'no verdict'} · ${judged.error ?? judged.by}` } }))
+    await update($, jev, value => ({ ...value, test: { state: ok ? 'ok' as const : 'fail' as const, message: `${judged.ms} ms · ${judged.verdict?.effort ? t(language, 'band.' + judged.verdict.effort).toLowerCase() : t(language, 'toasts.noVerdict')} · ${judged.error ?? judged.by}` } }))
   } catch (error) {
     await update($, jev, value => ({ ...value, test: { state: 'fail' as const, message: reason(error) } }))
   }
 }
 
-async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings): Promise<{ input: AgentSpawnInput; pick: WorkerPick }> {
+async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings): Promise<{ input: AgentSpawnInput; pick: WorkerPick } | { deny: string }> {
+  const language = await read($, lang)
   const files = await workerFiles($)
-  const available = [...files.keys(), 'general-purpose']
+  try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
+  const candidates = workerCandidates(files, await read($, routerModels))
+  const pinnedCandidates = [...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] })
   const usable = await availability($)
   const marker = readMarker(e.prompt)
   const explicit = marker && !['auto', 'ripple'].includes(marker.name) ? marker : null
-  let verdict: WorkerVerdict = { tier: 'standard', effort: 'high', why: 'judge unavailable' }
+  let verdict: WorkerVerdict = { domain: 'general', level: 'standard', effort: 'high', why: t(language, 'toasts.judgeUnavailable') }
   let by: WorkerPick['by'] = 'default'
   let ms = 0
   let target: TierTarget | undefined
@@ -388,28 +457,29 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
     // Agent names and their file-model ids are both valid explicit routing notes.
     const name = files.has(explicit.name) ? explicit.name : [...files].find(([, f]) => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === explicit.name)?.[0]
     target = name ? { agent: name } : { agent: 'general-purpose', model: explicit.name }
-    verdict = { tier: TIERS.find(t => s.tiers[t].agent === target!.agent) ?? 'standard', effort: effortOf(explicit.level) ?? 'high', why: 'explicit worker marker' }
+    verdict = { domain: 'general', level: 'standard', effort: effortOf(explicit.level) ?? 'high', why: t(language, 'toasts.explicitMarker') }
     by = 'marker'
   } else {
     const judged = await judge($, s, { description: e.description, prompt: e.prompt }, true)
-    if (judged.verdict && 'tier' in judged.verdict) { verdict = judged.verdict; by = judged.by }
+    if (judged.verdict && 'domain' in judged.verdict) { verdict = judged.verdict; by = judged.by }
     ms = judged.ms
   }
-  const resolved = target ? { target } : resolveTarget(verdict.tier, s, available, name => agentProvider(files.get(name) ?? ''), { chatgpt: usable })
-  let selected = resolved.target
-  let fallbackReason = 'fallbackReason' in resolved ? resolved.fallbackReason : undefined
-  // An edited fallback can itself be missing/out of quota. Always finish at a dispatchable built-in.
-  if (!available.includes(selected.agent) || (agentProvider(files.get(selected.agent) ?? '') === 'chatgpt' && !usable)) {
-    fallbackReason ??= `${selected.agent} is unavailable`
-    selected = { agent: 'general-purpose', model: 'sonnet' }
-  }
+  const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model)?.provider ?? 'anthropic' } : undefined) : undefined
+  if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
+  const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable)
+    ? { target: target!, effort: verdict.effort }
+    : resolveWorker(verdict, s, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
+  const selected = resolved.target
+  if (!selected) return { deny: t(language, 'workers.none') }
+  const fallbackReason = resolved.fallbackReason
+  verdict = { ...verdict, effort: resolved.effort }
   const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
   let prompt = e.prompt
   if (marker) prompt = prompt.replace(MARKER, '').replace(/^\s*\n/, '')
-  const value: WorkerPick = { ...verdict, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
-  if (fallbackReason) await $.ui.toast(`ClaudeRipple: ${fallbackReason}; running ${targetLabel(selected)}.`)
+  const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
+  if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected) }))
   await update($, lastSpawn, () => value)
-  await update($, stats, current => addWorker(current, verdict.tier))
+  await update($, stats, current => addWorker(current, verdict.level))
   return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
 }
 
@@ -428,12 +498,13 @@ async function toggleSave($: EngineInterface): Promise<void> {
   await update($, saveUntil, () => until)
 }
 async function manualPick($: EngineInterface, effort: Effort): Promise<void> {
+  const language = await read($, lang)
   await saveSettings($, { ...await currentSettings($), effortAuto: false })
-  await installPick($, { effort, by: 'manual', why: 'your pick', at: await $.clock.now() })
+  await installPick($, { effort, by: 'manual', why: t(language, 'toasts.yourPick'), at: await $.clock.now() })
   const draft = await $.prompt.read()
   if (!draft.text.trim() || /^\/effort\s+\w+\s*$/.test(draft.text)) {
     await $.prompt.fill({ text: `/effort ${effort}`, mode: 'replace' })
-    await $.ui.toast('ClaudeRipple: press Enter so the app effort control follows your pick.')
+    await $.ui.toast(t(language, 'toasts.effortEnter'))
   }
 }
 // A draft is cloned through normalization, never aliased to saved settings.
@@ -447,6 +518,7 @@ async function startPanel($: EngineInterface, which: 'settings' | 'setup'): Prom
 async function patchDraft($: EngineInterface, change: Partial<Settings>): Promise<void> {
   const current = normalizeSettings(await read($, settingsDraft) ?? await read($, settings))
   await update($, settingsDraft, () => normalizeSettings({ ...current, ...change }))
+  if (change.jevSource) { await update($, jev, value => ({ ...value, test: { state: 'idle' as const } })); await jevKey($, change.jevSource) }
 }
 async function finishSettings($: EngineInterface, setup: boolean, skip = false): Promise<void> {
   const draft = normalizeSettings(skip ? await read($, settings) : await read($, settingsDraft))
@@ -454,7 +526,7 @@ async function finishSettings($: EngineInterface, setup: boolean, skip = false):
   if (setup) await $.store.set('setupDone', true)
   await update($, panel, () => null)
   await update($, settingsDraft, () => null)
-  await $.ui.toast('ClaudeRipple: settings saved.')
+  await $.ui.toast(t(await read($, lang), 'toasts.settingsSaved'))
 }
 async function openHandoff($: EngineInterface): Promise<void> {
   const active = await read($, handoff)
@@ -479,6 +551,7 @@ async function queueHandoff($: EngineInterface, kind?: 'quick' | 'full'): Promis
   await update($, handoffQueued, () => true)
 }
 async function copyHandoff($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
   const value = await read($, handoff)
   if (!value?.text) return
   const text = wrapForNewChat(value.text, 'continue', value.kind, !!(await currentSettings($)).handoffSkill)
@@ -487,7 +560,7 @@ async function copyHandoff($: EngineInterface): Promise<void> {
     if (!copied.isCopied) throw new Error(copied.reason)
   } catch (error) {
     await $.prompt.fill({ text, mode: 'replace' })
-    await $.ui.toast('ClaudeRipple: clipboard unavailable; the resume note is in the prompt.')
+    await $.ui.toast(t(language, 'toasts.clipboardFallback'))
     await report($, 'copy fallback', error)
   }
   await update($, handoff, () => ({ ...value, stage: 'copied' }))
@@ -524,6 +597,7 @@ async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult
   } finally { forking = false; forkUsage = null }
 }
 async function driveHandoff($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
   const value = await read($, handoff)
   if (!value || value.stage !== 'writing' || await read($, busy)) return
   if (!value.text && !await read($, handoffQueued)) return
@@ -549,11 +623,12 @@ async function driveHandoff($: EngineInterface): Promise<void> {
   } catch (error) {
     await update($, handoff, () => ({ ...value, stage: 'failed' }))
     await update($, handoffWaiting, () => false)
-    await $.ui.toast('ClaudeRipple: handoff failed; nothing was cleared.')
+    await $.ui.toast(t(language, 'toasts.handoffFailed'))
     await report($, 'handoff', error)
   }
 }
 async function runCompact($: EngineInterface, note = ''): Promise<void> {
+  const language = await read($, lang)
   await update($, panel, () => null)
   await update($, advice, () => null)
   await update($, resultCard, () => ({ stage: 'compacting' }))
@@ -561,8 +636,8 @@ async function runCompact($: EngineInterface, note = ''): Promise<void> {
     await $.command.run({ command: 'compact', args: note })
     await update($, resultCard, () => ({ stage: 'compacted' }))
   } catch (error) {
-    await update($, resultCard, () => ({ stage: 'failed' as const, detail: 'Compaction did not finish.' }))
-    await $.ui.toast('ClaudeRipple: compaction failed; the chat was kept.')
+    await update($, resultCard, () => ({ stage: 'failed' as const, detail: t(language, 'alerts.compactFailed') }))
+    await $.ui.toast(t(language, 'toasts.compactFailed'))
     await report($, 'compact command', error)
   }
 }
@@ -588,6 +663,7 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   if (until !== null && until <= await $.clock.now()) await update($, saveUntil, () => null)
 }
 async function tick($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
   if (ticking) return
   ticking = true
   try {
@@ -599,7 +675,7 @@ async function tick($: EngineInterface): Promise<void> {
     }
     const memo = await read($, cache)
     const left = memo ? memo.expiresAt - now : null
-    const boundary = left === null ? 'unknown' : left <= 0 ? 'expired' : left <= 60000 ? 'last-minute' : countdown(left)
+    const boundary = left === null ? 'unknown' : left <= 0 ? 'expired' : left <= 60000 ? 'last-minute' : countdown(left, language)
     // Text/minimal counters need minute changes; SVG countdown animates between them itself.
     if (cacheBoundary !== undefined && boundary !== cacheBoundary) await $.ui.invalidate('ui.render')
     cacheBoundary = boundary
@@ -618,12 +694,12 @@ async function tick($: EngineInterface): Promise<void> {
       try { answer = await fork($, 'Reply with just: ok') }
       catch (error) { await report($, 'warm fork', error) }
       const before = await read($, warm)
-      const after = afterPing(before, answer, await $.clock.now())
+      const after = afterPing(before, answer, await $.clock.now(), language)
       await update($, warm, () => after)
-      if (after.stopped && !before.stopped) await $.ui.toast(`ClaudeRipple: ${after.stopped}`)
+      if (after.stopped && !before.stopped) await $.ui.toast(t(language, 'toasts.warmStopped', { reason: after.stopped }))
     } else if (s.keepWarm && !await read($, busy) && decision.reason === 'keep warm time bound reached' && !(await read($, warm)).stopped) {
-      await update($, warm, value => ({ ...value, stopped: 'Keep warm stopped: time bound reached' }))
-      await $.ui.toast('ClaudeRipple: keep warm stopped at its time bound.')
+      await update($, warm, value => ({ ...value, stopped: t(language, 'toasts.warmBoundReason') }))
+      await $.ui.toast(t(language, 'toasts.warmBound'))
     }
   } catch (error) { await report($, 'session tick', error) }
   finally { ticking = false }
@@ -660,15 +736,16 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
 async function settingsView($: EngineInterface): Promise<SettingsView> {
   const s = await currentSettings($)
   const draft = normalizeSettings(await read($, settingsDraft) ?? s)
-  return { tab: await read($, settingsTab), draft, dirty: JSON.stringify(draft) !== JSON.stringify(s), agents: await read($, agentOptions), routerModels: await read($, routerModels), skills: await read($, skills), jev: await read($, jev) }
+  return { tab: await read($, settingsTab), draft, dirty: JSON.stringify(draft) !== JSON.stringify(s), agents: await read($, agentOptions), routerModels: await read($, routerModels), skills: await read($, skills), jev: await read($, jev), workerUi: await read($, workerUi) }
 }
 async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)
   const columns = 'bodyColumns' in e.props ? e.props.bodyColumns : e.viewport?.columns ?? 100
   const maxRows = 'maxRows' in e.props ? e.props.maxRows : 'scroll' in e.props ? e.props.scroll.bodyRows : 1
-  return { surface: e.surface, columns, maxRows, now: await $.clock.now(), appearance: s.appearance }
+  return { surface: e.surface, columns, maxRows, now: await $.clock.now(), appearance: s.appearance, lang: await read($, lang) }
 }
 async function alertView($: EngineInterface, now: number): Promise<AlertView | null> {
+  const language = await read($, lang)
   const s = await currentSettings($)
   const c = await read($, context)
   const m = await read($, cache)
@@ -683,9 +760,9 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     swamp: d === 'swamp' || (!await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
   if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
   if (which === 'handoff') return { kind: 'handoffChoice', handoffKind: await read($, handoffChoiceKind), after: await read($, handoffChoiceAfter) }
-  if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? 'Jev out of credits (demo)' : downReason! }
+  if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason! }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
-  if (which === 'result') return writing ? { kind: 'result', stage: ['writing', 'clearing'].includes(writing.stage) ? 'handingOff' : writing.stage === 'failed' ? 'failed' : 'handoffDone', handoffKind: writing.kind, ...(writing.stage === 'copied' ? { detail: 'The resume note was copied; this chat was kept.' } : {}) } : { kind: 'result', ...result! }
+  if (which === 'result') return writing ? { kind: 'result', stage: ['writing', 'clearing'].includes(writing.stage) ? 'handingOff' : writing.stage === 'failed' ? 'failed' : 'handoffDone', handoffKind: writing.kind, ...(writing.stage === 'copied' ? { detail: t(language, 'alerts.copied') } : {}) } : { kind: 'result', ...result! }
   if (which === 'cold') return { kind: 'cold', tokens: d === 'cold' ? 180000 : c!.tokens, idleMinutes: m ? Math.round((now - m.lastReplyAt) / 60000) : 61 }
   if (which === 'swamp') return { kind: 'swamp', percent: d === 'swamp' ? 65 : c!.percent, tokens: d === 'swamp' ? 160000 : c!.tokens }
   return null
@@ -705,13 +782,14 @@ function bandActions($: EngineInterface, surface: Frame['surface']): BandActions
 }
 function settingsActions($: EngineInterface): SettingsActions {
   return { setTab: tab => update($, settingsTab, () => tab), patch: change => patchDraft($, change),
-    setTier: async (tier, target) => { const s = normalizeSettings(await read($, settingsDraft)); await patchDraft($, { tiers: { ...s.tiers, [tier]: target } }) },
-    setFallback: target => patchDraft($, { fallback: target }), jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(`ClaudeRipple: ${reason(error)}`) } }, testJev: () => testJudge($),
+    setWorkerUi: ui => update($, workerUi, value => ({ ...value, ...ui })),
+    setRule: async (domain, rule) => { const s = normalizeSettings(await read($, settingsDraft)); await patchDraft($, { rules: { ...s.rules, [domain]: rule } }) },
+    setFallback: target => patchDraft($, { fallback: target }), jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
     save: () => finishSettings($, false), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {
   const a = settingsActions($)
-  return { patch: a.patch, setTier: a.setTier, jevKey: a.jevKey, testJev: a.testJev,
+  return { patch: a.patch, setRule: a.setRule, setWorkerUi: a.setWorkerUi, jevKey: a.jevKey, testJev: a.testJev,
     back: () => update($, setupStep, step => Math.max(1, step - 1) as 1 | 2 | 3 | 4), next: () => update($, setupStep, step => Math.min(4, step + 1) as 1 | 2 | 3 | 4), finish: () => finishSettings($, true), skip: () => finishSettings($, true, true) }
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
@@ -724,6 +802,7 @@ function toolLine(e: ToolCallInput): string {
   return `${e.tool} ${String(detail).split('\n')[0]}`.trim().slice(0, 70)
 }
 async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnStepInput> {
+  const language = await read($, lang)
   if (e.agentId) {
     const a = (await read($, agents)).find(a => a.id === e.agentId)
     return a?.pick && a.pick.target.agent === 'general-purpose' ? { ...e, effort: a.pick.effort } : e
@@ -747,15 +826,15 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
     const level = effortOf(e.effort)
     const carried = await read($, pick)
     if (!s.effortAuto && carried?.by === 'manual' && level && carried.effort !== level) {
-      await installPick($, { effort: level, by: 'manual', why: 'app effort', at: await $.clock.now() })
+      await installPick($, { effort: level, by: 'manual', why: t(language, 'toasts.appEffort'), at: await $.clock.now() })
     }
   }
   if (!changedModel && oldEffort !== null && e.effort !== undefined && oldEffort !== e.effort) {
     await update($, appEffort, () => e.effort ?? null)
     await saveSettings($, { ...s, effortAuto: false })
     const level = effortOf(e.effort)
-    if (level) await installPick($, { effort: level, by: 'manual', why: 'app effort changed', at: await $.clock.now() })
-    await $.ui.toast('ClaudeRipple: your app effort change turned Auto off.')
+    if (level) await installPick($, { effort: level, by: 'manual', why: t(language, 'toasts.appEffortChanged'), at: await $.clock.now() })
+    await $.ui.toast(t(language, 'toasts.autoOff'))
     return e
   }
   if (!changedModel && oldEffort === null && e.effort !== undefined) await update($, appEffort, () => e.effort!)
@@ -772,10 +851,11 @@ export const register: Register = on => {
     const result = await next(e)
     try {
       await loadSettings($)
+      const language = await read($, lang)
       await $.ui.status(undefined)
-      await $.command.register({ name: 'ripple', description: 'ClaudeRipple effort, workers, cache and session tools', argumentHint: 'settings|setup|auto|warm|save|handoff [full]|stats|debug|agents|log|bar|cold|swamp|hot|down', immediate: true })
-      await $.command.register({ name: 'ripple-log', description: 'Open or close the ClaudeRipple request log', immediate: true })
-      await $.command.register({ name: 'ripple-bar', description: 'Show or hide the ClaudeRipple band', immediate: true })
+      await $.command.register({ name: 'ripple', description: t(language, 'commands.description'), argumentHint: t(language, 'commands.argumentHint'), immediate: true })
+      await $.command.register({ name: 'ripple-log', description: t(language, 'commands.logDescription'), immediate: true })
+      await $.command.register({ name: 'ripple-bar', description: t(language, 'commands.barDescription'), immediate: true })
       startTimers($)
       if (!(await currentSettings($)).setupDone && !await read($, panel)) await startPanel($, 'setup')
     } catch (error) { await report($, 'session.start', error) }
@@ -841,7 +921,7 @@ export const register: Register = on => {
         const input: JudgeInput = { messages, next: e.text, attachments: e.attachments, current: { model, effort: current?.effort ?? effortOf(await read($, appEffort)) ?? 'medium' }, contextPercent: c?.percent, midTurn: !!e.turnId }
         const judged = await judge($, s, input, false)
         if (sequence === judgeSequence && (await currentSettings($)).effortAuto && judged.verdict) {
-          const final = finalEffort(judged.verdict, s, (await read($, saveUntil) ?? 0) > await $.clock.now())
+          const final = finalEffort(judged.verdict, s, (await read($, saveUntil) ?? 0) > await $.clock.now(), await read($, lang))
           const value: Pick = { ...judged.verdict, ...final, by: judged.by, at: await $.clock.now() }
           if (e.turnId && current && EFFORTS.indexOf(value.effort) < EFFORTS.indexOf(current.effort)) await update($, heldPick, () => value)
           else { await update($, heldPick, () => null); await installPick($, value) }
@@ -886,6 +966,7 @@ export const register: Register = on => {
   })
   on('turn.complete', async ($, e, next) => {
     try {
+      const language = await read($, lang)
       if (e.agentId) {
         const now = await $.clock.now()
         await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state: e.reason === 'answer' ? 'done' : 'failed', endedAt: now, now: undefined, toolSince: undefined } : a))
@@ -900,7 +981,7 @@ export const register: Register = on => {
           if (e.reason === 'answer' && e.answer.trim()) await update($, handoff, () => ({ ...value, text: e.answer }))
           else {
             await update($, handoff, () => ({ ...value, stage: 'failed' }))
-            await $.ui.toast('ClaudeRipple: handoff produced no answer; nothing was cleared.')
+            await $.ui.toast(t(language, 'toasts.handoffEmpty'))
           }
         }
       }
@@ -914,12 +995,24 @@ export const register: Register = on => {
       const s = await currentSettings($)
       if (!e.workflow && !e.isTeammate && takesOver(e, s)) {
         const routed = await requestPick($, e, s)
+        if ('deny' in routed) return routed
         input = routed.input
         chosen = routed.pick
       } else if (!e.fork && !e.workflow) {
+        const files = await workerFiles($)
+        try { await refreshModels($) } catch (error) { await report($, 'explicit worker catalogue', error) }
+        const file = files.get(e.subagentType)
+        const provider = file ? agentProvider(file) : e.model && !/^(?:sonnet|opus|haiku|claude-)/.test(e.model) ? (await read($, routerModels)).find(m => m.value === e.model?.replace(/@[^@]*$/, ''))?.provider : 'anthropic'
+        if (provider && s.providers[provider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider }) }
+        const marker = readMarker(e.prompt)
+        if (marker) {
+          const markerFile = files.get(marker.name) ?? [...files.values()].find(f => agentModel(f)?.replace(/@[^@]*$/, '') === marker.name)
+          const markerProvider = markerFile ? agentProvider(markerFile) : (await read($, routerModels)).find(m => m.value === marker.name)?.provider
+          if (markerProvider && s.providers[markerProvider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider: markerProvider }) }
+        }
         const fix = await workerFix($, e)
         if (fix) {
-          if (fix.dropped) await $.ui.toast(`ClaudeRipple: ${e.subagentType} runs on its own model, not "${fix.dropped}"`)
+          if (fix.dropped) await $.ui.toast(t(await read($, lang), 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
           input = { ...e, prompt: fix.prompt, model: fix.model }
         }
       }
@@ -948,27 +1041,29 @@ export const register: Register = on => {
   })
   on('session.compact', async ($, e, next) => {
     try {
+      const language = await read($, lang)
       if (e.agentId || (await currentSettings($)).compactWith !== 'haiku') return next(e)
-      if (e.trigger === 'precompute') return { skip: 'ClaudeRipple summarizes with Haiku when compaction is needed.' }
+      if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }
       const transcript = serializeTranscript(e.messages.length ? e.messages : await $.session.messages())
-      if (!transcript) throw new Error('Transcript is empty or over the compaction budget')
+      if (!transcript) throw new Error(t(language, 'toasts.transcriptEmpty'))
       const answer = await $.model.complete({ model: HAIKU, system: COMPACT_SYSTEM, prompt: transcript + (e.instructions ? `\n\nKeep especially:\n${e.instructions}` : ''), maxTokens: 16000, timeoutMs: 240000, effort: 'medium' })
-      if (!answer.isAnswered || answer.text.trim().length <= 200) throw new Error('Haiku returned no usable summary')
+      if (!answer.isAnswered || answer.text.trim().length <= 200) throw new Error(t(language, 'toasts.summaryEmpty'))
       await update($, cache, () => null)
       await update($, context, () => null)
       await update($, resultCard, () => ({ stage: 'compacted' }))
       return compactResult(answer.text)
     } catch (error) {
-      await $.ui.toast('ClaudeRipple: Haiku compaction failed; using the session compactor.')
+      await $.ui.toast(t(await read($, lang), 'toasts.compactFallback'))
       await report($, 'session.compact', error)
     }
     return next(e)
   })
   on('command.run', { command: 'ripple' }, async ($, e, next) => {
     try {
+      const language = await read($, lang)
       const [sub = 'settings', arg] = e.args.trim().toLowerCase().split(/\s+/)
-      if (sub === 'stats') return { text: formatStats(await read($, stats)) }
-      if (sub === 'debug') return { text: JSON.stringify({ judge: (await currentSettings($)).judge, judgeModel: (await currentSettings($)).judgeModel, pick: await read($, pick), paused: await read($, paused), cache: await read($, cache), warm: await read($, warm), lastSpawn: await read($, lastSpawn), lastRequest: await read($, lastRequest) }, null, 2) }
+      if (sub === 'stats') return { text: formatStats(await read($, stats), language) }
+      if (sub === 'debug') return { text: debugText(language, { judge: (await currentSettings($)).judge, judgeModel: (await currentSettings($)).judgeModel, pick: await read($, pick), paused: await read($, paused), cache: await read($, cache), warm: await read($, warm), lastSpawn: await read($, lastSpawn), lastRequest: await read($, lastRequest) }) }
       if (sub === 'settings' || sub === 'setup') await startPanel($, sub)
       else if (sub === 'auto') await toggleAuto($)
       else if (sub === 'warm') await toggleWarm($)
@@ -978,16 +1073,20 @@ export const register: Register = on => {
       else if (sub === 'agents') await toggleAgents($)
       else if (sub === 'bar') await toggleBar($)
       else if (['cold', 'swamp', 'hot', 'down'].includes(sub)) { await update($, panel, () => null); await update($, demo, () => sub as 'cold' | 'swamp' | 'hot' | 'down') }
-      else return { text: 'ClaudeRipple: settings, setup, auto, warm, save, handoff [full], stats, debug, agents, log, bar, cold, swamp, hot, down.' }
-      return { text: `ClaudeRipple: ${sub}.` }
+      else return { text: t(language, 'commands.help') }
+      return { text: t(language, 'commands.done', { command: sub }) }
     } catch (error) { await report($, 'ripple command', error); return next(e) }
   })
   on('command.run', { command: 'ripple-log' }, async ($, e, next) => {
-    try { return { text: await toggleLog($) ? 'ClaudeRipple log opened.' : 'ClaudeRipple log closed.' } }
+    try {
+      const language = await read($, lang)
+      return { text: await toggleLog($) ? t(language, 'commands.logOpened') : t(language, 'commands.logClosed') } }
     catch (error) { await report($, 'ripple-log', error); return next(e) }
   })
   on('command.run', { command: 'ripple-bar' }, async ($, e, next) => {
-    try { return { text: await toggleBar($) ? 'ClaudeRipple line shown above the prompt.' : 'ClaudeRipple line hidden. /ripple-bar shows it again.' } }
+    try {
+      const language = await read($, lang)
+      return { text: await toggleBar($) ? t(language, 'commands.barShown') : t(language, 'commands.barHidden') } }
     catch (error) { await report($, 'ripple-bar', error); return next(e) }
   })
   on('ui.close', { id: LOG_PANE }, async ($, e, next) => {
@@ -1000,6 +1099,7 @@ export const register: Register = on => {
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     try {
+      const language = await read($, lang)
       startTimers($)
       if (e.props.hasSurvey) return next(e)
       const which = await read($, panel)
@@ -1021,7 +1121,7 @@ export const register: Register = on => {
       if (s.layout === 'minimal') return next(e)
       const { Box, Button, Text } = el
       const actions = bandActions($, e.surface)
-      return <Box flexDirection="column"><Box flexDirection="row" justifyContent="space-between"><Text dimColor>ClaudeRipple</Text><Box flexDirection="row" columnGap={2}>{e.surface === 'terminal' || e.surface === 'mobile' ? <Button key="effort" plain hotkey="e" label="Effort" onPress={actions.toggleEffortMenu} /> : null}<Button key="hide" plain role="dismiss" label="×" onPress={() => toggleBar($)} /></Box></Box>{renderBand(el, frame, await dashboard($, e.props.isWorking), actions)}</Box>
+      return <Box flexDirection="column"><Box flexDirection="row" justifyContent="space-between"><Text dimColor>{t(language, 'commands.logTitle')}</Text><Box flexDirection="row" columnGap={2}>{e.surface === 'terminal' || e.surface === 'mobile' ? <Button key="effort" plain hotkey="e" label={t(language, 'band.effort')} onPress={actions.toggleEffortMenu} /> : null}<Button key="hide" plain role="dismiss" label="×" onPress={() => toggleBar($)} /></Box></Box>{renderBand(el, frame, await dashboard($, e.props.isWorking), actions)}</Box>
     } catch (error) { await report($, 'AbovePrompt render', error); return next(e) }
   })
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {

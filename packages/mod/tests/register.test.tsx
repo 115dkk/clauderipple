@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteInput, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { normalizeSettings } from '../hooks/settings'
+import type { Lang } from '../hooks/i18n'
 import type { Settings } from '../types'
 
 const NOW = 1000000
@@ -12,10 +13,17 @@ const FILES: Record<string, string> = {
   'gpt-6-1-sol': '---\nname: gpt-6-1-sol\ndescription: Executor via chatgpt.\nmodel: gpt-6.1-sol@medium\n---\nExecute.',
   'gpt-6-astra': '---\nname: gpt-6-astra\ndescription: Executor via chatgpt.\nmodel: gpt-6-astra@high\n---\nExecute.',
 }
+const AA = { models: [
+  { model: 'gpt-6.1-sol', provider: 'chatgpt', variants: [{ effort: 'high', intelligence: 50.24, costPerTask: 0.3191 }] },
+  { model: 'gpt-6-astra', provider: 'chatgpt', variants: [{ effort: 'medium', intelligence: 49.6, costPerTask: 1.541 }] },
+  { model: 'claude-sonnet-5-5', provider: 'anthropic', variants: [{ effort: 'high', intelligence: 46.8, costPerTask: 0.884 }] },
+  { model: 'deepseek-v4.1-flash', provider: 'deepseek', variants: [{ effort: 'max', intelligence: 39.46, costPerTask: 0.2652 }] },
+] }
+const CONFIG = { admin: { port: 9992 }, providers: { deepseek: { models: [{ id: 'deepseek-v4.1-flash' }] }, chatgpt: { models: [{ id: 'gpt-6.1-sol' }, { id: 'gpt-6-astra' }] }, anthropic: { models: [{ id: 'claude-sonnet-5-5' }] } } }
 const SPAWN: AgentSpawnInput = { tool_use_id: 'tool1', subagentType: 'ripple:auto', prompt: 'Rename one local variable and verify it.', description: 'Rename variable', parentModel: 'claude-opus-5-5', provider: { plugin: 'engine', tier: 'core' }, background: false, fork: false }
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specified change and verify it.', toolUses: [] }, { role: 'assistant', text: 'The implementation is ready.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { key?: string; envFile?: string; limits?: { kind: string; percentUsed: number; resetsAt?: string }[] } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string; language?: unknown; env?: Record<string, string>; platform?: string; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[] } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>([['settings', normalizeSettings({ setupDone: true, ...patch })]])
   const toasts: string[] = []
@@ -27,10 +35,27 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { key?: stri
   let percent = 20
   on('store.get', ($, e) => ({ value: saved.get(e.key) }))
   on('store.set', ($, e) => { saved.set(e.key, e.value); return { value: undefined } })
-  mock.env(on, { HOME: '/home/test', ...(options.key ? { TYPESAFE_API_KEY: options.key } : {}) })
+  mock.env(on, { HOME: '/home/test', LANG: 'en_US.UTF-8', ...(options.key ? { TYPESAFE_API_KEY: options.key } : {}), ...options.env })
+  let hostLanguage = options.language
+  const processes: { argv: readonly string[]; timeoutMs?: number }[] = []
+  on('settings.read', () => ({ value: { language: hostLanguage } }))
+  let resolvedLanguage: unknown
+  on('state.set', { plugin: 'ripple', key: 'lang' }, async ($, e, next) => {
+    const result = await next(e)
+    if ('value' in result && result.value?.isSet) resolvedLanguage = e.value
+    return result
+  })
+  on('process.run', ($, e) => {
+    processes.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
+    if (e.argv[0] === 'uname') return { value: { exitCode: 0, stdout: options.platform ?? 'Linux', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (e.argv[0] === 'defaults' && options.appleFail) return { value: { exitCode: 1, stdout: '', stderr: 'locale timed out', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: 0, stdout: options.appleLocale ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('fs.read', ($, e) => {
-    if (e.path.endsWith('generated-agents.json')) return { value: JSON.stringify({ agents: Object.keys(FILES) }) }
-    if (e.path.endsWith('config.json')) return { value: JSON.stringify({ admin: { port: 9992 } }) }
+    options.paths?.push(e.path)
+    if (e.path.endsWith('generated-agents.json')) return { value: JSON.stringify({ agents: [...Object.keys(FILES), 'claude-sonnet-5-5'] }) }
+    if (e.path.endsWith('/claude-sonnet-5-5.md')) return { value: '---\nname: claude-sonnet-5-5\ndescription: Execute via anthropic.\nmodel: claude-sonnet-5-5@high\n---\nExecute.' }
+    if (e.path.endsWith('config.json')) return { value: JSON.stringify(options.config ?? CONFIG) }
     if (e.path.endsWith('/.config/jev/.env')) return { value: options.envFile ?? '' }
     const name = e.path.split('/').pop()?.replace(/\.md$/, '') ?? ''
     return { value: FILES[name] ?? '' }
@@ -55,18 +80,22 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { key?: stri
   on('turn.complete', () => ({ text: '' }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
-  return { clock, saved, toasts, logs, panes, submitted, filled, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
+  return { clock, saved, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
-function http(on: On, exhausted = false) {
+function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
   on('http.fetch', ($, e) => {
     urls.push(e.url)
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : { requests: [] }
+    if (e.url === 'https://opencode.ai/zen/v1/systemone' && zen) {
+      zen(e)
+      return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
+    }
+    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
 }
-function judgeStub(on: On, text = '{"tier":"light","effort":"low","sure":0.9,"why":"small rename"}') {
+function judgeStub(on: On, text = '{"domain":"general","level":"light","effort":"low","sure":0.9,"why":"small rename"}') {
   const calls: ModelCompleteInput[] = []
   on('model.complete', ($, e) => { calls.push(e); return { value: { isAnswered: true, text, usage: USAGE } } })
   return calls
@@ -106,6 +135,87 @@ async function band($: Engine, surface: 'terminal' | 'desktop' = 'terminal', has
     viewport: { columns: 140, rows: 40 }, props: { hasSurvey, isWorking: false, bodyColumns: 130, maxRows: 20, scroll: { offset: 0, bodyRows: 20 }, view: {} } })
 }
 
+function expectLanguage(boundary: ReturnType<typeof boundaries>, language: Lang): void {
+  expect(boundary.language()).toBe(language)
+}
+
+test('explicit mod language wins over host settings and locale', async ($, on) => {
+  const b = boundaries(on, { language: 'pt' }, { language: 'Korean', env: { LANG: 'ja_JP', LC_ALL: 'es_ES' } })
+  http(on)
+  await start($)
+  expectLanguage(b, 'pt')
+  expect(b.processes).toEqual([])
+})
+
+test('auto prefers Claude Code language over LANG and LC_ALL', async ($, on) => {
+  const b = boundaries(on, {}, { language: '한국어', env: { LANG: 'ja_JP', LC_ALL: 'es_ES' } })
+  http(on)
+  await start($)
+  expectLanguage(b, 'ko')
+  expect(b.processes).toEqual([])
+})
+
+test('auto checks LANG then LC_ALL when the host setting is unsupported', async ($, on) => {
+  const b = boundaries(on, {}, { language: 12, env: { LANG: 'zh-Hans', LC_ALL: 'pt_BR' } })
+  http(on)
+  await start($)
+  expectLanguage(b, 'zh')
+  expect(b.processes).toEqual([])
+})
+
+test('auto accepts LC_ALL after an unsupported LANG', async ($, on) => {
+  const b = boundaries(on, {}, { env: { LANG: 'C.UTF-8', LC_ALL: 'es_ES' } })
+  http(on)
+  await start($)
+  expectLanguage(b, 'es')
+  expect(b.processes).toEqual([])
+})
+
+test('auto reads AppleLocale only on macOS with a two-second timeout', async ($, on) => {
+  const b = boundaries(on, {}, { env: { LANG: 'C', LC_ALL: '' }, platform: 'Darwin', appleLocale: 'ja_JP\n' })
+  http(on)
+  await start($)
+  expectLanguage(b, 'ja')
+  expect(b.processes).toEqual([{ argv: ['uname', '-s'], timeoutMs: 2000 }, { argv: ['defaults', 'read', '-g', 'AppleLocale'], timeoutMs: 2000 }])
+})
+
+test('auto defaults to English off macOS', async ($, on) => {
+  const b = boundaries(on, {}, { env: { LANG: 'C', LC_ALL: '' } })
+  http(on)
+  await start($)
+  expectLanguage(b, 'en')
+  expect(b.processes.length).toBe(1)
+})
+
+test('a failed macOS locale lookup logs the failure and falls back without preventing startup', async ($, on) => {
+  const b = boundaries(on, {}, { env: { LANG: 'C', LC_ALL: '' }, platform: 'Darwin', appleFail: true })
+  http(on)
+  await start($)
+  expectLanguage(b, 'en')
+  expect(b.logs.some(log => log.includes('locale timed out'))).toBe(true)
+  expect((await command($, 'stats')).text).toContain('Auto:')
+})
+
+test('saving language re-resolves auto from current host settings', async ($, on) => {
+  const b = boundaries(on, { language: 'pt' }, { language: 'Korean' })
+  http(on)
+  await start($)
+  await command($, 'settings')
+  let ui = await band($)
+  await ui.press({ key: 'tab-look' })
+  await ui.select({ key: 'language', value: 'auto' })
+  await ui.press({ key: 'save' })
+  expectLanguage(b, 'ko')
+  expect(b.saved.get('settings')).toMatchObject({ language: 'auto' })
+  await ui.unmount()
+  b.setLanguage('Japanese')
+  await command($, 'settings')
+  ui = await band($)
+  await ui.press({ key: 'save' })
+  expectLanguage(b, 'ja')
+  await ui.unmount()
+})
+
 test('ripple:auto is judged and rewritten to the light agent with @effort', async ($, on) => {
   const b = boundaries(on)
   const urls = http(on)
@@ -125,7 +235,7 @@ test('ripple:auto is judged and rewritten to the light agent with @effort', asyn
 test('ChatGPT exhaustion selects the configured fallback and explains it in a toast', async ($, on) => {
   const b = boundaries(on, { fallback: { agent: 'general-purpose', model: 'opus' } })
   http(on, true)
-  judgeStub(on, '{"tier":"standard","effort":"high","why":"implementation"}')
+  judgeStub(on, '{"domain":"backend","level":"standard","effort":"high","why":"implementation"}')
   const sent = spawnStub(on)
   const steps = stepStub(on)
   await start($)
@@ -171,6 +281,88 @@ test('failed worker judge uses standard/high; unavailable fallback still reaches
   const debug = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
   expect(debug.text).toContain('"effort": "high"')
   expect(debug.text).toContain('"by": "default"')
+})
+
+test('Zen Jev uses the exact config authorization and first Jev model with CLAUDERIPPLE_HOME', async ($, on) => {
+  const paths: string[] = []
+  const config = { ...CONFIG, providers: { ...CONFIG.providers, 'opencode-zen': { headers: { authorization: 'Bearer zen-config-key' }, models: [{ id: 'other' }, { id: 'jev-1.13' }, { id: 'jev-latest' }] } } }
+  boundaries(on, { judge: 'jev', jevSource: 'zen' }, { env: { CLAUDERIPPLE_HOME: '/custom/ripple' }, config, paths })
+  const sent: { url: string; body?: string; headers?: Readonly<Record<string, string>> }[] = []
+  http(on, false, config, e => sent.push({ url: e.url, body: e.init?.body, headers: e.init?.headers }))
+  const haiku = judgeStub(on)
+  await start($)
+  await submit($)
+  expect(sent.length).toBe(1)
+  expect(sent[0]?.headers?.authorization).toBe('Bearer zen-config-key')
+  expect(JSON.parse(sent[0]!.body!)).toMatchObject({ model: 'jev-1.13', questions: { effort: { type: 'choice' } } })
+  expect(haiku.length).toBe(0)
+  expect(paths).toContain('/custom/ripple/config.json')
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.press({ key: 'tab-judge' })
+  expect(await ui.find({ key: 'jev-key' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'uses your OpenCode Zen key from ClaudeRipple' })).toBeDefined()
+  await ui.press({ key: 'jev-test' })
+  expect(sent.length).toBe(2)
+  await ui.unmount()
+})
+
+test('Zen without a key explains the missing key and falls back to Haiku', async ($, on) => {
+  const b = boundaries(on, { judge: 'jev', jevSource: 'zen' })
+  const urls = http(on)
+  const haiku = judgeStub(on, '{"effort":"medium","why":"fallback"}')
+  await start($)
+  await submit($)
+  expect(haiku.length).toBe(1)
+  expect(urls.some(url => url.includes('opencode.ai'))).toBe(false)
+  expect(b.toasts.some(text => text.includes('No OpenCode Zen authorization key'))).toBe(true)
+})
+
+for (const level of ['standard', 'deep'] as const) test('AA auto ' + level + ' picks Sol high over Astra medium and caches scores', async ($, on) => {
+  boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } }).rules })
+  const urls = http(on)
+  judgeStub(on, JSON.stringify({ domain: 'backend', level, effort: 'medium', why: 'implementation' }))
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn(SPAWN)
+  await $.agent.spawn(SPAWN)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high' })
+  expect(sent[1]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high' })
+  expect(urls.filter(url => url.endsWith('/api/model-scores')).length).toBe(1)
+  const debug = await command($, 'debug')
+  expect(debug.text).toContain('50.24')
+  expect(debug.text).toContain('0.3191')
+})
+
+test('provider off refuses named workers and every-provider-off refuses automatic spawning', async ($, on) => {
+  boundaries(on, { providers: { chatgpt: false, deepseek: false, anthropic: false } })
+  http(on)
+  judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  const explicit = await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol' })
+  expect(explicit.deny).toContain('switched off')
+  const automatic = await $.agent.spawn(SPAWN)
+  expect(automatic.deny).toContain('No enabled worker')
+  expect(sent.length).toBe(0)
+})
+
+test('judge model Select includes nongenerated provider models and native Anthropic', async ($, on) => {
+  const b = boundaries(on, { judge: 'model' })
+  http(on, false, { ...CONFIG, providers: { ...CONFIG.providers, 'opencode-zen': { models: [{ id: 'jev-1.13' }] } } })
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.press({ key: 'tab-judge' })
+  await ui.select({ key: 'judge-model', value: 'jev-1.13' })
+  await ui.press({ key: 'save' })
+  expect(b.saved.get('settings')).toMatchObject({ judgeModel: 'jev-1.13' })
+  await command($, 'settings')
+  await ui.press({ key: 'tab-judge' })
+  await ui.select({ key: 'judge-model', value: 'claude-sonnet-5-5' })
+  await ui.press({ key: 'save' })
+  expect(b.saved.get('settings')).toMatchObject({ judgeModel: 'claude-sonnet-5-5' })
+  await ui.unmount()
 })
 
 test('prompt judge rewrites every Opus 5.5 main step, not subagent effort', async ($, on) => {
@@ -462,13 +654,11 @@ test('router judge falls back and Haiku retries its alias when unanswered', asyn
 })
 
 test('Jev key input preserves other env lines and chmods the file 600', async ($, on) => {
-  boundaries(on, { judge: 'jev' }, { envFile: 'OTHER=keep\nTYPESAFE_API_KEY=old\nTAIL=yes\n' })
+  const b = boundaries(on, { judge: 'jev' }, { envFile: 'OTHER=keep\nTYPESAFE_API_KEY=old\nTAIL=yes\n' })
   http(on)
   let written = ''
   let path = ''
-  let argv: readonly string[] = []
   on('fs.write', ($, e) => { written = e.text; path = e.path; return { value: undefined } })
-  on('process.run', ($, e) => { argv = e.argv; return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
   await start($)
   await command($, 'settings')
   const ui = await band($)
@@ -476,7 +666,7 @@ test('Jev key input preserves other env lines and chmods the file 600', async ($
   await ui.input({ key: 'jev-key', text: 'new-$&-$$-key' })
   expect(written).toBe('OTHER=keep\nTYPESAFE_API_KEY=new-$&-$$-key\nTAIL=yes\n')
   expect(path).toBe('/home/test/.config/jev/.env')
-  expect(argv).toEqual(['chmod', '600', path])
+  expect(b.processes.at(-1)?.argv).toEqual(['chmod', '600', path])
 })
 
 test('Jev Test displays latency/result from the selected judge', async ($, on) => {

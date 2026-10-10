@@ -3,6 +3,7 @@
 // report a compact or handoff in progress and done. One layout for all: a tinted badge, a title
 // and one line of why, then the choices — the main one filled.
 
+import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
@@ -29,7 +30,7 @@ type Card = {
   extra?: RenderNode[]
 }
 
-const JUDGE_NAME = { haiku: 'Haiku', jev: 'Jev', model: 'The router model' } as const
+const JUDGE_NAME = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'alerts.routerModel' } as const
 
 function badge(el: Els, frame: Frame, card: Card): RenderNode {
   const s = 34
@@ -60,14 +61,13 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'cold',
         tone: 'accent',
         glyph: 'snow',
-        title: 'The cache went cold',
+        title: t(frame.lang, 'alerts.coldTitle'),
         body:
-          'This ' + compactNumber(alert.tokens) + '-token chat sat ' + alert.idleMinutes + ' min, so the next prompt re-reads all of it at full price. ' +
-          'Compact it or hand off to a fresh chat first?',
+          t(frame.lang, 'alerts.coldBody', { tokens: compactNumber(alert.tokens), minutes: alert.idleMinutes }),
         choices: [
-          { key: 'compact', label: 'Compact', hotkey: 'c', onPress: () => a.compact(), primary: true },
-          { key: 'handoff', label: 'Handoff', hotkey: 'h', onPress: a.handoff },
-          { key: 'dismiss', label: 'Not now', hotkey: 'n', onPress: a.dismiss },
+          { key: 'compact', label: t(frame.lang, 'band.compact'), hotkey: 'c', onPress: () => a.compact(), primary: true },
+          { key: 'handoff', label: t(frame.lang, 'band.handoff'), hotkey: 'h', onPress: a.handoff },
+          { key: 'dismiss', label: t(frame.lang, 'alerts.notNow'), hotkey: 'n', onPress: a.dismiss },
         ],
       }
     case 'swamp':
@@ -75,27 +75,27 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'swamp',
         tone: 'warn',
         glyph: 'alert',
-        title: 'Context ' + Math.round(alert.percent) + '% full',
-        body: compactNumber(alert.tokens) + ' tokens ride along with every prompt; long chats get slower, dearer and blurrier. A compact or a fresh chat keeps answers sharp.',
+        title: t(frame.lang, 'alerts.swampTitle', { percent: Math.round(alert.percent) }),
+        body: t(frame.lang, 'alerts.swampBody', { tokens: compactNumber(alert.tokens) }),
         choices: [
-          { key: 'compact', label: 'Compact', hotkey: 'c', onPress: () => a.compact(), primary: true },
-          { key: 'handoff', label: 'Handoff', hotkey: 'h', onPress: a.handoff },
-          { key: 'dismiss', label: 'Not now', hotkey: 'n', onPress: a.dismiss },
+          { key: 'compact', label: t(frame.lang, 'band.compact'), hotkey: 'c', onPress: () => a.compact(), primary: true },
+          { key: 'handoff', label: t(frame.lang, 'band.handoff'), hotkey: 'h', onPress: a.handoff },
+          { key: 'dismiss', label: t(frame.lang, 'alerts.notNow'), hotkey: 'n', onPress: a.dismiss },
         ],
       }
     case 'hot': {
-      const resets = resetsLabel(alert.resetsAt, frame.now)
+      const resets = resetsLabel(alert.resetsAt, frame.now, frame.lang)
       return {
         key: 'hot',
         tone: alert.percent >= 95 ? 'bad' : 'warn',
         glyph: 'clock',
-        title: limitName(alert.limitKind) + ' limit at ' + Math.round(alert.percent) + '%',
+        title: t(frame.lang, 'alerts.hotTitle', { window: limitName(alert.limitKind, frame.lang), percent: Math.round(alert.percent) }),
         body:
           (resets ? resets.charAt(0).toUpperCase() + resets.slice(1) + '. ' : '') +
-          (alert.save ? 'Save mode is on: Auto stays at medium or below until the window resets.' : 'Save mode keeps Auto at medium or below until the window resets.'),
+          (alert.save ? t(frame.lang, 'alerts.saveOnBody') : t(frame.lang, 'alerts.saveBody')),
         choices: [
-          { key: 'save', label: alert.save ? 'Save mode on' : 'Save mode', hotkey: 's', onPress: a.toggleSave, primary: !alert.save, lit: alert.save },
-          { key: 'dismiss', label: 'Not now', hotkey: 'n', onPress: a.dismiss },
+          { key: 'save', label: alert.save ? t(frame.lang, 'alerts.saveOn') : t(frame.lang, 'alerts.save'), hotkey: 's', onPress: a.toggleSave, primary: !alert.save, lit: alert.save },
+          { key: 'dismiss', label: t(frame.lang, 'alerts.notNow'), hotkey: 'n', onPress: a.dismiss },
         ],
       }
     }
@@ -104,25 +104,25 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'judge',
         tone: 'bad',
         glyph: 'alert',
-        title: 'The effort judge is not answering',
-        body: JUDGE_NAME[alert.judge] + ': ' + alert.reason + '. ' + (alert.judge === 'haiku' ? 'Auto keeps the current effort meanwhile.' : 'Auto asks Haiku meanwhile.'),
+        title: t(frame.lang, 'alerts.judgeTitle'),
+        body: t(frame.lang, 'alerts.judgeBody', { judge: t(frame.lang, JUDGE_NAME[alert.judge]), reason: alert.reason, fallback: t(frame.lang, alert.judge === 'haiku' ? 'alerts.keepEffort' : 'alerts.askHaiku') }),
         choices: [
-          { key: 'settings', label: 'Open settings', hotkey: 'o', onPress: a.openSettings, primary: true },
-          { key: 'dismiss', label: 'Not now', hotkey: 'n', onPress: a.dismiss },
+          { key: 'settings', label: t(frame.lang, 'alerts.openSettings'), hotkey: 'o', onPress: a.openSettings, primary: true },
+          { key: 'dismiss', label: t(frame.lang, 'alerts.notNow'), hotkey: 'n', onPress: a.dismiss },
         ],
       }
     case 'result':
-      return resultCard(alert, a)
+      return resultCard(frame, alert, a)
     case 'compactNote':
       return {
         key: 'note',
         tone: 'accent',
         glyph: 'compact',
-        title: 'Compact this chat',
-        body: 'Say what the summary must keep, or leave it to the summary.',
+        title: t(frame.lang, 'alerts.compactTitle'),
+        body: t(frame.lang, 'alerts.compactBody'),
         choices: [
-          { key: 'compact', label: 'Compact', hotkey: 'c', onPress: () => a.compact(alert.draft), primary: true },
-          { key: 'dismiss', label: 'Cancel', hotkey: 'x', onPress: a.dismiss },
+          { key: 'compact', label: t(frame.lang, 'band.compact'), hotkey: 'c', onPress: () => a.compact(alert.draft), primary: true },
+          { key: 'dismiss', label: t(frame.lang, 'alerts.cancel'), hotkey: 'x', onPress: a.dismiss },
         ],
       }
     case 'handoffChoice':
@@ -130,29 +130,29 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'handoff',
         tone: 'accent',
         glyph: 'handoff',
-        title: 'Hand off to a fresh chat',
+        title: t(frame.lang, 'alerts.handoffTitle'),
         body:
           alert.handoffKind === 'quick'
-            ? 'Quick: a summary of this chat, written from its cache, that the new chat resumes from.'
-            : 'Full: the handoff skill (or a turn) checks git and writes HANDOFF.md before the switch.',
+            ? t(frame.lang, 'alerts.quickBody')
+            : t(frame.lang, 'alerts.fullBody'),
         choices: [
-          { key: 'go', label: 'Go', hotkey: 'g', onPress: a.go, primary: true },
-          { key: 'dismiss', label: 'Cancel', hotkey: 'x', onPress: a.dismiss },
+          { key: 'go', label: t(frame.lang, 'alerts.go'), hotkey: 'g', onPress: a.go, primary: true },
+          { key: 'dismiss', label: t(frame.lang, 'alerts.cancel'), hotkey: 'x', onPress: a.dismiss },
         ],
       }
   }
 }
 
-function resultCard(alert: Extract<AlertView, { kind: 'result' }>, a: AlertActions): Card {
-  const dismiss: Choice = { key: 'dismiss', label: 'Dismiss', hotkey: 'x', onPress: a.dismiss }
+function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>, a: AlertActions): Card {
+  const dismiss: Choice = { key: 'dismiss', label: t(frame.lang, 'alerts.dismiss'), hotkey: 'x', onPress: a.dismiss }
   switch (alert.stage) {
     case 'handingOff':
       return {
         key: 'result',
         tone: 'accent',
         glyph: 'wave',
-        title: 'Handing off…',
-        body: alert.detail ?? (alert.handoffKind === 'full' ? 'Running the handoff: checking git and writing HANDOFF.md.' : 'Writing a summary a fresh chat can resume from.'),
+        title: t(frame.lang, 'alerts.handingOff'),
+        body: alert.detail ?? (alert.handoffKind === 'full' ? t(frame.lang, 'alerts.fullProgress') : t(frame.lang, 'alerts.quickProgress')),
         choices: [],
       }
     case 'handoffDone':
@@ -160,16 +160,16 @@ function resultCard(alert: Extract<AlertView, { kind: 'result' }>, a: AlertActio
         key: 'result',
         tone: 'ok',
         glyph: 'check',
-        title: 'Handoff done',
-        body: alert.detail ?? 'The summary is ready.',
-        choices: [{ key: 'copy', label: 'Copy again', hotkey: 'y', onPress: a.copy }, dismiss],
+        title: t(frame.lang, 'alerts.handoffDone'),
+        body: alert.detail ?? t(frame.lang, 'alerts.summaryReady'),
+        choices: [{ key: 'copy', label: t(frame.lang, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }, dismiss],
       }
     case 'compacting':
-      return { key: 'result', tone: 'accent', glyph: 'wave', title: 'Compacting…', body: alert.detail ?? 'Summarizing the chat; it continues from the summary.', choices: [] }
+      return { key: 'result', tone: 'accent', glyph: 'wave', title: t(frame.lang, 'alerts.compacting'), body: alert.detail ?? t(frame.lang, 'alerts.compactingBody'), choices: [] }
     case 'compacted':
-      return { key: 'result', tone: 'ok', glyph: 'check', title: 'Compacted', body: alert.detail ?? 'The chat continues from the summary.', choices: [dismiss] }
+      return { key: 'result', tone: 'ok', glyph: 'check', title: t(frame.lang, 'alerts.compacted'), body: alert.detail ?? t(frame.lang, 'alerts.compactedBody'), choices: [dismiss] }
     case 'failed':
-      return { key: 'result', tone: 'bad', glyph: 'cross', title: 'That did not finish', body: alert.detail ?? 'Nothing was changed.', choices: [dismiss] }
+      return { key: 'result', tone: 'bad', glyph: 'cross', title: t(frame.lang, 'alerts.failed'), body: alert.detail ?? t(frame.lang, 'alerts.unchanged'), choices: [dismiss] }
   }
 }
 
@@ -180,10 +180,10 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
     return [
       <Field
         key="note"
-        label="Keep"
-        placeholder="decisions, open questions, file names… (optional)"
+        label={t(frame.lang, 'alerts.keep')}
+        placeholder={t(frame.lang, 'alerts.keepPlaceholder')}
         value={alert.draft}
-        submitLabel="compact"
+        submitLabel={t(frame.lang, 'alerts.compactSubmit')}
         autoFocus
         onInput={(text: string) => a.noteInput(text)}
         onSubmit={(text: string) => a.compact(text)}
@@ -192,21 +192,21 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
   }
   if (alert.kind === 'handoffChoice') {
     const kinds: { value: HandoffKind; label: string; hotkey: string }[] = [
-      { value: 'quick', label: 'Quick', hotkey: 'q' },
-      { value: 'full', label: 'Full', hotkey: 'f' },
+      { value: 'quick', label: t(frame.lang, 'alerts.quick'), hotkey: 'q' },
+      { value: 'full', label: t(frame.lang, 'alerts.full'), hotkey: 'f' },
     ]
     const afters: { value: Settings['handoffAfter']; label: string; hotkey: string }[] = [
-      { value: 'continue', label: 'Continue', hotkey: '1' },
-      { value: 'confirm', label: 'Confirm first', hotkey: '2' },
-      { value: 'copy', label: 'Copy only', hotkey: '3' },
+      { value: 'continue', label: t(frame.lang, 'alerts.continue'), hotkey: '1' },
+      { value: 'confirm', label: t(frame.lang, 'alerts.confirm'), hotkey: '2' },
+      { value: 'copy', label: t(frame.lang, 'alerts.copy'), hotkey: '3' },
     ]
     return [
       <Box key="kind" flexDirection="row" columnGap={2} alignItems="center">
-        <Text dimColor>{'Kind '}</Text>
+        <Text dimColor>{t(frame.lang, 'alerts.kind')}</Text>
         {segmented(el, frame, 'kind', kinds, alert.handoffKind, k => a.setHandoffKind(k))}
       </Box>,
       <Box key="after" flexDirection="row" columnGap={2} alignItems="center">
-        <Text dimColor>{'Then '}</Text>
+        <Text dimColor>{t(frame.lang, 'alerts.then')}</Text>
         {segmented(el, frame, 'after', afters, alert.after, k => a.setHandoffAfter(k))}
       </Box>,
     ]

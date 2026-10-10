@@ -1,5 +1,8 @@
 // The mod's shared shapes. The design and the reasons are in docs/specs/2026-10-10-ripple-mod.md.
 
+// Engine contracts must be self-contained; i18n re-exports this language type.
+export type Lang = 'ko' | 'en' | 'zh' | 'ja' | 'es' | 'pt'
+
 export type StatusLine = string | null
 
 export type StatusRequest = {
@@ -47,8 +50,21 @@ export type JudgeInput = {
 /** Who judges: Haiku on the person's Claude login, TypeSafe's Jev, or a model through the router. */
 export type JudgeKind = 'haiku' | 'jev' | 'model'
 
-/** The kinds of delegated work the worker judge tells apart; settings map each to an agent. */
-export type Tier = 'light' | 'standard' | 'deep' | 'design'
+/** Domain is the kind of work; level is its required capability, independently. */
+export type Domain = 'design' | 'frontend' | 'backend' | 'infra' | 'data' | 'test' | 'docs' | 'research' | 'general'
+export type Level = 'light' | 'standard' | 'deep'
+/** Historical stats include design counts from before the two-axis migration. */
+export type Tier = Level | 'design'
+export type Calibration = { effortOffset?: -2 | -1 | 0 | 1 | 2; floor?: Effort; ceiling?: Effort }
+export type Rule = ({ mode: 'pin'; targets: Partial<Record<Level, TierTarget>> } & Calibration)
+  | ({ mode: 'auto'; allow: string[] } & Calibration) | { mode: 'inherit' }
+export type RouterModel = { value: string; label: string; provider: string }
+export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
+export type AaScore = { intelligence: number; costPerTask: number }
+export type ModelScore = { model: string; provider: string; variants: { effort: Effort | null; intelligence: number | null; costPerTask: number | null }[] }
+export type ScoreCache = { until: number; models: ModelScore[] }
+export type WorkerSection = 'providers' | 'preference' | Domain
+export type WorkerUi = { section: WorkerSection; page: number }
 
 /** An agent to spawn: a dispatchable `subagentType`, and a model only for Claude's own agents. */
 export type TierTarget = { agent: string; model?: string }
@@ -63,7 +79,12 @@ export type Settings = {
   ceiling: Effort
   /** off: never; auto: spawns of ripple:auto; all: also general-purpose spawns with no model. */
   agentAuto: 'off' | 'auto' | 'all'
-  tiers: Record<Tier, TierTarget>
+  jevSource: 'typesafe' | 'zen'
+  rules: Record<Domain, Rule>
+  providers: Record<string, boolean>
+  preference: string[]
+  autoFloors: Record<Level, number>
+  autoTieBand: number
   /** What runs when a tier's agent is unavailable (its provider out of quota or signed out). */
   fallback: TierTarget
   keepWarm: boolean
@@ -77,6 +98,7 @@ export type Settings = {
   swampAt: number
   layout: 'dashboard' | 'minimal'
   appearance: 'auto' | 'dark' | 'light'
+  language: 'auto' | Lang
   /** Band parts switched off: 'timer' | 'reason' | 'route' | 'limits'. */
   hide: string[]
   setupDone: boolean
@@ -89,7 +111,7 @@ export type Verdict = { effort: Effort; sure?: number; why: string }
 export type Pick = Verdict & { by: JudgeKind | 'manual' | 'followup'; at: number }
 
 /** A judge's answer for a delegated task. */
-export type WorkerVerdict = { tier: Tier; effort: Effort; sure?: number; why: string }
+export type WorkerVerdict = { domain: Domain; level: Level; effort: Effort; sure?: number; why: string }
 
 /** What a spawn of ripple:auto (or a taken-over spawn) was turned into. */
 export type WorkerPick = WorkerVerdict & {
@@ -98,6 +120,8 @@ export type WorkerPick = WorkerVerdict & {
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string
+  aa?: AaScore
+  runnerUp?: AaScore & { target: TierTarget; effort: Effort }
 }
 
 export type AgentState = 'running' | 'waiting' | 'done' | 'failed'
@@ -159,7 +183,7 @@ export type SetupStep = 1 | 2 | 3 | 4
 export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 export type AgentOption = { value: string; label: string; available: boolean }
 export type JevState = {
-  source: 'env' | 'file' | 'pasted' | null
+  source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
 }
 
@@ -173,6 +197,7 @@ declare module 'claude-code' {
       onlySession: boolean
       bandHidden: boolean
       settings: Settings | null
+      lang: Lang
       pick: Pick | null
       deciding: boolean
       paused: boolean
@@ -214,7 +239,9 @@ declare module 'claude-code' {
       agentsShowDone: boolean
       jev: JevState
       agentOptions: AgentOption[]
-      routerModels: string[]
+      routerModels: RouterModel[]
+      modelScores: ScoreCache | null
+      workerUi: WorkerUi
       skills: string[]
       judgeDownHidden: string | null
       limit: Hot | null

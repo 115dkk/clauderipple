@@ -27,7 +27,6 @@ prose when they disagree.
 - Plugin name becomes `ripple` (agent type `ripple:auto`, command `/ripple`). `packages/cli/src/settings.ts`
   recognises both `ripple` and the old `clauderipple-status` when it adds or removes the plugin dir.
 - `/ripple-log` and `/ripple-bar` stay as aliases.
-- The "not affiliated with Anthropic" notice appears in the settings panel footer.
 
 ## Engine rules every file must follow
 
@@ -74,42 +73,73 @@ prose when they disagree.
   `general-purpose` without an explicit `model`): judge the task, then rewrite `subagentType` and
   `model`. Explicit choices are respected: a named worker or an explicit `[[ripple: x@y]]` marker
   skips the judge (the existing `worker.ts` fixes still apply).
-- **Tiers, not names.** The judge picks a tier and an effort; settings map tiers to agents:
-  - `light` — chores, repetitive, simple lookups → default `deepseek-v4-1-flash`
-  - `standard` — designed implementation, research, review → default `gpt-6-1-sol`
-  - `deep` — careful, high-stakes, hard reasoning → default `gpt-6-astra`
-  - `design` — UI, visual, brand → default Claude `sonnet` (`general-purpose` + `model: sonnet`)
-  Defaults are only used when that agent exists (generated-agents.json); otherwise the tier falls
-  back to the next tier up that exists, finally `general-purpose` + `sonnet`.
-- **Availability:** before choosing, read the router's `/api/status`. A ChatGPT-backed worker
-  (agent file description `… via chatgpt`) is unavailable when no ChatGPT account is `ready` with
-  every rate-limit window under 100 %; then the tier's `fallback` (default `general-purpose` +
-  `sonnet`) runs and the spawn's toast says why.
-- **Effort:** router workers get `@<effort>` on the model id (the router's own suffix); Claude
-  agents get it through `turn.step` for that `agentId` (spawn result carries it).
-- Judge input: description, prompt (first 3,000 chars), tier criteria. Same judges as §1 (Jev with
-  a `tier` question instead of `model`). Output `{tier, effort, sure, why}`. Judge failure →
-  `standard` at `high`.
-- The pick (tier, agent, effort, why, judge, ms) is recorded for the Agents pane and stats.
+- **Two independent axes:** the judge returns `{domain, level, effort, sure, why}`. Domain is
+  `design | frontend | backend | infra | data | test | docs | research | general`; level is
+  `light | standard | deep`. Design means visual taste, not every frontend implementation.
+  Jev asks separate `domain`, `level` and `effort` choice questions. Failure defaults to
+  `general / standard / high`. Judge input remains description + first 3,000 prompt characters.
+- **Rules, not a mixed tier table:** `rules: Record<Domain, Rule>`; Rule is a Pin with
+  `targets: Partial<Record<Level, TierTarget>>`, an Auto with `allow: string[]` (provider names,
+  empty = all enabled), or `{mode:'inherit'}` (use general). General itself cannot inherit;
+  invalid general-inherit normalizes to the default Pin. Pin/Auto may carry effort calibration
+  (`effortOffset: -2..2`, `floor`, `ceiling`). `TierTarget` remains `{agent, model?}`.
+- Defaults: general Pin light → `deepseek-v4-1-flash`, standard → `gpt-6-1-sol`, deep →
+  `gpt-6-astra`; design Pin light/standard → `general-purpose + sonnet`, deep →
+  `general-purpose + opus`; every other domain inherits general. Old stored `tiers` migrate into
+  general's targets and old `tiers.design` into all three design levels; explicit new rules win.
+- **Availability:** sample generated agent files and `/api/status` at spawn. Known ChatGPT
+  accounts must be ready and below 100% in every quota window; unknown availability is not
+  exhaustion. `providers: Record<string,boolean>` defaults to `{}` (unspecified = on). Off is
+  absolute for automatic picks, Pins, configured/built-in fallbacks and explicit named/marker
+  selections; an explicit disabled choice or no enabled target refuses the spawn with a reason.
+- **Effort:** Pins apply offset steps then floor/ceiling (floor wins an inverted ceiling).
+  Router workers get `@effort` on the file's exact model id; built-in Claude agents get their
+  effort through `turn.step` for that agent id. Explicit enabled markers bypass classification.
+- **Jev sources:** `jevSource:'typesafe'|'zen'` (default TypeSafe). Zen POSTs the identical choice
+  body to `https://opencode.ai/zen/v1/systemone`, with `model` the first id containing `jev` in
+  `providers['opencode-zen'].models`, else `jev-latest`. Read the authorization header verbatim
+  with `$.fs.read` from `<CLAUDERIPPLE_HOME or ~/.clauderipple>/config.json`; never retain it in an
+  atom or fetch it from the admin API. Both sources time out at 3s and fall back to Haiku on
+  failure or confidence < .5. Zen has no key input; missing-key text and Test use the same path.
+- **Judge model list:** GET `<admin>/api/config`, every provider's declared `models[].id`, native
+  Anthropic included, displayed as `model · provider`; it is not limited to generated workers.
+- WorkerPick records domain, level, target, actual effort, why, judge, latency and fallback reason;
+  Auto additionally records selected `aa:{intelligence,costPerTask}` and `runnerUp` target/effort/
+  intelligence/cost. Stats count by level; old design counts remain readable.
 
-### 2a. Two worker modes (decided 2026-10-10, after the tier design above)
+### 2a. Resolution and controls (implemented 2026-10-10)
 
-- **Manual (`workerMode: 'tiers'`)** — the tier table above, plus:
-  - per-provider on/off: a switched-off provider's workers are never picked, by any path;
-  - a preference order of providers/models: within a tier the first usable one runs, and quota
-    exhaustion moves down the order;
-  - per-tier effort calibration: an offset (−2..+2 steps on the judge's effort) and floor/ceiling,
-    since one effort word means different work on different models.
-- **Auto (`workerMode: 'auto'`)** — data picks the model and effort:
-  - the judge answers only the intelligence the task needs (a level mapped to an Artificial
-    Analysis Intelligence Index floor, e.g. chores ≥ 30, designed implementation ≥ 45, hard ≥ 50,
-    hardest ≥ 53);
-  - candidates are every (enabled worker × effort) that AA measured; pick the cheapest by AA's
-    **cost per task in USD** (it folds input, cache and output prices — money, not tokens, is the
-    measure) among those at or above the floor; the preference order breaks near-ties (within a
-    few index points);
-  - providers out of quota or switched off drop out; design work keeps its manual target (AA
-    does not measure taste).
+- There is no global `workerMode`: choose Pin/Auto/Same as general independently per domain.
+  Design defaults to Pin because AA does not measure taste, but can explicitly opt into Auto.
+- **Pin:** resolve inheritance; use the selected level's target, walking upwards for missing
+  files/empty targets. Quota exhaustion or an off provider does not silently choose a dearer
+  pinned level: try usable entries named in `preference: string[]` (provider/model ids, first
+  wins; generated-agent names also accepted), then configured `fallback`, built-in Sonnet,
+  finally another enabled generated worker. If none can run, refuse. Apply the resolved rule's
+  effort offset, floor and ceiling. A usable explicit Pin wins over preference.
+- **Auto:** `autoFloors:{light:30,standard:45,deep:50}`, `autoTieBand:2` by default.
+  - candidates = readable `generated-agents.json` workers and exact file models intersected with
+    the router's declared model/provider catalogue × measured effort variants from
+    GET `/api/model-scores`. Scores live in a session atom for 10 minutes; retrieval failure logs
+    and retains the previous cache (or no data), never calls AA or needs an AA key in the mod;
+  - drop off/out-of-quota providers and those outside the rule's allow-list. Drop variants outside
+    effort floor/ceiling; positive offset permits only efforts at/above the offset-adjusted judged
+    effort, negative offset only at/below it. Offset zero imposes no judged-effort restriction.
+    Never change a selected measured effort afterwards while claiming the old score. A null-effort
+    single variant uses the calibrated judged effort without pretending AA measured that effort;
+  - among variants with intelligence ≥ the level's floor, anchor on lowest costPerTask, then allow
+    preference to win only within `autoTieBand` index points of that anchor AND ≤125% of its cost.
+    Equal preferences resolve by cost, then intelligence, then model id; an expensive preference
+    cannot defeat the budget bound. Runner-up is the cheapest other floor-qualified variant;
+  - no variant reaches the floor → highest intelligence available, then cost. No usable AA data →
+    general Pin, or default general Pin if general is Auto; preserve on/off, availability, allow-list
+    and the Auto rule's effort calibration. Report the fallback reason. No enabled target → refuse.
+- **UI:** Workers settings and setup step 2 share the existing controls, with a selector for
+  Providers, Preference and each domain. Provider toggles, preference up/down/remove/add, Pin
+  per-level Selects, Auto allow toggles/index floors/tie band, and effort calibration are paged
+  inside the band's row budget. Every Auto page shows `cheapest above index N · Data: Artificial
+  Analysis (artificialanalysis.ai)`. Agents show domain/level and `index 50.2 · $0.32/task
+  (next: …)` with the same attribution.
 - **Data:** a daily GitHub Action (`.github/workflows/aa-data.yml`, secret `AA_API_KEY`) reads the
   AA API (index, prices per variant) and each tracked variant's model page (its embedded record's
   `intelligenceIndexCostPerTask.cost.total`; the free API has no cost per task), and force-pushes

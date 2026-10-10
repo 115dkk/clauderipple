@@ -10,13 +10,15 @@ import type { Engine } from 'claude-code/testing'
 import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 
 import type { AgentRec, Settings, StatusRequest } from '../types'
+import { STRINGS } from '../hooks/i18n'
+import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
 import { pack, renderBand, renderFooter } from '../hooks/ui/band'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
-import { countdown, modelName, routeOf, targetOf, targetValue } from '../hooks/ui/view'
+import { countdown, elapsed, modelName, resetsLabel, routeOf, seconds, targetOf, targetValue } from '../hooks/ui/view'
 import type { AlertView, DashboardView, Frame, SettingsTab, Surface } from '../hooks/ui/view'
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -28,7 +30,7 @@ function paneProps(columns: number, rows = 30): RenderPropsOf['Pane'] {
 }
 
 function frameOf(surface: Surface, columns = 140, maxRows = 12): Frame {
-  return { surface, columns, maxRows, now: NOW, appearance: 'auto' }
+  return { surface, columns, maxRows, now: NOW, appearance: 'auto', lang: 'en' }
 }
 
 /** Records which callback ran, with what. */
@@ -60,7 +62,7 @@ const DASH: DashboardView = {
   isWorking: false,
 }
 
-const SETTINGS: Settings = {
+const SETTINGS: Settings = normalizeSettings({
   effortAuto: true,
   judge: 'jev',
   judgeModel: 'deepseek-v4.1-flash',
@@ -80,9 +82,10 @@ const SETTINGS: Settings = {
   swampAt: 50,
   layout: 'dashboard',
   appearance: 'auto',
+  language: 'auto',
   hide: [],
   setupDone: false,
-}
+})
 
 const AGENT_OPTIONS = [
   { value: 'deepseek-v4-1-flash', label: 'deepseek-v4-1-flash', available: true },
@@ -109,9 +112,20 @@ test('view helpers', () => {
   expect(modelName('claude-fable-5-1')).toBe('Fable 5.1')
   expect(modelName('sonnet')).toBe('Sonnet')
   expect(modelName('gpt-6.1-sol')).toBe('gpt-6.1-sol')
-  expect(countdown(41 * 60_000)).toBe('41m')
-  expect(countdown(105_000)).toBe('1:45')
-  expect(countdown(0)).toBe('cold')
+  expect(countdown(41 * 60_000, 'en')).toBe('41m')
+  expect(countdown(105_000, 'en')).toBe('1:45')
+  expect(countdown(0, 'en')).toBe('cold')
+  expect(countdown(41 * 60_000, 'ko')).toBe('41분')
+  expect(countdown(105_000, 'ko')).toBe('1:45')
+  expect(countdown(0, 'ko')).toBe(STRINGS.ko['band.cold'])
+  expect(countdown(41 * 60_000, 'es')).toBe('41 min')
+  expect(elapsed(12_000, 'en')).toBe('12s')
+  expect(elapsed(245_000, 'ko')).toBe('4분 05초')
+  expect(elapsed(3_720_000, 'ja')).toBe('1時間02分')
+  expect(resetsLabel('2026-10-10T13:45:00', NOW, 'en')).toBe('resets in 25m')
+  expect(resetsLabel('2026-10-10T13:45:00', NOW, 'ko')).toBe('25분 뒤 초기화')
+  expect(resetsLabel('2026-10-13T13:20:00', NOW, 'zh')).toBe('3天后重置')
+  expect(seconds(2.14, 'ko')).toBe('2.1초')
   expect(targetOf(targetValue({ agent: 'general-purpose', model: 'sonnet' }))).toEqual({ agent: 'general-purpose', model: 'sonnet' })
   expect(targetOf('gpt-6-1-sol')).toEqual({ agent: 'gpt-6-1-sol' })
   const record: StatusRequest = { at: '2026-10-10T13:19:10', source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, usage: { input: 3000, cached: 41_000, output: 900 } }
@@ -209,6 +223,29 @@ test('the minimal footer draws on both surfaces', async ($, on) => {
   expect(calls).toEqual(['settings', 'settings'])
 })
 
+test('a ko frame resolves temporary Korean text, SVG captions, alt and title', async ($, on) => {
+  const original = { ...STRINGS.ko }
+  const noop = () => undefined
+  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+  try {
+    STRINGS.ko['band.auto'] = '자동'
+    STRINGS.ko['band.high'] = '높음'
+    STRINGS.ko['band.effortTitle'] = '강도 {value}{hint} · 선택'
+    STRINGS.ko['band.effortAlt'] = '강도 {value} ({mode}){why}'
+    drawPane(on, 'ko-band', (el, surface) => renderBand(el, { ...frameOf(surface), lang: 'ko' }, DASH, actions))
+    const terminal = await mount($, 'ko-band', 'terminal')
+    expect((await terminal.find({ key: 'auto' }))?.props.label).toBe('자동 ●')
+    expect(await terminal.find({ type: 'Text', text: /높음/ })).toBeDefined()
+    await terminal.unmount()
+    const desktop = await mount($, 'ko-band', 'desktop')
+    const svgs = await desktop.findAll({ type: 'Svg' })
+    expect(svgs.some(svg => String(svg.props.alt).startsWith('강도 높음'))).toBe(true)
+    expect(svgs.some(svg => String(svg.props.source).includes('<title>강도 높음'))).toBe(true)
+    expect(svgs.some(svg => String(svg.props.source).includes('자동'))).toBe(true)
+    await desktop.unmount()
+  } finally { Object.assign(STRINGS.ko, original) }
+})
+
 // ---- Alerts ------------------------------------------------------------------------------------
 
 const ALERTS: AlertView[] = [
@@ -270,13 +307,13 @@ test('alert choices reach their callbacks', async ($, on) => {
 
 const TABS: SettingsTab[] = ['effort', 'workers', 'judge', 'cache', 'handoff', 'look']
 
-test('every settings card draws on both surfaces, with the notice', async ($, on) => {
+test('every settings card draws on both surfaces without the affiliation footer', async ($, on) => {
   const noop = () => undefined
-  const actions = { setTab: noop, patch: noop, setTier: noop, setFallback: noop, jevKey: noop, testJev: noop, save: noop, close: noop }
+  const actions = { setTab: noop, patch: noop, setRule: noop, setWorkerUi: noop, setFallback: noop, jevKey: noop, testJev: noop, save: noop, close: noop }
   for (const tab of TABS) {
     for (const judge of tab === 'judge' ? (['haiku', 'jev', 'model'] as const) : (['haiku'] as const)) {
       drawPane(on, 'settings-' + tab + '-' + judge, (el, surface) =>
-        renderSettings(el, frameOf(surface, 120, 14), { tab, draft: { ...SETTINGS, judge }, dirty: false, agents: AGENT_OPTIONS, routerModels: ['deepseek-v4.1-flash'], skills: ['handoff'], jev: { source: 'file', test: { state: 'ok' } } }, actions),
+        renderSettings(el, frameOf(surface, 120, 14), { tab, draft: { ...SETTINGS, judge }, dirty: false, agents: AGENT_OPTIONS, routerModels: [{ value: 'deepseek-v4.1-flash', label: 'deepseek-v4.1-flash · deepseek', provider: 'deepseek' }], workerUi: { section: 'general', page: 0 }, skills: ['handoff'], jev: { source: 'file', test: { state: 'ok' } } }, actions),
       )
     }
   }
@@ -284,7 +321,7 @@ test('every settings card draws on both surfaces, with the notice', async ($, on
     for (const tab of TABS) {
       for (const judge of tab === 'judge' ? ['haiku', 'jev', 'model'] : ['haiku']) {
         const ui = await mount($, 'settings-' + tab + '-' + judge, surface)
-        expect(await ui.find({ type: 'Text', text: 'not affiliated with Anthropic' }), "ui { type: 'Text', text: 'not affiliated with Anthropic' } " + surface).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
         expect(await ui.find({ key: 'save' }), "ui { key: 'save' } " + surface).toBeDefined()
         await ui.unmount()
       }
@@ -294,8 +331,8 @@ test('every settings card draws on both surfaces, with the notice', async ($, on
 
 test('settings controls reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
-  const actions = { setTab: fn('tab'), patch: fn('patch'), setTier: fn('tier'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
-  const view = (tab: SettingsTab) => ({ tab, draft: SETTINGS, dirty: true, agents: AGENT_OPTIONS, routerModels: [], skills: [], jev: { source: null, test: { state: 'idle' as const } } })
+  const actions = { setTab: fn('tab'), patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
+  const view = (tab: SettingsTab) => ({ tab, draft: SETTINGS, dirty: true, agents: AGENT_OPTIONS, routerModels: [], workerUi: { section: 'general' as const, page: 0 }, skills: [], jev: { source: null, test: { state: 'idle' as const } } })
   drawPane(on, 'effort', (el, surface) => renderSettings(el, frameOf(surface), view('effort'), actions))
   drawPane(on, 'workers', (el, surface) => renderSettings(el, frameOf(surface), view('workers'), actions))
   drawPane(on, 'judge', (el, surface) => renderSettings(el, frameOf(surface), view('judge'), actions))
@@ -307,7 +344,7 @@ test('settings controls reach their callbacks', async ($, on) => {
     await effort.press({ key: 'save' })
     await effort.press({ key: 'close' })
     const workers = await mount($, 'workers', surface)
-    await workers.select({ key: 'tier-design', value: 'gpt-6-1-sol' })
+    await workers.select({ key: 'pin-light', value: 'gpt-6-1-sol' })
     await workers.press({ key: 'agent-auto-all' })
     const judge = await mount($, 'judge', surface)
     await judge.input({ key: 'jev-key', text: 'ts-key' })
@@ -319,7 +356,7 @@ test('settings controls reach their callbacks', async ($, on) => {
     'patch:[{"floor":"medium"}]',
     'save',
     'close',
-    'tier:["design",{"agent":"gpt-6-1-sol"}]',
+    'rule:["general",{"mode":"pin","targets":{"light":{"agent":"gpt-6-1-sol"},"standard":{"agent":"gpt-6-1-sol"},"deep":{"agent":"gpt-6-astra"}}}]',
     'patch:[{"agentAuto":"all"}]',
     'key:["ts-key"]',
     'test',
@@ -327,12 +364,31 @@ test('settings controls reach their callbacks', async ($, on) => {
   expect(calls).toEqual([...once, ...once])
 })
 
+test('workers pages retain provider/preference controls and AA attribution on narrow surfaces', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { setTab: fn('tab'), patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
+  const draft = normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } }, preference: ['chatgpt', 'deepseek'] })
+  for (const section of ['general', 'providers', 'preference'] as const) drawPane(on, 'workers-' + section, (el, surface) => renderSettings(el, frameOf(surface, 80, 12), { tab: 'workers', draft, dirty: false, agents: AGENT_OPTIONS, routerModels: [{ value: 'gpt-6.1-sol', label: 'Sol · chatgpt', provider: 'chatgpt' }, { value: 'deepseek-v4.1-flash', label: 'Flash · deepseek', provider: 'deepseek' }], skills: [], jev: { source: null, test: { state: 'idle' } }, workerUi: { section, page: 0 } }, actions))
+  for (const surface of SURFACES) {
+    const auto = await mount($, 'workers-general', surface, 80)
+    expect(await auto.find({ type: 'Text', text: /cheapest above index 45.*Data: Artificial Analysis/ })).toBeDefined()
+    await auto.press({ key: 'worker-next' })
+    const providers = await mount($, 'workers-providers', surface, 80)
+    await providers.press({ key: 'provider-chatgpt' })
+    const preference = await mount($, 'workers-preference', surface, 80)
+    await preference.press({ key: 'preference-up-1' })
+  }
+  expect(calls.filter(c => c === 'workerUi:[{"page":1}]').length).toBe(2)
+  expect(calls.filter(c => c === 'patch:[{"providers":{"chatgpt":false}}]').length).toBe(2)
+  expect(calls.filter(c => c === 'patch:[{"preference":["deepseek","chatgpt"]}]').length).toBe(2)
+})
+
 test('setup steps draw on both surfaces and move on', async ($, on) => {
   const { calls, fn } = recorder()
-  const actions = { patch: fn('patch'), setTier: fn('tier'), jevKey: fn('key'), testJev: fn('test'), back: fn('back'), next: fn('next'), finish: fn('finish'), skip: fn('skip') }
+  const actions = { patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), jevKey: fn('key'), testJev: fn('test'), back: fn('back'), next: fn('next'), finish: fn('finish'), skip: fn('skip') }
   for (const step of [1, 2, 3, 4] as const) {
     drawPane(on, 'setup-' + step, (el, surface) =>
-      renderSetup(el, frameOf(surface), { step, draft: SETTINGS, agents: AGENT_OPTIONS, routerModels: [], jev: { source: 'env', test: { state: 'idle' } } }, actions),
+      renderSetup(el, frameOf(surface), { step, draft: SETTINGS, agents: AGENT_OPTIONS, routerModels: [], workerUi: { section: 'general' as const, page: 0 }, jev: { source: 'env', test: { state: 'idle' } } }, actions),
     )
   }
   for (const surface of SURFACES) {
@@ -340,7 +396,8 @@ test('setup steps draw on both surfaces and move on', async ($, on) => {
     await (await mount($, 'setup-2', surface)).press({ key: 'back' })
     await (await mount($, 'setup-3', surface)).press({ key: 'set-warm' })
     const done = await mount($, 'setup-4', surface)
-    expect(await done.find({ type: 'Text', text: /Light → deepseek-v4-1-flash/ }), "done { type: 'Text', text: /Light → deepseek-v4-1-flash/ } " + surface).toBeDefined()
+    expect(await done.find({ type: 'Text', text: /General → Pin/ }), "done { type: 'Text', text: /General → Pin/ } " + surface).toBeDefined()
+    expect(await done.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
     await done.press({ key: 'finish' })
   }
   const once = ['next', 'back', 'patch:[{"keepWarm":true}]', 'finish']
@@ -355,7 +412,7 @@ const AGENTS: AgentRec[] = [
     description: 'Port the request log renderer',
     type: 'gpt-6-1-sol',
     model: 'gpt-6.1-sol@high',
-    pick: { tier: 'standard', effort: 'high', sure: 0.8, why: 'designed refactor', target: { agent: 'gpt-6-1-sol' }, by: 'haiku', ms: 900 },
+    pick: { domain: 'frontend', level: 'standard', effort: 'high', sure: 0.8, why: 'designed refactor', target: { agent: 'gpt-6-1-sol' }, by: 'haiku', ms: 900, aa: { intelligence: 50.24, costPerTask: 0.3191 }, runnerUp: { target: { agent: 'gpt-6-astra' }, effort: 'medium', intelligence: 49.6, costPerTask: 1.541 } },
     state: 'running',
     now: 'Edit hooks/ui/log.tsx',
     toolSince: NOW - 14_000,
@@ -375,6 +432,8 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
     expect(await ui.find({ type: 'Text', text: 'Port the request log renderer' }), "ui { type: 'Text', text: 'Port the request log renderer' } " + surface).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), "ui { type: 'Text', text: /Edit hooks\/ui\/log.tsx/ } " + surface).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Summarize the docs' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Frontend \/ Standard/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /index 50.2.*\$0.32\/task.*next:.*Data: Artificial Analysis/ })).toBeDefined()
     await ui.press({ key: 'done' })
     const open = await mount($, 'agents-open', surface, 64)
     expect(await open.find({ type: 'Text', text: 'Summarize the docs' }), "open { type: 'Text', text: 'Summarize the docs' } " + surface).toBeDefined()

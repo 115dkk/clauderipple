@@ -52,11 +52,11 @@ test('judge, worker and warm accounting stays separate from main requests', () =
 })
 
 test('stats text is compact measured accounting, with safe empty averages and all categories', () => {
-  const empty = formatStats(emptyStats())
+  const empty = formatStats(emptyStats(), 'en')
   assert.ok(empty.includes('0 prompts, 0 requests; 0 weighted tokens'))
   assert.ok(!empty.includes('NaN') && !empty.includes('Infinity'))
   const stats = addWarm(addWorker(addJudge(addPrompt(addRequest(emptyStats(), usage, 'high'), 'high'), 'haiku', 120, 30), 'deep'), usage)
-  assert.equal(formatStats(stats), [
+  assert.equal(formatStats(stats, 'en'), [
     'Auto: 1 prompts, 1 requests; 400 weighted tokens',
     'Tokens: input 100, write 80, read 1000, output 20',
     'high 1 prompts / 400 weighted',

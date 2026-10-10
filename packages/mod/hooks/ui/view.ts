@@ -2,8 +2,10 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, Settings, StatusRequest, Tier, TierTarget } from '../../types'
+import type { AgentRec, Domain, Effort, HandoffKind, JudgeKind, RouterModel, Rule, Settings, StatusRequest, TierTarget, WorkerUi } from '../../types'
 import type { Appearance } from './theme'
+import { t } from '../i18n'
+import type { Lang } from '../i18n'
 
 export type Surface = 'terminal' | 'desktop' | 'vscode' | 'mobile'
 
@@ -17,6 +19,7 @@ export type Frame = {
   /** Epoch ms when drawn; countdowns are computed from it. */
   now: number
   appearance: Appearance
+  lang: Lang
 }
 
 /** Desktop and the editor draw SVG; the terminal and mobile draw text. */
@@ -139,7 +142,7 @@ export type AgentOption = { value: string; label: string; available: boolean }
 
 export type JevState = {
   /** Where the key comes from; null when there is none. */
-  source: 'env' | 'file' | 'pasted' | null
+  source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
 }
 
@@ -150,7 +153,8 @@ export type SettingsView = {
   dirty: boolean
   agents: readonly AgentOption[]
   /** Router model ids the `model` judge can ask. */
-  routerModels: readonly string[]
+  routerModels: readonly RouterModel[]
+  workerUi: WorkerUi
   /** Skills a full handoff can run. */
   skills: readonly string[]
   jev: JevState
@@ -159,7 +163,8 @@ export type SettingsView = {
 export type SettingsActions = {
   setTab: (tab: SettingsTab) => void
   patch: (change: Partial<Settings>) => void
-  setTier: (tier: Tier, target: TierTarget) => void
+  setRule: (domain: Domain, rule: Rule) => void
+  setWorkerUi: (ui: Partial<WorkerUi>) => void
   setFallback: (target: TierTarget) => void
   /** The Jev key typed into the field (Enter). */
   jevKey: (key: string) => void
@@ -175,13 +180,15 @@ export type SetupView = {
   step: SetupStep
   draft: Settings
   agents: readonly AgentOption[]
-  routerModels: readonly string[]
+  routerModels: readonly RouterModel[]
+  workerUi: WorkerUi
   jev: JevState
 }
 
 export type SetupActions = {
   patch: (change: Partial<Settings>) => void
-  setTier: (tier: Tier, target: TierTarget) => void
+  setRule: (domain: Domain, rule: Rule) => void
+  setWorkerUi: (ui: Partial<WorkerUi>) => void
   jevKey: (key: string) => void
   testJev: () => void
   back: () => void
@@ -216,14 +223,18 @@ export type LogActions = {
 // ---- Helpers register.tsx and the drawings share ----------------------------------------------
 
 export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
-export const TIERS: readonly Tier[] = ['light', 'standard', 'deep', 'design']
 
 export function effortIndex(effort: Effort | null | undefined): number {
   return effort ? EFFORTS.indexOf(effort) : -1
 }
 
-export function effortName(effort: Effort): string {
-  return effort === 'xhigh' ? 'X-High' : effort.charAt(0).toUpperCase() + effort.slice(1)
+export function effortName(effort: Effort, lang: Lang): string {
+  return t(lang, 'band.' + effort)
+}
+
+/** Route records can contain unknown effort ids; translate only the known display values. */
+export function effortLabel(value: string, lang: Lang): string {
+  return EFFORTS.includes(value as Effort) ? effortName(value as Effort, lang).toLowerCase() : value
 }
 
 /** "claude-opus-5-5[1m]" → "Opus 5.5"; ids it does not know pass through, trimmed. */
@@ -296,20 +307,25 @@ export function compactNumber(n: number): string {
 }
 
 /** A countdown as the band shows it: "58m" above two minutes, "1:45" below, "cold" at zero. */
-export function countdown(ms: number): string {
-  if (ms <= 0) return 'cold'
+export function countdown(ms: number, lang: Lang): string {
+  if (ms <= 0) return t(lang, 'band.cold')
   const s = Math.ceil(ms / 1000)
-  if (s >= 120) return Math.ceil(s / 60) + 'm'
+  if (s >= 120) return t(lang, 'units.minutes', { n: Math.ceil(s / 60) })
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
 }
 
 /** A duration the Agents pane shows: "12s", "4m 05s", "1h 02m". */
-export function elapsed(ms: number): string {
+export function elapsed(ms: number, lang: Lang): string {
   const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return s + 's'
+  if (s < 60) return t(lang, 'units.seconds', { n: s })
   const m = Math.floor(s / 60)
-  if (m < 60) return m + 'm ' + String(s % 60).padStart(2, '0') + 's'
-  return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm'
+  if (m < 60) return t(lang, 'units.minSec', { m, s: String(s % 60).padStart(2, '0') })
+  return t(lang, 'units.hourMin', { h: Math.floor(m / 60), m: String(m % 60).padStart(2, '0') })
+}
+
+/** Seconds with one decimal, as routes and log entries show them: "1.2s". */
+export function seconds(value: number, lang: Lang): string {
+  return t(lang, 'units.seconds', { n: value.toFixed(1) })
 }
 
 export function clockTime(at: string | number): string {
@@ -318,23 +334,23 @@ export function clockTime(at: string | number): string {
 }
 
 /** "resets 14:20" or "resets in 3h" from an ISO time. */
-export function resetsLabel(resetsAt: string | undefined, now: number): string | undefined {
+export function resetsLabel(resetsAt: string | undefined, now: number, lang: Lang): string | undefined {
   if (!resetsAt) return undefined
   const at = Date.parse(resetsAt)
   if (!Number.isFinite(at)) return undefined
   const left = at - now
-  if (left <= 0) return 'resetting'
-  if (left < 3_600_000) return 'resets in ' + Math.max(1, Math.round(left / 60_000)) + 'm'
+  if (left <= 0) return t(lang, 'band.resetting')
+  if (left < 3_600_000) return t(lang, 'band.resetsIn', { time: t(lang, 'units.minutes', { n: Math.max(1, Math.round(left / 60_000)) }) })
   if (left < 86_400_000) {
     const d = new Date(at)
-    return 'resets ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+    return t(lang, 'band.resetsAt', { time: String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') })
   }
-  return 'resets in ' + Math.round(left / 86_400_000) + 'd'
+  return t(lang, 'band.resetsIn', { time: t(lang, 'units.days', { n: Math.round(left / 86_400_000) }) })
 }
 
 /** "five_hour" → "5-hour", "seven_day" → "Weekly". */
-export function limitName(kind: string): string {
-  if (kind === 'five_hour') return '5-hour'
-  if (kind === 'seven_day') return 'Weekly'
+export function limitName(kind: string, lang: Lang): string {
+  if (kind === 'five_hour') return t(lang, 'band.fiveHour')
+  if (kind === 'seven_day') return t(lang, 'band.weekly')
   return kind.replace(/_/g, ' ')
 }

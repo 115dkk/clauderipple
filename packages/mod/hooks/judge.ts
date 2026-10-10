@@ -1,7 +1,9 @@
-import type { Effort, JudgeInput, Pick, Settings, Verdict, WorkerVerdict, Tier } from '../types'
+import type { Domain, Effort, JudgeInput, Level, Pick, Settings, Verdict, WorkerVerdict } from '../types'
+import { DOMAINS, LEVELS } from './settings.ts'
+import { t } from './i18n.ts'
+import type { Lang } from './i18n.ts'
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
-const TIERS: readonly Tier[] = ['light', 'standard', 'deep', 'design']
 
 export const EFFORT_JUDGE_SYSTEM = `Choose the cheapest reasoning effort that can do this work well. This is a coding agent able to inspect files, run commands, and edit code, not merely answer a chat question.
 Assess work volume, uncertainty, and the cost of mistakes, not message length. A short choice approving a build inherits the size of that build. Corrections and steering retain at least the running effort; closing remarks need little effort. "Think hard" or thorough reasoning requires at least high; an explicit quick answer calls for low.
@@ -98,11 +100,17 @@ const effortCriteria = {
   xhigh: 'Difficult extended investigation with interacting constraints.',
   max: 'Exceptional open-ended research or the hardest reasoning problems.',
 }
-const tierCriteria = {
+const levelCriteria = {
   light: 'Mechanical chores, repeated changes, or simple lookups.',
   standard: 'Implement a designed change, research, summarize documentation, or review.',
   deep: 'Careful high-stakes reasoning, subtle debugging, architecture, or security.',
-  design: 'UI, visual presentation, branding, or the look and voice of copy.',
+}
+const domainCriteria: Record<Domain, string> = {
+  design: 'Visual composition, branding, taste, look and voice of copy.',
+  frontend: 'Frontend UI implementation, components, styles and interactions.',
+  backend: 'Server application logic, APIs and authentication.', infra: 'Infrastructure, deployment, networks and operations.',
+  data: 'Data processing, schemas, queries and analysis.', test: 'Tests, quality assurance and verification.',
+  docs: 'Documentation, technical writing and summaries.', research: 'Investigation and research.', general: 'Other or cross-domain work.',
 }
 
 function jevBody(input: JudgeInput, task: string) {
@@ -118,11 +126,12 @@ export function jevEffortRequest(input: JudgeInput) {
   return jevBody(input, EFFORT_JUDGE_SYSTEM)
 }
 
-/** Jev chooses a stable tier, never a provider's changing model catalogue. */
+/** Capability and kind of work are independent; the judge never chooses a provider. */
 export function jevWorkerRequest(input: { description: string; prompt: string }) {
-  const body = jevBody({ messages: [], next: `${input.description}\n${input.prompt.slice(0, 3000)}` }, 'Choose a worker tier and reasoning effort for a delegated coding task. Judge its scope and risk; visual and brand work belongs to design.')
+  const body = jevBody({ messages: [], next: `${input.description}\n${input.prompt.slice(0, 3000)}` }, 'Choose the domain, capability level and reasoning effort for a delegated coding task. Judge scope and risk independently of the domain.')
   return { ...body, questions: { ...body.questions,
-    tier: { type: 'choice' as const, instructions: 'Select the kind of worker this task needs.', criteria: { ...tierCriteria } },
+    domain: { type: 'choice' as const, instructions: 'Select the domain of this task.', criteria: { ...domainCriteria } },
+    level: { type: 'choice' as const, instructions: 'Select the capability level needed.', criteria: { ...levelCriteria } },
   } }
 }
 
@@ -146,12 +155,13 @@ export function parseJevEffort(json: unknown, current?: { effort: Effort } | nul
 
 export function parseJevWorker(json: unknown): WorkerVerdict | undefined {
   const reply = answers(json)
-  const tierAnswer = record(reply?.tier)
+  const domainAnswer = record(reply?.domain)
+  const levelAnswer = record(reply?.level)
   const effortAnswer = record(reply?.effort)
-  const level = effort(effortAnswer?.choice)
-  if (!tierAnswer || !TIERS.includes(tierAnswer.choice as Tier) || !effortAnswer || !level) return undefined
-  const scores = [answerSure(tierAnswer), answerSure(effortAnswer)].filter((score): score is number => score !== undefined)
-  return { tier: tierAnswer.choice as Tier, effort: level, ...(scores.length ? { sure: Math.min(...scores) } : {}), why: '' }
+  const selectedEffort = effort(effortAnswer?.choice)
+  if (!domainAnswer || !DOMAINS.includes(domainAnswer.choice as Domain) || !levelAnswer || !LEVELS.includes(levelAnswer.choice as Level) || !effortAnswer || !selectedEffort) return undefined
+  const scores = [answerSure(domainAnswer), answerSure(levelAnswer), answerSure(effortAnswer)].filter((score): score is number => score !== undefined)
+  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, effort: selectedEffort, ...(scores.length ? { sure: Math.min(...scores) } : {}), why: '' }
 }
 
 export function jevUsage(json: unknown): number {
@@ -159,13 +169,13 @@ export function jevUsage(json: unknown): number {
   return [usage?.input_tokens, usage?.output_tokens].reduce<number>((sum, count) => sum + (typeof count === 'number' && Number.isFinite(count) && count >= 0 ? count : 0), 0)
 }
 
-export function jevFailure(status: number | 'timeout' | 'network'): string {
-  if (status === 401 || status === 403) return 'Jev key rejected'
-  if (status === 402) return 'Jev out of credits'
-  if (status === 429) return 'Jev rate limited'
-  if (status === 'timeout') return 'Jev timed out'
-  if (status === 'network') return 'Jev network unavailable'
-  return `Jev request failed (${status})`
+export function jevFailure(status: number | 'timeout' | 'network', lang: Lang = 'en'): string {
+  if (status === 401 || status === 403) return t(lang, 'toasts.jevRejected')
+  if (status === 402) return t(lang, 'toasts.jevCredits')
+  if (status === 429) return t(lang, 'toasts.jevRateLimited')
+  if (status === 'timeout') return t(lang, 'toasts.jevTimeout')
+  if (status === 'network') return t(lang, 'toasts.jevNetwork')
+  return t(lang, 'toasts.jevHttp', { status })
 }
 
 export function parseJevKey(fileText: string): string | undefined {
@@ -191,10 +201,10 @@ export function capped(level: Effort, saving: boolean): Effort {
 }
 
 /** Save is last, so even a high floor cannot defeat the subscription-saving cap. */
-export function finalEffort(verdict: Verdict, settings: Settings, saving: boolean): { effort: Effort; why: string } {
+export function finalEffort(verdict: Verdict, settings: Settings, saving: boolean, lang: Lang = 'en'): { effort: Effort; why: string } {
   const adjusted = bounded(tipped(verdict.effort, verdict.sure, settings.bias), settings.floor, settings.ceiling)
   const result = capped(adjusted, saving)
-  return { effort: result, why: result !== adjusted ? 'save mode' : adjusted !== verdict.effort ? 'your settings' : verdict.why }
+  return { effort: result, why: result !== adjusted ? t(lang, 'toasts.saveMode') : adjusted !== verdict.effort ? t(lang, 'toasts.yourSettings') : verdict.why }
 }
 
 export function isCacheSafeModel(modelId: string): boolean {

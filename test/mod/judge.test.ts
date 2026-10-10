@@ -86,9 +86,9 @@ test('Jev effort body has only the specified root/state/questions and all effort
 test('Jev worker body asks tier and effort, not model, and truncates prompt to 3000', () => {
   const body = jevWorkerRequest({ description: 'Review', prompt: 'a'.repeat(3000) + 'omitted' })
   assert.equal(body.model, 'jev-latest')
-  assert.deepEqual(Object.keys(body.questions), ['effort', 'tier'])
-  assert.deepEqual(Object.keys(body.questions.tier.criteria), ['light', 'standard', 'deep', 'design'])
-  assert.equal(body.questions.tier.type, 'choice')
+  assert.deepEqual(Object.keys(body.questions), ['effort', 'domain', 'level'])
+  assert.deepEqual(Object.keys(body.questions.level.criteria), ['light', 'standard', 'deep'])
+  assert.equal(body.questions.domain.type, 'choice')
   assert.ok(!body.state.next_message.includes('omitted'))
 })
 
@@ -103,8 +103,8 @@ test('Jev parses direct/nested answers and confidence fallback, keeps current on
 })
 
 test('Jev worker needs both choices and conservatively uses their minimum confidence', () => {
-  assert.deepEqual(parseJevWorker({ result: { answers: { tier: { choice: 'design', confidence: 0.8 }, effort: { choice: 'high', probabilities: { high: 0.6 } } } } }), { tier: 'design', effort: 'high', sure: 0.6, why: '' })
-  assert.deepEqual(parseJevWorker({ answers: { tier: { choice: 'light' }, effort: { choice: 'low' } } }), { tier: 'light', effort: 'low', why: '' })
+  assert.deepEqual(parseJevWorker({ result: { answers: { domain: { choice: 'design', confidence: 0.8 }, level: { choice: 'deep', confidence: 0.9 }, effort: { choice: 'high', probabilities: { high: 0.6 } } } } }), { domain: 'design', level: 'deep', effort: 'high', sure: 0.6, why: '' })
+  assert.deepEqual(parseJevWorker({ answers: { domain: { choice: 'general' }, level: { choice: 'light' }, effort: { choice: 'low' } } }), { domain: 'general', level: 'light', effort: 'low', why: '' })
   for (const json of [null, {}, { answers: { tier: { choice: 'bad' }, effort: { choice: 'high' } } }, { answers: { tier: { choice: 'deep' } } }]) assert.equal(parseJevWorker(json), undefined)
 })
 

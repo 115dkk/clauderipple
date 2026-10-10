@@ -2,6 +2,7 @@
 // what matters (model, provider, effort, tokens, cache, time, result). Moved here unchanged in
 // content from register.tsx's own drawing.
 
+import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { StatusRequest } from '../../types'
@@ -9,7 +10,7 @@ import { textButton } from './parts'
 import type { Els } from './parts'
 import { cacheTone, providerColor, textTone } from './theme'
 import type { Frame, LogActions, LogView } from './view'
-import { cachePercent, clockTime, isRich, modelOf, promptTokens } from './view'
+import { cachePercent, clockTime, effortLabel, isRich, modelOf, promptTokens, seconds } from './view'
 
 function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean): RenderNode {
   const { Box, Text } = el
@@ -29,7 +30,7 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
         </Text>
         <Text color={providerColor(record.provider)}>{record.provider}</Text>
         {record.resent ? (
-          <Text dimColor>{'↻ ' + String(record.status) + ' resent'}</Text>
+          <Text dimColor>{t(frame.lang, 'log.resent', { status: String(record.status) })}</Text>
         ) : (
           <Text color={record.ok ? tone.ok : tone.bad} bold={!record.ok}>
             {record.ok ? '✓' : '✕ ' + String(record.status)}
@@ -37,11 +38,11 @@ function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean):
         )}
       </Box>
       <Box flexDirection="row" columnGap={1}>
-        <Text dimColor>{record.effort ?? '-'}</Text>
-        {record.usage ? <Text dimColor>{'in ' + tokens(promptTokens(record.usage))}</Text> : null}
-        {cache !== undefined ? <Text color={tone[cacheTone(cache)]}>{'cache ' + cache + '%'}</Text> : null}
-        {record.usage ? <Text dimColor>{'out ' + tokens(record.usage.output)}</Text> : null}
-        <Text dimColor>{(record.ms / 1000).toFixed(1) + 's'}</Text>
+        <Text dimColor>{record.effort ? effortLabel(record.effort, frame.lang) : '-'}</Text>
+        {record.usage ? <Text dimColor>{t(frame.lang, 'log.input', { tokens: tokens(promptTokens(record.usage)) })}</Text> : null}
+        {cache !== undefined ? <Text color={tone[cacheTone(cache)]}>{t(frame.lang, 'band.cachePercent', { percent: cache })}</Text> : null}
+        {record.usage ? <Text dimColor>{t(frame.lang, 'log.output', { tokens: tokens(record.usage.output) })}</Text> : null}
+        <Text dimColor>{seconds(record.ms / 1000, frame.lang)}</Text>
       </Box>
       {!record.ok && record.note ? (
         <Text color={record.resent ? undefined : tone.bad} dimColor={record.resent} wrap="wrap">
@@ -58,11 +59,11 @@ export function renderLog(el: Els, frame: Frame, view: LogView, actions: LogActi
   return (
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="row" gap={1}>
-        <Text bold>{view.mineOnly ? 'This session' : 'All sessions'}</Text>
-        {textButton(el, 'scope', view.mineOnly ? 'Show all sessions' : 'This session only', actions.toggleScope, isRich(frame) ? undefined : 'a')}
+        <Text bold>{view.mineOnly ? t(frame.lang, 'log.thisSession') : t(frame.lang, 'log.allSessions')}</Text>
+        {textButton(el, 'scope', view.mineOnly ? t(frame.lang, 'log.showAll') : t(frame.lang, 'log.onlySession'), actions.toggleScope, isRich(frame) ? undefined : 'a')}
       </Box>
-      {!view.mineOnly && <Text dimColor>● this session  ○ other sessions</Text>}
-      {view.rows.length === 0 && <Text dimColor>No model requests yet.</Text>}
+      {!view.mineOnly && <Text dimColor>{t(frame.lang, 'log.legend')}</Text>}
+      {view.rows.length === 0 && <Text dimColor>{t(frame.lang, 'log.empty')}</Text>}
       {view.rows.map(record => entry(el, frame, record, view.mineOnly))}
     </Box>
   )

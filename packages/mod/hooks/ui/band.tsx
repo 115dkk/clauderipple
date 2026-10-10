@@ -7,14 +7,15 @@
 // The cache chip counts down by itself (SMIL frames and a CSS drain), so the band needs no
 // per-second redraw; markup that shows nothing new stays byte-identical between redraws.
 
+import { t } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
 import { CHIP_H, WAVE_CSS, WAVE_PERIOD, chip, gauge, icon, meter, meterWave, pill, plate, text, textButton } from './parts'
 import type { Els } from './parts'
-import { clip, contextTone, esc, limitTone, providerColor, cacheTone, svgDoc, textTone, textWidth, v } from './theme'
+import { clip, contextTone, displayWidth, esc, limitTone, providerColor, cacheTone, svgDoc, textTone, textWidth, v } from './theme'
 import type { BandActions, DashboardView, Frame } from './view'
-import { EFFORTS, compactNumber, countdown, effortIndex, effortName, isRich, limitName, resetsLabel } from './view'
+import { EFFORTS, compactNumber, countdown, effortIndex, effortLabel, effortName, isRich, limitName, resetsLabel, seconds } from './view'
 
 const CAP_Y = 13.5
 const VAL_Y = 27
@@ -26,11 +27,11 @@ type Chip = { key: string; source: string; alt: string; width: number; live?: bo
 function effortChip(frame: Frame, view: DashboardView, onPress: () => void): Chip {
   const { level, mode, why } = view.effort
   const idx = effortIndex(level)
-  const model = (view.model ?? 'Model').toUpperCase()
-  const tag = mode === 'auto' || mode === 'deciding' ? 'AUTO' : mode === 'manual' ? 'MANUAL' : mode === 'paused' ? 'PAUSED' : 'AUTO OFF'
+  const model = (view.model ?? t(frame.lang, 'band.model')).toUpperCase()
+  const tag = t(frame.lang, mode === 'auto' || mode === 'deciding' ? 'band.auto' : mode === 'manual' ? 'band.manual' : mode === 'paused' ? 'band.paused' : 'band.autoOff').toUpperCase()
   const caption = model + ' · ' + tag
   const value =
-    mode === 'deciding' ? 'Deciding…' : level ? effortName(level) : mode === 'paused' ? 'Paused' : mode === 'off' ? 'Off' : '—'
+    mode === 'deciding' ? t(frame.lang, 'band.deciding') : level ? effortName(level, frame.lang) : mode === 'paused' ? t(frame.lang, 'band.paused') : mode === 'off' ? t(frame.lang, 'band.off') : '—'
   const showWhy = mode === 'auto' && why && !view.hide.includes('reason')
   const whyText = showWhy ? clip(why!, 34) : ''
   const gx = 22
@@ -59,17 +60,17 @@ function effortChip(frame: Frame, view: DashboardView, onPress: () => void): Chi
   if (whyText) body += text(tx + valW + 8, VAL_Y, 'sub', whyText)
   const hint =
     mode === 'paused'
-      ? 'Auto pauses on this model: effort changes there are not known to keep the cache.'
+      ? t(frame.lang, 'band.pausedHint')
       : mode === 'off'
-        ? 'Auto is off; the effort is yours.'
+        ? t(frame.lang, 'band.offHint')
         : mode === 'deciding'
-          ? 'The judge is picking the effort for this prompt.'
+          ? t(frame.lang, 'band.decidingHint')
           : why ?? ''
-  body += '<title>' + esc('Effort ' + value + (hint ? ' — ' + hint : '') + ' · Click to pick an effort') + '</title>'
+  body += '<title>' + esc(t(frame.lang, 'band.effortTitle', { value, hint: hint ? ' — ' + hint : '' })) + '</title>'
   return {
     key: 'effort',
     source: svgDoc(width, CHIP_H, frame.appearance, body, css),
-    alt: 'Effort ' + value + ' (' + tag.toLowerCase() + ')' + (whyText ? ': ' + whyText : ''),
+    alt: t(frame.lang, 'band.effortAlt', { value, mode: tag.toLowerCase(), why: whyText ? ': ' + whyText : '' }),
     width,
     live: true,
     onPress,
@@ -79,18 +80,18 @@ function effortChip(frame: Frame, view: DashboardView, onPress: () => void): Chi
 function contextChip(frame: Frame, view: DashboardView): Chip | null {
   const ctx = view.context
   if (!ctx) return null
-  const t = contextTone(ctx.percent, view.swampAt)
-  const paint = t === 'ink' ? v('ink') : v(t)
+  const tone = contextTone(ctx.percent, view.swampAt)
+  const paint = tone === 'ink' ? v('ink') : v(tone)
   const value = Math.round(ctx.percent) + '%'
   const sub = compactNumber(ctx.tokens)
   const tx = 38
   const valW = textWidth(value, 12.5, 'bold')
-  const width = Math.ceil(tx + Math.max(textWidth('CONTEXT', 8.5) * 1.12, valW + 6 + textWidth(sub, 11.5)) + 14)
+  const width = Math.ceil(tx + Math.max(textWidth(t(frame.lang, 'band.context').toUpperCase(), 8.5) * 1.12, valW + 6 + textWidth(sub, 11.5)) + 14)
   const body =
     plate(width, CHIP_H, false) + gauge(20, CHIP_H / 2, 8.5, ctx.percent / 100, paint) +
-    text(tx, CAP_Y, 'cap', 'CONTEXT') + text(tx, VAL_Y, 'val', value, t === 'ink' ? undefined : paint) +
+    text(tx, CAP_Y, 'cap', t(frame.lang, 'band.context').toUpperCase()) + text(tx, VAL_Y, 'val', value, tone === 'ink' ? undefined : paint) +
     text(tx + valW + 6, VAL_Y, 'sub', sub)
-  return { key: 'context', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: 'Context ' + value + ' of ' + compactNumber(ctx.window) + ' (' + sub + ' tokens)', width }
+  return { key: 'context', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: t(frame.lang, 'band.contextAlt', { value, window: compactNumber(ctx.window), tokens: sub }), width }
 }
 
 /**
@@ -104,10 +105,10 @@ function cacheChip(frame: Frame, view: DashboardView): Chip | null {
   const warm = view.warm
   const left = cache ? Math.max(0, cache.expiresAt - frame.now) : 0
   const leftS = Math.ceil(left / 1000)
-  const caption = warm.on ? (warm.stopped ? 'CACHE · WARM STOPPED' : 'CACHE · WARM') : 'CACHE'
+  const caption = t(frame.lang, warm.on ? (warm.stopped ? 'band.cacheStopped' : 'band.cacheWarm') : 'band.cache').toUpperCase()
   const sub = warm.on && warm.pings > 0 ? '×' + warm.pings : ''
   const tx = 38
-  const longest = cache ? countdown(left) : '—'
+  const longest = cache ? countdown(left, frame.lang) : '—'
   const valW = Math.max(textWidth('0:00', 12.5, 'bold'), textWidth(longest, 12.5, 'bold'))
   const width = Math.ceil(tx + Math.max(textWidth(caption, 8.5) * 1.12, valW + (sub ? 6 + textWidth(sub, 11.5) : 0)) + 14)
   const cx = 20
@@ -121,7 +122,7 @@ function cacheChip(frame: Frame, view: DashboardView): Chip | null {
   if (!cache) {
     body += text(tx, VAL_Y, 'val', '—', v('muted'))
   } else if (leftS <= 0) {
-    body += icon('snow', cx - 7, cy - 7, v('muted')) + text(tx, VAL_Y, 'val', 'cold', v('muted'))
+    body += icon('snow', cx - 7, cy - 7, v('muted')) + text(tx, VAL_Y, 'val', t(frame.lang, 'band.cold'), v('muted'))
   } else {
     const frac = Math.min(1, left / cache.ttlMs)
     const start = (c * (1 - frac)).toFixed(2)
@@ -134,11 +135,11 @@ function cacheChip(frame: Frame, view: DashboardView): Chip | null {
       c.toFixed(2) + ' ' + c.toFixed(2) + '" stroke-dashoffset="' + start + '" transform="rotate(-90 ' + cx + ' ' + cy + ')">' +
       (leftS > 60 ? '<set attributeName="stroke" to="' + v('warn') + '" begin="' + warnAt + 's"/>' : '') + '</circle>'
     // One <text> per shown value, each visible from its start to the next one's.
-    let shown = countdown(left)
+    let shown = countdown(left, frame.lang)
     let from = 0
     const frames: [number, number, string][] = []
     for (let t = 1; t <= leftS; t++) {
-      const next = countdown(left - t * 1000)
+      const next = countdown(left - t * 1000, frame.lang)
       if (next !== shown) {
         frames.push([from, t, shown])
         shown = next
@@ -147,7 +148,7 @@ function cacheChip(frame: Frame, view: DashboardView): Chip | null {
     }
     frames.push([from, -1, shown])
     for (const [a, b, label] of frames) {
-      const cold = label === 'cold'
+      const cold = b === -1
       const late = !cold && leftS - a <= 60
       const fill = cold ? v('muted') : late ? v('warn') : undefined
       body +=
@@ -162,13 +163,13 @@ function cacheChip(frame: Frame, view: DashboardView): Chip | null {
   if (warm.on && cache && leftS > 0) body += '<g transform="translate(' + (cx - 4.2) + ' ' + (cy - 4.6) + ') scale(0.6)">' + icon('flame', 0, 0, warm.stopped ? v('muted') : v('accent')) + '</g>'
   if (sub) body += text(tx + valW + 6, VAL_Y, 'sub', sub)
   const tip = cache
-    ? 'Prompt cache ' + (leftS > 0 ? 'warm for ' + countdown(left) : 'expired') + (warm.on ? ' · keep-warm ' + (warm.stopped ? 'stopped: ' + warm.stopped : 'on, ' + warm.pings + ' pings') : '')
-    : 'No reply yet'
+    ? t(frame.lang, 'band.cacheTip', { state: leftS > 0 ? t(frame.lang, 'band.warmFor', { time: countdown(left, frame.lang) }) : t(frame.lang, 'band.expired'), warm: warm.on ? warm.stopped ? t(frame.lang, 'band.warmStoppedTip', { reason: warm.stopped }) : t(frame.lang, 'band.warmOnTip', { count: warm.pings }) : '' })
+    : t(frame.lang, 'band.noReply')
   body += '<title>' + esc(tip) + '</title>'
   return {
     key: 'cache',
     source: svgDoc(width, CHIP_H, frame.appearance, body, css),
-    alt: 'Cache ' + (cache ? (leftS > 0 ? countdown(left) + ' left' : 'cold') : 'unknown') + (warm.on ? ', keep warm on' + (sub ? ' ' + sub : '') : ''),
+    alt: t(frame.lang, 'band.cacheAlt', { state: cache ? leftS > 0 ? t(frame.lang, 'band.timeLeft', { time: countdown(left, frame.lang) }) : t(frame.lang, 'band.cold') : t(frame.lang, 'band.unknown'), warm: warm.on ? t(frame.lang, 'band.keepWarmAlt', { count: sub ? ' ' + sub : '' }) : '' }),
     width,
     live: true,
   }
@@ -177,11 +178,11 @@ function cacheChip(frame: Frame, view: DashboardView): Chip | null {
 function limitChip(frame: Frame, view: DashboardView): Chip | null {
   const limit = view.limit
   if (!limit || view.hide.includes('limits')) return null
-  const t = limitTone(limit.percent)
-  const paint = t === 'ink' ? v('ink') : v(t)
-  const caption = limitName(limit.kind).toUpperCase() + ' LIMIT' + (limit.save ? ' · SAVE' : '')
+  const tone = limitTone(limit.percent)
+  const paint = tone === 'ink' ? v('ink') : v(tone)
+  const caption = t(frame.lang, 'band.limitCaption', { window: limitName(limit.kind, frame.lang).toUpperCase(), save: limit.save ? t(frame.lang, 'band.saveCaption') : '' })
   const value = Math.round(limit.percent) + '%'
-  const resets = resetsLabel(limit.resetsAt, frame.now)
+  const resets = resetsLabel(limit.resetsAt, frame.now, frame.lang)
   const tx = 12
   const valW = textWidth(value, 12.5, 'bold')
   const barW = 34
@@ -190,11 +191,11 @@ function limitChip(frame: Frame, view: DashboardView): Chip | null {
   const bx = tx + valW + 8
   const fill = Math.max(2, (barW * Math.min(100, limit.percent)) / 100)
   const body =
-    plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', caption, limit.save ? v('accent') : undefined) + text(tx, VAL_Y, 'val', value, t === 'ink' ? undefined : paint) +
+    plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', caption, limit.save ? v('accent') : undefined) + text(tx, VAL_Y, 'val', value, tone === 'ink' ? undefined : paint) +
     '<rect x="' + bx + '" y="' + (VAL_Y - 6) + '" width="' + barW + '" height="4" rx="2" fill="' + v('faint') + '" opacity="0.6"/>' +
     '<rect x="' + bx + '" y="' + (VAL_Y - 6) + '" width="' + fill.toFixed(1) + '" height="4" rx="2" fill="' + paint + '"/>' +
     (resets ? text(bx + barW + 8, VAL_Y, 'sub', resets) : '')
-  return { key: 'limit', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: limitName(limit.kind) + ' limit ' + value + (resets ? ', ' + resets : ''), width }
+  return { key: 'limit', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: t(frame.lang, 'band.limitAlt', { window: limitName(limit.kind, frame.lang), value, reset: resets ? ', ' + resets : '' }), width }
 }
 
 function routeChip(frame: Frame, view: DashboardView, onPress: () => void): Chip | null {
@@ -203,12 +204,12 @@ function routeChip(frame: Frame, view: DashboardView, onPress: () => void): Chip
   if (!view.route) {
     if (!view.notice) return null
     const value = clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), 52)
-    const width = Math.ceil(tx + Math.max(textWidth('ROUTER', 8.5) * 1.12, textWidth(value, 12)) + 14)
-    const body = plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', 'ROUTER') + text(tx, VAL_Y, 'lbl', value, v('muted'))
-    return { key: 'route', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: 'Router: ' + value, width, onPress }
+    const width = Math.ceil(tx + Math.max(textWidth(t(frame.lang, 'band.router').toUpperCase(), 8.5) * 1.12, textWidth(value, 12)) + 14)
+    const body = plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', t(frame.lang, 'band.router').toUpperCase()) + text(tx, VAL_Y, 'lbl', value, v('muted'))
+    return { key: 'route', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: t(frame.lang, 'band.routerAlt', { value }), width, onPress }
   }
   const r = view.route
-  const caption = r.resent ? 'RESENT · ' + r.status : !r.ok ? 'FAILED · ' + r.status : 'LAST ROUTE'
+  const caption = t(frame.lang, r.resent ? 'band.resentCaption' : !r.ok ? 'band.failedCaption' : 'band.lastRoute', { status: r.status })
   const model = clip(r.model, 30)
   let x = tx + 13
   let line = '<path d="M' + tx + ' ' + (VAL_Y - 9) + 'v5.5a2 2 0 0 0 2 2h6M' + (tx + 6.5) + ' ' + (VAL_Y - 4) + 'l2.6 2.5-2.6 2.5" fill="none" stroke="' + (r.ok ? v('muted') : r.resent ? v('muted') : v('bad')) + '" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>'
@@ -220,23 +221,23 @@ function routeChip(frame: Frame, view: DashboardView, onPress: () => void): Chip
   line += '<text x="' + x + '" y="' + VAL_Y + '" class="sub" style="fill:' + hue + ';font-weight:600">' + esc(r.provider) + '</text>'
   x += textWidth(r.provider, 11.5, 'bold') + 8
   if (r.effort) {
-    line += text(x, VAL_Y, 'sub', r.effort)
-    x += textWidth(r.effort, 11.5) + 8
+    line += text(x, VAL_Y, 'sub', effortLabel(r.effort, frame.lang))
+    x += textWidth(effortLabel(r.effort, frame.lang), 11.5) + 8
   }
   if (r.ok && r.cachePct !== undefined) {
     const label = r.cachePct + '%'
     line += text(x, VAL_Y, 'sub', label, v(cacheTone(r.cachePct)))
     x += textWidth(label, 11.5) + 8
   }
-  const secs = r.seconds.toFixed(1) + 's'
+  const secs = seconds(r.seconds, frame.lang)
   line += text(x, VAL_Y, 'sub', secs)
   x += textWidth(secs, 11.5)
   const width = Math.ceil(Math.max(x, tx + textWidth(caption, 8.5) * 1.12) + 14)
   const body =
     plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', caption, !r.ok && !r.resent ? v('bad') : undefined) + line +
-    '<title>' + esc((r.note ? r.note + ' · ' : '') + 'Click for the request log') + '</title>'
+    '<title>' + esc((r.note ? r.note + ' · ' : '') + t(frame.lang, 'band.logHint')) + '</title>'
   const alt =
-    'Last route: ' + r.model + ' via ' + r.provider + (r.effort ? ', ' + r.effort : '') + (r.cachePct !== undefined ? ', cache ' + r.cachePct + '%' : '') + ', ' + secs + (r.ok ? '' : ', ' + (r.resent ? 'resent ' : 'failed ') + r.status)
+    t(frame.lang, 'band.routeAlt', { model: r.model, provider: r.provider, effort: r.effort ? ', ' + effortLabel(r.effort, frame.lang) : '', cache: r.cachePct !== undefined ? t(frame.lang, 'band.routeCache', { percent: r.cachePct }) : '', time: secs, status: r.ok ? '' : t(frame.lang, r.resent ? 'band.routeResent' : 'band.routeFailed', { status: r.status }) })
   return { key: 'route', source: svgDoc(width, CHIP_H, frame.appearance, body), alt, width, live: r.note !== undefined, onPress }
 }
 
@@ -252,11 +253,11 @@ function effortMenuRich(el: Els, frame: Frame, view: DashboardView, actions: Ban
   const current = view.effort.mode === 'manual' || view.effort.mode === 'off' ? view.effort.level : null
   return (
     <Box key="effort-menu" flexDirection="row" flexWrap="wrap" gap={1}>
-      {pill(el, frame, { key: 'pick-auto', label: 'Auto', lit: view.auto, onPress: actions.toggleAuto, height: CHIP_H - 4, glyph: (x, y) => meter(x + 7, y + 7, 2, v('accent'), v('faint'), 0.75) })}
+      {pill(el, frame, { key: 'pick-auto', label: t(frame.lang, 'band.auto'), lit: view.auto, onPress: actions.toggleAuto, height: CHIP_H - 4, glyph: (x, y) => meter(x + 7, y + 7, 2, v('accent'), v('faint'), 0.75) })}
       {EFFORTS.map((effort, i) =>
         pill(el, frame, {
           key: 'pick-' + effort,
-          label: effortName(effort),
+          label: effortName(effort, frame.lang),
           lit: current === effort,
           onPress: () => actions.pickEffort(effort),
           height: CHIP_H - 4,
@@ -271,18 +272,18 @@ function controlsRich(el: Els, frame: Frame, view: DashboardView, actions: BandA
   const ht = CHIP_H
   const handoff = view.handoff !== 'off'
   return [
-    pill(el, frame, { key: 'auto', label: 'Auto', toggle: view.auto, onPress: actions.toggleAuto, height: ht, alt: 'Effort Auto ' + (view.auto ? 'on' : 'off') }),
-    pill(el, frame, { key: 'warm', label: 'Warm', toggle: view.warm.on, onPress: actions.toggleWarm, height: ht, alt: 'Keep cache warm ' + (view.warm.on ? 'on' : 'off') }),
+    pill(el, frame, { key: 'auto', label: t(frame.lang, 'band.auto'), toggle: view.auto, onPress: actions.toggleAuto, height: ht, alt: t(frame.lang, 'band.effortAutoAlt', { state: t(frame.lang, view.auto ? 'band.on' : 'band.off').toLowerCase() }) }),
+    pill(el, frame, { key: 'warm', label: t(frame.lang, 'band.warm'), toggle: view.warm.on, onPress: actions.toggleWarm, height: ht, alt: t(frame.lang, 'band.warmAlt', { state: t(frame.lang, view.warm.on ? 'band.on' : 'band.off').toLowerCase() }) }),
     handoff
-      ? pill(el, frame, { key: 'handoff', label: 'Handoff', lit: view.handoff === 'advised', onPress: actions.handoff, height: ht, glyph: (x, y) => icon('handoff', x, y, view.handoff === 'advised' ? v('accent') : v('ink')), alt: view.handoff === 'advised' ? 'Handoff (advised: a fresh chat pays now)' : 'Handoff' })
-      : pill(el, frame, { key: 'compact', label: 'Compact', onPress: actions.compact, height: ht, glyph: (x, y) => icon('compact', x, y, v('ink')) }),
-    pill(el, frame, { key: 'log', label: 'Log', lit: view.logOpen, onPress: actions.toggleLog, height: ht, glyph: (x, y) => icon('log', x, y, view.logOpen ? v('accent') : v('ink')), alt: view.logOpen ? 'Close the request log' : 'Open the request log' }),
+      ? pill(el, frame, { key: 'handoff', label: t(frame.lang, 'band.handoff'), lit: view.handoff === 'advised', onPress: actions.handoff, height: ht, glyph: (x, y) => icon('handoff', x, y, view.handoff === 'advised' ? v('accent') : v('ink')), alt: view.handoff === 'advised' ? t(frame.lang, 'band.handoffAdvised') : t(frame.lang, 'band.handoff') })
+      : pill(el, frame, { key: 'compact', label: t(frame.lang, 'band.compact'), onPress: actions.compact, height: ht, glyph: (x, y) => icon('compact', x, y, v('ink')) }),
+    pill(el, frame, { key: 'log', label: t(frame.lang, 'band.log'), lit: view.logOpen, onPress: actions.toggleLog, height: ht, glyph: (x, y) => icon('log', x, y, view.logOpen ? v('accent') : v('ink')), alt: view.logOpen ? t(frame.lang, 'band.closeLog') : t(frame.lang, 'band.openLog') }),
     pill(el, frame, (() => {
-      const o: Parameters<typeof pill>[2] = { key: 'agents', label: 'Agents', lit: view.agentsOpen, onPress: actions.toggleAgents, height: ht, glyph: (x, y) => icon('agents', x, y, view.agentsOpen ? v('accent') : v('ink')), alt: 'Agents: ' + view.agents.live + ' running' }
+      const o: Parameters<typeof pill>[2] = { key: 'agents', label: t(frame.lang, 'band.agents'), lit: view.agentsOpen, onPress: actions.toggleAgents, height: ht, glyph: (x, y) => icon('agents', x, y, view.agentsOpen ? v('accent') : v('ink')), alt: t(frame.lang, 'band.agentsAlt', { count: view.agents.live }) }
       if (view.agents.live > 0) o.badge = String(view.agents.live)
       return o
     })()),
-    pill(el, frame, { key: 'settings', label: '', onPress: actions.openSettings, height: ht, glyph: (x, y) => icon('gear', x, y, v('muted')), alt: 'Ripple settings' }),
+    pill(el, frame, { key: 'settings', label: '', onPress: actions.openSettings, height: ht, glyph: (x, y) => icon('gear', x, y, v('muted')), alt: t(frame.lang, 'band.settingsAlt') }),
   ]
 }
 
@@ -319,7 +320,7 @@ type Segment = { key: string; runs: Run[] }
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
 
 function width(seg: Segment): number {
-  return seg.runs.reduce((n, r) => n + r.text.length, 0) + Math.max(0, seg.runs.length - 1)
+  return seg.runs.reduce((n, r) => n + displayWidth(r.text), 0) + Math.max(0, seg.runs.length - 1)
 }
 
 function infoSegments(frame: Frame, view: DashboardView): Segment[] {
@@ -328,29 +329,29 @@ function infoSegments(frame: Frame, view: DashboardView): Segment[] {
   const { level, mode, why } = view.effort
   const idx = effortIndex(level)
   const runs: Run[] = []
-  if (mode === 'deciding') runs.push({ text: '◌ deciding…', color: tone.accent, bold: true })
-  else if (mode === 'paused') runs.push({ text: '‖ ' + (level ?? 'paused'), dim: true }, { text: 'auto paused', dim: true })
-  else if (mode === 'off') runs.push({ text: (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ?? 'off'), bold: true }, { text: 'auto off', dim: true })
-  else runs.push({ text: (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ?? '—'), bold: true, color: mode === 'auto' ? tone.accent : undefined }, { text: mode === 'auto' ? 'auto' : 'manual', dim: true })
+  if (mode === 'deciding') runs.push({ text: t(frame.lang, 'band.decidingText'), color: tone.accent, bold: true })
+  else if (mode === 'paused') runs.push({ text: '‖ ' + (level ? effortName(level, frame.lang).toLowerCase() : t(frame.lang, 'band.paused').toLowerCase()), dim: true }, { text: t(frame.lang, 'band.autoPaused'), dim: true })
+  else if (mode === 'off') runs.push({ text: (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : t(frame.lang, 'band.off').toLowerCase()), bold: true }, { text: t(frame.lang, 'band.autoOff').toLowerCase(), dim: true })
+  else runs.push({ text: (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : '—'), bold: true, color: mode === 'auto' ? tone.accent : undefined }, { text: t(frame.lang, mode === 'auto' ? 'band.auto' : 'band.manual').toLowerCase(), dim: true })
   if (view.model) runs.push({ text: '· ' + view.model, dim: true })
   segs.push({ key: 'effort', runs })
   if (mode === 'auto' && why && !view.hide.includes('reason')) segs.push({ key: 'why', runs: [{ text: '“' + clip(why, 30) + '”', dim: true }] })
   if (view.context) {
-    const t = contextTone(view.context.percent, view.swampAt)
+    const shade = contextTone(view.context.percent, view.swampAt)
     const pct = view.context.percent
     const pie = pct >= 87.5 ? '●' : pct >= 62.5 ? '◕' : pct >= 37.5 ? '◑' : pct >= 12.5 ? '◔' : '○'
-    segs.push({ key: 'context', runs: [{ text: pie + ' ' + Math.round(pct) + '%', color: t === 'ink' ? undefined : tone[t] }, { text: compactNumber(view.context.tokens), dim: true }] })
+    segs.push({ key: 'context', runs: [{ text: pie + ' ' + Math.round(pct) + '%', color: shade === 'ink' ? undefined : tone[shade] }, { text: compactNumber(view.context.tokens), dim: true }] })
   }
   if (!view.hide.includes('timer')) {
     const left = view.cache ? view.cache.expiresAt - frame.now : 0
-    const r: Run[] = [{ text: '⧗ ' + (view.cache ? countdown(left) : '—'), color: view.cache && left > 0 && left <= 60_000 ? tone.warn : undefined, dim: !view.cache || left <= 0 }]
-    if (view.warm.on) r.push({ text: view.warm.stopped ? 'warm stopped' : '≈warm' + (view.warm.pings ? ' ×' + view.warm.pings : ''), color: view.warm.stopped ? undefined : tone.accent, dim: view.warm.stopped !== undefined })
+    const r: Run[] = [{ text: '⧗ ' + (view.cache ? countdown(left, frame.lang) : '—'), color: view.cache && left > 0 && left <= 60_000 ? tone.warn : undefined, dim: !view.cache || left <= 0 }]
+    if (view.warm.on) r.push({ text: view.warm.stopped ? t(frame.lang, 'band.warmStopped') : t(frame.lang, 'band.warmText') + (view.warm.pings ? ' ×' + view.warm.pings : ''), color: view.warm.stopped ? undefined : tone.accent, dim: view.warm.stopped !== undefined })
     segs.push({ key: 'cache', runs: r })
   }
   if (view.limit && !view.hide.includes('limits')) {
-    const t = limitTone(view.limit.percent)
-    const r: Run[] = [{ text: limitName(view.limit.kind), dim: true }, { text: Math.round(view.limit.percent) + '%', color: t === 'ink' ? undefined : tone[t] }]
-    if (view.limit.save) r.push({ text: 'save', color: tone.accent })
+    const shade = limitTone(view.limit.percent)
+    const r: Run[] = [{ text: limitName(view.limit.kind, frame.lang), dim: true }, { text: Math.round(view.limit.percent) + '%', color: shade === 'ink' ? undefined : tone[shade] }]
+    if (view.limit.save) r.push({ text: t(frame.lang, 'band.save'), color: tone.accent })
     segs.push({ key: 'limit', runs: r })
   }
   if (!view.hide.includes('route')) {
@@ -361,10 +362,10 @@ function infoSegments(frame: Frame, view: DashboardView): Segment[] {
         { text: clip(route.model, 34), bold: true },
         { text: route.provider, color: providerColor(route.provider) },
       ]
-      if (route.effort) r.push({ text: route.effort, dim: true })
-      if (!route.ok) r.push(route.resent ? { text: route.status + ' resent', dim: true } : { text: route.status, color: tone.bad })
-      if (route.ok && route.cachePct !== undefined) r.push({ text: 'cache ' + route.cachePct + '%', color: tone[cacheTone(route.cachePct)] })
-      r.push({ text: route.seconds.toFixed(1) + 's', dim: true })
+      if (route.effort) r.push({ text: effortLabel(route.effort, frame.lang), dim: true })
+      if (!route.ok) r.push(route.resent ? { text: t(frame.lang, 'band.resent', { status: route.status }), dim: true } : { text: route.status, color: tone.bad })
+      if (route.ok && route.cachePct !== undefined) r.push({ text: t(frame.lang, 'band.cachePercent', { percent: route.cachePct }), color: tone[cacheTone(route.cachePct)] })
+      r.push({ text: seconds(route.seconds, frame.lang), dim: true })
       segs.push({ key: 'route', runs: r })
     } else if (view.notice) {
       segs.push({ key: 'route', runs: [{ text: view.notice, dim: true }] })
@@ -375,16 +376,16 @@ function infoSegments(frame: Frame, view: DashboardView): Segment[] {
 
 type Control = { key: string; label: string; hotkey: string; onPress: () => void; primary?: boolean }
 
-function controls(view: DashboardView, actions: BandActions): Control[] {
+function controls(frame: Frame, view: DashboardView, actions: BandActions): Control[] {
   const handoff = view.handoff !== 'off'
   return [
-    { key: 'auto', label: 'Auto ' + (view.auto ? '●' : '○'), hotkey: 'a', onPress: actions.toggleAuto },
-    { key: 'warm', label: 'Warm ' + (view.warm.on ? '●' : '○'), hotkey: 'w', onPress: actions.toggleWarm },
+    { key: 'auto', label: t(frame.lang, 'band.auto') + ' ' + (view.auto ? '●' : '○'), hotkey: 'a', onPress: actions.toggleAuto },
+    { key: 'warm', label: t(frame.lang, 'band.warm') + ' ' + (view.warm.on ? '●' : '○'), hotkey: 'w', onPress: actions.toggleWarm },
     handoff
-      ? { key: 'handoff', label: view.handoff === 'advised' ? 'Handoff ◆' : 'Handoff', hotkey: 'h', onPress: actions.handoff }
-      : { key: 'compact', label: 'Compact', hotkey: 'c', onPress: actions.compact },
-    { key: 'log', label: view.logOpen ? 'Close log' : 'Log', hotkey: 'l', onPress: actions.toggleLog },
-    { key: 'agents', label: 'Agents' + (view.agents.live ? ' ' + view.agents.live : ''), hotkey: 'g', onPress: actions.toggleAgents },
+      ? { key: 'handoff', label: view.handoff === 'advised' ? t(frame.lang, 'band.handoff') + ' ◆' : t(frame.lang, 'band.handoff'), hotkey: 'h', onPress: actions.handoff }
+      : { key: 'compact', label: t(frame.lang, 'band.compact'), hotkey: 'c', onPress: actions.compact },
+    { key: 'log', label: view.logOpen ? t(frame.lang, 'band.closeLogText') : t(frame.lang, 'band.log'), hotkey: 'l', onPress: actions.toggleLog },
+    { key: 'agents', label: t(frame.lang, 'band.agents') + (view.agents.live ? ' ' + view.agents.live : ''), hotkey: 'g', onPress: actions.toggleAgents },
     { key: 'settings', label: '⚙', hotkey: 's', onPress: actions.openSettings },
   ]
 }
@@ -425,8 +426,8 @@ function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   const { Box } = el
   const cols = Math.max(20, frame.columns)
   let segs = infoSegments(frame, view)
-  const ctrls = controls(view, actions)
-  const ctrlWidth = (c: Control) => c.hotkey.length + 2 + c.label.length
+  const ctrls = controls(frame, view, actions)
+  const ctrlWidth = (c: Control) => displayWidth(c.hotkey) + 2 + displayWidth(c.label)
   const layout = (s: Segment[]) => {
     // Wide: facts and controls share rows; otherwise controls get their own.
     const all: (Segment | Control)[] = [...s, ...ctrls]
@@ -444,8 +445,8 @@ function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   }
   const menu = view.effortMenu
     ? [
-        textButton(el, 'pick-auto', 'Auto ' + (view.auto ? '●' : '○'), actions.toggleAuto, '0'),
-        ...EFFORTS.map((effort: Effort, i) => textButton(el, 'pick-' + effort, RIPPLE_CHAR[i]! + ' ' + effort, () => actions.pickEffort(effort), String(i + 1))),
+        textButton(el, 'pick-auto', t(frame.lang, 'band.auto') + ' ' + (view.auto ? '●' : '○'), actions.toggleAuto, '0'),
+        ...EFFORTS.map((effort: Effort, i) => textButton(el, 'pick-' + effort, RIPPLE_CHAR[i]! + ' ' + effortName(effort, frame.lang).toLowerCase(), () => actions.pickEffort(effort), String(i + 1))),
       ]
     : null
   return (
@@ -483,7 +484,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
   const { level, mode } = view.effort
   const idx = effortIndex(level)
   const effortText =
-    mode === 'deciding' ? '◌ deciding…' : (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ?? '—') + (mode === 'auto' ? '' : mode === 'paused' ? ' (paused)' : mode === 'off' ? ' (auto off)' : ' (manual)')
+    mode === 'deciding' ? t(frame.lang, 'band.decidingText') : (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : '—') + (mode === 'auto' ? '' : mode === 'paused' ? t(frame.lang, 'band.footerPaused') : mode === 'off' ? t(frame.lang, 'band.footerOff') : t(frame.lang, 'band.footerManual'))
   const left = view.cache ? view.cache.expiresAt - frame.now : 0
   return (
     <Box flexDirection="row" columnGap={2} alignItems="center">
@@ -492,12 +493,12 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
       </Text>
       {view.context ? (
         <Text dimColor color={contextTone(view.context.percent, view.swampAt) === 'ink' ? undefined : tone[contextTone(view.context.percent, view.swampAt) as 'warn' | 'bad']}>
-          {'ctx ' + Math.round(view.context.percent) + '%'}
+          {t(frame.lang, 'band.footerContext', { percent: Math.round(view.context.percent) })}
         </Text>
       ) : null}
-      {view.cache && !view.hide.includes('timer') ? <Text dimColor>{'⧗ ' + countdown(left) + (view.warm.on ? ' ≈' : '')}</Text> : null}
-      {view.limit && !view.hide.includes('limits') ? <Text dimColor>{limitName(view.limit.kind) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
-      {textButton(el, 'auto', view.auto ? 'Auto ●' : 'Auto ○', actions.toggleAuto)}
+      {view.cache && !view.hide.includes('timer') ? <Text dimColor>{'⧗ ' + countdown(left, frame.lang) + (view.warm.on ? ' ≈' : '')}</Text> : null}
+      {view.limit && !view.hide.includes('limits') ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
+      {textButton(el, 'auto', t(frame.lang, 'band.auto') + (view.auto ? ' ●' : ' ○'), actions.toggleAuto)}
       {textButton(el, 'settings', '⚙', actions.openSettings)}
       {engine ?? null}
     </Box>

@@ -1,4 +1,6 @@
 import type { Effort, JudgeKind, Stats, Tier, Usage } from '../types'
+import { t } from './i18n.ts'
+import type { Lang } from './i18n.ts'
 
 export function emptyStats(): Stats {
   return { prompts: 0, requests: 0, input: 0, write: 0, read: 0, out: 0, byEffort: {},
@@ -38,20 +40,20 @@ export function addWarm(stats: Stats, usage: Usage): Stats {
   return { ...stats, warm: { pings: stats.warm.pings + 1, cost: stats.warm.cost + weighted(usage) } }
 }
 
-export function formatStats(stats: Stats): string {
+export function formatStats(stats: Stats, lang: Lang): string {
   const total = weighted({ input_tokens: stats.input, cache_creation_input_tokens: stats.write,
     cache_read_input_tokens: stats.read, output_tokens: stats.out })
   const judges = stats.judge.haiku + stats.judge.jev + stats.judge.model
   const efforts = (['low', 'medium', 'high', 'xhigh', 'max'] as Effort[]).filter(level => stats.byEffort[level]).map(level => {
     const bucket = stats.byEffort[level]!
-    return `${level} ${bucket.prompts} prompts / ${Math.round(bucket.cost)} weighted`
+    return t(lang, 'commands.statsEffort', { effort: t(lang, 'band.' + level).toLowerCase(), prompts: bucket.prompts, cost: Math.round(bucket.cost) })
   })
   return [
-    `Auto: ${stats.prompts} prompts, ${stats.requests} requests; ${Math.round(total)} weighted tokens`,
-    `Tokens: input ${stats.input}, write ${stats.write}, read ${stats.read}, output ${stats.out}`,
+    t(lang, 'commands.statsAuto', { prompts: stats.prompts, requests: stats.requests, total: Math.round(total) }),
+    t(lang, 'commands.statsTokens', { input: stats.input, write: stats.write, read: stats.read, output: stats.out }),
     ...efforts,
-    `Judges: haiku ${stats.judge.haiku}, jev ${stats.judge.jev}, model ${stats.judge.model}; ${stats.judge.tokens} tokens, ${stats.judge.ms} ms (${judges ? Math.round(stats.judge.ms / judges) : 0} ms avg)`,
-    `Workers: ${(['light', 'standard', 'deep', 'design'] as Tier[]).map(tier => `${tier} ${stats.workers[tier] ?? 0}`).join(', ')}`,
-    `Warm: ${stats.warm.pings} pings, ${Math.round(stats.warm.cost)} weighted tokens`,
+    t(lang, 'commands.statsJudges', { ...stats.judge, avg: judges ? Math.round(stats.judge.ms / judges) : 0 }),
+    t(lang, 'commands.statsWorkers', { workers: (['light', 'standard', 'deep', 'design'] as Tier[]).map(tier => `${t(lang, 'settings.' + tier).toLowerCase()} ${stats.workers[tier] ?? 0}`).join(', ') }),
+    t(lang, 'commands.statsWarm', { pings: stats.warm.pings, cost: Math.round(stats.warm.cost) }),
   ].join('\n')
 }

@@ -1,111 +1,127 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
-import { DEFAULTS } from '../../packages/mod/hooks/settings.ts'
-
-// The engine resolves extensionless TS imports; mirror that only within this Node test process.
+import { DEFAULTS, normalizeSettings } from '../../packages/mod/hooks/settings.ts'
+import type { ModelScore, WorkerCandidate, WorkerVerdict } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider,
-  chatgptUsable, resolveTarget, spawnModel, takesOver } = await import('../../packages/mod/hooks/workers.ts')
+const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
+  resolveWorker, resolvedRule, calibratedEffort, routerModelOptions, workerCandidates, zenJev, scoreModels, spawnModel, takesOver } = await import('../../packages/mod/hooks/workers.ts')
+const candidates: WorkerCandidate[] = [
+  { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
+  { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
+  { target: { agent: 'gpt-6-astra' }, model: 'gpt-6-astra', provider: 'chatgpt' },
+  { target: { agent: 'claude-sonnet-5-5' }, model: 'claude-sonnet-5-5', provider: 'zen' },
+]
+const scores: ModelScore[] = candidates.map((c, i) => ({ model: c.model, provider: c.provider, variants: [{ effort: ['max', 'high', 'medium', 'high'][i] as 'max' | 'high' | 'medium', intelligence: [39.46, 50.24, 49.6, 46.8][i]!, costPerTask: [0.2652, 0.3191, 1.541, 0.884][i]! }] }))
+const verdict: WorkerVerdict = { domain: 'backend', level: 'standard', effort: 'medium', why: 'implementation' }
+const auto = normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } })
+const pick = (s = DEFAULTS, v = verdict, data = scores, workers = candidates, usable = true) => resolveWorker(v, s, workers, data, usable)
 
-// Shape sampled by GET /api/status on 2026-10-10; account identities deliberately omitted.
-const liveShape = { chatgpt: { quota: { chatgpt: { rate_limits: { primary: { used_percent: 89 }, secondary: null } } },
-  auth: { chatgpt: 'accounts=2 usable=1 mode=auto' }, signedIn: { chatgpt: true }, accounts: { chatgpt: [
-    { id: 'ready-account', planType: 'prolite', state: 'ready', paused: false, needsReauth: false,
-      quota: { type: 'codex.rate_limits', plan_type: 'prolite', rate_limits: {
-        primary: { used_percent: 89, window_minutes: 10080, reset_after_seconds: 320918, reset_at: 1791948526 }, secondary: null },
-      credits: { has_credits: false, unlimited: false, balance: '0' } } },
-    { id: 'paused-account', planType: 'plus', state: 'paused', paused: true, needsReauth: false, quota: null },
-  ] } } }
-const status = (accounts: unknown[]) => ({ chatgpt: { accounts: { chatgpt: accounts } } })
-const ready = { state: 'ready', paused: false, needsReauth: false }
-
-test('worker judge describes stable work tiers and only reads 3000 prompt characters', () => {
-  const text = workerJudgeInput({ description: 'Review', prompt: 'x'.repeat(3000) + 'discard' })
-  assert.ok(text.includes('Review') && text.includes('x'.repeat(3000)) && !text.includes('discard'))
-  for (const tier of ['light', 'standard', 'deep', 'design']) assert.ok(WORKER_JUDGE_SYSTEM.includes(tier))
+test('judge separates domain and level, rejects mixed-tier legacy verdicts', () => {
+  assert.match(WORKER_JUDGE_SYSTEM, /independent/)
+  assert.equal(workerJudgeInput({ description: 'Review', prompt: 'x'.repeat(3000) + 'discard' }).includes('discard'), false)
+  assert.deepEqual(parseWorkerVerdict('```json\n{"domain":"design","level":"deep","effort":"high","sure":0.9,"why":"taste"}\n```'), { domain: 'design', level: 'deep', effort: 'high', sure: 0.9, why: 'taste' })
+  for (const text of ['', '{}', '{"tier":"design","effort":"high"}', '{"domain":"bad","level":"light","effort":"low"}']) assert.equal(parseWorkerVerdict(text), undefined)
 })
-
-test('worker verdict requires both valid fields and bounds confidence/reason', () => {
-  assert.deepEqual(parseWorkerVerdict('```json\n{"tier":"deep","effort":"high","sure":0.9,"why":"security"}\n```'), { tier: 'deep', effort: 'high', sure: 0.9, why: 'security' })
-  assert.deepEqual(parseWorkerVerdict('{"tier":"light","effort":"low","sure":2}'), { tier: 'light', effort: 'low', why: '' })
-  assert.equal(parseWorkerVerdict(JSON.stringify({ tier: 'design', effort: 'max', why: 'x'.repeat(100) }))?.why.length, 60)
-  for (const text of ['', '{}', '{"tier":"bad","effort":"high"}', '{"tier":"light","effort":"bad"}', '{"effort":"high"}']) assert.equal(parseWorkerVerdict(text), undefined)
+test('markers and frontmatter provider retain existing parsing semantics', () => {
+  assert.deepEqual(readMarker('context\n[[ ripple : GPT-6.1-SOL @ HIGH ]]'), { name: 'gpt-6.1-sol', level: 'high' })
+  assert.equal(agentProvider('---\ndescription: Executor via chatgpt.\n---\n'), 'chatgpt')
+  assert.equal(agentProvider('description: via chatgpt.'), undefined)
 })
-
-test('marker regex matches ripple/gpt anywhere, preserves optional level and lowercases', () => {
-  assert.deepEqual(readMarker('context\n[[ ripple : GPT-6.1-SOL @ HIGH ]]\nwork'), { name: 'gpt-6.1-sol', level: 'high' })
-  assert.deepEqual(readMarker('[[gpt: astra]]'), { name: 'astra' })
-  assert.deepEqual(readMarker('[[ripple: a@max]] [[ripple: b@low]]'), { name: 'a', level: 'max' })
-  for (const text of ['', '[[Ripple: astra@high]]', '[[ripple: bad_name@high]]', '[[ripple: x@3]]']) assert.equal(readMarker(text), null)
-})
-
-test('provider is read only from a frontmatter description', () => {
-  assert.equal(agentProvider('---\nname: sol\ndescription: Execute via chatgpt.\nmodel: gpt-6.1-sol\n---\n'), 'chatgpt')
-  assert.equal(agentProvider('---\r\ndescription: "gpt-6.1-sol via CHATGPT."\r\n---\r\n'), 'chatgpt')
-  assert.equal(agentProvider('---\ndescription: deepseek via deepseek.\n---\n'), 'deepseek')
-  assert.equal(agentProvider('description: x via chatgpt.'), undefined)
-  assert.equal(agentProvider('---\nname: x\n---\ndescription: via chatgpt.'), undefined)
-})
-
-test('realistic status uses account readiness and quota, not aggregate sign-in', () => {
-  assert.equal(chatgptUsable(liveShape), true)
+test('account readiness and all windows decide availability; unknown is not exhaustion', () => {
+  const status = (accounts: unknown[]) => ({ chatgpt: { accounts: { chatgpt: accounts } } })
+  const ready = { state: 'ready', paused: false, needsReauth: false }
+  assert.equal(chatgptUsable(status([ready])), true)
   assert.equal(chatgptUsable(status([])), false)
-  assert.equal(chatgptUsable(status([{ ...ready, paused: true }])), false)
-  assert.equal(chatgptUsable(status([{ ...ready, needsReauth: true }])), false)
-  assert.equal(chatgptUsable(status([{ ...ready, state: 'expired' }])), false)
-  assert.equal(chatgptUsable(status([{ ...ready, quota: { rate_limits: { primary: { used_percent: 100 }, secondary: null } } }])), false)
-  assert.equal(chatgptUsable(status([{ ...ready, quota: { rate_limits: { primary: { used_percent: 0 }, secondary: { used_percent: 100 } } } }])), false)
-  assert.equal(chatgptUsable(status([{ ...ready, quota: { rate_limits: { primary: { used_percent: 99.99 }, secondary: null } } }])), true)
-  assert.equal(chatgptUsable(status([{ ...ready, paused: true }, ready])), true)
-  for (const missing of [undefined, null, {}, { chatgpt: {} }, { chatgpt: { accounts: {} } }]) assert.equal(chatgptUsable(missing), true)
-  assert.equal(chatgptUsable(status([{ ...ready, quota: null }])), true)
+  for (const account of [{ ...ready, paused: true }, { ...ready, needsReauth: true }, { ...ready, quota: { rate_limits: { secondary: { used_percent: 100 } } } }]) assert.equal(chatgptUsable(status([account])), false)
+  assert.equal(chatgptUsable({}), true)
+})
+test('router catalogue includes every declared model, including Anthropic and nongenerated Jev', () => {
+  const config = { providers: { anthropic: { models: [{ id: 'claude-sonnet-5-5' }] }, 'opencode-zen': { models: [{ id: 'jev-1.13' }, { id: 'un-generated' }], headers: { authorization: 'Bearer exact' } } } }
+  assert.deepEqual(routerModelOptions(config).map(m => m.label), ['claude-sonnet-5-5 · anthropic', 'jev-1.13 · opencode-zen', 'un-generated · opencode-zen'])
+  assert.deepEqual(zenJev(config), { authorization: 'Bearer exact', model: 'jev-1.13' })
+  assert.deepEqual(zenJev({}), { model: 'jev-latest' })
+  const files = new Map([['sol', '---\ndescription: Execute via chatgpt.\nmodel: gpt-6.1-sol@high\n---\n'], ['missing', '---\nmodel: missing\n---\n']])
+  assert.deepEqual(workerCandidates(files, [{ value: 'gpt-6.1-sol', provider: 'chatgpt', label: 'Sol' }]), [{ target: { agent: 'sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' }])
+})
+test('inherit resolves general, design defaults are level-dependent and pinned targets climb missing levels', () => {
+  assert.deepEqual(resolvedRule('backend', DEFAULTS), DEFAULTS.rules.general)
+  assert.equal(pick().target?.agent, 'gpt-6-1-sol')
+  assert.equal(pick(DEFAULTS, { ...verdict, domain: 'design', level: 'deep' }).target?.model, 'opus')
+  assert.equal(pick(DEFAULTS, { ...verdict, level: 'light' }, [], candidates.slice(1)).target?.agent, 'gpt-6-1-sol')
+})
+test('quota/off never chooses the blocked provider; preference wins quota fallback', () => {
+  assert.equal(pick(DEFAULTS, verdict, [], candidates, false).target?.model, 'sonnet')
+  const s = normalizeSettings({ providers: { chatgpt: false }, preference: ['deepseek'] })
+  assert.equal(pick(s).target?.agent, 'deepseek-v4-1-flash')
+  const none = normalizeSettings({ providers: { chatgpt: false, deepseek: false, zen: false, anthropic: false } })
+  assert.equal(pick(none).target, undefined)
+})
+test('calibration offsets are steps; floor wins inverted ceiling', () => {
+  assert.equal(calibratedEffort('medium', { effortOffset: 2 }), 'xhigh')
+  assert.equal(calibratedEffort('low', { effortOffset: -2, floor: 'high', ceiling: 'medium' }), 'high')
+  const s = normalizeSettings({ rules: { backend: { mode: 'pin', targets: { standard: { agent: 'gpt-6-1-sol' } }, effortOffset: 1, ceiling: 'high' } } })
+  assert.equal(pick(s).effort, 'high')
+})
+test('auto chooses Sol high over expensive Astra medium and deep floor 50 still selects Sol', () => {
+  const result = pick(auto)
+  assert.equal(result.target?.agent, 'gpt-6-1-sol'); assert.equal(result.effort, 'high')
+  assert.deepEqual(result.aa, { intelligence: 50.24, costPerTask: 0.3191 })
+  assert.equal(result.runnerUp?.target.agent, 'claude-sonnet-5-5')
+  assert.equal(pick(auto, { ...verdict, level: 'deep' }).target?.agent, 'gpt-6-1-sol')
+})
+test('auto preferences win only within both index and cost tie boundaries', () => {
+  const data = scores.map(s => ({ ...s, variants: s.model === 'gpt-6-astra' ? [{ effort: 'medium' as const, intelligence: 49.6, costPerTask: 0.35 }] : s.variants }))
+  const s = normalizeSettings({ ...auto, preference: ['gpt-6-astra'] })
+  assert.equal(pick(s, verdict, data).target?.agent, 'gpt-6-astra')
+  assert.equal(pick(s).target?.agent, 'gpt-6-1-sol')
+  assert.equal(pick({ ...s, autoTieBand: 0.1 }, verdict, data).target?.agent, 'gpt-6-1-sol')
+  assert.equal(pick(s, { ...verdict, level: 'deep' }, data).target?.agent, 'gpt-6-1-sol')
+})
+test('auto allow/provider/quota filters, strongest fallback, and no-data general pin fallback', () => {
+  const s = normalizeSettings({ rules: { backend: { mode: 'auto', allow: ['deepseek'] } } })
+  assert.equal(pick(s).target?.agent, 'deepseek-v4-1-flash')
+  assert.match(pick(s).fallbackReason ?? '', /strongest/)
+  assert.equal(pick({ ...auto, providers: { chatgpt: false } }).target?.agent, 'claude-sonnet-5-5')
+  assert.equal(pick(auto, verdict, scores, candidates, false).target?.agent, 'claude-sonnet-5-5')
+  assert.equal(pick(auto, verdict, []).target?.agent, 'gpt-6-1-sol')
+  assert.match(pick(auto, verdict, []).fallbackReason ?? '', /No usable AA data/)
+  assert.equal(resolveWorker(verdict, auto, [], [], true, 'en', candidates).target?.agent, 'gpt-6-1-sol')
+})
+test('auto calibration filters measured efforts rather than falsifying the score of a rewritten effort', () => {
+  const s = normalizeSettings({ rules: { general: { mode: 'auto', allow: [], floor: 'high', ceiling: 'high' } } })
+  assert.equal(pick(s).effort, 'high')
+  assert.equal(pick(s).runnerUp?.effort, 'high')
+  assert.deepEqual(scoreModels({ models: [{ model: 'x', provider: 'y', variants: [{ effort: 'high', intelligence: NaN, costPerTask: 1 }] }] })[0]?.variants, [])
+})
+test('auto offsets constrain measured efforts and no-data fallback preserves rule calibration/allow', () => {
+  const up = normalizeSettings({ rules: { general: { mode: 'auto', allow: [], effortOffset: 1 } } })
+  assert.equal(pick(up).effort, 'high')
+  const down = normalizeSettings({ rules: { general: { mode: 'auto', allow: [], effortOffset: -1 } } })
+  assert.equal(pick(down).effort, 'low') // no low measurements: general pin, calibrated for this rule
+  const allow = normalizeSettings({ rules: { backend: { mode: 'auto', allow: ['deepseek'], floor: 'max' } } })
+  const noData = pick(allow, verdict, [])
+  assert.equal(noData.target?.agent, 'deepseek-v4-1-flash')
+  assert.equal(noData.effort, 'max')
+  const pinnedModel = normalizeSettings({ providers: { chatgpt: false }, rules: { backend: { mode: 'pin', targets: { standard: { agent: 'general-purpose', model: 'gpt-6.1-sol' } } } } })
+  assert.equal(pick(pinnedModel).target?.model, 'sonnet')
 })
 
-const provider = (agent: string) => agent.startsWith('gpt-') ? 'chatgpt' : undefined
-const all = ['deepseek-v4-1-flash', 'gpt-6-1-sol', 'gpt-6-astra', 'general-purpose']
-
-test('target prefers its tier, climbs available tiers, then uses configured fallback', () => {
-  assert.deepEqual(resolveTarget('light', DEFAULTS, all, provider, { chatgpt: true }), { target: DEFAULTS.tiers.light })
-  assert.deepEqual(resolveTarget('light', DEFAULTS, all.slice(1), provider, { chatgpt: true }), { target: DEFAULTS.tiers.standard, fallbackReason: 'deepseek-v4-1-flash is not installed' })
-  assert.equal(resolveTarget('light', DEFAULTS, ['gpt-6-astra', 'general-purpose'], provider, { chatgpt: true }).target.agent, 'gpt-6-astra')
-  const unavailable = resolveTarget('standard', DEFAULTS, all, provider, { chatgpt: false })
-  assert.deepEqual(unavailable.target, DEFAULTS.fallback)
-  assert.ok(unavailable.fallbackReason?.includes('ChatGPT'))
-  const custom = { ...DEFAULTS, fallback: { agent: 'general-purpose', model: 'opus' } }
-  assert.deepEqual(resolveTarget('deep', custom, ['general-purpose'], provider, { chatgpt: true }).target, custom.fallback)
-  assert.deepEqual(resolveTarget('design', DEFAULTS, all, provider, { chatgpt: false }), { target: DEFAULTS.tiers.design })
-  assert.equal(resolveTarget('design', DEFAULTS, [], provider, { chatgpt: true }).target.model, 'sonnet')
-  assert.equal(resolveTarget('deep', DEFAULTS, [all[0]!], provider, { chatgpt: true }).target.agent, 'general-purpose')
+test('worker strings come from the translated tables and interpolate', async () => {
+  const { t, STRINGS } = await import('../../packages/mod/hooks/i18n.ts')
+  assert.equal(t('en', 'workers.autoLine', { floor: 50 }), 'cheapest above index 50 · Data: Artificial Analysis (artificialanalysis.ai)')
+  assert.equal(t('ko', 'workers.autoLine', { floor: 50 }), STRINGS.ko['workers.autoLine'].replace('{floor}', '50'))
+  assert.notEqual(t('ko', 'workers.autoLine', { floor: 50 }), t('en', 'workers.autoLine', { floor: 50 }))
 })
 
-test('quota exhaustion uses fallback even when a non-ChatGPT upper tier exists', () => {
-  const custom = { ...DEFAULTS, tiers: { ...DEFAULTS.tiers, deep: { agent: 'deepseek-v4-1-flash' } } }
-  const result = resolveTarget('standard', custom, all, provider, { chatgpt: false })
-  assert.deepEqual(result.target, custom.fallback)
-  assert.match(result.fallbackReason ?? '', /ChatGPT/)
-})
-
-test('spawn model uses generated file base and suffix, built-ins keep their explicit model', () => {
-  assert.equal(spawnModel(DEFAULTS.tiers.standard, 'max', 'gpt-6.1-sol@medium'), 'gpt-6.1-sol@max')
-  assert.equal(spawnModel(DEFAULTS.tiers.light, 'low', 'deepseek-v4.1-flash'), 'deepseek-v4.1-flash@low')
-  assert.equal(spawnModel(DEFAULTS.tiers.design, 'high'), 'sonnet')
-  assert.equal(spawnModel(DEFAULTS.tiers.design, 'high', 'sonnet'), 'sonnet')
-  assert.equal(spawnModel({ agent: 'Explore' }, 'high'), undefined)
-})
-
-test('takeover honours auto modes and never forks or intercepts named/modelled built-ins', () => {
-  const spawn = { subagentType: 'ripple:auto', fork: false }
-  assert.equal(takesOver(spawn, DEFAULTS), true)
-  assert.equal(takesOver({ ...spawn, subagentType: 'auto' }, DEFAULTS), true)
-  assert.equal(takesOver({ ...spawn, fork: true }, DEFAULTS), false)
-  assert.equal(takesOver(spawn, { ...DEFAULTS, agentAuto: 'off' }), false)
-  const general = { subagentType: 'general-purpose', fork: false }
-  assert.equal(takesOver(general, DEFAULTS), false)
-  assert.equal(takesOver(general, { ...DEFAULTS, agentAuto: 'all' }), true)
-  assert.equal(takesOver({ ...general, model: 'sonnet' }, { ...DEFAULTS, agentAuto: 'all' }), false)
-  assert.equal(takesOver({ ...general, subagentType: 'gpt-6-astra' }, { ...DEFAULTS, agentAuto: 'all' }), false)
+test('spawn suffix and takeover retain named-worker and fork boundaries', () => {
+  assert.equal(spawnModel({ agent: 'sol' }, 'max', 'gpt-6.1-sol@medium'), 'gpt-6.1-sol@max')
+  assert.equal(spawnModel({ agent: 'general-purpose', model: 'sonnet' }, 'high'), 'sonnet')
+  assert.equal(takesOver({ subagentType: 'ripple:auto', fork: false }, DEFAULTS), true)
+  assert.equal(takesOver({ subagentType: 'ripple:auto', fork: true }, DEFAULTS), false)
+  assert.equal(takesOver({ subagentType: 'general-purpose', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), true)
+  assert.equal(takesOver({ subagentType: 'general-purpose', model: 'sonnet', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), false)
 })
