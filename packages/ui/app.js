@@ -200,6 +200,8 @@ function showView(name) {
   if (name === "providers" && !providersLoaded) void loadProviders();
   if (name === "clients" && !clientsLoaded) void loadClients();
   if (name === "logs") queueMicrotask(() => void refreshRequests());
+  // Read again on every visit: the bar's ⚙ panel saves the same settings.
+  if (name === "mod") queueMicrotask(() => void loadMod());
 }
 for (const button of $all(".nav-btn")) button.addEventListener("click", () => showView(button.dataset.view));
 window.addEventListener("hashchange", () => showView((location.hash || "#health").slice(1)));
@@ -253,6 +255,7 @@ async function refreshHealth() {
   $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) })]));
   renderHealthProviders();
   if (clientsLoaded) renderClients();
+  if (modState.settings) renderModNotice();
   const details = $("#health-details");
   details.replaceChildren(
     versionRow(),
@@ -2362,6 +2365,622 @@ function openProviderForm(options) {
   });
   form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), saveButton]));
   showModal(form, () => { if (isChatgpt) formActive = false; });
+}
+
+// ---- ClaudeRipple mod ---------------------------------------------------------------
+//
+// The mod's settings live in the router (GET/PUT /api/mod-settings); the ⚙ panel in the bar edits
+// the same object. As in System Settings a change applies itself: it is saved after a short pause
+// with the revision it was made on. A 409 means another surface saved first — its settings are
+// shown and the change made here is dropped, rather than quietly overwriting theirs.
+
+const MOD_DOMAINS = ["general", "design", "frontend", "backend", "infra", "data", "test", "docs", "research"];
+const MOD_LEVELS = ["light", "standard", "deep"];
+const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const MOD_PARTS = ["timer", "reason", "route", "limits"];
+// Named in themselves, as the mod's own Look card lists them.
+const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"]];
+// Claude Code's own agent with a model: what the mod offers besides the generated workers.
+const MOD_CLAUDE_MODELS = ["sonnet", "opus", "haiku"];
+/** The mod's defaults (packages/mod/hooks/settings.ts), for a router that has stored nothing yet. */
+const MOD_DEFAULTS = {
+  effortAuto: true, judge: "haiku", judgeModel: "deepseek-v4.1-flash", jevSource: "typesafe",
+  bias: 0, floor: "low", ceiling: "max", agentAuto: "auto",
+  rules: {
+    general: { mode: "pin", targets: { light: { agent: "deepseek-v4-1-flash" }, standard: { agent: "gpt-6-1-sol" }, deep: { agent: "gpt-6-astra" } } },
+    design: { mode: "pin", targets: { light: { agent: "general-purpose", model: "sonnet" }, standard: { agent: "general-purpose", model: "sonnet" }, deep: { agent: "general-purpose", model: "opus" } } },
+    frontend: { mode: "inherit" }, backend: { mode: "inherit" }, infra: { mode: "inherit" }, data: { mode: "inherit" },
+    test: { mode: "inherit" }, docs: { mode: "inherit" }, research: { mode: "inherit" },
+  },
+  providers: {}, preference: [], autoFloors: { light: 30, standard: 45, deep: 50 }, autoTieBand: 2,
+  fallback: { agent: "general-purpose", model: "sonnet" },
+  keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
+  compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
+  swampAt: 50, layout: "dashboard", appearance: "auto", language: "auto", hide: ["reason"], setupDone: false,
+};
+
+let modState = { settings: null, revision: 0, options: null };
+let modSaveTimer = null;
+let modSaving = false;
+let modSaveAgain = false;
+let modAaLevel = "standard";
+let modSheet = null;
+
+/**
+ * The router hands back the mod's full normalized settings; this only fills what an older router
+ * (or an empty store) leaves out, so the page never draws a control over `undefined`. Fields this
+ * page does not know are kept and sent back as they came.
+ */
+function modNormalize(raw) {
+  const value = raw && typeof raw === "object" && !Array.isArray(raw) ? clone(raw) : {};
+  return {
+    ...clone(MOD_DEFAULTS),
+    ...value,
+    rules: { ...clone(MOD_DEFAULTS.rules), ...(value.rules || {}) },
+    autoFloors: { ...MOD_DEFAULTS.autoFloors, ...(value.autoFloors || {}) },
+    providers: { ...(value.providers || {}) },
+    preference: Array.isArray(value.preference) ? value.preference : [],
+    hide: Array.isArray(value.hide) ? value.hide : clone(MOD_DEFAULTS.hide),
+  };
+}
+
+function modCap(text) { return text ? text.charAt(0).toLocaleUpperCase() + text.slice(1) : text; }
+function modEffortName(effort) { return t(`mod.effort.${effort}`); }
+function modSigned(n) { return n > 0 ? `+${n}` : n < 0 ? `−${-n}` : "0"; }
+function modTargetValue(target) { return target && target.agent ? (target.model ? `${target.agent}+${target.model}` : target.agent) : ""; }
+function modTargetOf(value) {
+  const plus = value.indexOf("+");
+  return plus < 0 ? { agent: value } : { agent: value.slice(0, plus), model: value.slice(plus + 1) };
+}
+/** A target as a person reads it: the model for Claude's own agent, else the worker's name. */
+function modTargetLabel(target) {
+  if (!target || !target.agent) return "—";
+  if (target.model) return `Claude ${modCap(target.model)}`;
+  const agent = modAgents().find((entry) => entry.name === target.agent);
+  return agent ? agent.model : target.agent;
+}
+function modAgents() { return (modState.options && modState.options.agents) || []; }
+/** The router's AA record for a worker's exact model and provider. */
+function modScoreOf(agent) {
+  const scores = modState.options && modState.options.scores;
+  return ((scores && scores.models) || []).find((entry) => entry.model === agent.model && entry.provider === agent.provider && entry.matched && entry.variants.length);
+}
+/**
+ * A worker's numbers in one line: the variant Auto would reach for at standard difficulty (the
+ * cheapest at or above that floor), or the strongest one when none reaches it.
+ */
+function modAaLine(agent) {
+  const score = modScoreOf(agent);
+  const measured = score ? score.variants.filter((variant) => typeof variant.intelligence === "number") : [];
+  if (!measured.length) return t("mod.aaNone");
+  const floor = modState.settings.autoFloors.standard;
+  const priced = measured.filter((variant) => variant.intelligence >= floor && typeof variant.costPerTask === "number").sort((a, b) => a.costPerTask - b.costPerTask);
+  const variant = priced[0] || [...measured].sort((a, b) => b.intelligence - a.intelligence)[0];
+  return t("mod.aaLine", {
+    index: variant.intelligence.toFixed(1),
+    effort: (variant.effort ? modEffortName(variant.effort) : t("mod.aaDefault")).toLocaleLowerCase(),
+    cost: modMoney(variant.costPerTask),
+  });
+}
+function modMoney(cost) { return typeof cost !== "number" ? "—" : cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`; }
+/** Whether a worker is among an Auto rule's candidates; an empty allow-list means every worker. */
+function modAllowed(rule, name) {
+  const names = modAgents().map((agent) => agent.name);
+  const allow = (rule.allow || []).filter((entry) => names.includes(entry));
+  return allow.length === 0 || allow.includes(name);
+}
+function modToggleAllowed(rule, name, on) {
+  const names = modAgents().map((agent) => agent.name);
+  const kept = new Set(names.filter((entry) => modAllowed(rule, entry)));
+  if (on) kept.add(name); else kept.delete(name);
+  return { ...rule, allow: kept.size === names.length ? [] : names.filter((entry) => kept.has(entry)) };
+}
+/** One switch per worker: what an Auto rule may choose from. The last one on cannot be turned off. */
+function modCandidateRows(rule, keyPrefix, onChange) {
+  const agents = modAgents();
+  const onCount = agents.filter((agent) => modAllowed(rule, agent.name)).length;
+  return agents.map((agent) => {
+    const on = modAllowed(rule, agent.name);
+    const control = modSwitch(`${keyPrefix}:${agent.name}`, on, `${agent.model} · ${agent.provider}`, (value) => onChange(modToggleAllowed(rule, agent.name, value)));
+    if (on && onCount === 1) control.querySelector("input").disabled = true;
+    const info = modProviderInfo(agent.provider);
+    return cell(
+      agent.model,
+      control,
+      [
+        el("span", { class: "cell-sub" }, [agent.provider, info && !info.usable ? el("span", { class: "badge warn candidate-state", text: t("mod.notUsable") }) : null]),
+        el("span", { class: "cell-sub aa-line", text: modAaLine(agent) }),
+      ],
+      "candidate-row",
+    );
+  });
+}
+function modProviderInfo(name) { return ((modState.options && modState.options.providers) || []).find((provider) => provider.name === name); }
+function modModels() {
+  const seen = new Set();
+  return ((modState.options && modState.options.models) || []).filter((model) => !model.judgeOnly && !seen.has(model.model) && seen.add(model.model));
+}
+
+/** Rebuild a region in place, keeping keyboard focus on the control that had it. */
+function modRedraw(root, nodes) {
+  const active = document.activeElement;
+  const key = active && root.contains(active) ? active.dataset.key : null;
+  root.replaceChildren(...nodes.filter(Boolean));
+  if (key) {
+    const again = root.querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (again) again.focus();
+  }
+}
+function modSwitch(key, checked, label, onChange) {
+  const input = el("input", { type: "checkbox", role: "switch", "data-key": key, "aria-label": label, checked });
+  input.addEventListener("change", () => onChange(input.checked));
+  return el("span", { class: "switch" }, [input, el("span")]);
+}
+function modSegmented(key, choices, value, label, onPick) {
+  return el("div", { class: "segmented", role: "radiogroup", "aria-label": label }, choices.map((choice) => {
+    const on = String(choice.value) === String(value);
+    const button = el("button", { type: "button", class: on ? "active" : "", role: "radio", "aria-checked": String(on), "data-key": `${key}:${choice.value}`, text: choice.label });
+    button.addEventListener("click", () => { if (!on) onPick(choice.value); });
+    return button;
+  }));
+}
+/** A pop-up menu. Items are `{value, label}` or `{group, items}`; a saved value no longer offered stays visible. */
+function modSelect(key, items, value, label, onChange, cls) {
+  const select = el("select", { "data-key": key, "aria-label": label, class: cls });
+  const known = new Set();
+  const add = (parent, item) => { known.add(String(item.value)); parent.appendChild(el("option", { value: item.value, text: item.label })); };
+  for (const item of items) {
+    if (!item.group) { add(select, item); continue; }
+    if (!item.items.length) continue;
+    const group = el("optgroup", { label: item.group });
+    for (const entry of item.items) add(group, entry);
+    select.appendChild(group);
+  }
+  if (!known.has(String(value))) select.appendChild(el("option", { value, text: `${value}${t("mod.unavailable")}` }));
+  select.value = String(value);
+  select.addEventListener("change", () => onChange(select.value));
+  return select;
+}
+function modNumber(key, value, range, label, onChange) {
+  const input = el("input", { type: "number", class: "num-field", min: String(range.min), max: String(range.max), step: String(range.step), value: String(value), inputmode: "decimal", "data-key": key, "aria-label": label });
+  input.addEventListener("change", () => {
+    const n = Number(input.value);
+    if (!input.value.trim() || !Number.isFinite(n)) { input.value = String(value); return; }
+    onChange(Math.min(range.max, Math.max(range.min, n)));
+  });
+  return input;
+}
+function modSection(title, rows, footers, action) {
+  return el("section", { class: "section" }, [
+    title || action ? el("div", { class: "section-head" }, [title ? el("h3", { class: "section-title", text: title }) : el("span"), action || null]) : null,
+    el("div", { class: "group" }, rows.filter(Boolean)),
+    ...(footers || []).filter(Boolean).map((footer) => typeof footer === "string" ? el("p", { class: "group-footer", text: footer }) : footer),
+  ]);
+}
+function modCard(id, title, blurb, sections) {
+  return el("section", { class: "mod-card", "aria-labelledby": `mod-card-${id}` }, [
+    el("div", { class: "mod-card-head" }, [el("h2", { id: `mod-card-${id}`, text: title }), blurb ? el("p", { class: "hint", text: blurb }) : null]),
+    ...sections.filter(Boolean),
+  ]);
+}
+// ---- Saving
+
+function modStatus(text, isError) {
+  const box = $("#mod-status");
+  box.textContent = text;
+  box.classList.toggle("bad-text", Boolean(isError));
+}
+function modPatch(change) {
+  modState.settings = { ...modState.settings, ...change };
+  modRefresh();
+  clearTimeout(modSaveTimer);
+  modStatus(t("slots.saving"));
+  modSaveTimer = setTimeout(() => { modSaveTimer = null; void saveMod(); }, 450);
+}
+function modSetRule(domain, rule) { modPatch({ rules: { ...modState.settings.rules, [domain]: rule } }); }
+async function saveMod() {
+  if (modSaving) { modSaveAgain = true; return; }
+  modSaving = true;
+  try {
+    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings: modState.settings, revision: modState.revision }) });
+    modState.revision = Number(out.revision) || modState.revision + 1;
+    // The router's copy is the normalized one; take it unless a newer change is already waiting.
+    if (out.settings && !modSaveTimer && !modSaveAgain) { modState.settings = modNormalize(out.settings); modRefresh(); }
+    modStatus(t("mod.saved"));
+  } catch (error) {
+    if (error.status === 409 && error.body && "settings" in error.body) {
+      clearTimeout(modSaveTimer);
+      modSaveTimer = null;
+      modSaveAgain = false;
+      modState.settings = modNormalize(error.body.settings);
+      modState.revision = Number(error.body.revision) || 0;
+      modRefresh();
+      modStatus(t("mod.conflict"), true);
+      toast(t("mod.conflict"), true);
+    } else {
+      modStatus(`${t("common.saveFailed")} ${error.message}`, true);
+    }
+  } finally {
+    modSaving = false;
+    if (modSaveAgain) { modSaveAgain = false; void saveMod(); }
+  }
+}
+async function loadMod() {
+  // A change still on its way would be overwritten by what the router holds now.
+  if (modSaveTimer || modSaving) return;
+  const [settingsResult, optionsResult] = await Promise.allSettled([api("/api/mod-settings"), api("/api/mod-options")]);
+  if (settingsResult.status === "rejected") {
+    if (!modState.settings) {
+      $("#mod-content").replaceChildren(modSection(null, [el("div", { class: "cell-note bad-text", text: `${t("common.loadFailed")} ${settingsResult.reason.message}` })]));
+      return;
+    }
+  } else {
+    modState.settings = modNormalize(settingsResult.value.settings);
+    modState.revision = Number(settingsResult.value.revision) || 0;
+  }
+  modState.options = optionsResult.status === "fulfilled" ? optionsResult.value : null;
+  modRefresh();
+}
+function modRefresh() {
+  if (!modState.settings) return;
+  renderModNotice();
+  modRedraw($("#mod-content"), [modEffortCard(), modWorkersCard(), modJudgeCard(), modCacheCard(), modHandoffCard(), modLookCard()]);
+  if (modSheet) modSheet.draw();
+}
+/** Settings for a mod that is switched off do nothing until it is on; the switch lives in Clients. */
+function renderModNotice() {
+  const box = $("#mod-notice");
+  const off = Boolean(status) && !status.statusMod;
+  if (box.dataset.state === String(off)) return;
+  box.dataset.state = String(off);
+  box.hidden = !off;
+  box.replaceChildren(...(off ? [el("div", { class: "group" }, [cell(
+    el("span", { class: "cell-label", text: t("mod.offNotice", { clients: t("nav.clients") }) }),
+    el("button", { class: "btn secondary compact", type: "button", text: t("nav.clients"), onclick: () => showView("clients") }),
+  )])] : []));
+}
+
+// ---- Cards
+
+function modEffortCard() {
+  const s = modState.settings;
+  const efforts = MOD_EFFORTS.map((effort) => ({ value: effort, label: modEffortName(effort) }));
+  const range = el("input", { type: "range", class: "lean-range", min: "-2", max: "2", step: "1", value: String(s.bias), "data-key": "bias", "aria-label": t("mod.lean"), "aria-valuetext": modSigned(s.bias) });
+  range.addEventListener("change", () => modPatch({ bias: Number(range.value) }));
+  const lean = el("div", { class: "lean" }, [
+    el("span", { class: "lean-end", text: t("mod.cheaper") }),
+    el("div", { class: "lean-track" }, [range, el("div", { class: "lean-ticks", "aria-hidden": "true" }, [-2, -1, 0, 1, 2].map(() => el("span")))]),
+    el("span", { class: "lean-end", text: t("mod.smarter") }),
+  ]);
+  const inverted = MOD_EFFORTS.indexOf(s.ceiling) < MOD_EFFORTS.indexOf(s.floor);
+  return modCard("effort", t("mod.effort"), t("mod.effortBlurb"), [modSection(null, [
+    cell(t("mod.auto"), modSwitch("effort-auto", s.effortAuto, t("mod.auto"), (on) => modPatch({ effortAuto: on })), modCap(t("mod.autoHint"))),
+    cell(t("mod.lean"), lean, modCap(t("mod.leanHint")), "wide"),
+    cell(t("mod.floor"), modSelect("floor", efforts, s.floor, t("mod.floor"), (floor) => modPatch({ floor }), "narrow")),
+    cell(t("mod.ceiling"), modSelect("ceiling", efforts, s.ceiling, t("mod.ceiling"), (ceiling) => modPatch({ ceiling }), "narrow"), inverted ? el("span", { class: "cell-sub warn-text", text: modCap(t("mod.floorWins")) }) : null),
+  ])]);
+}
+
+/** Generated workers, then Claude Code's own agent with each Claude model. */
+function modTargetItems(withEmpty) {
+  // A worker reads as its model and the provider it comes through: one model can come from two.
+  const agents = modAgents().map((agent) => ({ value: agent.name, label: `${agent.model} · ${agent.provider}` }));
+  return [
+    ...(withEmpty ? [{ value: "", label: t("mod.noTarget") }] : []),
+    { group: t("mod.workers"), items: agents },
+    { group: "Claude", items: MOD_CLAUDE_MODELS.map((model) => ({ value: `general-purpose+${model}`, label: `Claude ${modCap(model)}` })) },
+  ];
+}
+function modCalibrationSummary(rule) {
+  const parts = [];
+  if (rule.effortOffset) parts.push(`${t("mod.offset")} ${modSigned(rule.effortOffset)}`);
+  if (rule.floor) parts.push(`${t("mod.floor")} ${modEffortName(rule.floor)}`);
+  if (rule.ceiling) parts.push(`${t("mod.ceiling")} ${modEffortName(rule.ceiling)}`);
+  return parts;
+}
+function modRuleSummary(domain) {
+  const rule = modState.settings.rules[domain];
+  if (!rule || rule.mode === "inherit") return "";
+  const head = rule.mode === "pin"
+    ? MOD_LEVELS.map((level) => `${t(`mod.level.${level}`)} ${modTargetLabel(rule.targets && rule.targets[level])}`).join(" · ")
+    : `${t("mod.candidates")}: ${modAgents().every((agent) => modAllowed(rule, agent.name)) ? t("mod.allCandidates") : modAgents().filter((agent) => modAllowed(rule, agent.name)).map((agent) => agent.model).join(", ")}`;
+  return [head, ...modCalibrationSummary(rule)].join(" · ");
+}
+function modPreferenceLabel(item) {
+  const model = modModels().find((entry) => entry.model === item);
+  if (model) return { label: model.name || model.model, sub: `${model.model} · ${model.provider}` };
+  const provider = modProviderInfo(item);
+  if (provider) return { label: item, sub: provider.type === item ? null : provider.type };
+  const agent = modAgents().find((entry) => entry.name === item);
+  if (agent) return { label: agent.model, sub: agent.provider };
+  return { label: item, sub: null };
+}
+function modPreferenceRows() {
+  const order = modState.settings.preference;
+  const move = (index, delta) => {
+    const next = [...order];
+    const other = index + delta;
+    if (other < 0 || other >= next.length) return;
+    [next[index], next[other]] = [next[other], next[index]];
+    modPatch({ preference: next });
+  };
+  const rows = order.map((item, index) => {
+    const { label, sub } = modPreferenceLabel(item);
+    const up = el("button", { class: "icon-btn", type: "button", title: t("mod.up"), "aria-label": `${t("mod.up")}: ${label}`, "data-key": `pref-up:${item}`, onclick: () => move(index, -1) }, [svgIcon("0 0 20 20", ["M5 12.5l5-5 5 5"])]);
+    const down = el("button", { class: "icon-btn", type: "button", title: t("mod.down"), "aria-label": `${t("mod.down")}: ${label}`, "data-key": `pref-down:${item}`, onclick: () => move(index, 1) }, [svgIcon("0 0 20 20", ["M5 7.5l5 5 5-5"])]);
+    const remove = el("button", { class: "icon-btn remove", type: "button", title: t("mod.remove"), "aria-label": `${t("mod.remove")}: ${label}`, "data-key": `pref-remove:${item}`, onclick: () => modPatch({ preference: order.filter((_, i) => i !== index) }) }, [svgIcon("0 0 20 20", ["M10 2.8a7.2 7.2 0 1 0 0 14.4 7.2 7.2 0 0 0 0-14.4z", "M6.6 10h6.8"])]);
+    up.disabled = index === 0;
+    down.disabled = index === order.length - 1;
+    return cell(el("span", { class: "cell-label" }, [el("span", { class: "pref-rank", text: `${index + 1}` }), label]), [up, down, remove], sub ? el("span", { class: "cell-sub mono", text: sub }) : null, "pref-row");
+  });
+  // New entries name a worker (model and provider), the unit Auto now chooses between.
+  const taken = new Set(order);
+  const add = modSelect("pref-add", [
+    { value: "", label: "—" },
+    ...modAgents().filter((agent) => !taken.has(agent.name)).map((agent) => ({ value: agent.name, label: `${agent.model} · ${agent.provider}` })),
+  ], "", t("mod.addPreference"), (value) => { if (value) modPatch({ preference: [...order, value] }); });
+  return [
+    ...(rows.length ? rows : [el("div", { class: "cell-note", text: t("mod.preferenceEmpty") })]),
+    cell(t("mod.addPreference"), add),
+  ];
+}
+function modAaSection() {
+  const s = modState.settings;
+  const options = modState.options;
+  const scores = options && options.scores;
+  // One row per worker, so the table reads against the Candidates list above it.
+  const general = s.rules.general;
+  const rows = modAgents().map((agent) => ({ agent, score: modScoreOf(agent), on: general.mode !== "auto" || modAllowed(general, agent.name) }));
+  const models = rows.filter((row) => row.score).map((row) => ({ ...row.score, name: row.agent.model, on: row.on }));
+  const levelPicker = modSegmented("aa-level", MOD_LEVELS.map((level) => ({ value: level, label: t(`mod.level.${level}`) })), modAaLevel, t("mod.aaData"), (level) => { modAaLevel = level; modRefresh(); });
+  if (!models.length) return modSection(t("mod.aaData"), [el("div", { class: "cell-note", text: t("mod.aaNoData") })], [t("mod.attribution")]);
+  const floor = s.autoFloors[modAaLevel];
+  const columns = [...MOD_EFFORTS.filter((effort) => models.some((model) => model.variants.some((variant) => variant.effort === effort)))];
+  if (models.some((model) => model.variants.some((variant) => !variant.effort))) columns.push(null);
+  // The cell Auto would anchor on at this level: cheapest at or above the floor, among candidates that are on.
+  let best = null;
+  for (const model of models) {
+    if (!model.on) continue;
+    for (const variant of model.variants) {
+      if (typeof variant.intelligence !== "number" || typeof variant.costPerTask !== "number" || variant.intelligence < floor) continue;
+      if (!best || variant.costPerTask < best.variant.costPerTask) best = { model, variant };
+    }
+  }
+  const table = el("table", { class: "aa-table" }, [
+    el("thead", {}, [el("tr", {}, [el("th", { text: t("mod.model") }), ...columns.map((effort) => el("th", { text: effort ? modEffortName(effort) : t("mod.aaDefault") }))])]),
+    el("tbody", {}, models.map((model) => el("tr", { class: model.on ? "" : "aa-off" }, [
+      el("td", { class: "aa-model" }, [el("span", { text: model.name }), el("small", { text: model.provider })]),
+      ...columns.map((effort) => {
+        const variant = model.variants.find((entry) => (entry.effort || null) === effort);
+        if (!variant || typeof variant.intelligence !== "number") return el("td", { class: "aa-cell empty", text: "—" });
+        const isBest = best && best.variant === variant;
+        const below = variant.intelligence < floor;
+        return el("td", { class: `aa-cell${isBest ? " best" : below ? " below" : ""}` }, [el("b", { text: variant.intelligence.toFixed(1) }), el("span", { text: modMoney(variant.costPerTask) })]);
+      }),
+    ]))),
+  ]);
+  const unmatched = rows.filter((row) => !row.score).map((row) => row.agent.model);
+  const updated = scores.generatedAt ? new Date(scores.generatedAt).toLocaleDateString(CURRENT_LANG) : null;
+  return modSection(t("mod.aaData"), [el("div", { class: "aa-scroll" }, [table])], [
+    t("mod.aaHelp", { level: t(`mod.level.${modAaLevel}`), floor }),
+    unmatched.length ? t("mod.aaUnmatched", { models: unmatched.join(", ") }) : null,
+    updated ? `${t("mod.attribution")} · ${t("mod.aaUpdated", { date: updated })}` : t("mod.attribution"),
+  ], levelPicker);
+}
+/**
+ * A disclosure that stays as the person left it across redraws: the page is rebuilt on every
+ * change, and a details element built fresh would snap shut under the hand that opened it.
+ */
+const modOpenDetails = new Set();
+function modDetails(key, summary, content) {
+  const details = el("details", { class: "details mod-details" }, [el("summary", { "data-key": `details:${key}`, text: summary }), el("div", { class: "mod-details-body" }, content.filter(Boolean))]);
+  details.open = modOpenDetails.has(key);
+  details.addEventListener("toggle", () => { if (details.open) modOpenDetails.add(key); else modOpenDetails.delete(key); });
+  return details;
+}
+/** Offset, floor and ceiling of one rule: how hard the chosen worker thinks. */
+function modCalibrationRows(rule, keyPrefix, onChange) {
+  const calibrate = (change) => {
+    const next = { ...rule, ...change };
+    for (const key of Object.keys(change)) if (change[key] === undefined) delete next[key];
+    onChange(next);
+  };
+  const anyEffort = [{ value: "", label: t("mod.anyEffort") }, ...MOD_EFFORTS.map((effort) => ({ value: effort, label: modEffortName(effort) }))];
+  const inverted = rule.floor && rule.ceiling && MOD_EFFORTS.indexOf(rule.ceiling) < MOD_EFFORTS.indexOf(rule.floor);
+  return [
+    cell(t("mod.offset"), modSegmented(`${keyPrefix}-offset`, [-2, -1, 0, 1, 2].map((n) => ({ value: n, label: modSigned(n) })), rule.effortOffset || 0, t("mod.offset"), (n) => calibrate({ effortOffset: Number(n) })), null, "wide"),
+    cell(t("mod.floor"), modSelect(`${keyPrefix}-floor`, anyEffort, rule.floor || "", t("mod.floor"), (value) => calibrate({ floor: value || undefined }), "narrow")),
+    cell(t("mod.ceiling"), modSelect(`${keyPrefix}-ceiling`, anyEffort, rule.ceiling || "", t("mod.ceiling"), (value) => calibrate({ ceiling: value || undefined }), "narrow"), inverted ? el("span", { class: "cell-sub warn-text", text: modCap(t("mod.floorWins")) }) : null),
+  ];
+}
+/** One pop-up per difficulty, for a Fixed rule. */
+function modPinRows(rule, keyPrefix, onChange) {
+  const targets = rule.targets || {};
+  return MOD_LEVELS.map((level) => cell(
+    t(`mod.level.${level}`),
+    modSelect(`${keyPrefix}:${level}`, modTargetItems(true), modTargetValue(targets[level]), t(`mod.level.${level}`), (value) => {
+      const next = { ...targets };
+      if (value) next[level] = modTargetOf(value); else delete next[level];
+      onChange({ ...rule, targets: next });
+    }),
+    modCap(t(`mod.levelBlurb.${level}`)),
+    "wide",
+  ));
+}
+/** Switching between Auto and Fixed keeps the other one's last state and the effort calibration. */
+const modGeneralMemory = {};
+function modPickGeneral(mode) {
+  const current = modState.settings.rules.general;
+  modGeneralMemory[current.mode] = current;
+  const calibration = Object.fromEntries(["effortOffset", "floor", "ceiling"].filter((key) => current[key] !== undefined).map((key) => [key, current[key]]));
+  const remembered = modGeneralMemory[mode];
+  const next = remembered ? { ...remembered } : mode === "auto" ? { mode, allow: [] } : clone(MOD_DEFAULTS.rules.general);
+  for (const key of ["effortOffset", "floor", "ceiling"]) delete next[key];
+  modSetRule("general", { ...next, ...calibration });
+}
+function modExceptionRows() {
+  const exceptions = MOD_DOMAINS.filter((domain) => domain !== "general" && modState.settings.rules[domain] && modState.settings.rules[domain].mode !== "inherit");
+  const rows = exceptions.map((domain) => {
+    const rule = modState.settings.rules[domain];
+    const row = cell(t(`mod.domain.${domain}`), [el("span", { text: rule.mode === "pin" ? t("mod.pickFixed") : t("mod.autoMode") }), chevronIcon()], modRuleSummary(domain) || null, "link mod-domain");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.dataset.key = `domain:${domain}`;
+    row.addEventListener("click", () => openModException(domain));
+    row.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && event.target === row) { event.preventDefault(); openModException(domain); } });
+    return row;
+  });
+  const free = MOD_DOMAINS.filter((domain) => domain !== "general" && !exceptions.includes(domain));
+  const add = el("button", { class: "cell-button", type: "button", text: t("mod.addException"), "data-key": "add-exception", onclick: () => openModException(null) });
+  add.disabled = free.length === 0;
+  return [...(rows.length ? rows : [el("div", { class: "cell-note", text: t("mod.noExceptions") })]), add];
+}
+function modWorkersCard() {
+  const s = modState.settings;
+  const general = s.rules.general;
+  const auto = general.mode === "auto";
+  const floors = MOD_LEVELS.map((level) => s.autoFloors[level]).join("/");
+  return modCard("workers", t("mod.workers"), t("mod.workersBlurb"), [
+    modState.options ? null : modSection(null, [el("div", { class: "cell-note warn-text", text: t("mod.optionsFailed") })]),
+    modSection(null, [
+      cell(t("mod.takesOver"), modSegmented("agent-auto", [{ value: "off", label: t("mod.off") }, { value: "auto", label: "ripple:auto" }, { value: "all", label: t("mod.allSpawns") }], s.agentAuto, t("mod.takesOver"), (agentAuto) => modPatch({ agentAuto })), null, "wide"),
+    ], [t("mod.takesOverHelp")]),
+    modSection(null, [
+      cell(t("mod.picked"), modSegmented("picked", [{ value: "auto", label: t("mod.pickAuto") }, { value: "pin", label: t("mod.pickFixed") }], auto ? "auto" : "pin", t("mod.picked"), modPickGeneral), null, "wide"),
+    ], [t(auto ? "mod.pickHelpAuto" : "mod.pickHelpFixed")]),
+    auto
+      ? modSection(t("mod.candidates"), modAgents().length ? modCandidateRows(general, "candidate", (rule) => modSetRule("general", rule)) : [el("div", { class: "cell-note", text: t("mod.noModels") })], [t("mod.candidatesHelp"), t("mod.autoLine", { floor: floors })])
+      : modSection(t("mod.perLevel"), modPinRows(general, "fixed", (rule) => modSetRule("general", rule))),
+    auto ? modDetails("auto", t("mod.autoDetails"), [
+      modSection(null, [
+        ...MOD_LEVELS.map((level) => cell(t("mod.indexFloor", { level: t(`mod.level.${level}`) }), modNumber(`index-floor:${level}`, s.autoFloors[level], { min: 0, max: 100, step: 1 }, t("mod.indexFloor", { level: t(`mod.level.${level}`) }), (n) => modPatch({ autoFloors: { ...s.autoFloors, [level]: n } })))),
+        cell(t("mod.tieBand"), modNumber("tie-band", s.autoTieBand, { min: 0, max: 20, step: 0.5 }, t("mod.tieBand"), (n) => modPatch({ autoTieBand: n }))),
+      ], [t("mod.autoHelp")]),
+      modSection(t("mod.preference"), modPreferenceRows(), [t("mod.preferenceHint")]),
+      modAaSection(),
+    ]) : null,
+    modDetails("worker-effort", t("mod.workerEffort"), [modSection(null, modCalibrationRows(general, "general", (rule) => modSetRule("general", rule)))]),
+    modSection(t("mod.exceptions"), modExceptionRows(), [t("mod.exceptionsHelp")]),
+    el("div", { class: "group stacked-group" }, [
+      cell(t("mod.fallback"), modSelect("fallback", modTargetItems(false), modTargetValue(s.fallback), t("mod.fallback"), (value) => modPatch({ fallback: modTargetOf(value) })), modCap(t("mod.fallbackHint"))),
+    ]),
+  ]);
+}
+
+/**
+ * An exception: one field that does not follow the main choice, Fixed per difficulty or Auto among
+ * chosen candidates. Opened on a field, or with none to add one — the field can be changed there.
+ */
+function modFreshException(domain, mode) {
+  if (mode === "auto") return { mode, allow: [] };
+  const own = MOD_DEFAULTS.rules[domain];
+  if (own.mode === "pin") return clone(own);
+  const general = modState.settings.rules.general;
+  return { mode, targets: general.mode === "pin" ? clone(general.targets) : clone(MOD_DEFAULTS.rules.general.targets) };
+}
+function modExceptionSheet(state) {
+  const s = modState.settings;
+  const domain = state.domain;
+  const rule = s.rules[domain];
+  const out = [];
+  if (state.adding) {
+    const choices = MOD_DOMAINS.filter((entry) => entry !== "general" && (entry === domain || !s.rules[entry] || s.rules[entry].mode === "inherit"));
+    out.push(modSection(null, [cell(t("mod.field"), modSelect("exception-field", choices.map((entry) => ({ value: entry, label: t(`mod.domain.${entry}`) })), domain, t("mod.field"), (next) => {
+      // Moving the new exception to another field leaves the first one following the main choice again.
+      state.domain = next;
+      state.title.textContent = t(`mod.domain.${next}`);
+      modPatch({ rules: { ...s.rules, [domain]: { mode: "inherit" }, [next]: modFreshException(next, rule.mode) } });
+    }, "narrow"))]));
+  }
+  const pick = (mode) => { state.memory[rule.mode] = rule; modSetRule(domain, state.memory[mode] || modFreshException(domain, mode)); };
+  out.push(modSection(null, [cell(t("mod.picked"), modSegmented("exception-mode", [{ value: "auto", label: t("mod.autoMode") }, { value: "pin", label: t("mod.pickFixed") }], rule.mode, t("mod.picked"), pick), null, "wide")]));
+  const set = (next) => modSetRule(domain, next);
+  if (rule.mode === "pin") out.push(modSection(t("mod.perLevel"), modPinRows(rule, "exception-pin", set)));
+  else out.push(modSection(t("mod.candidates"), modCandidateRows(rule, "exception-candidate", set), [t("mod.candidatesHelp")]));
+  out.push(modSection(t("mod.workerEffort"), modCalibrationRows(rule, "exception", set)));
+  out.push(el("div", { class: "group stacked-group" }, [el("button", { class: "cell-button destructive", type: "button", text: t("mod.removeException"), onclick: () => { closeModal(); modSetRule(domain, { mode: "inherit" }); } })]));
+  return out;
+}
+function openModException(domain) {
+  const s = modState.settings;
+  const adding = !domain;
+  if (adding) {
+    domain = MOD_DOMAINS.find((entry) => entry !== "general" && (!s.rules[entry] || s.rules[entry].mode === "inherit"));
+    if (!domain) return;
+  }
+  const body = el("div", { class: "mod-sheet" });
+  const title = el("h1", { id: "modal-title", text: t(`mod.domain.${domain}`) });
+  const state = { domain, adding, memory: {}, title };
+  const done = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("mod.done"), onclick: closeModal });
+  showModal(el("div", {}, [title, hint(t("mod.exceptionsHelp")), body, el("div", { class: "actions end" }, [done])]), () => { modSheet = null; });
+  modSheet = { draw: () => { if (modState.settings.rules[state.domain] && modState.settings.rules[state.domain].mode !== "inherit") modRedraw(body, modExceptionSheet(state)); } };
+  // A new exception starts as Fixed with this field's defaults (Design: Claude), saved at once like any change.
+  if (adding) modSetRule(domain, modFreshException(domain, "pin"));
+  else modSheet.draw();
+}
+
+function modJudgeCard() {
+  const s = modState.settings;
+  const zen = modState.options && modState.options.zen;
+  const rows = [cell(t("mod.judge"), modSegmented("judge", [{ value: "haiku", label: t("mod.haiku") }, { value: "jev", label: t("mod.jev") }, { value: "model", label: t("mod.routerModel") }], s.judge, t("mod.judge"), (judge) => modPatch({ judge })), null, "wide")];
+  const footers = [];
+  if (s.judge === "haiku") rows.push(el("div", { class: "cell-note", text: t("mod.haikuHint") }));
+  if (s.judge === "jev") {
+    rows.push(cell(t("mod.jevSource"), modSegmented("jev-source", [{ value: "typesafe", label: t("mod.typesafe") }, { value: "zen", label: t("mod.zen") }], s.jevSource, t("mod.jevSource"), (jevSource) => modPatch({ jevSource })), null, "wide"));
+    if (s.jevSource === "zen") {
+      rows.push(zen && zen.configured
+        ? cell(t("mod.model"), el("span", { class: "mono", text: zen.model }), modCap(t("mod.zenKey")))
+        : cell(el("span", { class: "cell-label", text: modCap(t("mod.zenMissing")) }), el("button", { class: "btn secondary compact", type: "button", text: t("nav.providers"), onclick: () => showView("providers") }), t("mod.zenAdd")));
+    } else {
+      rows.push(el("div", { class: "cell-note", text: t("mod.jevKeyNote") }));
+    }
+    footers.push(el("p", { class: "group-footer warn-text", text: t(s.jevSource === "zen" ? "mod.zenWarning" : "mod.jevWarning") }));
+  }
+  if (s.judge === "model") {
+    const models = modModels().map((model) => ({ value: model.model, label: `${model.name || model.model} · ${model.provider}` }));
+    rows.push(cell(t("mod.model"), models.length || s.judgeModel
+      ? modSelect("judge-model", models, s.judgeModel, t("mod.model"), (judgeModel) => modPatch({ judgeModel }))
+      : el("span", { text: modCap(t("mod.noModels")) }), modCap(t("mod.haikuFallback"))));
+  }
+  return modCard("judge", t("mod.judge"), t("mod.judgeBlurb"), [modSection(null, rows, footers)]);
+}
+
+function modCacheCard() {
+  const s = modState.settings;
+  return modCard("cache", t("mod.cache"), t("mod.cacheBlurb"), [modSection(null, [
+    cell(t("mod.keepWarm"), modSwitch("keep-warm", s.keepWarm, t("mod.keepWarm"), (keepWarm) => modPatch({ keepWarm })), modCap(t("mod.keepWarmHint"))),
+    cell(t("mod.for"), modSegmented("warm-hours", [1, 2, 4, 8].map((n) => ({ value: n, label: t("mod.hours", { n }) })), s.keepWarmHours, t("mod.for"), (n) => modPatch({ keepWarmHours: Number(n) })), modCap(t("mod.afterReply")), "wide"),
+    cell(t("mod.chatsFrom"), modSegmented("warm-min", [10000, 30000, 60000, 100000].map((n) => ({ value: n, label: `${n / 1000}k` })), s.keepWarmMinTokens, t("mod.chatsFrom"), (n) => modPatch({ keepWarmMinTokens: Number(n) })), modCap(t("mod.tokens")), "wide"),
+  ], [t("mod.warmCost")])]);
+}
+
+function modHandoffCard() {
+  const s = modState.settings;
+  const skill = el("input", { type: "text", class: "text-field", value: s.handoffSkill, placeholder: t("mod.noSkill"), spellcheck: "false", autocomplete: "off", "data-key": "handoff-skill", "aria-label": t("mod.fullHandoff") });
+  skill.addEventListener("change", () => modPatch({ handoffSkill: skill.value.trim() }));
+  return modCard("handoff", t("mod.handoff"), t("mod.handoffBlurb"), [modSection(null, [
+    cell(t("mod.compactWith"), modSegmented("compact-with", [{ value: "haiku", label: t("mod.haiku") }, { value: "session", label: t("mod.sessionCompactor") }], s.compactWith, t("mod.compactWith"), (compactWith) => modPatch({ compactWith })), null, "wide"),
+    cell(t("mod.afterHandoff"), modSegmented("handoff-after", [{ value: "continue", label: t("mod.continue") }, { value: "confirm", label: t("mod.confirm") }, { value: "copy", label: t("mod.copy") }], s.handoffAfter, t("mod.afterHandoff"), (handoffAfter) => modPatch({ handoffAfter })), null, "wide"),
+    cell(t("mod.handoffButton"), modSegmented("handoff-button", [{ value: "advised", label: t("mod.whenAdvised") }, { value: "always", label: t("mod.always") }], s.handoffButton, t("mod.handoffButton"), (handoffButton) => modPatch({ handoffButton })), null, "wide"),
+    cell(t("mod.fullHandoff"), skill, null, "wide"),
+    cell(t("mod.heavyAt"), modSegmented("swamp-at", [40, 50, 60, 70].map((n) => ({ value: n, label: `${n}%` })), s.swampAt, t("mod.heavyAt"), (n) => modPatch({ swampAt: Number(n) })), modCap(t("mod.context")), "wide"),
+  ])]);
+}
+
+function modLookCard() {
+  const s = modState.settings;
+  const languages = [{ value: "auto", label: t("mod.auto") }, ...MOD_LANGUAGES.map(([value, label]) => ({ value, label }))];
+  return modCard("look", t("mod.look"), t("mod.lookBlurb"), [
+    modSection(null, [
+      cell(t("mod.layout"), modSegmented("layout", [{ value: "dashboard", label: t("mod.dashboard") }, { value: "minimal", label: t("mod.minimal") }], s.layout, t("mod.layout"), (layout) => modPatch({ layout })), s.layout === "minimal" ? modCap(t("mod.footerHint")) : null, "wide"),
+      cell(t("mod.appearance"), modSegmented("appearance", [{ value: "auto", label: t("mod.auto") }, { value: "dark", label: t("mod.dark") }, { value: "light", label: t("mod.lightAppearance") }], s.appearance, t("mod.appearance"), (appearance) => modPatch({ appearance })), null, "wide"),
+      cell(t("mod.language"), modSelect("language", languages, s.language, t("mod.language"), (language) => modPatch({ language }), "narrow")),
+    ]),
+    modSection(t("mod.show"), MOD_PARTS.map((part) => {
+      const shown = !s.hide.includes(part);
+      return cell(t(`mod.part.${part}`), modSwitch(`part:${part}`, shown, t(`mod.part.${part}`), (on) => modPatch({ hide: on ? s.hide.filter((entry) => entry !== part) : [...s.hide, part] })));
+    })),
+  ]);
 }
 
 // ---- Logs ---------------------------------------------------------------------------

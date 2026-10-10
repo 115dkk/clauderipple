@@ -133,6 +133,8 @@ body {
 .nav-icon { width: 18px; height: 18px; flex: 0 0 auto; color: var(--accent); }
 .nav-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-footer { margin-top: auto; padding: 0 2px; }
+/* A label too long for the phone tab bar carries a short form for it. */
+.nav-btn .nav-short { display: none; }
 .sidebar-footer select { width: 100%; }
 
 main { min-width: 0; padding: 36px 40px 72px; }
@@ -570,6 +572,66 @@ pre#logbox {
 .tag-ERR { color: var(--bad); }
 .tag-WARN { color: var(--warn); }
 
+/* ---- ClaudeRipple mod ---------------------------------------------------------------- */
+
+/* One long page of cards, each card a heading over the usual grouped lists. */
+a.cell { color: inherit; text-decoration: none; }
+#mod-notice:not([hidden]) + #mod-content { margin-top: 28px; }
+.mod-card + .mod-card { margin-top: 48px; }
+.mod-card-head { margin: 0 4px 12px; }
+.mod-card-head h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; }
+.mod-card-head .hint { margin-top: 3px; font-size: var(--fs-sub); }
+.mod-card-head + .section, .mod-card-head + .group { margin-top: 0; }
+.group-footer.warn-text, .cell-note.warn-text, .cell-sub.warn-text { color: var(--warn); }
+.mod-card .cell-value select, .mod-sheet .cell-value select { width: 320px; max-width: 100%; }
+.mod-card .cell-value select.narrow, .mod-sheet .cell-value select.narrow { width: 160px; }
+.text-field { width: 320px; }
+.num-field { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
+.mod-domain .cell-value > span { white-space: nowrap; }
+.pref-rank { display: inline-block; min-width: 1.4em; color: var(--label-3); font-variant-numeric: tabular-nums; }
+.pref-row .cell-value { gap: 2px; }
+.pref-row .cell-sub { padding-left: 1.4em; }
+.candidate-state { margin-left: 10px; font-size: var(--fs-foot); }
+.aa-line { font-variant-numeric: tabular-nums; }
+.mod-details { margin: 18px 4px 0; }
+.mod-details-body { margin: 0 -4px; }
+.mod-details-body > .section:first-child { margin-top: 12px; }
+.mod-sheet > .section:first-child { margin-top: 18px; }
+.mod-sheet .section { margin-top: 22px; }
+
+/* The lean is a slider with a tick for each of its five stops, like a System Settings slider. */
+.lean { display: flex; align-items: center; gap: 10px; color: var(--label-2); font-size: var(--fs-foot); }
+.lean-end { white-space: nowrap; }
+.lean-track { position: relative; display: grid; width: 172px; padding-bottom: 2px; }
+.lean-range { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; min-height: 0; margin: 0; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.lean-range:focus { box-shadow: none; }
+.lean-range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--fill-press); }
+.lean-range::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; margin-top: -8px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.08); }
+.lean-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--focus), 0 1px 3px rgba(0, 0, 0, 0.3); }
+.lean-range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--fill-press); }
+.lean-range::-moz-range-thumb { width: 20px; height: 20px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.08); }
+.lean-ticks { display: flex; justify-content: space-between; padding: 0 9px; pointer-events: none; }
+.lean-ticks span { width: 2px; height: 5px; border-radius: 1px; background: var(--label-3); }
+
+/* AA data: index over cost per task, one row per model and one column per effort. */
+.aa-scroll { overflow-x: auto; border-radius: inherit; }
+.aa-table { min-width: 560px; }
+.aa-table th { text-align: right; }
+.aa-table th:first-child { text-align: left; }
+.aa-table td { padding: 7px 12px; text-align: right; line-height: 1.3; }
+.aa-table td:last-child, .aa-table th:last-child { padding-right: 16px; }
+.aa-table td.aa-model { text-align: left; }
+.aa-model span { display: block; font-weight: 500; white-space: nowrap; }
+.aa-model small { display: block; font-size: var(--fs-cap); white-space: nowrap; }
+.aa-cell b { display: block; font-weight: 500; }
+.aa-cell span { display: block; color: var(--label-2); font-size: var(--fs-cap); }
+.aa-cell.empty { color: var(--label-3); }
+.aa-cell.below b, .aa-cell.below span { color: var(--label-3); }
+.aa-cell.best { background: var(--accent-soft); }
+.aa-cell.best b { color: var(--accent); font-weight: 700; }
+.aa-cell.best span { color: var(--accent); }
+.aa-off td { opacity: 0.5; }
+
 /* ---- About --------------------------------------------------------------------------- */
 
 /* The language menu lives in the sidebar; on a phone the sidebar is a tab bar, so About carries it. */
@@ -737,6 +799,8 @@ pre#logbox {
   .nav-btn .nav-icon { width: 22px; height: 22px; color: inherit; }
   .nav-btn span { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: break-word; word-break: keep-all; }
   .sidebar-footer { display: none; }
+  .nav-btn .nav-long { display: none; }
+  .nav-btn .nav-short { display: -webkit-box; }
   .narrow-only { display: block; }
 
   main { padding: 22px 16px calc(96px + env(safe-area-inset-bottom)); }
@@ -761,6 +825,18 @@ pre#logbox {
   .logs-chip:nth-child(5) { grid-column: 1 / -1; }
   .chooser-tiles { grid-template-columns: 1fr; }
   .chooser-tiles:not(.single) > .chooser-tile:nth-child(2)::before { display: block; }
+
+  /* A segmented control, slider or text field drops under its label and takes the row's width. */
+  .cell.wide { flex-wrap: wrap; row-gap: 8px; }
+  .cell.wide > .cell-value { flex: 1 1 100%; max-width: none; justify-content: flex-start; }
+  .cell.wide .segmented { display: flex; width: 100%; }
+  .cell.wide .segmented button { flex: 1 1 0; min-width: 0; padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; }
+  .cell.wide .lean { width: 100%; }
+  .cell.wide .lean-track { flex: 1 1 auto; width: auto; }
+  .cell.wide .text-field { width: 100%; }
+  .mod-card .cell-value select, .mod-sheet .cell-value select { width: 100%; }
+  .mod-card .cell-value select.narrow, .mod-sheet .cell-value select.narrow { width: 140px; }
+  .mod-domain .cell-value { max-width: none; }
 
   /* Requests read as a list: model and status on top, the numbers on one quiet line below. */
   .logs-table-card { overflow: visible; }
