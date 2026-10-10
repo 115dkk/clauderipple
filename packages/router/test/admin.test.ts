@@ -18,6 +18,7 @@ import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModelScores } from "../src/model-scores.ts";
 import type { ModOptions } from "../src/admin.ts";
 import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
+import { normalizeSettings } from "../../mod/hooks/settings.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
   // port 0: let the OS pick a free ephemeral port so parallel tests never collide.
@@ -88,27 +89,56 @@ const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}
   method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
 });
 
-test("admin mod-settings round-trips opaque settings, persists revision and increments unconditional writes", async () => {
+test("admin mod-settings returns full defaults before storage, normalizes writes and persists revisions", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
-    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: null, revision: 0 });
-    const settings = { effortAuto: false, rules: { general: { mode: "auto", allow: ["sol"] } }, future: [1, null, { nested: true }] };
-    const saved = await putModSettings(port, { settings, revision: 0 });
+    const defaults = { settings: normalizeSettings(null), revision: 0, stored: false };
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), defaults);
+    const input = { effortAuto: false, judge: "invalid", layout: "invalid", language: "invalid", keepWarmMinTokens: 1234, rules: { general: { mode: "auto", allow: [" sol ", "sol"] } }, future: [1, null, { nested: true }] };
+    const settings = normalizeSettings(input);
+    const saved = await putModSettings(port, { settings: input, revision: 0 });
     assert.equal(saved.status, 200);
-    assert.deepEqual(await saved.json(), { settings, revision: 1 });
-    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings, revision: 1 });
+    const snapshot = { settings, revision: 1, stored: true };
+    assert.deepEqual(await saved.json(), snapshot);
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), snapshot);
+    assert.equal(settings.judge, defaults.settings.judge);
+    assert.equal(settings.layout, defaults.settings.layout);
+    assert.equal(settings.language, defaults.settings.language);
+    assert.equal(settings.keepWarmMinTokens, 1234);
     const file = path.join(home, "mod-settings.json");
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { settings, revision: 1 });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), snapshot);
     if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.equal((await (await putModSettings(port, { settings })).json() as ModSettingsSnapshot).revision, 2);
     assert.deepEqual(fs.readdirSync(home).filter(name => /mod-settings.*(tmp|lock)/.test(name)), []);
   });
 });
 
+test("admin mod-settings empty-store conflicts include normalized defaults and stored false", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const response = await putModSettings(port, { settings: { language: "ko" }, revision: 1 });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { settings: normalizeSettings(null), revision: 0, stored: false });
+    assert.equal(fs.existsSync(path.join(home, "mod-settings.json")), false);
+  });
+});
+
+test("admin mod-settings normalizes legacy stored settings on GET without rewriting their revision", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const old = { settings: { layout: "invalid", language: "pt", tiers: { light: { agent: "legacy" } } }, revision: 7 };
+    const file = path.join(home, "mod-settings.json");
+    fs.writeFileSync(file, JSON.stringify(old));
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(old.settings), revision: 7, stored: true });
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), old);
+  });
+});
+
 test("admin mod-settings stale revisions return current settings; concurrent CAS has one winner", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
-    const responses = await Promise.all([putModSettings(port, { settings: { winner: "a" }, revision: 0 }), putModSettings(port, { settings: { winner: "b" }, revision: 0 })]);
+    const responses = await Promise.all([putModSettings(port, { settings: { language: "ko" }, revision: 0 }), putModSettings(port, { settings: { language: "ja" }, revision: 0 })]);
     assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
     const current = await (await fetch(`${base()}:${port}/api/mod-settings`)).json() as ModSettingsSnapshot;
+    assert.equal(current.stored, true);
+    assert.equal(current.revision, 1);
+    assert.deepEqual(current.settings, normalizeSettings(current.settings));
     for (const response of responses) assert.deepEqual(await response.json(), current);
     const stale = await putModSettings(port, { settings: {}, revision: 0 });
     assert.equal(stale.status, 409);
@@ -126,7 +156,7 @@ test("admin mod-settings refuses nonobjects, invalid revisions and secrets at an
     for (const revision of [-1, 0.5, null, "0"]) assert.equal((await putModSettings(port, { settings: {}, revision })).status, 400);
     const malformed = await fetch(`${base()}:${port}/api/mod-settings`, { method: "PUT", body: "{" });
     assert.equal(malformed.status, 400);
-    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: null, revision: 0 });
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(null), revision: 0, stored: false });
     // A count named for tokens is a setting the mod has, not a credential.
     assert.equal((await putModSettings(port, { settings: { keepWarmMinTokens: 30000, rules: { general: { mode: "pin" } } } })).status, 200);
   });

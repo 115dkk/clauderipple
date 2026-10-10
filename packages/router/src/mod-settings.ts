@@ -1,12 +1,14 @@
-// The router owns persistence, not the mod's schema. normalizeSettings stays in
-// packages/mod; unknown non-secret fields survive a round trip unchanged.
+// Persistence and normalization have one source each: the router's locked store
+// and the mod's pure schema (no claude-code runtime dependency).
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "./config.ts";
 import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
+import { normalizeSettings } from "../../mod/hooks/settings.ts";
+import type { ModSettingsSnapshot } from "../../mod/types/index.d.ts";
 
 export const MAX_MOD_SETTINGS_BYTES = 64 * 1024;
-export type ModSettingsSnapshot = { settings: Record<string, unknown> | null; revision: number };
+export type { ModSettingsSnapshot };
 
 export class ModSettingsInputError extends Error {
   readonly status: number;
@@ -57,14 +59,14 @@ export function readModSettings(home = homeDir()): ModSettingsSnapshot {
   let text: string;
   try { text = fs.readFileSync(path.join(home, "mod-settings.json"), "utf8"); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { settings: null, revision: 0 };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { settings: normalizeSettings(null), revision: 0, stored: false };
     throw error;
   }
   // Corruption is not an empty store: fail rather than silently overwrite it.
   const stored: unknown = JSON.parse(text);
   if (!object(stored) || !revision(stored.revision) || stored.revision < 1) throw new Error("invalid mod settings store");
   validateSettings(stored.settings);
-  return { settings: stored.settings, revision: stored.revision };
+  return { settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true };
 }
 
 export type ModSettingsWrite = { stale: boolean; current: ModSettingsSnapshot };
@@ -74,14 +76,15 @@ export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWr
   if (!object(body)) throw new ModSettingsInputError("body must be a JSON object");
   validateSettings(body.settings);
   if (body.revision !== undefined && !revision(body.revision)) throw new ModSettingsInputError("revision must be a non-negative safe integer");
-  const settings = body.settings;
+  const settings = normalizeSettings(body.settings);
+  validateSettings(settings);
   const expected = body.revision;
   const file = path.join(home, "mod-settings.json");
   return withFileLock(file, () => {
     const current = readModSettings(home);
     if (expected !== undefined && expected !== current.revision) return { stale: true, current };
     if (current.revision === Number.MAX_SAFE_INTEGER) throw new Error("mod settings revision exhausted");
-    const next = { settings, revision: current.revision + 1 };
+    const next: ModSettingsSnapshot = { settings, revision: current.revision + 1, stored: true };
     writeJsonAtomic(file, next);
     return { stale: false, current: next };
   });

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULTS, normalizeSettings } from '../../packages/mod/hooks/settings.ts'
+import { DEFAULTS, applySettingsChanges, normalizeSettings, settingsChanges } from '../../packages/mod/hooks/settings.ts'
 
 test('defaults use independent domain rules, two axes and measured floors', () => {
   assert.equal(DEFAULTS.judge, 'haiku')
@@ -12,6 +12,24 @@ test('defaults use independent domain rules, two axes and measured floors', () =
   assert.equal(DEFAULTS.rules.design.mode, 'pin')
   if (DEFAULTS.rules.design.mode === 'pin') assert.equal(DEFAULTS.rules.design.targets.deep?.model, 'opus')
   assert.equal(Object.hasOwn(DEFAULTS, 'tiers'), false)
+})
+test('rebasing settings preserves remote siblings and deletes only locally removed fields', () => {
+  const before = normalizeSettings({ providers: { old: true }, fallback: { agent: 'general-purpose', model: 'sonnet' }, rules: { backend: { mode: 'auto', allow: ['old'], floor: 'high' } } })
+  const after = normalizeSettings({ ...before, providers: { local: false }, fallback: { agent: 'custom' }, rules: { ...before.rules, backend: { mode: 'auto', allow: ['local'] } } })
+  const remote = normalizeSettings({ ...before, language: 'ja', providers: { ...before.providers, remote: false }, rules: { ...before.rules, backend: { mode: 'auto', allow: ['remote'], floor: 'high', ceiling: 'max' }, docs: { mode: 'auto', allow: ['remote'] } } })
+  const rebased = applySettingsChanges(remote, settingsChanges(before, after))
+  assert.deepEqual(rebased.providers, { local: false, remote: false })
+  assert.deepEqual(rebased.rules.backend, { mode: 'auto', allow: ['local'], ceiling: 'max' })
+  assert.deepEqual(rebased.rules.docs, remote.rules.docs)
+  assert.deepEqual(rebased.fallback, after.fallback)
+  assert.equal(rebased.language, 'ja')
+  assert.deepEqual(remote.providers, { old: true, remote: false })
+})
+test('a changed rule mode replaces the discriminated rule and an unchanged draft changes nothing', () => {
+  const before = normalizeSettings({ rules: { backend: { mode: 'pin', targets: { light: { agent: 'old' } }, floor: 'high' } } })
+  const after = normalizeSettings({ ...before, rules: { ...before.rules, backend: { mode: 'auto', allow: ['new'] } } })
+  assert.deepEqual(applySettingsChanges(before, settingsChanges(before, after)).rules.backend, after.rules.backend)
+  assert.deepEqual(settingsChanges(before, normalizeSettings(before)), [])
 })
 test('language accepts only auto and the six supported choices', () => {
   for (const language of ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt']) assert.equal(normalizeSettings({ language }).language, language)

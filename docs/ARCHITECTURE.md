@@ -208,15 +208,37 @@ request went, and a `Pane` holds the request log.
 
 ### 3b. Shared mod settings and judge-only models (2026-10-10)
 
-The router persists the mod's opaque settings object in `<homeDir()>/mod-settings.json`.
-`GET /api/mod-settings` returns `{settings:null, revision:0}` before the first write;
-`PUT` accepts `{settings, revision?}`, increments the revision under the account stores'
-`withFileLock` and `writeJsonAtomic` helpers (0600), and returns the current snapshot.
-A stale supplied revision returns 409 with that snapshot. The router checks only a
-JSON object, its 64 KiB UTF-8 serialized size (413), and case-insensitive key names
-containing `key`, `token` or `secret` at any depth (400); schema normalization belongs
-to the mod. This literal secret-name rule also refuses `keepWarmMinTokens` in the
-current mod schema: clients must not send that field until the contract is reconciled.
+The router is the single source of the mod's settings, persisted in
+`<homeDir()>/mod-settings.json`. `GET /api/mod-settings` returns
+`{settings:<full normalized Settings>, revision, stored:boolean}`. Before the first
+write it returns normalized defaults, revision 0 and `stored:false`, without creating
+storage. `PUT` accepts `{settings, revision?}`, normalizes with the mod's own pure
+`hooks/settings.ts:normalizeSettings` (type-only imports, no `claude-code` runtime),
+increments the revision under the account stores' `withFileLock` and `writeJsonAtomic`
+helpers (0600), and returns `{settings, revision, stored:true}`. A stale supplied
+revision returns 409 with the same full current snapshot, including `stored`.
+Existing stored settings are normalized on reads as well; unknown fields are dropped.
+Before normalization, the router refuses nonobjects, settings over 64 KiB of UTF-8
+JSON (413), and credential field names at any depth, including inside arrays (400).
+The final word of a field name decides (`apiKey`, `access_token`, `clientSecret`,
+`password`, etc.); `keepWarmMinTokens` is a count, not a credential, and is accepted.
+Corrupt storage is an error, never an empty store to overwrite.
+
+The mod reads this endpoint at `session.start` and every 3-second router poll, even
+when its band is hidden. A changed revision replaces the settings atom and redraws
+readers. Only when `stored:false` does it read legacy plugin-store `settings` and
+`setupDone` and migrate them with a revision-checked PUT; a racing first writer wins
+instead of being overwritten. Afterwards settings are never read from or saved to the
+plugin store; unrelated keys such as picks, band visibility and handoff choices remain.
+Panel/setup saves PUT the last seen revision. On 409 the mod takes the server copy,
+reapplies only the user's changed paths (including sibling rule/provider fields), and
+retries once. A panel keeps its opening baseline so a poll while it is open cannot
+turn an unrelated remote edit into a local overwrite. Offline changes remain active
+locally with the existing router-not-answering notice and retry on the next poll,
+rebased over that poll's server copy. Revision, pending edits and migration state live
+in session atoms and survive module hot reloads; settings HTTP work is serialized.
+Language resolution and the separate Jev key file are unchanged. Verified with
+`test/admin.test.ts`, `test/mod/settings.test.ts` and the mod's 2.1.293 engine tests.
 
 `GET /api/mod-options` returns `agents` (owned manifest entries with existing agent
 files), all configured `models` (`model`, `provider`, `name`, `judgeOnly`), `providers`

@@ -104,6 +104,12 @@ export type Settings = {
   setupDone: boolean
 }
 
+/** The admin API always returns a complete normalized settings object. */
+export type ModSettingsSnapshot = { settings: Settings; revision: number; stored: boolean }
+/** Arrays and rule mode changes are atomic; other edits are rebased by field path. */
+export type SettingsChange = { path: string[]; value?: unknown; remove?: boolean }
+export type SettingsSync = { revision: number | null; pending: SettingsChange[]; migrationChecked: boolean; migration: Settings | null }
+
 /** A judge's answer for the main chat's next prompt. */
 export type Verdict = { effort: Effort; sure?: number; why: string }
 
@@ -197,6 +203,8 @@ declare module 'claude-code' {
       onlySession: boolean
       bandHidden: boolean
       settings: Settings | null
+      settingsSync: SettingsSync
+      settingsBase: Settings | null
       lang: Lang
       pick: Pick | null
       deciding: boolean

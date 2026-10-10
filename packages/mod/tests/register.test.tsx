@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteInput, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
-import type { Settings } from '../types'
+import type { ModSettingsSnapshot, Settings } from '../types'
 
 const NOW = 1000000
 const USAGE: ModelUsage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 40000, cache_creation_input_tokens: 0 }
@@ -25,7 +25,29 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specifi
 
 function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string; language?: unknown; env?: Record<string, string>; platform?: string; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[] } = {}) {
   const clock = mock.clock(on, { now: NOW })
-  const saved = new Map<string, unknown>([['settings', normalizeSettings({ setupDone: true, ...patch })]])
+  const saved = new Map<string, unknown>()
+  const storeWrites: string[] = []
+  const storeReads: string[] = []
+  let router: ModSettingsSnapshot = { settings: normalizeSettings({ setupDone: true, ...patch }), revision: 1, stored: true }
+  let offline = false
+  let conflict: Settings | null = null
+  let alwaysConflict = false
+  const settingsRequests: { method: string; settings?: unknown; revision?: unknown }[] = []
+  on('http.fetch', { url: /\/api\/mod-settings$/ }, ($, e) => {
+    if (offline) throw new Error('router unavailable')
+    const method = e.init?.method ?? 'GET'
+    if (method === 'GET') {
+      settingsRequests.push({ method })
+      return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(router) } }
+    }
+    const input = JSON.parse(e.init?.body ?? '{}')
+    settingsRequests.push({ method, settings: input.settings, revision: input.revision })
+    if (conflict) { router = { settings: conflict, revision: router.revision + 1, stored: true }; conflict = null }
+    if (alwaysConflict) router = { ...router, revision: router.revision + 1 }
+    const stale = input.revision !== router.revision
+    if (!stale) router = { settings: normalizeSettings(input.settings), revision: router.revision + 1, stored: true }
+    return { value: { ok: !stale, status: stale ? 409 : 200, headers: {}, text: JSON.stringify(router) } }
+  })
   const toasts: string[] = []
   const logs: string[] = []
   const submitted: string[] = []
@@ -33,8 +55,8 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   const panes = new Set<string>()
   let model = 'claude-opus-5-5'
   let percent = 20
-  on('store.get', ($, e) => ({ value: saved.get(e.key) }))
-  on('store.set', ($, e) => { saved.set(e.key, e.value); return { value: undefined } })
+  on('store.get', ($, e) => { storeReads.push(e.key); return { value: saved.get(e.key) } })
+  on('store.set', ($, e) => { storeWrites.push(e.key); saved.set(e.key, e.value); return { value: undefined } })
   mock.env(on, { HOME: '/home/test', LANG: 'en_US.UTF-8', ...(options.key ? { TYPESAFE_API_KEY: options.key } : {}), ...options.env })
   let hostLanguage = options.language
   const processes: { argv: readonly string[]; timeoutMs?: number }[] = []
@@ -80,11 +102,12 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('turn.complete', () => ({ text: '' }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
-  return { clock, saved, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
+  return { clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
 function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
-  on('http.fetch', ($, e) => {
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
     urls.push(e.url)
     if (e.url === 'https://opencode.ai/zen/v1/systemone' && zen) {
       zen(e)
@@ -134,6 +157,161 @@ async function band($: Engine, surface: 'terminal' | 'desktop' = 'terminal', has
   return $.ui.mount({ plugin: 'ripple', component: 'AbovePrompt', requestId: 'band', surface,
     viewport: { columns: 140, rows: 40 }, props: { hasSurvey, isWorking: false, bodyColumns: 130, maxRows: 20, scroll: { offset: 0, bodyRows: 20 }, view: {} } })
 }
+
+test('router settings override legacy store and revision changes redraw even with the band hidden', async ($, on) => {
+  const b = boundaries(on, { language: 'pt' })
+  b.saved.set('settings', normalizeSettings({ language: 'ko' }))
+  http(on)
+  await start($)
+  expectLanguage(b, 'pt')
+  expect(b.storeReads).not.toContain('settings')
+  await command($, 'bar')
+  b.remote({ settings: normalizeSettings({ setupDone: true, language: 'ja', effortAuto: false }), revision: 2, stored: true })
+  await b.clock.advance(3000)
+  expectLanguage(b, 'ja')
+  await command($, 'bar')
+  const ui = await band($)
+  expect((await ui.find({ key: 'auto' }))?.props.label).toContain('○')
+  b.remote({ settings: normalizeSettings({ setupDone: true, language: 'ko' }), revision: 2, stored: true })
+  await b.clock.advance(3000)
+  expectLanguage(b, 'ja') // An unchanged revision does not replace the atom.
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
+  await ui.unmount()
+})
+
+test('empty router uses defaults without writing when there is no legacy store', async ($, on) => {
+  const b = boundaries(on)
+  b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
+  http(on)
+  await start($)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: 'Welcome to ClaudeRipple' })).toBeDefined()
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
+  await ui.unmount()
+})
+
+test('legacy settings and setup completion migrate once; unrelated store keys survive', async ($, on) => {
+  const b = boundaries(on)
+  b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
+  b.saved.set('settings', { language: 'pt', keepWarm: true, tiers: { light: { agent: 'old-worker' } } })
+  b.saved.set('setupDone', true)
+  b.saved.set('handoffChoice', { kind: 'full', after: 'copy' })
+  http(on)
+  await start($)
+  expect(b.router().settings).toMatchObject({ language: 'pt', keepWarm: true, setupDone: true, rules: { general: { mode: 'pin', targets: { light: { agent: 'old-worker' } } } } })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(1)
+  expect(b.settingsRequests.find(r => r.method === 'PUT')?.revision).toBe(0)
+  b.saved.set('settings', { language: 'ko' })
+  await b.clock.advance(3000)
+  await $.classic.SessionStart({ source: 'clear' })
+  expectLanguage(b, 'pt')
+  expect(b.storeReads.filter(key => key === 'settings').length).toBe(1)
+  expect(b.storeWrites).not.toContain('settings')
+  expect(b.saved.get('handoffChoice')).toEqual({ kind: 'full', after: 'copy' })
+})
+
+test('panel save retries a stale revision once and preserves remote sibling fields', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.select({ key: 'floor', value: 'medium' })
+  b.conflict(normalizeSettings({ setupDone: true, ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } }))
+  await ui.press({ key: 'save' })
+  const writes = b.settingsRequests.filter(r => r.method === 'PUT')
+  expect(writes.map(r => r.revision)).toEqual([1, 2])
+  expect(b.router().settings).toMatchObject({ floor: 'medium', ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } })
+  expectLanguage(b, 'pt')
+  expect(b.storeWrites).not.toContain('settings')
+  await ui.unmount()
+})
+
+test('two conflicts stop the save retry and retain the edit for the next poll', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.select({ key: 'floor', value: 'medium' })
+  b.alwaysConflict(true)
+  await ui.press({ key: 'save' })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(2)
+  expect(b.router().settings.floor).toBe('low')
+  await command($, 'settings')
+  expect((await ui.find({ key: 'floor' }))?.props.value).toBe('medium')
+  b.alwaysConflict(false)
+  await b.clock.advance(3000)
+  expect(b.router().settings.floor).toBe('medium')
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(3)
+  await ui.unmount()
+})
+
+test('migration loses a first-write race without overwriting existing server settings', async ($, on) => {
+  const b = boundaries(on)
+  b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
+  b.saved.set('settings', { language: 'pt' })
+  b.conflict(normalizeSettings({ setupDone: true, language: 'ja', keepWarm: true }))
+  http(on)
+  await start($)
+  expectLanguage(b, 'ja')
+  expect(b.router().settings).toMatchObject({ language: 'ja', keepWarm: true })
+  await b.clock.advance(3000)
+  expect(b.storeReads.filter(key => key === 'settings').length).toBe(1)
+})
+
+test('offline startup recovers and migrates legacy settings only after reaching an empty router', async ($, on) => {
+  const b = boundaries(on)
+  b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
+  b.saved.set('settings', { language: 'pt', setupDone: true })
+  b.offline(true)
+  http(on)
+  await start($)
+  expect(b.storeReads).not.toContain('settings')
+  b.offline(false)
+  await b.clock.advance(3000)
+  expectLanguage(b, 'pt')
+  expect(b.router().stored).toBe(true)
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(1)
+})
+
+test('an open draft saves only its edits after polling newer settings', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.select({ key: 'floor', value: 'medium' })
+  b.remote({ settings: normalizeSettings({ setupDone: true, ceiling: 'high', keepWarmHours: 8 }), revision: 2, stored: true })
+  await b.clock.advance(3000)
+  await ui.press({ key: 'save' })
+  expect(b.router().settings).toMatchObject({ floor: 'medium', ceiling: 'high', keepWarmHours: 8 })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
+  await ui.unmount()
+})
+
+test('offline panel save keeps local edits, shows router notice and retries on next poll', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.select({ key: 'floor', value: 'medium' })
+  b.offline(true)
+  await ui.press({ key: 'save' })
+  expect(b.router().settings.floor).toBe('low')
+  await command($, 'settings')
+  expect((await ui.find({ key: 'floor' }))?.props.value).toBe('medium')
+  expect(b.toasts.some(text => text.includes('router not answering'))).toBe(true)
+  expect(b.toasts).not.toContain('Settings saved')
+  expect(b.storeWrites).not.toContain('settings')
+  b.remote({ settings: normalizeSettings({ setupDone: true, ceiling: 'high' }), revision: 2, stored: true })
+  b.offline(false)
+  await b.clock.advance(3000)
+  expect(b.router().settings).toMatchObject({ floor: 'medium', ceiling: 'high' })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
+  await ui.unmount()
+})
 
 function expectLanguage(boundary: ReturnType<typeof boundaries>, language: Lang): void {
   expect(boundary.language()).toBe(language)
@@ -214,7 +392,7 @@ test('saving language re-resolves auto from current host settings', async ($, on
   await ui.select({ key: 'language', value: 'auto' })
   await ui.press({ key: 'save' })
   expectLanguage(b, 'ko')
-  expect(b.saved.get('settings')).toMatchObject({ language: 'auto' })
+  expect(b.router().settings).toMatchObject({ language: 'auto' })
   await ui.unmount()
   b.setLanguage('Japanese')
   await command($, 'settings')
@@ -364,12 +542,12 @@ test('judge model Select includes nongenerated provider models and native Anthro
   await ui.press({ key: 'tab-judge' })
   await ui.select({ key: 'judge-model', value: 'jev-1.13' })
   await ui.press({ key: 'save' })
-  expect(b.saved.get('settings')).toMatchObject({ judgeModel: 'jev-1.13' })
+  expect(b.router().settings).toMatchObject({ judgeModel: 'jev-1.13' })
   await command($, 'settings')
   await ui.press({ key: 'tab-judge' })
   await ui.select({ key: 'judge-model', value: 'claude-sonnet-5-5' })
   await ui.press({ key: 'save' })
-  expect(b.saved.get('settings')).toMatchObject({ judgeModel: 'claude-sonnet-5-5' })
+  expect(b.router().settings).toMatchObject({ judgeModel: 'claude-sonnet-5-5' })
   await ui.unmount()
 })
 
@@ -414,7 +592,7 @@ test('a later person app-effort change turns Auto off and wins', async ($, on) =
   await step($, 'claude-opus-5-5', 'medium')
   await step($, 'claude-opus-5-5', 'low')
   expect(sent.map(s => s.effort)).toEqual(['high', 'low'])
-  expect(b.saved.get('settings')).toMatchObject({ effortAuto: false })
+  expect(b.router().settings).toMatchObject({ effortAuto: false })
   expect(b.toasts.some(t => t.includes('turned Auto off'))).toBe(true)
 })
 
@@ -541,9 +719,9 @@ test('settings draft saves only on Save, and the dashboard title remains ClaudeR
   expect(await ui.find({ type: 'Text', text: 'ClaudeRipple' })).toBeDefined()
   await ui.press({ key: 'settings' })
   await ui.select({ key: 'floor', value: 'medium' })
-  expect(b.saved.get('settings')).toMatchObject({ floor: 'low' })
+  expect(b.router().settings).toMatchObject({ floor: 'low' })
   await ui.press({ key: 'save' })
-  expect(b.saved.get('settings')).toMatchObject({ floor: 'medium' })
+  expect(b.router().settings).toMatchObject({ floor: 'medium' })
   await ui.press({ key: 'hide' })
   expect(b.saved.get('bandHidden')).toBe(true)
   await $.command.run({ command: 'ripple-bar', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: '' })
@@ -576,7 +754,7 @@ test('log queries by session and reopening follows engine panes, not stale atoms
   expect(b.panes.has('ripple-log')).toBe(true)
 })
 
-test('clear reloads store settings and resume restores cache age', async ($, on) => {
+test('clear reloads router settings and resume restores cache age', async ($, on) => {
   const b = boundaries(on, { effortAuto: false })
   http(on)
   await $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 120, prompt_cache_likely_expired: false, model: 'claude-opus-5-5' })
@@ -610,7 +788,8 @@ test('Jev low confidence falls back to Haiku and sends the key only to TypeSafe'
   const judges = judgeStub(on, '{"effort":"high","why":"fallback"}')
   const sent = stepStub(on)
   const destinations: string[] = []
-  on('http.fetch', ($, e) => {
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
     if (e.init?.headers?.authorization) destinations.push(e.url)
     if (e.url === 'https://api.typesafe.ai/v1/systemone') {
       expect(e.init?.headers?.authorization).toBe('Bearer test-secret')
@@ -631,7 +810,8 @@ test('Jev low confidence falls back to Haiku and sends the key only to TypeSafe'
 test('Jev times out at three seconds without blocking the person prompt', async ($, on) => {
   const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
   const judges = judgeStub(on, '{"effort":"medium","why":"fallback"}')
-  on('http.fetch', async ($, e) => {
+  on('http.fetch', async ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
     if (e.url.includes('typesafe.ai')) await b.clock.sleep(6000)
     return { value: { ok: true, status: 200, headers: {}, text: '{"requests":[]}' } }
   })
@@ -679,7 +859,7 @@ test('Jev key input preserves other env lines and chmods the file 600', async ($
 
 test('Jev Test displays latency/result from the selected judge', async ($, on) => {
   boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
-  on('http.fetch', ($, e) => ({ value: { ok: true, status: 200, headers: {}, text: e.url.includes('typesafe.ai') ? '{"answers":{"effort":{"choice":"low","confidence":0.9}}}' : '{"requests":[]}' } }))
+  on('http.fetch', ($, e, next) => e.url.endsWith('/api/mod-settings') ? next(e) : { value: { ok: true, status: 200, headers: {}, text: e.url.includes('typesafe.ai') ? '{"answers":{"effort":{"choice":"low","confidence":0.9}}}' : '{"requests":[]}' } })
   await start($)
   await command($, 'settings')
   const ui = await band($)
@@ -771,8 +951,9 @@ test('first-run setup finishes once and keeps its saved choices', async ($, on) 
   await ui.press({ key: 'set-warm' })
   await ui.press({ key: 'next' })
   await ui.press({ key: 'finish' })
-  expect(b.saved.get('settings')).toMatchObject({ setupDone: true, keepWarm: true })
-  expect(b.saved.get('setupDone')).toBe(true)
+  expect(b.router().settings).toMatchObject({ setupDone: true, keepWarm: true })
+  expect(b.storeWrites).not.toContain('settings')
+  expect(b.storeWrites).not.toContain('setupDone')
 })
 
 test('saving unrelated settings cannot revive stopped keep-warm; toggling it can', async ($, on) => {

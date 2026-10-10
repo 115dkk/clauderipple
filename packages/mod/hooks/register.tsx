@@ -2,8 +2,8 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
-import { DOMAINS, normalizeSettings } from './settings'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
+import { DOMAINS, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
@@ -31,6 +31,8 @@ const logOpen = atom({ plugin: 'ripple', key: 'logOpen' } as const, false)
 const onlySession = atom({ plugin: 'ripple', key: 'onlySession' } as const, false)
 const bandHidden = atom({ plugin: 'ripple', key: 'bandHidden' } as const, false)
 const settings = atom({ plugin: 'ripple', key: 'settings' } as const, null)
+const settingsSync = atom({ plugin: 'ripple', key: 'settingsSync' } as const, { revision: null, pending: [], migrationChecked: false, migration: null })
+const settingsBase = atom({ plugin: 'ripple', key: 'settingsBase' } as const, null)
 const lang = atom({ plugin: 'ripple', key: 'lang' } as const, 'en')
 const pick = atom({ plugin: 'ripple', key: 'pick' } as const, null)
 const deciding = atom({ plugin: 'ripple', key: 'deciding' } as const, false)
@@ -94,6 +96,13 @@ let cacheBoundary: string | undefined
 let judgeSequence = 0
 let generation = 0
 let carriedPick = false
+// Serialize settings reads and writes so a slow poll cannot overwrite a queued edit.
+let settingsWork: Promise<void> = Promise.resolve()
+function settingsTask<T>(work: () => Promise<T>): Promise<T> {
+  const result = settingsWork.then(work)
+  settingsWork = result.then(() => undefined, () => undefined)
+  return result
+}
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -162,12 +171,67 @@ async function registerAuto($: EngineInterface, s: Settings): Promise<void> {
   if (s.agentAuto === 'off') return
   await $.agent.register({ name: 'auto', description: 'Delegate any task here; ClaudeRipple picks the model and reasoning effort for it.', prompt: EXECUTOR, disallowedTools: ['Agent'] })
 }
-async function loadSettings($: EngineInterface): Promise<void> {
-  const s = normalizeSettings(await $.store.get('settings'))
-  if ((await $.store.get('setupDone')) === true) s.setupDone = true
+async function installSettings($: EngineInterface, s: Settings): Promise<void> {
+  const previous = await currentSettings($)
   await update($, settings, () => s)
   const resolved = await resolveLanguage($, s)
   await update($, lang, () => resolved)
+  await registerAuto($, s)
+  if (!s.effortAuto) await update($, heldPick, () => null)
+  if (s.keepWarm && !previous.keepWarm) await update($, warm, value => ({ ...value, stopped: undefined }))
+}
+function settingsSnapshot(text: string): ModSettingsSnapshot {
+  const value = object(JSON.parse(text))
+  if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 0 || typeof value.stored !== 'boolean' || !value.settings || typeof value.settings !== 'object' || Array.isArray(value.settings)) throw new Error('invalid router settings snapshot')
+  return { settings: normalizeSettings(value.settings), revision: Number(value.revision), stored: value.stored }
+}
+async function routerSettingsDown($: EngineInterface, error: unknown): Promise<void> {
+  const notice = t(await read($, lang), 'band.routerDown')
+  if (await read($, line) !== notice) await update($, line, () => notice)
+  await report($, 'router settings', error)
+}
+async function acceptSettings($: EngineInterface, snapshot: ModSettingsSnapshot, sent = 0): Promise<void> {
+  const sync = await update($, settingsSync, value => ({ ...value, revision: snapshot.revision, pending: value.pending.slice(sent), migration: snapshot.stored ? null : value.migration }))
+  const base = snapshot.stored ? snapshot.settings : sync.migration ?? snapshot.settings
+  await installSettings($, applySettingsChanges(base, sync.pending))
+}
+async function putSettings($: EngineInterface, admin: string, base: Settings): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const sync = await read($, settingsSync)
+    const count = sync.pending.length
+    const response = await $.http.fetch(`${admin}/api/mod-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ settings: applySettingsChanges(base, sync.pending), revision: sync.revision }) })
+    if (!response.ok && response.status !== 409) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
+    const snapshot = settingsSnapshot(response.text)
+    await acceptSettings($, snapshot, response.ok ? count : 0)
+    if (response.ok) return
+    base = snapshot.settings
+    if (attempt === 1) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: 409 }))
+  }
+}
+async function syncSettings($: EngineInterface, admin: string): Promise<void> {
+  const response = await $.http.fetch(`${admin}/api/mod-settings`)
+  if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
+  const snapshot = settingsSnapshot(response.text)
+  let sync = await read($, settingsSync)
+  if (!sync.migrationChecked) {
+    let migration: Settings | null = null
+    if (!snapshot.stored) {
+      const legacy = await $.store.get('settings')
+      const setupDone = await $.store.get('setupDone')
+      if (legacy !== undefined && legacy !== null || setupDone === true) {
+        migration = normalizeSettings(legacy)
+        if (setupDone === true) migration.setupDone = true
+      }
+    }
+    sync = await update($, settingsSync, value => ({ ...value, migrationChecked: true, migration }))
+  }
+  if (sync.revision !== snapshot.revision || await read($, settings) === null) await acceptSettings($, snapshot)
+  sync = await read($, settingsSync)
+  if (sync.pending.length || sync.migration) await putSettings($, admin, snapshot.stored ? snapshot.settings : sync.migration ?? snapshot.settings)
+}
+async function loadSettings($: EngineInterface): Promise<void> {
+  try { await settingsTask(async () => { await syncSettings($, await adminUrl($)) }) }
+  catch (error) { await installSettings($, await currentSettings($)); await routerSettingsDown($, error) }
   const hidden = (await $.store.get('bandHidden')) === true
   await update($, bandHidden, () => hidden)
   if (!(await read($, pick))) {
@@ -178,18 +242,23 @@ async function loadSettings($: EngineInterface): Promise<void> {
       await update($, pick, () => ({ effort: level, why: typeof carried.why === 'string' ? carried.why : '', by: carried.by as Pick['by'], at: typeof carried.at === 'number' ? carried.at : 0 }))
     }
   }
-  await registerAuto($, s)
 }
-async function saveSettings($: EngineInterface, s: Settings): Promise<void> {
-  const previous = await currentSettings($)
-  const normalized = normalizeSettings(s)
-  await $.store.set('settings', normalized)
-  await update($, settings, () => normalized)
-  const resolved = await resolveLanguage($, normalized)
-  await update($, lang, () => resolved)
-  await registerAuto($, normalized)
-  if (!normalized.effortAuto) await update($, heldPick, () => null)
-  if (normalized.keepWarm && !previous.keepWarm) await update($, warm, value => ({ ...value, stopped: undefined }))
+async function saveSettings($: EngineInterface, s: Settings, baseline?: Settings): Promise<boolean> {
+  const changes = settingsChanges(baseline ?? await currentSettings($), normalizeSettings(s))
+  try {
+    await settingsTask(async () => {
+      await update($, settingsSync, value => ({ ...value, pending: [...value.pending, ...changes] }))
+      await installSettings($, applySettingsChanges(await currentSettings($), changes))
+      const admin = await adminUrl($)
+      if ((await read($, settingsSync)).revision === null) await syncSettings($, admin)
+      else {
+        const sync = await read($, settingsSync)
+        // Local state already includes pending edits; applying them again is idempotent.
+        await putSettings($, admin, sync.migration ?? await currentSettings($))
+      }
+    })
+    return true
+  } catch (error) { await routerSettingsDown($, error); return false }
 }
 async function installPick($: EngineInterface, value: Pick): Promise<void> {
   carriedPick = false
@@ -236,10 +305,11 @@ async function refreshRouter($: EngineInterface): Promise<void> {
   polling = true
   try {
     await syncPanes($)
-    const open = await isLogUp($)
-    if (!open && await read($, bandHidden)) return
-    const session = await $.session.id()
     const admin = await adminUrl($)
+    await settingsTask(() => syncSettings($, admin))
+    const open = await isLogUp($)
+    if (!open && await read($, bandHidden)) { await update($, line, () => null); return }
+    const session = await $.session.id()
     const own = await $.http.fetch(`${admin}/api/requests?kind=messages&n=${open ? 60 : 1}&session=${encodeURIComponent(session)}`)
     if (!own.ok) throw new Error(t(language, 'commands.routerHttp', { status: own.status }))
     const mine = (object(JSON.parse(own.text)).requests ?? []) as StatusRequest[]
@@ -514,6 +584,7 @@ async function manualPick($: EngineInterface, effort: Effort): Promise<void> {
 async function startPanel($: EngineInterface, which: 'settings' | 'setup'): Promise<void> {
   const s = await currentSettings($)
   await update($, settingsDraft, () => normalizeSettings(s))
+  await update($, settingsBase, () => normalizeSettings(s))
   if (which === 'setup') await update($, setupStep, () => 1)
   await update($, panel, () => which)
   await choices($)
@@ -525,11 +596,11 @@ async function patchDraft($: EngineInterface, change: Partial<Settings>): Promis
 }
 async function finishSettings($: EngineInterface, setup: boolean, skip = false): Promise<void> {
   const draft = normalizeSettings(skip ? await read($, settings) : await read($, settingsDraft))
-  await saveSettings($, { ...draft, setupDone: setup || draft.setupDone })
-  if (setup) await $.store.set('setupDone', true)
+  const saved = await saveSettings($, { ...draft, setupDone: setup || draft.setupDone }, skip ? undefined : normalizeSettings(await read($, settingsBase) ?? await currentSettings($)))
   await update($, panel, () => null)
   await update($, settingsDraft, () => null)
-  await $.ui.toast(t(await read($, lang), 'toasts.settingsSaved'))
+  await update($, settingsBase, () => null)
+  await $.ui.toast(t(await read($, lang), saved ? 'toasts.settingsSaved' : 'band.routerDown'))
 }
 async function openHandoff($: EngineInterface): Promise<void> {
   const active = await read($, handoff)
@@ -788,7 +859,7 @@ function settingsActions($: EngineInterface): SettingsActions {
     setWorkerUi: ui => update($, workerUi, value => ({ ...value, ...ui })),
     setRule: async (domain, rule) => { const s = normalizeSettings(await read($, settingsDraft)); await patchDraft($, { rules: { ...s.rules, [domain]: rule } }) },
     setFallback: target => patchDraft($, { fallback: target }), jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
-    save: () => finishSettings($, false), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null) } }
+    save: () => finishSettings($, false), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {
   const a = settingsActions($)

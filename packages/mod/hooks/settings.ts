@@ -1,4 +1,4 @@
-import type { Calibration, Domain, Effort, Level, Rule, Settings, TierTarget } from '../types'
+import type { Calibration, Domain, Effort, Level, Rule, Settings, SettingsChange, TierTarget } from '../types/index.d.ts'
 
 export const DOMAINS: readonly Domain[] = ['general', 'design', 'frontend', 'backend', 'infra', 'data', 'test', 'docs', 'research']
 export const LEVELS: readonly Level[] = ['light', 'standard', 'deep']
@@ -34,7 +34,7 @@ function target(raw: unknown, fallback?: TierTarget): TierTarget | undefined {
 }
 function calibration(value: Record<string, unknown>): Calibration {
   const out: Calibration = {}
-  if ([-2, -1, 0, 1, 2].includes(Number(value.effortOffset)) && typeof value.effortOffset === 'number') out.effortOffset = value.effortOffset as Calibration['effortOffset']
+  if ([-2, -1, 0, 1, 2].includes(Number(value.effortOffset)) && typeof value.effortOffset === 'number') out.effortOffset = value.effortOffset as NonNullable<Calibration['effortOffset']>
   for (const field of ['floor', 'ceiling'] as const) if (EFFORTS.includes(value[field] as Effort)) out[field] = value[field] as Effort
   return out
 }
@@ -83,4 +83,36 @@ export function normalizeSettings(raw: unknown): Settings {
   if (Array.isArray(value.hide)) result.hide = [...new Set(value.hide.filter((part): part is string => typeof part === 'string' && ['timer', 'reason', 'route', 'limits'].includes(part)))]
   result.fallback = target(value.fallback, DEFAULTS.fallback)!
   return result
+}
+
+/** Preserve unrelated remote edits, including sibling domains and provider switches. */
+export function settingsChanges(before: Settings, after: Settings): SettingsChange[] {
+  function diff(a: unknown, b: unknown, path: string[]): SettingsChange[] {
+    if (JSON.stringify(a) === JSON.stringify(b)) return []
+    if (b === undefined) return [{ path, remove: true }]
+    if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b)) {
+      const left = object(a), right = object(b)
+      // Changing a discriminated rule replaces it, rather than retaining the old mode's fields.
+      if (left.mode === right.mode) return [...new Set([...Object.keys(left), ...Object.keys(right)])].flatMap(key => diff(left[key], right[key], [...path, key]))
+    }
+    return [{ path, value: b }]
+  }
+  return diff(before, after, [])
+}
+
+export function applySettingsChanges(base: Settings, changes: readonly SettingsChange[]): Settings {
+  const result = object(normalizeSettings(base))
+  for (const change of changes) {
+    let parent = result
+    for (const key of change.path.slice(0, -1)) {
+      const child = object(parent[key])
+      parent[key] = child
+      parent = child
+    }
+    const key = change.path.at(-1)
+    if (key === undefined) continue
+    if (change.remove) delete parent[key]
+    else parent[key] = change.value
+  }
+  return normalizeSettings(result)
 }
