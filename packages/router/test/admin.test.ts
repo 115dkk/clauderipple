@@ -210,7 +210,13 @@ test("admin mod-options offers owned workers, every provider model, judge candid
         return JSON.parse(text) as ModOptions;
       };
       const options = await get();
-      assert.deepEqual(options.agents, [{ name: "gpt-6-1-sol", model: "gpt-6.1-sol", provider: "codex" }]);
+      assert.deepEqual(options.agents, [{ name: "gpt-6-1-sol", model: "gpt-6.1-sol", provider: "codex", efforts: ["low", "medium", "high", "xhigh", "max"], billing: "subscription" }]);
+      assert.deepEqual(options.providers.map(p => [p.name, p.billing]), [["codex", "subscription"], ["zen", "payg"], ["custom", "free"], ["native", "payg"], ["google", "subscription"]]);
+      assert.deepEqual(options.claudeEfforts, ["low", "medium", "high", "max"]);
+      // ChatGPT out of quota is not connected: the GPT presets fall back to Claude and say so.
+      assert.deepEqual(options.presets.gpt.rungs.standard, { target: { agent: "general-purpose", model: "sonnet" }, effort: "medium" });
+      assert.deepEqual(options.presets.gpt.substituted, ["light", "standard", "hard", "plan"]);
+      assert.deepEqual(options.presets.claude.rungs.light, { target: { agent: "general-purpose", model: "haiku" }, effort: "low" });
       assert.deepEqual(options.models.find(m => m.model === "jev-1.13"), { model: "jev-1.13", provider: "zen", name: "Jev", judgeOnly: true });
       assert.equal(options.models.length, 6);
       assert.deepEqual(options.zen, { configured: true, model: "jev-1.13" });
@@ -221,7 +227,9 @@ test("admin mod-options offers owned workers, every provider model, judge candid
       assert.equal(options.scores.models.find(m => m.model === "gpt-6.1-sol")?.variants[0]?.intelligence, 50.24);
       assert.equal(refreshed, 1);
       credit = true;
-      assert.equal((await get()).providers.find(p => p.name === "codex")?.usable, true, "purchased credits keep a full account usable");
+      const credited = await get();
+      assert.equal(credited.providers.find(p => p.name === "codex")?.usable, true, "purchased credits keep a full account usable");
+      assert.deepEqual(credited.presets.gpt.rungs.standard, { target: { agent: "gpt-6-1-sol" }, effort: "medium" });
       setCfg(makeCfg({ providers: { zen: { type: "openai-compatible", url: "https://opencode.ai/zen/v1", models: [{ id: "jev-2" }] } }, routes: {}, aliases: {}, direct: [] }));
       assert.deepEqual((await get()).zen, { configured: true, model: "jev-2" }, "hand-entered Zen URLs need no preset");
       setCfg(makeCfg({ providers: {}, routes: {}, aliases: {}, direct: [] }));

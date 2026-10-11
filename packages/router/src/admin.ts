@@ -30,6 +30,8 @@ export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, writeModSettings } from "./mod-settings.ts";
+import { billingOf, claudeChoices, presets } from "../../mod/hooks/ladder.ts";
+import type { Billing, Effort, LadderChoice, Preset, PresetId } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
@@ -454,12 +456,20 @@ async function chatgptStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}):
 }
 
 export type ModOptions = {
-  agents: ReturnType<typeof generatedAgents>;
+  /** Each worker with its model's effort ladder (mod efforts only) and how it is paid for. */
+  agents: (ReturnType<typeof generatedAgents>[number] & { efforts: Effort[]; billing: Billing })[];
   models: { model: string; provider: string; name: string; judgeOnly: boolean }[];
-  providers: { name: string; type: Provider["type"]; usable: boolean }[];
+  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing }[];
   zen: { configured: boolean; model: string | null };
   scores: ReturnType<typeof buildModelScores>;
+  /** Claude's own models' effort ladder, for the rungs that run Claude Code's own agent. */
+  claudeEfforts: Effort[];
+  /** The worker ladder's presets filled from the usable workers (docs/specs/2026-10-11-worker-ladder.md). */
+  presets: Record<PresetId, Preset>;
 };
+
+const MOD_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+const modEfforts = (levels: readonly string[] | undefined): Effort[] => (levels ?? []).filter((level): level is Effort => MOD_EFFORTS.includes(level));
 
 async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<ModOptions> {
   const cfg = deps.config();
@@ -479,7 +489,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY) : claudeAuthStore(deps).describeSource() !== null;
     }
     if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready");
-    return { name, type: p.type, usable };
+    return { name, type: p.type, usable, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }) };
   });
   const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
   const zen = Object.values(cfg.providers).find(p => {
@@ -490,7 +500,24 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     return url.hostname === "opencode.ai" && /^\/zen\/v1(?:\/|$)/.test(url.pathname);
   });
   const model = zen?.models?.find(m => isJudgeOnlyModel(m.id))?.id ?? null;
-  return { agents: generatedAgents(cfg, deps.agentDir, undefined, deps.log), models, providers, zen: { configured: model !== null, model }, scores: buildModelScores(cfg, await scores.get()) };
+  const catalog = effortLevels(cfg).providers;
+  const agents = generatedAgents(cfg, deps.agentDir, undefined, deps.log).map(a => ({
+    ...a,
+    efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
+    billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
+  }));
+  const scored = buildModelScores(cfg, await scores.get());
+  const claudeEfforts = modEfforts(catalog.anthropic?.default);
+  // Presets offer only what can run now: a worker whose provider is signed out or out of quota is not connected.
+  const usable = new Set(providers.filter(p => p.usable).map(p => p.name));
+  const choices: LadderChoice[] = [
+    ...agents.filter(a => usable.has(a.provider)).map(a => {
+      const costs = (scored.models.find(m => m.model === a.model && m.provider === a.provider)?.variants ?? []).flatMap(v => typeof v.costPerTask === "number" ? [v.costPerTask] : []);
+      return { target: { agent: a.name }, model: a.model, provider: a.provider, billing: a.billing, efforts: a.efforts, ...(costs.length ? { cost: Math.min(...costs) } : {}) };
+    }),
+    ...claudeChoices(claudeEfforts),
+  ];
+  return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts, presets: presets(choices) };
 }
 
 async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
