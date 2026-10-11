@@ -569,6 +569,21 @@ test('provider off refuses named workers and every-provider-off refuses automati
   expect(sent.length).toBe(0)
 })
 
+test('a subagent may not start a worker; the main chat still delegates', async ($, on) => {
+  boundaries(on)
+  http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  const nested = await $.agent.spawn({ ...SPAWN, parentAgentId: 'agent-7' })
+  expect(nested.deny).toContain('may not start another subagent')
+  const named = await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', parentAgentId: 'agent-7' })
+  expect(named.deny).toContain('may not start another subagent')
+  expect(judges.length).toBe(0)
+  expect(sent.length).toBe(0)
+  expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
+})
+
 test('prompt judge rewrites every Opus 5.5 main step, not subagent effort', async ($, on) => {
   boundaries(on)
   http(on)

@@ -1224,6 +1224,10 @@ export const register: Register = on => {
     let input = e
     let chosen: WorkerPick | undefined
     try {
+      // Only the main chat delegates. A worker that starts its own worker waits on it idle, and a
+      // Claude worker's 5-minute cache lapses meanwhile: 324k tokens rewritten in one request after
+      // an 8.5-minute wait on 2026-10-11. Forks, workflows and teammates are the engine's, not this.
+      if (e.parentAgentId && !e.fork && !e.workflow && !e.isTeammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
       if (!e.workflow && !e.isTeammate && takesOver(e, s)) {
         const routed = await requestPick($, e, s)
