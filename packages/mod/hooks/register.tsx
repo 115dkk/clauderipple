@@ -607,6 +607,8 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   if (marker) prompt = prompt.replace(MARKER, '').replace(/^\s*\n/, '')
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected) }))
+  // The verdict behind a pick is otherwise only in the agents panel; the debug log keeps it checkable.
+  await $.ui.log(`ClaudeRipple worker pick: ${e.description} → ${verdict.domain}/${verdict.level}/${verdict.effort} by ${by}${verdict.sure !== undefined ? ` sure ${verdict.sure.toFixed(2)}` : ''} → ${model ?? selected.agent}${resolved.aa ? ` (AA ${resolved.aa.intelligence.toFixed(1)}, $${resolved.aa.costPerTask.toFixed(3)})` : ''}`, { to: 'debug' })
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
   return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
