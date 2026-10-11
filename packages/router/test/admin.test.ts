@@ -1141,6 +1141,21 @@ test("GET /app.js serves a static file with the right content-type", async () =>
   });
 });
 
+test("the dashboard's favicons are served, and /favicon.ico gets the PNG", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const svg = await fetch(`${base()}:${port}/favicon.svg`);
+    assert.equal(svg.status, 200);
+    assert.equal(svg.headers.get("content-type"), "image/svg+xml");
+    for (const route of ["/favicon-32.png", "/favicon.ico"]) {
+      const res = await fetch(`${base()}:${port}${route}`);
+      assert.equal(res.status, 200, route);
+      assert.equal(res.headers.get("content-type"), "image/png", route);
+      const bytes = Buffer.from(await res.arrayBuffer());
+      assert.equal(bytes.subarray(1, 4).toString("latin1"), "PNG", route);
+    }
+  });
+});
+
 test("path traversal outside the UI root is blocked", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     // fetch()/undici would normalize %2e%2e client-side; send the raw encoded path so the

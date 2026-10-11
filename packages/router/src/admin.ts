@@ -1373,7 +1373,9 @@ function tailLines(file: string, n: number): string {
 
 function safeStaticPath(urlPath: string): string | null {
   const decoded = decodeURIComponent(urlPath.split("?")[0] ?? "/");
-  const rel = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
+  // Clients that ask for /favicon.ico without reading the page's <link rel="icon"> get the PNG;
+  // browsers sniff the bytes, so a PNG served for .ico shows.
+  const rel = decoded === "/" ? "index.html" : decoded === "/favicon.ico" ? "favicon-32.png" : decoded.replace(/^\/+/, "");
   const full = path.resolve(UI_ROOT, rel);
   const rootWithSep = UI_ROOT.endsWith(path.sep) ? UI_ROOT : UI_ROOT + path.sep;
   if (full !== UI_ROOT && !full.startsWith(rootWithSep)) return null; // path traversal guard
