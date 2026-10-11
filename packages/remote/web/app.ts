@@ -1,0 +1,565 @@
+// The phone app: one screen at a time (pair, home, session), a docked composer, sheets for
+// folder and model. State that must survive closing the app (the token, unsent messages, the
+// last folder and model) lives in localStorage; everything else is rebuilt from the host.
+import type { BlobChunk, BrowseResult, ClientMsg, Effort, FolderEntry, HostMsg, ProviderGroup, ReqOp, SessionEvent, SessionSummary, SubPage } from "../src/protocol.ts";
+import { Link } from "./conn.ts";
+import type { LinkStatus } from "./conn.ts";
+import { esc, icon, patchList, setHTML } from "./dom.ts";
+import { pickLang, setLang, t } from "./i18n.ts";
+import { mergeEvents, reduce } from "./timeline.ts";
+import type { Item, Outgoing, SessionView } from "./timeline.ts";
+import * as V from "./views.ts";
+import type { UI } from "./views.ts";
+
+interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean; attached: boolean }
+interface OutboxEntry extends Outgoing { session: string | null; create?: { cwd: string; model: string; effort: Effort | null } }
+type Screen = { name: "pair" } | { name: "home" } | { name: "session"; id: string };
+
+const store = {
+  get<T>(key: string, fallback: T): T {
+    try { const raw = localStorage.getItem(key); return raw === null ? fallback : (JSON.parse(raw) as T); } catch { return fallback; }
+  },
+  set(key: string, value: unknown): void {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode: state lives for this visit only */ }
+  },
+};
+
+const uid = (): string => crypto.randomUUID();
+const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
+
+export class App {
+  ui: UI;
+  screen: Screen = { name: "home" };
+  caches = new Map<string, Cache>();
+  outbox: OutboxEntry[] = store.get<OutboxEntry[]>("rr.outbox", []);
+  recentModels: string[] = store.get<string[]>("rr.recentModels", []);
+  link: Link | null = null;
+  pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  /** create's clientMsgId → session id, once the host acknowledged it */
+  created = new Map<string, string>();
+  private renderedScreen = "";
+  private composerMode = "";
+  private lastOpenPerm = "";
+
+  constructor(link: LinkStatus) {
+    this.ui = {
+      now: Date.now(), link, host: null, home: undefined, sessions: [], models: [], sheet: null,
+      draft: store.get("rr.draft", { cwd: null, model: null, effort: null }),
+      expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null,
+    };
+  }
+
+  // ---- boot --------------------------------------------------------------------------------
+
+  start(): void {
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const paired = hash.get("pair");
+    if (paired) {
+      store.set("rr.token", paired);
+      history.replaceState(null, "", location.pathname);
+    }
+    const token = store.get<string | null>("rr.token", null);
+    if (!token) { this.screen = { name: "pair" }; this.render(); return; }
+    this.screen = this.routeFromHash();
+    window.addEventListener("hashchange", () => { this.screen = this.routeFromHash(); this.ui.sheet = null; this.render(); this.attachCurrent(); });
+    const clientId = store.get<string>("rr.clientId", "") || uid();
+    store.set("rr.clientId", clientId);
+    const link = new Link({
+      url: `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+      token, clientId,
+      makeSocket: (url) => new WebSocket(url) as unknown as import("./conn.ts").SocketLike,
+      now: () => Date.now(),
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (id) => clearTimeout(id as number),
+      isOnline: () => navigator.onLine,
+    });
+    this.link = link;
+    link.onStatus = (s) => { this.ui.link = s; this.ui.now = Date.now(); this.renderChrome(); };
+    link.onMessage = (m) => this.onHost(m);
+    link.onReady = () => this.onReady();
+    window.addEventListener("online", () => link.nudge());
+    window.addEventListener("offline", () => link.nudge());
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") link.nudge(); });
+    setInterval(() => { this.ui.now = Date.now(); this.renderChrome(); }, 1000);
+    this.bind();
+    this.render();
+    link.start();
+  }
+
+  private routeFromHash(): Screen {
+    const m = /^#\/s\/(.+)$/.exec(location.hash);
+    return m ? { name: "session", id: decodeURIComponent(m[1]!) } : { name: "home" };
+  }
+
+  go(screen: Screen): void {
+    const hash = screen.name === "session" ? `#/s/${encodeURIComponent(screen.id)}` : "";
+    if (location.hash !== hash) {
+      if (hash) location.hash = hash; else history.pushState(null, "", location.pathname);
+    }
+    this.screen = screen;
+    this.ui.sheet = null;
+    this.render();
+    this.attachCurrent();
+  }
+
+  // ---- host messages -----------------------------------------------------------------------
+
+  private onReady(): void {
+    for (const c of this.caches.values()) c.attached = false;
+    this.attachCurrent();
+    this.flushOutbox();
+    if (!this.ui.models.length) void this.loadModels();
+  }
+
+  onHost(m: HostMsg): void {
+    switch (m.t) {
+      case "ready":
+        this.ui.host = m.host; this.ui.sessions = m.sessions; this.render(); break;
+      case "host":
+        this.ui.host = m.host; this.renderChrome(); break;
+      case "sessions":
+        this.ui.sessions = m.sessions; if (this.screen.name === "home") this.render(); else this.renderChrome(); break;
+      case "events": {
+        const c = this.cache(m.session);
+        if (m.tail || (c.epoch && c.epoch !== m.epoch)) { c.events = []; c.hasOlder = m.tail?.hasOlder ?? false; }
+        c.epoch = m.epoch;
+        c.events = mergeEvents(c.events, m.events);
+        for (const e of m.events) if (e.kind === "user") this.dropOutbox(e.clientMsgId);
+        if (this.isCurrent(m.session)) this.renderSession();
+        break;
+      }
+      case "history": {
+        const c = this.cache(m.session);
+        c.loadingOlder = false;
+        c.hasOlder = m.hasOlder;
+        const main = $("main");
+        const before = main ? main.scrollHeight - main.scrollTop : 0;
+        c.events = mergeEvents(c.events, m.events);
+        if (this.isCurrent(m.session)) { this.renderSession(); if (main) main.scrollTop = main.scrollHeight - before; }
+        break;
+      }
+      case "ack": {
+        const entry = this.outbox.find((o) => o.clientMsgId === m.clientMsgId);
+        if (entry?.create) {
+          this.created.set(m.clientMsgId, m.session);
+          if (this.screen.name === "session" && this.screen.id === `local:${m.clientMsgId}`) {
+            history.replaceState(null, "", `#/s/${encodeURIComponent(m.session)}`);
+            this.screen = { name: "session", id: m.session };
+            this.renderedScreen = "";
+          }
+        }
+        this.dropOutbox(m.clientMsgId);
+        this.attachCurrent();
+        this.render();
+        break;
+      }
+      case "res": {
+        const p = this.pending.get(m.reqId);
+        this.pending.delete(m.reqId);
+        if (p) { if (m.ok) p.resolve(m.data); else p.reject(new Error(m.error)); }
+        break;
+      }
+      case "error":
+        if (m.clientMsgId) this.dropOutbox(m.clientMsgId);
+        this.toast(t("error.generic", { text: m.message }));
+        break;
+      default:
+        break;
+    }
+  }
+
+  private isCurrent(session: string): boolean {
+    return this.screen.name === "session" && this.screen.id === session;
+  }
+
+  cache(id: string): Cache {
+    let c = this.caches.get(id);
+    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false, attached: false }; this.caches.set(id, c); }
+    return c;
+  }
+
+  private attachCurrent(): void {
+    if (this.screen.name !== "session" || this.screen.id.startsWith("local:") || this.ui.link.state !== "open") return;
+    const c = this.cache(this.screen.id);
+    if (c.attached) return;
+    const last = c.events.length ? c.events[c.events.length - 1]!.seq : 0;
+    const msg: ClientMsg = c.epoch && last ? { t: "attach", session: this.screen.id, epoch: c.epoch, afterSeq: last } : { t: "attach", session: this.screen.id };
+    if (this.link?.send(msg)) c.attached = true;
+  }
+
+  req<T>(op: ReqOp): Promise<T> {
+    const reqId = uid();
+    return new Promise<T>((resolve, reject) => {
+      if (!this.link?.send({ t: "req", reqId, op })) { reject(new Error("offline")); return; }
+      this.pending.set(reqId, { resolve: resolve as (v: unknown) => void, reject });
+      setTimeout(() => { if (this.pending.delete(reqId)) reject(new Error("timeout")); }, 15_000);
+    });
+  }
+
+  private async loadModels(): Promise<void> {
+    try {
+      this.ui.models = await this.req<ProviderGroup[]>({ op: "models" });
+      const d = this.ui.draft;
+      const all = this.ui.models.flatMap((g) => g.models);
+      if (!d.model || !all.some((m) => m.model === d.model)) {
+        const first = all.find((m) => m.usable);
+        if (first) { d.model = first.model; d.effort = first.efforts.includes("high") ? "high" : first.efforts[0] ?? null; store.set("rr.draft", d); }
+      }
+      this.render();
+    } catch { /* retried on the next ready */ }
+  }
+
+  // ---- outbox: nothing a person typed is dropped; nothing shows as sent before the host says so ----
+
+  private saveOutbox(): void { store.set("rr.outbox", this.outbox); }
+
+  private dropOutbox(id: string): void {
+    const before = this.outbox.length;
+    this.outbox = this.outbox.filter((o) => o.clientMsgId !== id);
+    if (this.outbox.length !== before) this.saveOutbox();
+  }
+
+  private flushOutbox(): void {
+    for (const o of this.outbox) {
+      const session = o.session ?? null;
+      const sent = o.create && !session
+        ? this.link?.send({ t: "create", clientMsgId: o.clientMsgId, cwd: o.create.cwd, model: o.create.model, effort: o.create.effort, text: o.text })
+        : session ? this.link?.send({ t: "send", session, clientMsgId: o.clientMsgId, text: o.text }) : false;
+      o.state = sent ? "sending" : "pending";
+    }
+    this.saveOutbox();
+    this.render();
+  }
+
+  submit(text: string): void {
+    const body = text.trim();
+    if (!body) return;
+    const clientMsgId = uid();
+    if (this.screen.name === "home" || (this.screen.name === "session" && this.screen.id.startsWith("local:"))) {
+      const d = this.ui.draft;
+      if (!d.cwd) { this.openFolderSheet(); return; }
+      if (!d.model) { this.openModelSheet(null); return; }
+      const entry: OutboxEntry = { clientMsgId, text: body, at: Date.now(), state: "pending", session: null, create: { cwd: d.cwd, model: d.model, effort: d.effort } };
+      this.outbox.push(entry);
+      this.rememberModel(d.model);
+      this.flushOutbox();
+      this.go({ name: "session", id: `local:${clientMsgId}` });
+      return;
+    }
+    if (this.screen.name !== "session") return;
+    const session = this.screen.id;
+    this.outbox.push({ clientMsgId, text: body, at: Date.now(), state: "pending", session });
+    this.flushOutbox();
+    this.scrollToBottom();
+  }
+
+  private rememberModel(id: string): void {
+    this.recentModels = [id, ...this.recentModels.filter((m) => m !== id)].slice(0, 5);
+    store.set("rr.recentModels", this.recentModels);
+  }
+
+  // ---- rendering -----------------------------------------------------------------------------
+
+  view(id: string): SessionView {
+    const c = this.cache(id);
+    const out = this.outbox.filter((o) => o.session === id || (id.startsWith("local:") && o.clientMsgId === id.slice(6)) || (o.create && this.created.get(o.clientMsgId) === id));
+    return reduce(c.events, out, c.events.length > 0 && !c.hasOlder);
+  }
+
+  summary(id: string): SessionSummary | undefined {
+    const s = this.ui.sessions.find((x) => x.id === id);
+    if (s || !id.startsWith("local:")) return s;
+    const o = this.outbox.find((x) => x.clientMsgId === id.slice(6));
+    if (!o?.create) return undefined;
+    return { id, title: o.text, cwd: o.create.cwd, model: o.create.model, effort: o.create.effort, state: "starting", pending: 0, createdAt: o.at, updatedAt: o.at, lastSeq: 0, epoch: "" };
+  }
+
+  render(): void {
+    const root = $("#app");
+    const key = this.screen.name === "session" ? `s:${this.screen.id}` : this.screen.name;
+    if (key !== this.renderedScreen) {
+      this.renderedScreen = key;
+      this.composerMode = "";
+      root.dataset.screen = this.screen.name;
+      root.innerHTML = this.screen.name === "pair"
+        ? `<main class="scroll">${V.pairScreen()}</main>`
+        : `<header class="top" id="top"></header><div id="pre"></div><main class="scroll" id="main">${this.screen.name === "session" ? `<div class="loading-older" id="older" hidden>${t("history.loading")}</div><div class="tl" id="tl"></div>` : ""}</main><footer class="dock"><div id="dock-extra"></div><div id="dock-input"></div></footer><div id="sheet"></div><div id="toast"></div>`;
+      if (this.screen.name === "session") requestAnimationFrame(() => this.scrollToBottom());
+    }
+    if (this.screen.name === "pair") return;
+    if (this.screen.name === "home") {
+      setHTML($("#top"), V.homeTop(this.ui));
+      setHTML($("#pre"), "");
+      setHTML($("#main"), V.homeMain(this.ui));
+      setHTML($("#dock-extra"), V.chips(this.ui));
+      this.renderComposer(t("composer.new"), "send");
+    } else {
+      this.renderSession();
+    }
+    this.renderSheet();
+    this.renderToast();
+  }
+
+  /** Only what changes every second: the link pill, banners, countdowns, "working for". */
+  renderChrome(): void {
+    if (this.screen.name === "pair") return;
+    if (this.screen.name === "home") {
+      setHTML($("#top"), V.homeTop(this.ui));
+      const main = $("#main");
+      if (main) { const y = main.scrollTop; setHTML(main, V.homeMain(this.ui)); main.scrollTop = y; }
+      return;
+    }
+    this.renderSession(true);
+  }
+
+  renderSession(chromeOnly = false): void {
+    if (this.screen.name !== "session") return;
+    const id = this.screen.id;
+    const view = this.view(id);
+    const s = this.summary(id);
+    const top = $("#top");
+    if (!top) return;
+    setHTML(top, V.sessionTop(this.ui, s, view));
+    setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
+    const perm = V.permCard(view, this.ui);
+    setHTML($("#dock-extra"), perm + (perm ? "" : V.workingLine(view, this.ui)));
+    // Stop only when the host can hear it; offline the button sends (queues) instead.
+    const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
+    this.renderComposer(t("composer.reply"), running && !perm && this.ui.link.state === "open" ? "stop" : "send");
+    const openId = view.open[0]?.id ?? "";
+    if (openId && openId !== this.lastOpenPerm) navigator.vibrate?.(30);
+    this.lastOpenPerm = openId;
+    if (chromeOnly) return;
+    const main = $("main");
+    const stick = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+    patchList<Item>($("#tl"), view.items, (it) => V.item(it, this.ui));
+    const c = this.cache(id);
+    $("#older").hidden = !c.loadingOlder;
+    if (stick) this.scrollToBottom();
+  }
+
+  private renderComposer(placeholder: string, mode: "send" | "stop"): void {
+    const key = `${placeholder}|${mode}`;
+    const host = $("#dock-input");
+    if (!host || key === this.composerMode) return;
+    const prev = (document.getElementById("input") as HTMLTextAreaElement | null)?.value ?? store.get<string>(`rr.typed.${this.renderedScreen}`, "");
+    host.innerHTML = V.composer(placeholder, mode, prev);
+    this.composerMode = key;
+    this.fitInput();
+  }
+
+  renderSheet(): void {
+    const el = $("#sheet");
+    setHTML(el, V.sheet(this.ui));
+  }
+
+  private renderToast(): void {
+    const el = $("#toast");
+    if (el) el.innerHTML = this.ui.toast ? `<div class="toast" role="status">${this.ui.toast.replace(/[<>&]/g, "")}</div>` : "";
+  }
+
+  toast(text: string): void {
+    this.ui.toast = text;
+    this.renderToast();
+    setTimeout(() => { if (this.ui.toast === text) { this.ui.toast = null; this.renderToast(); } }, 3500);
+  }
+
+  scrollToBottom(): void {
+    const main = $("main");
+    if (main) main.scrollTop = main.scrollHeight;
+  }
+
+  private fitInput(): void {
+    const ta = document.getElementById("input") as HTMLTextAreaElement | null;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
+    const send = ta.parentElement?.querySelector<HTMLButtonElement>("button[data-act=send]");
+    if (send) send.disabled = !ta.value.trim();
+  }
+
+  // ---- sheets --------------------------------------------------------------------------------
+
+  async openFolderSheet(): Promise<void> {
+    this.ui.sheet = { kind: "folder", recent: [], browse: null, filter: "", loading: true };
+    this.renderSheet();
+    try {
+      const [recent, browse] = await Promise.all([this.req<FolderEntry[]>({ op: "folders" }), this.req<BrowseResult>({ op: "browse", ...(this.ui.draft.cwd ? { path: this.ui.draft.cwd } : {}) })]);
+      if (this.ui.sheet?.kind !== "folder") return;
+      this.ui.home = browse.home;
+      this.ui.sheet = { ...this.ui.sheet, recent, browse, loading: false };
+      this.renderSheet();
+    } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
+  }
+
+  async browse(path: string): Promise<void> {
+    try {
+      const browse = await this.req<BrowseResult>({ op: "browse", path });
+      if (this.ui.sheet?.kind !== "folder") return;
+      this.ui.sheet = { ...this.ui.sheet, browse, filter: "" };
+      this.renderSheet();
+    } catch { this.toast(t("error.cwd")); }
+  }
+
+  openModelSheet(forSession: string | null): void {
+    const s = forSession ? this.summary(forSession) : undefined;
+    const v = forSession ? this.view(forSession) : null;
+    const model = (v?.model ?? s?.model) ?? this.ui.draft.model;
+    const effort = (v?.effort ?? s?.effort) ?? this.ui.draft.effort;
+    this.ui.sheet = { kind: "model", groups: this.ui.models, recent: this.recentModels, model, effort, forSession };
+    this.renderSheet();
+    if (!this.ui.models.length) void this.loadModels().then(() => { if (this.ui.sheet?.kind === "model") { this.ui.sheet.groups = this.ui.models; this.renderSheet(); } });
+  }
+
+  // ---- input -----------------------------------------------------------------------------------
+
+  private bind(): void {
+    const root = $("#app");
+    root.addEventListener("click", (ev) => {
+      const el = (ev.target as HTMLElement).closest<HTMLElement>("[data-act]");
+      if (!el) return;
+      void this.act(el.dataset.act!, el);
+    });
+    root.addEventListener("input", (ev) => {
+      const el = ev.target as HTMLElement;
+      if (el.id === "input") { this.fitInput(); store.set(`rr.typed.${this.renderedScreen}`, (el as HTMLTextAreaElement).value); }
+      if (el.id === "folder-filter" && this.ui.sheet?.kind === "folder") {
+        this.ui.sheet.filter = (el as HTMLInputElement).value;
+        const pos = (el as HTMLInputElement).selectionStart;
+        this.renderSheet();
+        const again = document.getElementById("folder-filter") as HTMLInputElement | null;
+        again?.focus();
+        if (again && pos !== null) again.setSelectionRange(pos, pos);
+      }
+    });
+    root.addEventListener("keydown", (ev) => {
+      const el = ev.target as HTMLElement;
+      // Enter sends on a hardware keyboard; on a phone the return key makes a new line unless enterkeyhint says send.
+      if (el.id === "input" && ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && matchMedia("(pointer: fine)").matches) {
+        ev.preventDefault();
+        void this.act("send", el);
+      }
+    });
+    root.addEventListener("scroll", (ev) => {
+      const main = ev.target as HTMLElement;
+      if (main.id !== "main" || this.screen.name !== "session" || main.scrollTop > 240) return;
+      const c = this.cache(this.screen.id);
+      if (!c.hasOlder || c.loadingOlder || !c.events.length) return;
+      if (this.link?.send({ t: "history", session: this.screen.id, beforeSeq: c.events[0]!.seq, reqId: uid() })) { c.loadingOlder = true; $("#older").hidden = false; }
+    }, true);
+  }
+
+  async act(act: string, el: HTMLElement): Promise<void> {
+    const id = el.dataset.id ?? "";
+    const session = this.screen.name === "session" ? this.screen.id : "";
+    switch (act) {
+      case "retry": this.link?.nudge(); break;
+      case "home": this.go({ name: "home" }); break;
+      case "open": this.go({ name: "session", id }); break;
+      case "send": {
+        const ta = document.getElementById("input") as HTMLTextAreaElement | null;
+        if (!ta) return;
+        const text = ta.value;
+        ta.value = "";
+        store.set(`rr.typed.${this.renderedScreen}`, "");
+        this.fitInput();
+        this.submit(text);
+        break;
+      }
+      case "stop": if (session && !session.startsWith("local:")) this.link?.send({ t: "interrupt", session }); break;
+      case "allow": case "deny": case "always":
+        if (session) {
+          const decision = act === "always" ? "allow_always" : act;
+          if (!this.link?.send({ t: "decide", session, id, decision })) this.toast(t("queue.pending"));
+        }
+        break;
+      case "perm-more": this.ui.permOpen.add(id); this.renderSession(true); break;
+      case "workers": this.ui.workersOpen = !this.ui.workersOpen; this.renderSession(true); break;
+      case "tool": await this.toggleTool(id); break;
+      case "sub": await this.openSub(id); break;
+      case "pick-folder": await this.openFolderSheet(); break;
+      case "pick-model": this.openModelSheet(null); break;
+      case "pick-model-session": if (session && !session.startsWith("local:")) this.openModelSheet(session); break;
+      case "close-sheet": this.ui.sheet = null; this.renderSheet(); break;
+      case "browse": await this.browse(el.dataset.path ?? ""); break;
+      case "choose-folder":
+        this.ui.draft.cwd = el.dataset.path ?? null;
+        store.set("rr.draft", this.ui.draft);
+        this.ui.sheet = null;
+        this.render();
+        break;
+      case "choose-model": if (this.ui.sheet?.kind === "model") {
+        const m = this.ui.models.flatMap((g) => g.models).find((x) => x.model === el.dataset.model);
+        this.ui.sheet.model = m?.model ?? null;
+        if (m && (!this.ui.sheet.effort || !m.efforts.includes(this.ui.sheet.effort))) this.ui.sheet.effort = m.efforts.includes("high") ? "high" : m.efforts[0] ?? null;
+        if (m && !m.efforts.length) this.ui.sheet.effort = null;
+        this.renderSheet();
+      } break;
+      case "choose-effort": if (this.ui.sheet?.kind === "model") { this.ui.sheet.effort = (el.dataset.effort as Effort) ?? null; this.renderSheet(); } break;
+      case "model-done": if (this.ui.sheet?.kind === "model" && this.ui.sheet.model) {
+        const { model, effort, forSession } = this.ui.sheet;
+        if (forSession) this.link?.send({ t: "set_model", session: forSession, model, effort });
+        else { this.ui.draft.model = model; this.ui.draft.effort = effort; store.set("rr.draft", this.ui.draft); }
+        this.rememberModel(model);
+        this.ui.sheet = null;
+        this.render();
+      } break;
+      case "settings": this.toggleLang(); break;
+    }
+  }
+
+  private toggleLang(): void {
+    const next = (store.get<string | null>("rr.lang", null) ?? (document.documentElement.lang || "ko")) === "ko" ? "en" : "ko";
+    store.set("rr.lang", next);
+    setLang(next);
+    document.documentElement.lang = next;
+    this.renderedScreen = "";
+    this.render();
+  }
+
+  private async toggleTool(id: string): Promise<void> {
+    if (this.ui.expanded.has(id)) { this.ui.expanded.delete(id); this.rerenderItems(); return; }
+    this.ui.expanded.set(id, null);
+    this.rerenderItems();
+    if (this.screen.name !== "session") return;
+    const view = this.view(this.screen.id);
+    const tool = view.items.flatMap((i) => (i.type === "assistant" ? i.tools : [])).find((x) => x.id === id);
+    const text = tool?.result?.text;
+    if (text && typeof text !== "string") {
+      try {
+        const chunk = await this.req<BlobChunk>({ op: "blob", session: this.screen.id, id: text.blob });
+        this.ui.expanded.set(id, chunk.text + (chunk.next !== null ? "\n…" : ""));
+      } catch { this.ui.expanded.set(id, text.preview); }
+      this.rerenderItems();
+    }
+  }
+
+  private rerenderItems(): void {
+    // Expanded state is UI-only; bump versions by re-rendering the list wholesale.
+    const tl = document.getElementById("tl");
+    if (tl) for (const child of Array.from(tl.children) as HTMLElement[]) child.dataset.ver = "";
+    this.renderSession();
+  }
+
+  private async openSub(sub: string): Promise<void> {
+    if (this.screen.name !== "session") return;
+    try {
+      const page = await this.req<SubPage>({ op: "sub", session: this.screen.id, sub });
+      const view = reduce(page.events);
+      const html = view.items.map((i) => V.item(i, this.ui)).join("");
+      setHTML($("#sheet"), `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog"><div class="grab"></div><div class="sh"><b>${esc(t("sub.worker"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div><div class="sbody"><div class="tl">${html}</div></div></div>`);
+    } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
+  }
+}
+
+export function boot(): void {
+  const lang = pickLang(navigator.languages ?? [navigator.language], store.get<string | null>("rr.lang", null));
+  setLang(lang);
+  document.documentElement.lang = lang;
+  const params = new URLSearchParams(location.search);
+  const demo = params.get("demo");
+  if (demo) { void import("./demo.ts").then((d) => d.runDemo(demo, params)); return; }
+  new App({ state: "connecting", attempt: 0, nextAt: null, lastRx: null, downSince: null }).start();
+}
+
+boot();
