@@ -116,14 +116,16 @@ export class Link {
       this.status.lastRx = this.deps.now();
       sock.send(JSON.stringify({ t: "hello", token: this.deps.token, clientId: this.deps.clientId } satisfies ClientMsg));
       this.armPing();
-      this.readyTimer = this.deps.setTimer(() => {
-        this.readyTimer = null;
-        if (authed || this.sock !== sock) return;
-        this.sock = null;
-        try { sock.close(4002, "no ready"); } catch { /* gone */ }
-        this.fail();
-      }, READY_MS);
     };
+    // From creation, not from open: a connect that hangs (a dead address after a network switch)
+    // may fire neither open nor close for minutes.
+    this.readyTimer = this.deps.setTimer(() => {
+      this.readyTimer = null;
+      if (authed || this.sock !== sock) return;
+      this.sock = null;
+      try { sock.close(4002, "no ready"); } catch { /* gone */ }
+      this.fail();
+    }, READY_MS);
     sock.onmessage = (ev) => {
       if (this.sock !== sock) return;
       this.status.lastRx = this.deps.now();
