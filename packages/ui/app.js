@@ -2844,7 +2844,7 @@ function modWorkersCard() {
     modState.options ? null : modSection(null, [el("div", { class: "cell-note warn-text", text: t("mod.optionsFailed") })]),
     modSection(null, [
       cell(t("mod.takesOver"), modSegmented("agent-auto", [{ value: "off", label: t("mod.off") }, { value: "auto", label: "ripple:auto" }, { value: "all", label: t("mod.allSpawns") }], s.agentAuto, t("mod.takesOver"), (agentAuto) => modPatch({ agentAuto })), null, "wide"),
-    ], [t("mod.takesOverHelp")]),
+    ], [t("mod.takesOverHelp"), t("mod.takesOverHelp2")]),
     modSection(null, [
       cell(t("mod.picked"), modSegmented("picked", [{ value: "auto", label: t("mod.pickAuto") }, { value: "pin", label: t("mod.pickFixed") }], auto ? "auto" : "pin", t("mod.picked"), modPickGeneral), null, "wide"),
     ], [t(auto ? "mod.pickHelpAuto" : "mod.pickHelpFixed")]),
