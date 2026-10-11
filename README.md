@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/mark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="brand/mark.svg">
+    <img src="brand/mark.svg" width="120" height="120" alt="The ClaudeRipple mascot: a hollow ripple ring with a curling wave crest">
+  </picture>
+</p>
+
 <h1 align="center">ClaudeRipple</h1>
 
 <p align="center"><b>English</b> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (BR)</a></p>

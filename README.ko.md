@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/mark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="brand/mark.svg">
+    <img src="brand/mark.svg" width="120" height="120" alt="ClaudeRipple 마스코트 리플이: 속이 빈 파문 고리에 물마루가 말려 오른 모습">
+  </picture>
+</p>
+
 <h1 align="center">ClaudeRipple</h1>
 
 <p align="center"><a href="README.md">English</a> · <b>한국어</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português (BR)</a></p>
