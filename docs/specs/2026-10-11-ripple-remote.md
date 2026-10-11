@@ -1,6 +1,7 @@
 # Ripple Remote — design draft (2026-10-11)
 
-Status: **draft, nothing built.** Facts marked *measured* have a source; everything else is a
+Status: **draft; M1 (host + LAN/Tailscale PWA) built on `feat/remote-app`**, see
+[2026-10-11-ripple-remote-ux.md](2026-10-11-ripple-remote-ux.md). Facts marked *measured* have a source; everything else is a
 decision or an open question and says so. Paseo and Happy are behavioral references only — no
 code is copied from them (project CLAUDE.md).
 
@@ -86,8 +87,10 @@ Every issue cited here was re-read with `gh api` on 2026-10-11 and is **open**: 
   be restarted to ship host changes (ARCHITECTURE §5). The host talks to the router over loopback
   like any client.
 - **Sessions are the host's.** It spawns Claude Code through the Agent SDK with
-  `ANTHROPIC_BASE_URL=http://127.0.0.1:8791`, any `cwd` the phone picks (thesis 2), any model id
-  the router routes (thesis 1). The CLI's `unrecognized_model` warning is noise only (§3).
+  `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS` pointing at the router (ARCHITECTURE §1), any `cwd` the
+  phone picks (thesis 2), any model id the router routes (thesis 1). Not `ANTHROPIC_BASE_URL`:
+  the router's port answers origin-form requests 405 (*measured* 2026-10-11, see the UX doc).
+  The CLI's `unrecognized_model` warning is noise only (§3).
 - **Desktop-app sessions:** open question. Resuming a session the desktop app has open would put
   two writers on one transcript. v1 lists them read-only and offers "continue here" only for
   sessions not open in the app. *Not measured.*
@@ -118,6 +121,7 @@ Every issue cited here was re-read with `gh api` on 2026-10-11 and is **open**: 
   ours. If we run a shared relay it only forwards ciphertext (Cloudflare Worker + Durable Object
   is cheap at this scale); self-hostable from day one so nobody depends on us.
 - Desktop-session concurrency (above) — measure before M1.
-- Does the Agent SDK accept a non-Claude model id end to end through the router as `query()`'s
-  model? The CLI does (§3, measured 2026-09-19); the SDK path is not measured.
+- ~~Does the Agent SDK accept a non-Claude model id end to end through the router?~~ *Measured*
+  2026-10-11: yes through `HTTPS_PROXY` (`deepseek-v4.1-flash` answered), no through
+  `ANTHROPIC_BASE_URL` (405). Details in [the UX doc](2026-10-11-ripple-remote-ux.md#measured-does-query-route-a-non-claude-model-end-to-end-2026-10-11).
 - App Store review for a native client that runs third-party models.
