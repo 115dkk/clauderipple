@@ -412,7 +412,8 @@ test('ripple:auto is judged and rewritten to the light agent with @effort', asyn
   expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@low' })
   expect(judges[0]?.model).toBe('claude-haiku-5-5')
   expect(urls).toContain('http://127.0.0.1:9992/api/status')
-  expect(b.logs).toEqual([])
+  // The only debug line is the pick itself: no error was reported on the way.
+  expect(b.logs).toEqual(['ClaudeRipple worker pick: Rename variable → general/light/low by haiku sure 0.90 → deepseek-v4.1-flash@low'])
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
   expect(stats.text).toContain('light 1')
 })
