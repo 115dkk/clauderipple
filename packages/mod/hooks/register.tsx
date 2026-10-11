@@ -205,7 +205,9 @@ async function installSettings($: EngineInterface, s: Settings): Promise<void> {
   await update($, settings, () => s)
   const resolved = await resolveLanguage($, s)
   await update($, lang, () => resolved)
-  await registerAuto($, s)
+  // A router poll can land before the session binds, when register rejects; session.start
+  // registers again, so a rejection here must not cut the rest of the install short.
+  try { await registerAuto($, s) } catch (error) { await report($, 'agent register', error) }
   if (!s.effortAuto) await update($, heldPick, () => null)
   if (s.keepWarm && !previous.keepWarm) await update($, warm, value => ({ ...value, stopped: undefined }))
 }
@@ -1036,6 +1038,9 @@ export const register: Register = on => {
       await $.command.register({ name: 'ripple', description: t(language, 'commands.description'), argumentHint: t(language, 'commands.argumentHint'), immediate: true })
       await $.command.register({ name: 'ripple-log', description: t(language, 'commands.logDescription'), immediate: true })
       await $.command.register({ name: 'ripple-bar', description: t(language, 'commands.barDescription'), immediate: true })
+      // loadSettings skips the install when an earlier poll already took this revision, and that
+      // poll may have run before the session bound: register here, where it is bound.
+      await registerAuto($, await currentSettings($))
       startTimers($)
       // Setup keeps its draft across a reload; quick settings never keep one.
       const open = await read($, panel)
