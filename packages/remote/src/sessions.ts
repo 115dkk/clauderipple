@@ -144,6 +144,7 @@ export class Sessions {
   private live = new Map<string, Live>();
   private figuresAt = new Map<string, number>();
   private lastFigures = new Map<string, string>();
+  private creating = new Map<string, Promise<string>>();
   private file: string;
   private now: () => number;
 
@@ -219,8 +220,18 @@ export class Sessions {
   // ---- what the phone asks for --------------------------------------------------------------
 
   /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session. */
-  async create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string }): Promise<string> {
-    for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return r.id;
+  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string }): Promise<string> {
+    for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
+    // A resend can arrive while the first create is still checking the folder; both get the one session.
+    let pending = this.creating.get(req.clientMsgId);
+    if (!pending) {
+      pending = this.createNew(req).finally(() => this.creating.delete(req.clientMsgId));
+      this.creating.set(req.clientMsgId, pending);
+    }
+    return pending;
+  }
+
+  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string }): Promise<string> {
     const cwd = path.resolve(req.cwd);
     if (!(await isDirectory(cwd))) throw new Error(`not a folder: ${cwd}`);
     const now = this.now();
