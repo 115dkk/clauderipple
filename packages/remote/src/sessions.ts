@@ -54,6 +54,7 @@ interface Live {
   turnStart: number;
   restartAfterTurn: boolean;
   retried: boolean;
+  interrupted: boolean;
 }
 
 export interface SessionsOptions {
@@ -273,6 +274,10 @@ export class Sessions {
     if (!live) return;
     // Open requests resolve as expired; their canUseTool continuation writes the event.
     this.opts.permissions.expireSession(id, "aborted");
+    const r = this.records.get(id);
+    // Only a running turn can be stopped; a flag set while idle would swallow the next real result.
+    if (!r || (r.state !== "running" && r.state !== "waiting")) return;
+    live.interrupted = true;
     await live.query.interrupt().catch(() => undefined);
     this.append(id, { kind: "notice", code: "interrupted" });
   }
@@ -332,7 +337,7 @@ export class Sessions {
       ...(r.sdkSessionId ? { resume: r.sdkSessionId } : {}),
       ...(this.opts.claudePath ? { pathToClaudeCodeExecutable: this.opts.claudePath } : {}),
     };
-    const live: Live = { query: null as unknown as SdkQuery, input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false };
+    const live: Live = { query: null as unknown as SdkQuery, input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false };
     this.live.set(r.id, live);
     void this.opts.router.status().then((s) => {
       // The router's own word on where its proxy and CA are wins over whatever this process inherited.
@@ -426,6 +431,13 @@ export class Sessions {
         this.flush(r.id, live);
         live.current = null;
         live.retried = false;
+        if (live.interrupted) {
+          // The person pressed Stop; the "interrupted" notice already says so. A failed-turn line would not be true.
+          live.interrupted = false;
+          this.setState(r, "idle");
+          if (live.restartAfterTurn) this.stop(r.id);
+          return;
+        }
         const ok = msg.subtype === "success" && msg.is_error !== true;
         const usage = msg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
         const win = usage ? Object.values(usage).map((u) => u.contextWindow ?? 0).find((w) => w > 0) : undefined;
