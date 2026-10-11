@@ -2380,15 +2380,27 @@ const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const MOD_PARTS = ["timer", "reason", "route", "limits"];
 // Named in themselves, as the mod's own Look card lists them.
 const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"]];
-// Claude Code's own agent with a model: what the mod offers besides the generated workers.
-const MOD_CLAUDE_MODELS = ["sonnet", "opus", "haiku"];
+// Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
+// first, and the AA ids their scores are kept under (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
+const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus"];
+const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
+// The worker ladder, bottom to top, and a rung's effort when nothing else says one.
+const MOD_RUNGS = ["light", "standard", "hard", "plan"];
+const MOD_RUNG_EFFORT = { light: "low", standard: "medium", hard: "high", plan: "high" };
+const MOD_PRESETS = ["claude", "claudeGpt", "gpt", "cheap"];
+// The two fields whose own ladder the card offers up front: only these change who should do the work.
+const MOD_OVERRIDES = ["design", "research"];
+const modClaude = (model, effort) => ({ target: { agent: "general-purpose", model }, effort });
 /** The mod's defaults (packages/mod/hooks/settings.ts), for a router that has stored nothing yet. */
 const MOD_DEFAULTS = {
   effortAuto: true, judge: "haiku", judgeModel: "deepseek-v4.1-flash", jevSource: "typesafe",
   bias: 0, floor: "low", ceiling: "max", agentAuto: "auto",
   rules: {
-    general: { mode: "pin", targets: { light: { agent: "deepseek-v4-1-flash" }, standard: { agent: "gpt-6-1-sol" }, deep: { agent: "gpt-6-astra" } } },
-    design: { mode: "pin", targets: { light: { agent: "general-purpose", model: "sonnet" }, standard: { agent: "general-purpose", model: "sonnet" }, deep: { agent: "general-purpose", model: "opus" } } },
+    general: { mode: "ladder", rungs: {
+      light: { target: { agent: "deepseek-v4-1-flash" }, effort: "max" }, standard: { target: { agent: "gpt-6-1-sol" }, effort: "medium" },
+      hard: { target: { agent: "gpt-6-astra" }, effort: "high" }, plan: modClaude("opus", "high"),
+    } },
+    design: { mode: "ladder", rungs: { light: modClaude("sonnet", "medium"), standard: modClaude("sonnet", "high"), hard: modClaude("opus", "high"), plan: modClaude("opus", "high") } },
     frontend: { mode: "inherit" }, backend: { mode: "inherit" }, infra: { mode: "inherit" }, data: { mode: "inherit" },
     test: { mode: "inherit" }, docs: { mode: "inherit" }, research: { mode: "inherit" },
   },
@@ -2431,13 +2443,6 @@ function modTargetValue(target) { return target && target.agent ? (target.model 
 function modTargetOf(value) {
   const plus = value.indexOf("+");
   return plus < 0 ? { agent: value } : { agent: value.slice(0, plus), model: value.slice(plus + 1) };
-}
-/** A target as a person reads it: the model for Claude's own agent, else the worker's name. */
-function modTargetLabel(target) {
-  if (!target || !target.agent) return "—";
-  if (target.model) return `Claude ${modCap(target.model)}`;
-  const agent = modAgents().find((entry) => entry.name === target.agent);
-  return agent ? agent.model : target.agent;
 }
 function modAgents() { return (modState.options && modState.options.agents) || []; }
 /** The router's AA record for a worker's exact model and provider. */
@@ -2661,15 +2666,180 @@ function modEffortCard() {
   ])]);
 }
 
-/** Generated workers, then Claude Code's own agent with each Claude model. */
-function modTargetItems(withEmpty) {
-  // A worker reads as its model and the provider it comes through: one model can come from two.
-  const agents = modAgents().map((agent) => ({ value: agent.name, label: `${agent.model} · ${agent.provider}` }));
-  return [
-    ...(withEmpty ? [{ value: "", label: t("mod.noTarget") }] : []),
-    { group: t("mod.workers"), items: agents },
-    { group: "Claude", items: MOD_CLAUDE_MODELS.map((model) => ({ value: `general-purpose+${model}`, label: `Claude ${modCap(model)}` })) },
+// ---- The worker ladder (docs/specs/2026-10-11-worker-ladder.md)
+
+/**
+ * Everything a rung can run: the router's workers (each with its model's effort ladder and how it
+ * is paid for), Claude Code's own agent on each Claude model, and the session's own model.
+ */
+function modChoices() {
+  const options = modState.options || {};
+  const claudeEfforts = Array.isArray(options.claudeEfforts) && options.claudeEfforts.length ? options.claudeEfforts : ["low", "medium", "high", "max"];
+  const workers = modAgents().map((agent) => {
+    const info = modProviderInfo(agent.provider);
+    return {
+      value: agent.name, label: agent.model, short: agent.model, model: agent.model, provider: agent.provider,
+      billing: /(?::|-)free$/i.test(agent.model) ? "free" : agent.billing || (info && info.billing) || null,
+      usable: !info || info.usable !== false,
+      efforts: Array.isArray(agent.efforts) ? agent.efforts : effortLevelsFor(agent.provider, agent.model),
+    };
+  });
+  const claude = MOD_CLAUDE_MODELS.map((alias) => ({
+    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, short: modCap(alias), model: MOD_CLAUDE_IDS[alias], provider: "anthropic",
+    billing: "subscription", usable: true, efforts: claudeEfforts, claude: true,
+  }));
+  const session = { value: "general-purpose", label: t("mod.sessionModel"), short: t("mod.sessionModelShort"), model: null, provider: null, billing: null, usable: true, efforts: claudeEfforts, claude: true };
+  return [...workers, ...claude, session];
+}
+function modChoiceOf(target) { const value = modTargetValue(target); return modChoices().find((choice) => choice.value === value); }
+/** The efforts a model takes, in the mod's terms; an unknown ladder offers them all. */
+function modLadderOf(choice) {
+  const levels = choice && Array.isArray(choice.efforts) ? choice.efforts.filter((effort) => MOD_EFFORTS.includes(effort)) : [];
+  return levels.length ? levels : [...MOD_EFFORTS];
+}
+/** The nearest effort a model takes, ties going up: how the router clamps one (compat.ts). */
+function modNearest(effort, ladder) {
+  if (ladder.includes(effort)) return effort;
+  const at = MOD_EFFORTS.indexOf(effort);
+  return ladder.reduce((best, next) => {
+    const d = Math.abs(MOD_EFFORTS.indexOf(next) - at);
+    const bd = Math.abs(MOD_EFFORTS.indexOf(best) - at);
+    return d < bd || (d === bd && MOD_EFFORTS.indexOf(next) > MOD_EFFORTS.indexOf(best)) ? next : best;
+  });
+}
+/** A model pop-up grouped by provider, each group tagged free / pay-per-token / subscription. */
+function modModelSelect(key, target, label, onChange, noneLabel) {
+  const choices = modChoices();
+  const groups = [];
+  for (const choice of choices) {
+    const name = choice.claude ? "Claude" : choice.provider;
+    let group = groups.find((entry) => entry.name === name);
+    if (!group) { group = { name, billing: choice.billing, items: [] }; groups.push(group); }
+    group.items.push({ value: choice.value, label: choice.label + (choice.usable ? "" : t("mod.unavailableNow")) });
+  }
+  const items = [
+    ...(noneLabel ? [{ value: "", label: noneLabel }] : []),
+    ...groups.map((group) => ({ group: group.billing ? `${group.name} · ${t(`mod.billing.${group.billing}`)}` : group.name, items: group.items })),
   ];
+  return modSelect(key, items, modTargetValue(target), label, onChange, "rung-model");
+}
+/** The measured AA index (and cost per task) of a model at one effort: grey context, never a gate. */
+function modAaHint(choice, effort) {
+  if (!choice || !choice.model) return "";
+  const score = modScoreOf({ model: choice.model, provider: choice.provider });
+  const variant = score && score.variants.find((entry) => entry.effort === effort && typeof entry.intelligence === "number");
+  return variant ? t("mod.aaHint", { index: variant.intelligence.toFixed(1), cost: modMoney(variant.costPerTask) }) : "";
+}
+/** The rungs a preset had to fill otherwise, marked until the next preset (a page convenience). */
+let modPresetMarks = { domain: null, rungs: [] };
+function modMarked(domain, rung) { return modPresetMarks.domain === domain && modPresetMarks.rungs.includes(rung); }
+/** Four rows: the rung, its one-line meaning, its model and effort, and the model's AA index in grey. */
+function modRungRows(domain, rule, keyPrefix, onChange) {
+  const rungs = rule.rungs || {};
+  const set = (rung, step) => {
+    if (modPresetMarks.domain === domain) modPresetMarks = { domain, rungs: modPresetMarks.rungs.filter((entry) => entry !== rung) };
+    onChange({ ...rule, rungs: { ...rungs, [rung]: step } });
+  };
+  return MOD_RUNGS.map((rung) => {
+    const step = rungs[rung];
+    const choice = step && modChoiceOf(step.target);
+    const ladder = modLadderOf(choice);
+    const shown = step ? modNearest(step.effort, ladder) : null;
+    const name = t(`mod.rung.${rung}`);
+    const select = modModelSelect(`${keyPrefix}:${rung}`, step && step.target, name, (value) => {
+      if (!value) return;
+      const target = modTargetOf(value);
+      // A model with another ladder keeps the nearest effort it takes, as the router would send it.
+      set(rung, { ...(step || {}), target, effort: modNearest(step ? step.effort : MOD_RUNG_EFFORT[rung], modLadderOf(modChoiceOf(target))) });
+    }, step ? null : "—");
+    const effort = step ? modSegmented(`${keyPrefix}-effort:${rung}`, ladder.map((value) => ({ value, label: modEffortName(value) })), shown, `${name} · ${t("mod.effort")}`, (value) => set(rung, { ...step, effort: value })) : null;
+    const aa = step ? modAaHint(choice, shown) : "";
+    const subs = [modCap(t(`mod.rungHint.${rung}`))];
+    if (modMarked(domain, rung)) subs.push(el("span", { class: "cell-sub warn-text", text: t("mod.presetFilled") }));
+    else if (choice && !choice.usable) subs.push(el("span", { class: "cell-sub warn-text", text: t("mod.rungUnusable") }));
+    return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-controls" }, [
+      select,
+      el("div", { class: "rung-effort" }, [effort, el("span", { class: "aa-hint", text: aa })]),
+    ]), subs, "wide rung-row");
+  });
+}
+/** What runs when a rung's model cannot: tried before the rung above. */
+function modBackupRows(rule, keyPrefix, onChange) {
+  const rungs = rule.rungs || {};
+  return MOD_RUNGS.filter((rung) => rungs[rung]).map((rung) => {
+    const step = rungs[rung];
+    return cell(t(`mod.rung.${rung}`), modModelSelect(`${keyPrefix}-backup:${rung}`, step.backup, `${t(`mod.rung.${rung}`)} · ${t("mod.backupTitle")}`, (value) => {
+      const next = { ...step };
+      if (value) next.backup = modTargetOf(value); else delete next.backup;
+      onChange({ ...rule, rungs: { ...rungs, [rung]: next } });
+    }, t("mod.backupNone")));
+  });
+}
+/** A ladder: its four rows, then its backups behind a disclosure. */
+function modLadderSections(domain, rule, title, onChange) {
+  const backups = rule.rungs && Object.values(rule.rungs).filter((step) => step && step.backup).length;
+  return [
+    // How the ladder climbs is said once, under the main ladder; a field's own ladder climbs alike.
+    modSection(title, modRungRows(domain, rule, `rung-${domain}`, onChange), domain === "general" ? [t("mod.ladderHelp"), t("mod.attribution")] : [t("mod.attribution")]),
+    modDetails(`backup:${domain}`, backups ? t("mod.backupTitleCount", { n: backups }) : t("mod.backupTitle"), [modSection(null, modBackupRows(rule, `rung-${domain}`, onChange), [t("mod.backupHelp")])]),
+  ];
+}
+function modSameStep(a, b) { return Boolean(a && b) && modTargetValue(a.target) === modTargetValue(b.target) && a.effort === b.effort; }
+/** A preset's four models in a quiet line under its name, each kept whole when the line wraps. */
+function modPresetLine(preset) {
+  const names = MOD_RUNGS.map((rung) => { const step = preset.rungs[rung]; const choice = step && modChoiceOf(step.target); return choice ? choice.short : step ? step.target.agent : "—"; });
+  return names.flatMap((name, index) => [index ? " · " : null, el("span", { class: "nowrap", text: name })]).filter(Boolean);
+}
+function modApplyPreset(id) {
+  const preset = modState.options.presets[id];
+  const general = modState.settings.rules.general;
+  // A preset changes what runs on each rung, not the person's backups.
+  const rungs = Object.fromEntries(MOD_RUNGS.map((rung) => {
+    const backup = general.mode === "ladder" && general.rungs && general.rungs[rung] && general.rungs[rung].backup;
+    return [rung, { ...clone(preset.rungs[rung]), ...(backup ? { backup } : {}) }];
+  }));
+  modPresetMarks = { domain: "general", rungs: [...(preset.substituted || [])] };
+  modSetRule("general", { mode: "ladder", rungs });
+  const name = t(`mod.preset.${id}`);
+  toast(preset.substituted && preset.substituted.length ? t("mod.presetToastFilled", { name, rungs: preset.substituted.map((rung) => t(`mod.rung.${rung}`)).join(", ") }) : t("mod.presetToast", { name }));
+}
+const MOD_OFFER_KEY = "clauderipple_ladder_offer_seen";
+function modOfferSeen() { try { return localStorage.getItem(MOD_OFFER_KEY) === "1"; } catch { return false; } }
+function modPresetSection() {
+  const presets = modState.options && modState.options.presets;
+  if (!presets) return null;
+  const general = modState.settings.rules.general;
+  const current = general.mode === "ladder" ? MOD_PRESETS.find((id) => presets[id] && MOD_RUNGS.every((rung) => modSameStep(general.rungs && general.rungs[rung], presets[id].rungs[rung]))) : null;
+  const buttons = MOD_PRESETS.filter((id) => presets[id]).map((id) => el("button", { class: `preset-btn${current === id ? " active" : ""}`, type: "button", "data-key": `preset:${id}`, "aria-pressed": String(current === id), onclick: () => modApplyPreset(id) }, [
+    el("span", { class: "preset-name", text: t(`mod.preset.${id}`) }),
+    el("span", { class: "preset-sub" }, modPresetLine(presets[id])),
+  ]));
+  const rows = [];
+  // Settings saved on Auto keep Auto; this says once that a preset is the way onto the ladder.
+  if (general.mode === "auto" && !modOfferSeen()) {
+    const keep = el("button", { class: "btn secondary compact", type: "button", "data-key": "offer-keep", text: t("mod.offerKeep"), onclick: () => { try { localStorage.setItem(MOD_OFFER_KEY, "1"); } catch { /* unavailable */ } modRefresh(); } });
+    rows.push(cell(el("span", { class: "cell-label", text: t("mod.offerAuto") }), keep, null, "offer-row"));
+  }
+  rows.push(el("div", { class: "preset-grid" }, buttons));
+  return modSection(t("mod.presets"), rows, [t("mod.presetsHelp")]);
+}
+/** A field's own ladder starts from its default (design: Claude), else a copy of the main ladder. */
+function modFieldLadder(domain) {
+  const own = MOD_DEFAULTS.rules[domain];
+  if (own && own.mode === "ladder") return clone(own);
+  const general = modState.settings.rules.general;
+  return clone(general.mode === "ladder" ? general : MOD_DEFAULTS.rules.general);
+}
+function modOverrideSections() {
+  const s = modState.settings;
+  const rows = MOD_OVERRIDES.map((domain) => {
+    const rule = s.rules[domain];
+    const on = rule.mode !== "inherit";
+    const label = t(`mod.override.${domain}`);
+    return cell(label, modSwitch(`override:${domain}`, on, label, (value) => modSetRule(domain, value ? modFieldLadder(domain) : { mode: "inherit" })), on ? (rule.mode === "auto" ? modCap(t("mod.overrideAuto")) : null) : modCap(t("mod.overrideOff")));
+  });
+  const ladders = MOD_OVERRIDES.filter((domain) => s.rules[domain].mode === "ladder").flatMap((domain) => modLadderSections(domain, s.rules[domain], t(`mod.override.${domain}`), (rule) => modSetRule(domain, rule)));
+  return [modSection(t("mod.overrides"), rows, [t("mod.overridesHelp")]), ...ladders];
 }
 function modCalibrationSummary(rule) {
   const parts = [];
@@ -2681,9 +2851,8 @@ function modCalibrationSummary(rule) {
 function modRuleSummary(domain) {
   const rule = modState.settings.rules[domain];
   if (!rule || rule.mode === "inherit") return "";
-  const head = rule.mode === "pin"
-    ? MOD_LEVELS.map((level) => `${t(`mod.level.${level}`)} ${modTargetLabel(rule.targets && rule.targets[level])}`).join(" · ")
-    : `${t("mod.candidates")}: ${modAgents().every((agent) => modAllowed(rule, agent.name)) ? t("mod.allCandidates") : modAgents().filter((agent) => modAllowed(rule, agent.name)).map((agent) => agent.model).join(", ")}`;
+  if (rule.mode === "ladder") return MOD_RUNGS.map((rung) => { const step = rule.rungs && rule.rungs[rung]; const choice = step && modChoiceOf(step.target); return choice ? choice.short : step ? step.target.agent : "—"; }).join(" · ");
+  const head = `${t("mod.candidates")}: ${modAgents().every((agent) => modAllowed(rule, agent.name)) ? t("mod.allCandidates") : modAgents().filter((agent) => modAllowed(rule, agent.name)).map((agent) => agent.model).join(", ")}`;
   return [head, ...modCalibrationSummary(rule)].join(" · ");
 }
 function modPreferenceLabel(item) {
@@ -2793,130 +2962,86 @@ function modCalibrationRows(rule, keyPrefix, onChange) {
     cell(t("mod.ceiling"), modSelect(`${keyPrefix}-ceiling`, anyEffort, rule.ceiling || "", t("mod.ceiling"), (value) => calibrate({ ceiling: value || undefined }), "narrow"), inverted ? el("span", { class: "cell-sub warn-text", text: modCap(t("mod.floorWins")) }) : null),
   ];
 }
-/** One pop-up per difficulty, for a Fixed rule. */
-function modPinRows(rule, keyPrefix, onChange) {
-  const targets = rule.targets || {};
-  return MOD_LEVELS.map((level) => cell(
-    t(`mod.level.${level}`),
-    modSelect(`${keyPrefix}:${level}`, modTargetItems(true), modTargetValue(targets[level]), t(`mod.level.${level}`), (value) => {
-      const next = { ...targets };
-      if (value) next[level] = modTargetOf(value); else delete next[level];
-      onChange({ ...rule, targets: next });
-    }),
-    modCap(t(`mod.levelBlurb.${level}`)),
-    "wide",
-  ));
-}
-/** Switching between Auto and Fixed keeps the other one's last state and the effort calibration. */
+/** Switching between the ladder and Auto keeps the other one's last state for this page's life. */
 const modGeneralMemory = {};
 function modPickGeneral(mode) {
   const current = modState.settings.rules.general;
   modGeneralMemory[current.mode] = current;
-  const calibration = Object.fromEntries(["effortOffset", "floor", "ceiling"].filter((key) => current[key] !== undefined).map((key) => [key, current[key]]));
   const remembered = modGeneralMemory[mode];
-  const next = remembered ? { ...remembered } : mode === "auto" ? { mode, allow: [] } : clone(MOD_DEFAULTS.rules.general);
-  for (const key of ["effortOffset", "floor", "ceiling"]) delete next[key];
-  modSetRule("general", { ...next, ...calibration });
+  modSetRule("general", remembered ? clone(remembered) : mode === "auto" ? { mode, allow: [] } : clone(MOD_DEFAULTS.rules.general));
 }
-function modExceptionRows() {
-  const exceptions = MOD_DOMAINS.filter((domain) => domain !== "general" && modState.settings.rules[domain] && modState.settings.rules[domain].mode !== "inherit");
-  const rows = exceptions.map((domain) => {
-    const rule = modState.settings.rules[domain];
-    const row = cell(t(`mod.domain.${domain}`), [el("span", { text: rule.mode === "pin" ? t("mod.pickFixed") : t("mod.autoMode") }), chevronIcon()], modRuleSummary(domain) || null, "link mod-domain");
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.dataset.key = `domain:${domain}`;
-    row.addEventListener("click", () => openModException(domain));
-    row.addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && event.target === row) { event.preventDefault(); openModException(domain); } });
-    return row;
+/** One row per field: the main ladder as is, its own four rungs, or Auto (experimental). */
+function modFieldRows() {
+  const s = modState.settings;
+  return MOD_DOMAINS.filter((domain) => domain !== "general").map((domain) => {
+    const rule = s.rules[domain];
+    const name = t(`mod.domain.${domain}`);
+    const pick = (mode) => modSetRule(domain, mode === "inherit" ? { mode } : mode === "auto" ? { mode, allow: [] } : modFieldLadder(domain));
+    const mode = modSegmented(`field:${domain}`, [{ value: "inherit", label: t("mod.followLadder") }, { value: "ladder", label: t("mod.ownLadder") }, { value: "auto", label: t("mod.autoMode") }], rule.mode, name, pick);
+    // Kept in place (invisible) on a field that follows the ladder, so every row's control lines up.
+    const edit = el("button", { class: `btn secondary compact${rule.mode === "inherit" ? " placeholder" : ""}`, type: "button", "data-key": `field-edit:${domain}`, text: t("mod.editRungs"), onclick: () => openModField(domain) });
+    if (rule.mode === "inherit") { edit.disabled = true; edit.tabIndex = -1; edit.setAttribute("aria-hidden", "true"); }
+    return cell(name, [mode, edit], rule.mode === "inherit" ? null : modRuleSummary(domain), "wide field-row");
   });
-  const free = MOD_DOMAINS.filter((domain) => domain !== "general" && !exceptions.includes(domain));
-  const add = el("button", { class: "cell-button", type: "button", text: t("mod.addException"), "data-key": "add-exception", onclick: () => openModException(null) });
-  add.disabled = free.length === 0;
-  return [...(rows.length ? rows : [el("div", { class: "cell-note", text: t("mod.noExceptions") })]), add];
+}
+/** Auto's floors, tie band, preference and AA table: open when a rule uses Auto, else folded. */
+function modAutoDetails(titled) {
+  const s = modState.settings;
+  return [
+    modSection(titled ? t("mod.autoDetails") : null, [
+      ...MOD_LEVELS.map((level) => cell(t("mod.indexFloor", { level: t(`mod.level.${level}`) }), modNumber(`index-floor:${level}`, s.autoFloors[level], { min: 0, max: 100, step: 1 }, t("mod.indexFloor", { level: t(`mod.level.${level}`) }), (n) => modPatch({ autoFloors: { ...s.autoFloors, [level]: n } })))),
+      cell(t("mod.tieBand"), modNumber("tie-band", s.autoTieBand, { min: 0, max: 20, step: 0.5 }, t("mod.tieBand"), (n) => modPatch({ autoTieBand: n }))),
+    ], [t("mod.autoHelp")]),
+    modSection(t("mod.preference"), modPreferenceRows(), [t("mod.preferenceHint")]),
+    modAaSection(),
+  ];
 }
 function modWorkersCard() {
   const s = modState.settings;
   const general = s.rules.general;
   const auto = general.mode === "auto";
   const floors = MOD_LEVELS.map((level) => s.autoFloors[level]).join("/");
+  const anyAuto = MOD_DOMAINS.some((domain) => s.rules[domain] && s.rules[domain].mode === "auto");
   return modCard("workers", t("mod.workers"), t("mod.workersBlurb"), [
     modState.options ? null : modSection(null, [el("div", { class: "cell-note warn-text", text: t("mod.optionsFailed") })]),
     modSection(null, [
       cell(t("mod.takesOver"), modSegmented("agent-auto", [{ value: "off", label: t("mod.off") }, { value: "auto", label: "ripple:auto" }, { value: "all", label: t("mod.allSpawns") }], s.agentAuto, t("mod.takesOver"), (agentAuto) => modPatch({ agentAuto })), null, "wide"),
     ], [t("mod.takesOverHelp"), t("mod.takesOverHelp2")]),
-    modSection(null, [
-      cell(t("mod.picked"), modSegmented("picked", [{ value: "auto", label: t("mod.pickAuto") }, { value: "pin", label: t("mod.pickFixed") }], auto ? "auto" : "pin", t("mod.picked"), modPickGeneral), null, "wide"),
-    ], [t(auto ? "mod.pickHelpAuto" : "mod.pickHelpFixed")]),
-    auto
-      ? modSection(t("mod.candidates"), modAgents().length ? modCandidateRows(general, "candidate", (rule) => modSetRule("general", rule)) : [el("div", { class: "cell-note", text: t("mod.noModels") })], [t("mod.candidatesHelp"), t("mod.autoLine", { floor: floors })])
-      : modSection(t("mod.perLevel"), modPinRows(general, "fixed", (rule) => modSetRule("general", rule))),
-    auto ? modDetails("auto", t("mod.autoDetails"), [
+    modPresetSection(),
+    ...(auto
+      ? [
+        modSection(t("mod.autoMode"), modAgents().length ? modCandidateRows(general, "candidate", (rule) => modSetRule("general", rule)) : [el("div", { class: "cell-note", text: t("mod.noModels") })], [t("mod.pickHelpAuto"), t("mod.candidatesHelp"), t("mod.autoLine", { floor: floors })]),
+        modDetails("worker-effort", t("mod.workerEffort"), [modSection(null, modCalibrationRows(general, "general", (rule) => modSetRule("general", rule)))]),
+      ]
+      : modLadderSections("general", general, t("mod.ladder"), (rule) => modSetRule("general", rule))),
+    ...modOverrideSections(),
+    modDetails("finer", t("mod.finer"), [
       modSection(null, [
-        ...MOD_LEVELS.map((level) => cell(t("mod.indexFloor", { level: t(`mod.level.${level}`) }), modNumber(`index-floor:${level}`, s.autoFloors[level], { min: 0, max: 100, step: 1 }, t("mod.indexFloor", { level: t(`mod.level.${level}`) }), (n) => modPatch({ autoFloors: { ...s.autoFloors, [level]: n } })))),
-        cell(t("mod.tieBand"), modNumber("tie-band", s.autoTieBand, { min: 0, max: 20, step: 0.5 }, t("mod.tieBand"), (n) => modPatch({ autoTieBand: n }))),
-      ], [t("mod.autoHelp")]),
-      modSection(t("mod.preference"), modPreferenceRows(), [t("mod.preferenceHint")]),
-      modAaSection(),
-    ]) : null,
-    modDetails("worker-effort", t("mod.workerEffort"), [modSection(null, modCalibrationRows(general, "general", (rule) => modSetRule("general", rule)))]),
-    modSection(t("mod.exceptions"), modExceptionRows(), [t("mod.exceptionsHelp")]),
-    el("div", { class: "group stacked-group" }, [
-      cell(t("mod.fallback"), modSelect("fallback", modTargetItems(false), modTargetValue(s.fallback), t("mod.fallback"), (value) => modPatch({ fallback: modTargetOf(value) })), modCap(t("mod.fallbackHint"))),
+        cell(t("mod.picked"), modSegmented("picked", [{ value: "ladder", label: t("mod.ladder") }, { value: "auto", label: t("mod.autoMode") }], general.mode, t("mod.picked"), modPickGeneral), null, "wide"),
+      ], [t(auto ? "mod.pickHelpAuto" : "mod.pickHelpLadder")]),
+      modSection(t("mod.fields"), modFieldRows(), [t("mod.fieldsHelp")]),
+      ...(anyAuto ? modAutoDetails(true) : [modDetails("auto", t("mod.autoDetails"), modAutoDetails(false))]),
     ]),
   ]);
 }
 
-/**
- * An exception: one field that does not follow the main choice, Fixed per difficulty or Auto among
- * chosen candidates. Opened on a field, or with none to add one — the field can be changed there.
- */
-function modFreshException(domain, mode) {
-  if (mode === "auto") return { mode, allow: [] };
-  const own = MOD_DEFAULTS.rules[domain];
-  if (own.mode === "pin") return clone(own);
-  const general = modState.settings.rules.general;
-  return { mode, targets: general.mode === "pin" ? clone(general.targets) : clone(MOD_DEFAULTS.rules.general.targets) };
-}
-function modExceptionSheet(state) {
-  const s = modState.settings;
-  const domain = state.domain;
-  const rule = s.rules[domain];
-  const out = [];
-  if (state.adding) {
-    const choices = MOD_DOMAINS.filter((entry) => entry !== "general" && (entry === domain || !s.rules[entry] || s.rules[entry].mode === "inherit"));
-    out.push(modSection(null, [cell(t("mod.field"), modSelect("exception-field", choices.map((entry) => ({ value: entry, label: t(`mod.domain.${entry}`) })), domain, t("mod.field"), (next) => {
-      // Moving the new exception to another field leaves the first one following the main choice again.
-      state.domain = next;
-      state.title.textContent = t(`mod.domain.${next}`);
-      modPatch({ rules: { ...s.rules, [domain]: { mode: "inherit" }, [next]: modFreshException(next, rule.mode) } });
-    }, "narrow"))]));
-  }
-  const pick = (mode) => { state.memory[rule.mode] = rule; modSetRule(domain, state.memory[mode] || modFreshException(domain, mode)); };
-  out.push(modSection(null, [cell(t("mod.picked"), modSegmented("exception-mode", [{ value: "auto", label: t("mod.autoMode") }, { value: "pin", label: t("mod.pickFixed") }], rule.mode, t("mod.picked"), pick), null, "wide")]));
+/** A field's own rule in a sheet: its four rungs and backups, or Auto's candidates and effort. */
+function modFieldSheet(domain) {
+  const rule = modState.settings.rules[domain];
   const set = (next) => modSetRule(domain, next);
-  if (rule.mode === "pin") out.push(modSection(t("mod.perLevel"), modPinRows(rule, "exception-pin", set)));
-  else out.push(modSection(t("mod.candidates"), modCandidateRows(rule, "exception-candidate", set), [t("mod.candidatesHelp")]));
-  out.push(modSection(t("mod.workerEffort"), modCalibrationRows(rule, "exception", set)));
-  out.push(el("div", { class: "group stacked-group" }, [el("button", { class: "cell-button destructive", type: "button", text: t("mod.removeException"), onclick: () => { closeModal(); modSetRule(domain, { mode: "inherit" }); } })]));
-  return out;
+  if (rule.mode === "ladder") return modLadderSections(domain, rule, null, set);
+  return [
+    modSection(t("mod.candidates"), modCandidateRows(rule, "field-candidate", set), [t("mod.candidatesHelp")]),
+    modSection(t("mod.workerEffort"), modCalibrationRows(rule, "field", set)),
+  ];
 }
-function openModException(domain) {
-  const s = modState.settings;
-  const adding = !domain;
-  if (adding) {
-    domain = MOD_DOMAINS.find((entry) => entry !== "general" && (!s.rules[entry] || s.rules[entry].mode === "inherit"));
-    if (!domain) return;
-  }
+function openModField(domain) {
   const body = el("div", { class: "mod-sheet" });
-  const title = el("h1", { id: "modal-title", text: t(`mod.domain.${domain}`) });
-  const state = { domain, adding, memory: {}, title };
   const done = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("mod.done"), onclick: closeModal });
-  showModal(el("div", {}, [title, hint(t("mod.exceptionsHelp")), body, el("div", { class: "actions end" }, [done])]), () => { modSheet = null; });
-  modSheet = { draw: () => { if (modState.settings.rules[state.domain] && modState.settings.rules[state.domain].mode !== "inherit") modRedraw(body, modExceptionSheet(state)); } };
-  // A new exception starts as Fixed with this field's defaults (Design: Claude), saved at once like any change.
-  if (adding) modSetRule(domain, modFreshException(domain, "pin"));
-  else modSheet.draw();
+  showModal(el("div", {}, [el("h1", { id: "modal-title", text: t(`mod.domain.${domain}`) }), hint(t("mod.fieldSheetHelp")), body, el("div", { class: "actions end" }, [done])]), () => { modSheet = null; });
+  // The sheet closes when its field goes back to following the ladder (from another tab or session).
+  modSheet = { draw: () => { if (modState.settings.rules[domain] && modState.settings.rules[domain].mode !== "inherit") modRedraw(body, modFieldSheet(domain)); else closeModal(); } };
+  modSheet.draw();
 }
 
 function modJudgeCard() {

@@ -593,6 +593,46 @@ a.cell { color: inherit; text-decoration: none; }
 .pref-row .cell-sub { padding-left: 1.4em; }
 .candidate-state { margin-left: 10px; font-size: var(--fs-foot); }
 .aa-line { font-variant-numeric: tabular-nums; }
+
+/* The worker ladder: a rung's name and meaning on the left; its model, effort and AA index on the right. */
+.rung-row { align-items: flex-start; }
+.rung-row > .cell-text { padding-top: 5px; }
+.rung-controls { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; min-width: 0; }
+.mod-card .cell-value select.rung-model, .mod-sheet .cell-value select.rung-model { width: 300px; }
+.rung-effort { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.rung-effort .segmented button { padding: 3px 11px; }
+.aa-hint { min-width: 112px; color: var(--label-3); font-size: var(--fs-cap); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.aa-hint:empty { display: none; }
+.preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 12px; }
+.offer-row + .preset-grid { position: relative; }
+.offer-row + .preset-grid::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
+.preset-btn {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--separator);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--label);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.preset-btn:hover { background: var(--fill); }
+.preset-btn:active { background: var(--fill-press); }
+.preset-btn.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.preset-name { font-size: var(--fs-sub); font-weight: 600; }
+.preset-btn.active .preset-name { color: var(--accent); }
+.preset-sub { width: 100%; color: var(--label-2); font-size: var(--fs-cap); line-height: 1.4; }
+.preset-sub .nowrap { white-space: nowrap; }
+.offer-row { background: var(--accent-soft); }
+.offer-row .cell-label { font-size: var(--fs-sub); }
+.field-row .cell-value { flex-wrap: wrap; justify-content: flex-end; }
+.field-row .btn.placeholder { visibility: hidden; }
 .mod-details { margin: 18px 4px 0; }
 .mod-details-body { margin: 0 -4px; }
 .mod-details-body > .section:first-child { margin-top: 12px; }
@@ -837,6 +877,13 @@ a.cell { color: inherit; text-decoration: none; }
   .mod-card .cell-value select, .mod-sheet .cell-value select { width: 100%; }
   .mod-card .cell-value select.narrow, .mod-sheet .cell-value select.narrow { width: 140px; }
   .mod-domain .cell-value { max-width: none; }
+  .rung-controls { align-items: stretch; width: 100%; }
+  .mod-card .cell-value select.rung-model, .mod-sheet .cell-value select.rung-model { width: 100%; }
+  .rung-effort { justify-content: space-between; }
+  .rung-effort .segmented { flex: 1 1 auto; }
+  .preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .field-row .cell-value { justify-content: flex-start; }
+  .field-row .btn.placeholder { display: none; }
 
   /* Requests read as a list: model and status on top, the numbers on one quiet line below. */
   .logs-table-card { overflow: visible; }
