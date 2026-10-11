@@ -5,8 +5,9 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { Settings } from '../../types'
-import { action, chip, segmented, toggle } from './parts'
+import { action, chip, mascot, segmented, toggle } from './parts'
 import type { Els } from './parts'
+import { MIN_SIZE } from './ripple'
 import { svgDoc, textTone, v } from './theme'
 import type { Frame, SettingsActions, SettingsView } from './view'
 import { isRich } from './view'
@@ -157,6 +158,7 @@ export function renderSettings(el: Els, frame: Frame, view: SettingsView, action
   return (
     <Box flexDirection="column" rowGap={rich ? 1 : 0} width="100%">
       <Box key="head" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+        {rich ? <Box marginRight={1}>{mascot(el, frame, 'settings', 'calm', t(frame.lang, 'band.brand'), MIN_SIZE)}</Box> : null}
         <Text bold>{t(frame.lang, 'band.brand')}</Text>
         <Text dimColor>{t(frame.lang, 'settings.quick')}</Text>
       </Box>

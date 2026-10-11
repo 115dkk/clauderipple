@@ -7,13 +7,15 @@
 // count started at the spawn and summed every step, so the same agent showed two different times
 // and totals a few lines apart. The terminal has no such list, so it keeps them.
 //
-// No pictures: the host builds every answer afresh and a picture blinks on each redraw (band.tsx).
+// No pictures while agents run: the host builds every answer afresh and a picture blinks on each
+// redraw (band.tsx), and every step of an agent redraws this pane. Only the empty pane, which
+// nothing redraws, shows 리플이.
 
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { AgentRec } from '../../types'
-import { textButton } from './parts'
+import { mascot, textButton } from './parts'
 import type { Els } from './parts'
 import { textTone } from './theme'
 import type { AgentsActions, AgentsView, Frame } from './view'
@@ -121,12 +123,19 @@ export function renderAgents(el: Els, frame: Frame, view: AgentsView, actions: A
   const live = view.agents.filter(a => a.state === 'running' || a.state === 'waiting').sort((a, b) => a.startedAt - b.startedAt)
   const done = view.agents.filter(a => a.state === 'done' || a.state === 'failed').sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
   if (view.agents.length === 0) {
-    return (
-      <Box flexDirection="column" rowGap={1} width="100%">
+    const text = (
+      <Box flexDirection="column" rowGap={1} flexGrow={1} flexShrink={1} minWidth={0}>
         <Text bold>{t(frame.lang, 'agents.emptyTitle')}</Text>
         <Text dimColor wrap="wrap">
           {t(frame.lang, 'agents.emptyBody')}
         </Text>
+      </Box>
+    )
+    if (!isRich(frame) || !('Svg' in el)) return <Box flexDirection="column" width="100%">{text}</Box>
+    return (
+      <Box flexDirection="row" alignItems="flex-start" columnGap={2} width="100%">
+        {mascot(el, frame, 'agents', 'calm', t(frame.lang, 'agents.emptyTitle'))}
+        {text}
       </Box>
     )
   }
