@@ -1,0 +1,137 @@
+// Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
+import type { Effort, Figures, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
+
+export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text } }
+
+export type Item =
+  | { type: "user"; key: string; ver: string; text: string; at: number; queued?: "pending" | "sending" }
+  | { type: "assistant"; key: string; ver: string; text: Text; streaming: boolean; tools: ToolView[]; model: string; at: number }
+  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
+  | { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; reason?: string; at: number }
+  | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
+  | { type: "notice"; key: string; ver: string; code: string; text?: string }
+  | { type: "start"; key: string; ver: string };
+
+export interface SessionView {
+  items: Item[];
+  state: SessionState | null;
+  figures: Figures | null;
+  model: string | null;
+  effort: Effort | null;
+  /** open permission requests, oldest first */
+  open: Extract<Item, { type: "permission" }>[];
+  /** when the current turn began, for the "working for" line */
+  turnStartedAt: number | null;
+  lastSeq: number;
+}
+
+export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending" }
+
+/**
+ * Reduce a session's loaded events (ascending seq; gaps allowed, duplicates ignored) and the
+ * messages this phone has not seen acknowledged yet.
+ */
+export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoing[] = [], atStart = false): SessionView {
+  const items: Item[] = [];
+  const byKey = new Map<string, number>();
+  const toolOwner = new Map<string, { item: number; tool: number }>();
+  const seenUser = new Set<string>();
+  let state: SessionState | null = null;
+  let figures: Figures | null = null;
+  let model: string | null = null;
+  let effort: Effort | null = null;
+  let turnStartedAt: number | null = null;
+  let lastSeq = 0;
+  const put = (item: Item): void => {
+    const at = byKey.get(item.key);
+    if (at === undefined) { byKey.set(item.key, items.length); items.push(item); }
+    else items[at] = item;
+  };
+  if (atStart) put({ type: "start", key: "start", ver: "1" });
+  for (const e of events) {
+    if (e.seq <= lastSeq) continue;
+    lastSeq = e.seq;
+    switch (e.kind) {
+      case "user":
+        seenUser.add(e.clientMsgId);
+        put({ type: "user", key: `u${e.clientMsgId}`, ver: "1", text: e.text, at: e.at });
+        break;
+      case "turn":
+        model = e.model; effort = e.effort; turnStartedAt = e.at;
+        break;
+      case "delta": {
+        const key = `a${e.msg}`;
+        const prev = byKey.has(key) ? items[byKey.get(key)!] : undefined;
+        const text = (prev?.type === "assistant" && typeof prev.text === "string" ? prev.text : "") + e.text;
+        put({ type: "assistant", key, ver: `d${e.seq}`, text, streaming: true, tools: prev?.type === "assistant" ? prev.tools : [], model: model ?? "", at: e.at });
+        break;
+      }
+      case "assistant": {
+        const key = `a${e.msg}`;
+        const tools: ToolView[] = e.tools.map((tc) => ({ ...tc }));
+        put({ type: "assistant", key, ver: `f${e.seq}`, text: e.text, streaming: false, tools, model: e.model, at: e.at });
+        const idx = byKey.get(key)!;
+        tools.forEach((tc, i) => toolOwner.set(tc.id, { item: idx, tool: i }));
+        break;
+      }
+      case "tool_result": {
+        const owner = toolOwner.get(e.toolUseId);
+        const item = owner ? items[owner.item] : undefined;
+        if (owner && item?.type === "assistant") {
+          const tools = item.tools.slice();
+          tools[owner.tool] = { ...tools[owner.tool]!, result: { ok: e.ok, text: e.text } };
+          items[owner.item] = { ...item, tools, ver: `${item.ver}r${e.seq}` };
+        }
+        break;
+      }
+      case "subagent":
+        put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, status: e.status, steps: e.steps });
+        break;
+      case "permission":
+        put({ type: "permission", key: `p${e.id}`, ver: `${e.seq}`, id: e.id, tool: e.tool, title: e.title, summary: e.summary, input: e.input, canAlways: e.canAlways, decision: null, at: e.at });
+        break;
+      case "permission_decided": {
+        const at = byKey.get(`p${e.id}`);
+        const item = at === undefined ? undefined : items[at];
+        if (item?.type === "permission") items[at!] = { ...item, decision: e.decision, ...(e.reason ? { reason: e.reason } : {}), ver: `${item.ver}d${e.seq}` };
+        break;
+      }
+      case "result":
+        put({ type: "result", key: `r${e.seq}`, ver: "1", ok: e.ok, ...(e.error ? { error: e.error } : {}), ms: e.ms, model: model ?? "", effort });
+        turnStartedAt = null;
+        break;
+      case "state":
+        state = e.state;
+        if (e.state === "running" && turnStartedAt === null) turnStartedAt = e.at;
+        break;
+      case "figures":
+        figures = e.figures;
+        break;
+      case "notice":
+        put({ type: "notice", key: `n${e.seq}`, ver: "1", code: e.code, ...(e.text ? { text: e.text } : {}) });
+        break;
+    }
+  }
+  for (const o of outbox) {
+    if (seenUser.has(o.clientMsgId)) continue;
+    put({ type: "user", key: `u${o.clientMsgId}`, ver: o.state, text: o.text, at: o.at, queued: o.state });
+  }
+  for (const it of items) if (it.type === "assistant" && it.streaming && state !== "running" && state !== "starting" && state !== "waiting") { it.streaming = false; it.ver += "s"; }
+  const open = items.filter((i): i is Extract<Item, { type: "permission" }> => i.type === "permission" && i.decision === null);
+  return { items, state, figures, model, effort, open, turnStartedAt, lastSeq };
+}
+
+/** Merge a page into a sorted event list without duplicates (pages may overlap after a reconnect). */
+export function mergeEvents(into: SessionEvent[], page: readonly SessionEvent[]): SessionEvent[] {
+  if (page.length === 0) return into;
+  const first = page[0]!.seq;
+  const last = page[page.length - 1]!.seq;
+  const head = into.length ? into[0]!.seq : Infinity;
+  const tail = into.length ? into[into.length - 1]!.seq : -Infinity;
+  if (first > tail) return into.concat(page);
+  if (last < head) return page.concat(into);
+  const map = new Map<number, SessionEvent>();
+  for (const e of into) map.set(e.seq, e);
+  for (const e of page) map.set(e.seq, e);
+  return Array.from(map.values()).sort((a, b) => a.seq - b.seq);
+}
