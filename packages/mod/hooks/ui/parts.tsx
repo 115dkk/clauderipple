@@ -34,9 +34,11 @@ export type Els = ElementTable
 export const FACE_SIZE = 44
 
 /**
- * 리플이 with one of its faces (ripple.ts), `size` px square, never below MIN_SIZE. It moves, so it
- * is drawn interactive; the motion starts from the rest pose, so a redraw reads as going on.
- * `percent` fills the ring of a gauge face. Desktop and the editor only.
+ * 리플이 with one of its faces (ripple.ts), `size` px square, never below MIN_SIZE. A plain image:
+ * CSS motion runs inside an SVG image too (Effortless animates its band this way), while an
+ * interactive picture is a frame the desktop rebuilds blank on every redraw, which is what blinked.
+ * The motion starts from the rest pose, so a redraw reads as going on. `percent` fills the ring of
+ * a gauge face. Desktop and the editor only.
  */
 export function mascot(el: Els, frame: Frame, key: string, face: Face, alt: string, size = FACE_SIZE, percent?: number): RenderNode {
   const s = Math.max(MIN_SIZE, size)
@@ -50,7 +52,7 @@ export function mascot(el: Els, frame: Frame, key: string, face: Face, alt: stri
   // In a Box of its own that never shrinks: beside a column of text it keeps its size.
   return (
     <Box key={'ripple-' + key} flexShrink={0}>
-      <Svg source={source} alt={alt} width={s} height={s} isInteractive />
+      <Svg source={source} alt={alt} width={s} height={s} />
     </Box>
   )
 }

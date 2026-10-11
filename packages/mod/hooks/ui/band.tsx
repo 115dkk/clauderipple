@@ -36,7 +36,8 @@ import type { RenderChildren, RenderNode } from 'claude-code'
 import type { Effort } from '../../types'
 import { textButton } from './parts'
 import type { Els } from './parts'
-import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, textTone } from './theme'
+import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, svgDoc, textTone } from './theme'
+import { GRID, rippleBody, rippleCss } from './ripple'
 import type { BandActions, DashboardView, Frame } from './view'
 import { EFFORTS, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, resetsLabel, seconds, compactNumber } from './view'
 
@@ -60,6 +61,21 @@ const COUNT_CELLS = 2
 const MARK_CELLS = 3
 /** The crest: a wave, a single cell in the host's sans (∿ measured 8.2 px at 14 px, a ch 8.8). */
 const CREST = '∿'
+
+/** 리플이 in the band, px: one text line high. */
+const BAND_RIPPLE = 20
+const bandRippleCache = new Map<string, string>()
+/** An image (never a frame): calm and gently moving while Auto picks, still and dimmed otherwise. Built once per state. */
+function bandRipple(frame: Frame, working: boolean): string {
+  const key = frame.appearance + (working ? '1' : '0')
+  let source = bandRippleCache.get(key)
+  if (!source) {
+    const css = working ? rippleCss('calm') : 'svg>g{opacity:.45}'
+    source = svgDoc(BAND_RIPPLE, BAND_RIPPLE, frame.appearance, rippleBody('calm'), css, '0 0 ' + GRID + ' ' + GRID)
+    bandRippleCache.set(key, source)
+  }
+  return source
+}
 /** The reason's slot on a wide terminal. */
 const WHY_CELLS = 28
 
@@ -420,9 +436,15 @@ function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActio
       <Box key="band-row" flexDirection="row" alignItems="center" width="100%" columnGap={1} flexWrap="wrap">
         <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={GAP} flexGrow={1} flexShrink={1} width={0} minWidth={need(facts) + GAP + 1}>
           <Box key="band-crest" flexShrink={0}>
-            <Text color={working ? textTone(frame.appearance).accent : undefined} dimColor={!working} bold>
-              {CREST}
-            </Text>
+            {'Svg' in el ? (
+              // Trial (2026-10-11): 리플이 as one image, its source fixed per state so every redraw
+              // hands the host the same document. Pulled again if the owner sees it blink.
+              <el.Svg key={'band-ripple-' + (working ? 'on' : 'off') + '-' + frame.appearance} source={bandRipple(frame, working)} alt="ClaudeRipple" width={BAND_RIPPLE} height={BAND_RIPPLE} />
+            ) : (
+              <Text color={working ? textTone(frame.appearance).accent : undefined} dimColor={!working} bold>
+                {CREST}
+              </Text>
+            )}
           </Box>
           {facts.map(f => factRich(el, f))}
           {/* The reason sits right after the route in only what the facts leave (it starts from no

@@ -158,8 +158,11 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
       expect(await ui.find({ type: 'Button', key }), "ui { type: 'Button', key } " + surface).toBeDefined()
       await ui.press({ key })
     }
-    // No pictures on any surface: the desktop draws each answer afresh, and a picture blinks.
-    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+    // One picture at most, 리플이, as a plain image: the desktop draws each answer afresh, and an
+    // interactive picture (a frame) reloads blank each time; an image of the same source does not.
+    const pictures = await ui.findAll({ type: 'Svg' })
+    expect(pictures.length).toBeLessThanOrEqual(1)
+    for (const picture of pictures) expect(picture.props.isInteractive).toBeFalsy()
     if (surface === 'terminal') {
       expect((await ui.find({ key: 'auto' }))?.props.hotkey).toBe('a')
       expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol' }), "ui { type: 'Text', text: 'gpt-6.1-sol' } " + surface).toBeDefined()
@@ -337,7 +340,8 @@ test('each alert shows 리플이 with the face of its state, its gauge in 5% ste
     const found = mascots(await ui.drawn())
     expect(found.length, 'alert ' + i).toBe(1)
     expect(found[0]!.props?.width).toBe(44)
-    expect(found[0]!.props?.isInteractive, 'alert ' + i).toBe(true)
+    // An image, not a frame: the desktop rebuilds a frame blank on each redraw.
+    expect(found[0]!.props?.isInteractive, 'alert ' + i).toBeFalsy()
     sources.push(String(found[0]!.props?.source))
     await ui.unmount()
     const terminal = await mount($, 'face-' + i, 'terminal')
