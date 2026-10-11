@@ -196,6 +196,15 @@ request went, and a `Pane` holds the request log.
   browser) are the app's own; the mod API (CLI 2.1.286 types) has no place for
   a plugin's button there. Its sites are the band, the status line, panes,
   transcript rows and slash commands.
+- **Pictures on the desktop are images, never frames.** The desktop app draws
+  each answer as a new DOM tree; an `Svg` becomes a new `<img>` of a data URL,
+  or with `isInteractive` a sandboxed `<iframe srcdoc>` that paints blank until
+  loaded. Only the frame blinks on a redraw: a plain `Svg` image does not, and
+  CSS `@keyframes` inside the SVG run in it (seen by the owner in the desktop
+  app on 2026-10-11 at commit 8d43b97, 리플이 moving in the band and the quick
+  settings with no flicker; Effortless animates its band the same way). A
+  redraw still starts the motion over, so the mod's loops all open on a rest
+  pose (`packages/mod/hooks/ui/ripple.ts`).
 - **A pane's open state is the engine's.** A module reload drops its pane
   without a `ui.close` the module hears, while `$.state` survives the reload: a
   flag kept there stuck the Log button on "Close log" (2026-10-05). The mod asks

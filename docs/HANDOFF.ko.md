@@ -10,10 +10,12 @@ packages/mod` 91, mod `tsc --noEmit`, `plugin validate` 통과. 실기 확인은
 Claude가 Claude 앱 창을 computer-use로 잡는 건 불가(권한 거부) — 실기 확인은 주군 스크린샷뿐.
 
 **이번에 밝혀진 사실 (근거 있음)**
-- **깜빡임:** 데스크톱 호스트는 응답마다 DOM을 통째로 갈아끼우고(`replaceWith`), Svg는 새 `<img data:>`·
-  `isInteractive`면 새 `<iframe srcdoc>`로 매번 다시 만든다 → 마크업이 같아도 깜빡임. **띠에는 Svg 금지**,
-  Text/Button만. 유휴 시 invalidate는 표시되는 분이 바뀔 때만(`scheduleCountdown`). 경고 카드는 아직 Svg라
-  떠 있는 동안 깜빡일 수 있다(미해결).
+- **깜빡임 (2026-10-11 정정):** 데스크톱 호스트는 응답마다 DOM을 통째로 갈아끼우고(`replaceWith`), Svg는 새
+  `<img data:>`·`isInteractive`면 새 `<iframe srcdoc>`로 만든다. **깜빡인 건 `isInteractive`(iframe)뿐이다** —
+  일반 Svg 이미지는 다시 그려도 깜빡이지 않고, SVG 안의 CSS @keyframes도 돈다(주군이 데스크톱 앱에서 8d43b97로
+  확인: 띠·빠른 설정의 리플이가 깜빡임 없이 움직임. Effortless도 같은 방식). 그래서 "띠에 Svg 금지"는 폐기,
+  규칙은 **Svg는 이미지로만, isInteractive 금지.** 다시 그리면 애니메이션은 처음부터 다시 시작하니 모든 루프는
+  자연스러운 자세에서 시작한다(`ripple.ts`). 유휴 시 invalidate는 표시되는 분이 바뀔 때만(`scheduleCountdown`).
 - **"클릭이 안 먹음":** 클릭·저장은 정상이었다. 켜짐/꺼짐을 흐림으로만 구분해 호스트 hover 스타일과 겹쳐
   안 보였던 것. 지금은 켜짐 = primary(강조색 채움) 버튼, 꺼짐 = 흐린 글자.
 - **위치 흔들림:** 값에 따라 칩 폭이 바뀌던 것 → 고정 폭 슬롯, 라우트만 남는 폭을 씀.
