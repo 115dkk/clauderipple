@@ -162,31 +162,6 @@ export function svgDoc(width: number, height: number, appearance: Appearance, bo
   )
 }
 
-/** Escapes text for SVG markup. */
-export function esc(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-}
-
-/**
- * A width estimate for SVG text, in px, so chips can be sized before the frame lays them out.
- * Errs wide: a chip with a little air reads better than clipped text. East Asian wide characters
- * (Hangul, kana, CJK ideographs, fullwidth forms, emoji) take a full em: measured 2026-10-10 in
- * Chromium, Hangul at 12px weight 500 draws 10.4px, Latin lower case about 6.5px.
- */
-export function textWidth(text: string, size = 12, weight: 'normal' | 'bold' = 'normal'): number {
-  let units = 0
-  for (const char of text) {
-    if (ZERO.test(char)) continue
-    if (WIDE.test(char)) units += 1.04
-    else if (/[ilI.,:;|'!]/.test(char)) units += 0.3
-    else if (/[mwMW@%]/.test(char)) units += 0.86
-    else if (/[A-Z0-9]/.test(char)) units += 0.64
-    else if (char === ' ') units += 0.3
-    else units += 0.58
-  }
-  return Math.ceil(units * size * (weight === 'bold' ? 1.06 : 1))
-}
-
 // East Asian Wide and Fullwidth ranges (UAX #11), and the emoji planes terminals draw two wide.
 const WIDE = /[ᄀ-ᅟ⌚⌛〈〉⏩-⏬⏰⏳◽◾☔☕♈-♓♿⚓⚡⚪⚫⚽⚾⛄⛅⛎⛔⛪⛲⛳⛵⛺⛽✅✊✋✨❌❎❓-❕❗➕-➗➰➿⬛⬜⭐⭕⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏ꥠ-꥿가-힣豈-﫿︐-︙︰-﹯＀-｠￠-￦\u{16FE0}-\u{16FE4}\u{17000}-\u{18CFF}\u{1B000}-\u{1B2FF}\u{1F004}\u{1F0CF}\u{1F18E}\u{1F191}-\u{1F19A}\u{1F200}-\u{1F251}\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F7E0}-\u{1F7EB}\u{1F90C}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
 // Combining marks, zero-width spaces and joiners, variation selectors: no cell of their own.
@@ -205,6 +180,25 @@ export function displayWidth(text: string): number {
   let width = 0
   for (const char of text) width += cellWidth(char)
   return width
+}
+
+/**
+ * The desktop width of `text` in `ch`, unrounded: the host's `ch` is the width of "0" in its 14 px
+ * sans. Measured 2026-10-10 in Chromium on macOS: ch 8.8 px, Hangul and kana ~12 px (1.36 ch),
+ * "Medium" 5.9 ch, "X-High" 5.1 ch. Each class of character is taken a little wide of that.
+ */
+export function chOf(text: string): number {
+  let ch = 0
+  for (const char of text) {
+    if (displayWidth(char) === 2) ch += 1.45
+    else if (char === ' ') ch += 0.45
+    else if (/[ilIj.,:;|'!]/.test(char)) ch += 0.4
+    else if (/[mwMW@%]/.test(char)) ch += 1.35
+    else if (/[A-Z]/.test(char)) ch += 1.1
+    else if (/[0-9]/.test(char)) ch += 1
+    else ch += 0.85
+  }
+  return ch
 }
 
 /** Cuts text to at most `max` terminal columns, the ellipsis included. */

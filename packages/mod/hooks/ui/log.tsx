@@ -6,12 +6,11 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { JudgeRun, StatusRequest } from '../../types'
-import { mascot, textButton } from './parts'
+import { action, actions as actions_, speak } from './parts'
 import type { Els } from './parts'
-import { MIN_SIZE } from './ripple'
 import { cacheTone, providerColor, textTone } from './theme'
 import type { Frame, LogActions, LogView } from './view'
-import { cachePercent, clockTime, effortLabel, isRich, modelOf, promptTokens, seconds } from './view'
+import { cachePercent, clockTime, effortLabel, modelOf, promptTokens, seconds } from './view'
 
 function entry(el: Els, frame: Frame, record: StatusRequest, mineOnly: boolean): RenderNode {
   const { Box, Text } = el
@@ -86,23 +85,19 @@ export function renderLog(el: Els, frame: Frame, view: LogView, actions: LogActi
   const { Box, Text } = el
   const judges = view.mineOnly ? (view.judges ?? []) : []
   const items = [...view.rows.map(record => ({ at: Date.parse(record.at), node: () => entry(el, frame, record, view.mineOnly) })), ...judges.map(run => ({ at: run.at, node: () => judgeEntry(el, frame, run) }))].sort((a, b) => b.at - a.at)
+  const scopeName = view.mineOnly ? t(frame.lang, 'log.thisSession') : t(frame.lang, 'log.allSessions')
+  const scope = action(el, frame, 'scope', view.mineOnly ? t(frame.lang, 'log.showAll') : t(frame.lang, 'log.onlySession'), actions.toggleScope, { hotkey: 'a' })
+  const legend = !view.mineOnly ? <Text key="legend" dimColor wrap="wrap">{t(frame.lang, 'log.legend')}</Text> : ''
+  // Empty, the pane has nothing to redraw it, so 리플이 can wait here without blinking; with
+  // requests every poll redraws it, so the list has no picture.
+  if (items.length === 0) return speak(el, frame, { key: 'log', face: 'calm', title: scopeName, line: t(frame.lang, 'log.empty'), blocks: [legend, actions_(el, frame, [scope])] })
   return (
     <Box flexDirection="column" gap={1} width="100%">
-      <Box flexDirection="row" flexWrap="wrap" gap={1}>
-        <Text bold>{view.mineOnly ? t(frame.lang, 'log.thisSession') : t(frame.lang, 'log.allSessions')}</Text>
-        {textButton(el, 'scope', view.mineOnly ? t(frame.lang, 'log.showAll') : t(frame.lang, 'log.onlySession'), actions.toggleScope, isRich(frame) ? undefined : 'a')}
+      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={2}>
+        <Text bold>{scopeName}</Text>
+        {scope}
       </Box>
-      {!view.mineOnly && <Text dimColor wrap="wrap">{t(frame.lang, 'log.legend')}</Text>}
-      {items.length === 0 &&
-        (isRich(frame) && 'Svg' in el ? (
-          // Empty, the pane has nothing to redraw it, so 리플이 can wait here without blinking.
-          <Box flexDirection="row" alignItems="center" columnGap={2}>
-            {mascot(el, frame, 'log', 'calm', t(frame.lang, 'log.empty'), MIN_SIZE)}
-            <Text dimColor wrap="wrap">{t(frame.lang, 'log.empty')}</Text>
-          </Box>
-        ) : (
-          <Text dimColor>{t(frame.lang, 'log.empty')}</Text>
-        ))}
+      {legend}
       {items.map(item => item.node())}
     </Box>
   )

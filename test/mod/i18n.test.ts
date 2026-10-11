@@ -101,12 +101,3 @@ test('stats uses the requested language without changing counters or number form
   } finally { STRINGS.ko['commands.statsAuto'] = original }
 })
 
-test('textWidth gives East Asian wide characters a full em, so Korean, Chinese and Japanese pills are not clipped', async () => {
-  const { textWidth } = await import('../../packages/mod/hooks/ui/theme.ts')
-  // Chromium 2026-10-10, 12px weight 500: 고정 20.8px, 일반과 같게 55.2px, 모든 서브에이전트 86.3px, すべて 31.1px.
-  for (const [label, drawn] of [['고정', 20.8], ['일반과 같게', 55.2], ['모든 서브에이전트', 86.3], ['固定', 20.8], ['すべて', 31.1], ['deepseek-v4.1-flash', 118], ['Allow providers', 89]] as const) assert.ok(textWidth(label, 12) >= drawn, label)
-  assert.ok(textWidth('고정', 12) >= 24)
-  assert.equal(textWidth('ＡＢ', 10), textWidth('가나', 10))
-  assert.ok(textWidth('auto', 12) <= 4 * 0.6 * 12 + 1)
-  assert.equal(textWidth('한̀', 12), textWidth('한', 12))
-})
