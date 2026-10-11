@@ -1,23 +1,29 @@
-import type { AaScore, Calibration, Domain, Effort, Level, ModelScore, RouterModel, Rule, Settings, TierTarget, WorkerAgent, WorkerCandidate, WorkerOption, WorkerVerdict } from '../types'
+import type { AaScore, Billing, Calibration, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerAgent, WorkerCandidate, WorkerOption, WorkerVerdict } from '../types'
 import { CLAUDE_WORKERS, DEFAULTS, DOMAINS, EFFORTS, LEVELS, candidateKey } from './settings'
 import { MARKER, agentModel } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
-import { bounded, parseEffortVerdict, verdictObject } from './judge'
+import { bounded, kindOf, parseEffortVerdict, verdictObject } from './judge'
+import { claudeChoices, presets, rungAbove, rungOf } from './ladder'
 
-export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level and the cheapest effort that still does this delegated task well. Evaluate actual scope and risk, not prompt length.
+export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level, kind of work and the cheapest effort that still does this delegated task well. Evaluate actual scope and risk, not prompt length.
 Domains: design (visual taste, composition, brand), frontend (UI implementation), backend (APIs and server logic), infra (deployment and operations), data (queries and processing), test (verification), docs (writing), research (investigation), general (other or cross-domain).
 Levels are independent of domain: light (chores, mechanical work, simple lookups), standard (designed implementation, ordinary research and review), deep (careful high-stakes reasoning, subtle bugs, architecture, security).
-Effort choices are low, medium, high, xhigh, max; reserve the last two for exceptionally hard work. Return only JSON {"domain":"design|frontend|backend|infra|data|test|docs|research|general","level":"light|standard|deep","effort":"low|medium|high|xhigh|max","sure":0.0,"why":"brief reason"}. Confidence is zero to one; explain in the user's language in at most six words.`
+Kind: plan (decide what to build: architecture, design decisions, specifications, a review whose verdict decides) or do (carry out what is decided: implement, fix, run, look up, write).
+Effort choices are low, medium, high, xhigh, max; reserve the last two for exceptionally hard work. Return only JSON {"domain":"design|frontend|backend|infra|data|test|docs|research|general","level":"light|standard|deep","kind":"plan|do","effort":"low|medium|high|xhigh|max","sure":0.0,"why":"brief reason"}. Confidence is zero to one and is about the level; explain in the user's language in at most six words.`
 
 export function workerJudgeInput(input: { description: string; prompt: string }): string {
   return `Task: ${input.description}\n\nInstructions:\n${input.prompt.slice(0, 3000)}`
 }
+/**
+ * A kind the judge leaves out or garbles reads as do: the verdict's level still stands, and losing
+ * it over the kind would send the task to the default instead.
+ */
 export function parseWorkerVerdict(text: string): WorkerVerdict | undefined {
   const verdict = parseEffortVerdict(text)
   const raw = verdictObject(text)
   if (!verdict || !DOMAINS.includes(raw?.domain as Domain) || !LEVELS.includes(raw?.level as Level)) return undefined
-  return { ...verdict, domain: raw!.domain as Domain, level: raw!.level as Level }
+  return { ...verdict, domain: raw!.domain as Domain, level: raw!.level as Level, kind: kindOf(raw!.kind) ?? 'do' }
 }
 export function readMarker(prompt: string): { name: string; level?: string } | null {
   const marker = MARKER.exec(prompt)
@@ -125,6 +131,29 @@ export function workerAgents(raw: unknown): WorkerAgent[] {
       ? [{ name: agent.name, model: agent.model, provider: agent.provider }] : []
   })
 }
+const BILLINGS: readonly Billing[] = ['free', 'payg', 'subscription']
+/**
+ * The router's rung choices (GET /api/mod-options), validated at the boundary: its workers whose
+ * provider can run now, with ladders, billing and cheapest measured cost, then Claude's own
+ * models. Presets are computed here from them, by the same rules as the dashboard's.
+ */
+export function ladderOptionsFrom(raw: unknown, until: number): LadderOptions {
+  const root = record(raw)
+  const efforts = (value: unknown): Effort[] => list(value).filter((e): e is Effort => EFFORTS.includes(e as Effort))
+  const usable = new Set(list(root.providers).flatMap(p => { const v = record(p); return typeof v.name === 'string' && v.usable !== false ? [v.name] : [] }))
+  const known = list(root.providers).length > 0
+  const scores = scoreModels(root.scores)
+  const choices: LadderChoice[] = list(root.agents).flatMap(value => {
+    const a = record(value)
+    if (typeof a.name !== 'string' || !a.name || typeof a.model !== 'string' || typeof a.provider !== 'string') return []
+    if (known && !usable.has(a.provider)) return []
+    const costs = (scores.find(s => s.model === a.model && s.provider === a.provider)?.variants ?? []).flatMap(v => v.costPerTask === null ? [] : [v.costPerTask])
+    const billing = BILLINGS.includes(a.billing as Billing) ? a.billing as Billing : 'payg'
+    return [{ target: { agent: a.name }, model: a.model, provider: a.provider, billing, efforts: efforts(a.efforts), ...(costs.length ? { cost: Math.min(...costs) } : {}) }]
+  })
+  const all = [...choices, ...claudeChoices(efforts(root.claudeEfforts))]
+  return { until, choices: all, presets: presets(all) }
+}
 /**
  * The measured variant shown beside a worker: what Auto would use for standard work (the cheapest
  * variant at or above `floor`), else its strongest variant.
@@ -147,33 +176,42 @@ function sameTarget(a: TierTarget, b: TierTarget): boolean { return a.agent === 
 function candidateOf(target: TierTarget, candidates: readonly WorkerCandidate[]): WorkerCandidate | undefined {
   return candidates.find(c => sameTarget(c.target, target)) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: candidates.find(c => c.model === baseModel(target.model ?? 'sonnet'))?.provider ?? 'anthropic' } : undefined)
 }
-export type Resolution = { target?: TierTarget; effort: Effort; fallbackReason?: string; aa?: AaScore; runnerUp?: AaScore & { target: TierTarget; effort: Effort } }
+export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; fallbackReason?: string; aa?: AaScore; runnerUp?: AaScore & { target: TierTarget; effort: Effort } }
 
-/** Pinned level, higher levels for missing files, then preferred quota fallback and the configured fallback. */
-function pin(level: Level, effort: Effort, rule: Extract<Rule, { mode: 'pin' }>, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = []): Resolution {
+/** Claude Code's own agent with no model: the subagent runs on the session's model. */
+export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
+
+/**
+ * The ladder: the verdict's rung, else its backup, else one rung up (its model, then its backup),
+ * else the session model, never down. Whatever ran instead says why (the fallback toast).
+ */
+export function ladderPick(verdict: WorkerVerdict, rule: Extract<Rule, { mode: 'ladder' }>, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = []): Resolution {
+  const wanted = rungOf(verdict)
   let reason: string | undefined
-  const usable = (candidate: WorkerCandidate): boolean => candidateUsable(candidate, settings, chatgpt) && allowed(candidate, allow)
-  const eligible = candidates.filter(usable)
-  for (const next of LEVELS.slice(LEVELS.indexOf(level))) {
-    const target = rule.targets[next]
-    if (!target) continue
-    const candidate = candidateOf(target, candidates)
-    if (candidate && usable(candidate)) return { target: { ...target }, effort: calibratedEffort(effort, rule), ...(reason ? { fallbackReason: reason } : {}) }
-    reason ??= !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : t(lang, 'toasts.providerQuota')
-    // Quota/off is not a request to spend on a higher pinned tier. Preference wins fallback only.
-    if (candidate) break
+  for (const rung of [wanted, rungAbove(wanted)]) {
+    if (!rung) continue
+    const step = rule.rungs[rung]
+    if (!step) { reason ??= t(lang, 'workers.rungEmpty', { rung: t(lang, 'workers.rung.' + rung) }); continue }
+    for (const target of [step.target, step.backup]) {
+      if (!target) continue
+      const candidate = candidateOf(target, candidates)
+      if (candidate && candidateUsable(candidate, settings, chatgpt) && allowed(candidate, allow)) return { target: { ...target }, effort: step.effort, rung, ...(reason ? { fallbackReason: reason } : {}) }
+      reason ??= !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !allowed(candidate, allow) ? t(lang, 'workers.notCandidate', { name: candidate.model }) : t(lang, 'toasts.providerQuota')
+    }
   }
-  const preferred = eligible.filter(c => rank(c, settings) < Number.MAX_SAFE_INTEGER).sort((a, b) => rank(a, settings) - rank(b, settings))[0]
-  const fallback = candidateOf(settings.fallback, candidates)
-  const builtin = candidateOf({ agent: 'general-purpose', model: 'sonnet' }, candidates)!
-  const selected = preferred ?? (fallback && usable(fallback) ? fallback : usable(builtin) ? builtin : eligible[0])
-  return { target: selected ? { ...selected.target } : undefined, effort: calibratedEffort(effort, rule), fallbackReason: reason ?? t(lang, 'workers.none') }
+  const effort = rule.rungs[wanted]?.effort ?? verdict.effort
+  // The session's model is Claude's: with Anthropic switched off nothing is left to run it.
+  if (settings.providers.anthropic === false) return { effort, rung: wanted, fallbackReason: t(lang, 'workers.none') }
+  return { target: { ...SESSION_MODEL }, effort, rung: wanted, fallbackReason: reason ?? t(lang, 'workers.none') }
 }
 
-/** Cheapest floor-qualified variant; near-tie preferences are measured against the cheapest anchor. */
+/**
+ * A ladder rule picks by rung; Auto (experimental) picks the cheapest floor-qualified variant, with
+ * near-tie preferences measured against the cheapest anchor.
+ */
 export function resolveWorker(verdict: WorkerVerdict, settings: Settings, candidates: readonly WorkerCandidate[], scores: readonly ModelScore[], chatgpt: boolean, lang: Lang = 'en', pinnedCandidates: readonly WorkerCandidate[] = candidates): Resolution {
   const rule = resolvedRule(verdict.domain, settings)
-  if (rule.mode === 'pin') return pin(verdict.level, verdict.effort, rule, settings, candidates, chatgpt, lang)
+  if (rule.mode === 'ladder') return ladderPick(verdict, rule, settings, candidates, chatgpt, lang)
   const measured = candidates.filter(c => candidateUsable(c, settings, chatgpt) && allowed(c, rule.allow)).flatMap(candidate => {
     const score = scores.find(s => s.model === candidate.model && s.provider === candidate.provider)
     return (score?.variants ?? []).flatMap(variant => {
@@ -189,9 +227,16 @@ export function resolveWorker(verdict: WorkerVerdict, settings: Settings, candid
     })
   })
   if (!measured.length) {
-    const general = settings.rules.general.mode === 'pin' ? settings.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'pin' }>
-    const result = pin(verdict.level, verdict.effort, general, settings, pinnedCandidates, chatgpt, lang, rule.allow)
-    return { ...result, effort: calibratedEffort(verdict.effort, rule), fallbackReason: result.fallbackReason ?? t(lang, 'workers.noData') }
+    // No usable AA data: the general ladder, among this rule's candidates, at this rule's effort.
+    const general = settings.rules.general.mode === 'ladder' ? settings.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
+    const result = ladderPick(verdict, general, settings, pinnedCandidates, chatgpt, lang, rule.allow)
+    const effort = calibratedEffort(verdict.effort, rule)
+    if (!result.target || sameTarget(result.target, SESSION_MODEL)) {
+      // A candidate this rule allows beats leaving the session model to it.
+      const any = pinnedCandidates.find(c => candidateUsable(c, settings, chatgpt) && allowed(c, rule.allow))
+      if (any && rule.allow.length) return { target: { ...any.target }, effort, fallbackReason: t(lang, 'workers.noData') }
+    }
+    return { ...result, effort, fallbackReason: result.fallbackReason ?? t(lang, 'workers.noData') }
   }
   const qualified = measured.filter(c => c.intelligence >= settings.autoFloors[verdict.level])
   const byCost = (a: typeof measured[number], b: typeof measured[number]): number => a.costPerTask - b.costPerTask || b.intelligence - a.intelligence || a.model.localeCompare(b.model)

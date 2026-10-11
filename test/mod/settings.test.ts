@@ -7,10 +7,18 @@ test('defaults use independent domain rules, two axes and measured floors', () =
   assert.equal(DEFAULTS.jevSource, 'typesafe')
   assert.deepEqual(DEFAULTS.autoFloors, { light: 20, standard: 45, deep: 50 })
   assert.equal(DEFAULTS.autoTieBand, 2)
-  assert.deepEqual(DEFAULTS.rules.general, { mode: 'pin', targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } })
+  // The spec's "Claude + GPT" example ladder; design stays on Claude, research follows the ladder.
+  assert.deepEqual(DEFAULTS.rules.general, { mode: 'ladder', rungs: {
+    light: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
+    hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' },
+  } })
   assert.deepEqual(DEFAULTS.rules.backend, { mode: 'inherit' })
-  assert.equal(DEFAULTS.rules.design.mode, 'pin')
-  if (DEFAULTS.rules.design.mode === 'pin') assert.equal(DEFAULTS.rules.design.targets.deep?.model, 'opus')
+  assert.deepEqual(DEFAULTS.rules.research, { mode: 'inherit' })
+  assert.equal(DEFAULTS.rules.design.mode, 'ladder')
+  if (DEFAULTS.rules.design.mode === 'ladder') {
+    assert.deepEqual(DEFAULTS.rules.design.rungs.light, { target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'medium' })
+    assert.equal(DEFAULTS.rules.design.rungs.hard?.target.model, 'opus')
+  }
   assert.equal(Object.hasOwn(DEFAULTS, 'tiers'), false)
 })
 test('rebasing settings preserves remote siblings and deletes only locally removed fields', () => {
@@ -39,17 +47,20 @@ test('defaults are deeply independent after normalization', () => {
   for (const value of [undefined, null, false, 'bad', 7, [], {}]) assert.deepEqual(normalizeSettings(value), DEFAULTS)
   const first = normalizeSettings(null)
   first.hide.push('timer'); first.preference.push('chatgpt'); first.providers.chatgpt = false
-  if (first.rules.general.mode === 'pin') first.rules.general.targets.light!.agent = 'changed'
-  if (first.rules.design.mode === 'pin') first.rules.design.targets.light!.model = 'changed'
+  if (first.rules.general.mode === 'ladder') first.rules.general.rungs.light!.target.agent = 'changed'
+  if (first.rules.design.mode === 'ladder') first.rules.design.rungs.light!.target.model = 'changed'
   first.autoFloors.deep = 99; first.fallback.agent = 'changed'
   assert.deepEqual(normalizeSettings(null), DEFAULTS)
 })
 test('old tiers migrate general and design once, explicit new rules win', () => {
   const migrated = normalizeSettings({ tiers: { light: { agent: ' custom ' }, design: { agent: 'general-purpose', model: 'haiku' } } })
   assert.equal(Object.hasOwn(migrated, 'tiers'), false)
-  assert.equal(migrated.rules.general.mode, 'pin')
-  if (migrated.rules.general.mode === 'pin') assert.equal(migrated.rules.general.targets.light!.agent, 'custom')
-  assert.deepEqual(migrated.rules.design, { mode: 'pin', targets: { light: { agent: 'general-purpose', model: 'haiku' }, standard: { agent: 'general-purpose', model: 'haiku' }, deep: { agent: 'general-purpose', model: 'haiku' } } })
+  assert.deepEqual(migrated.rules.general, { mode: 'ladder', rungs: {
+    light: { target: { agent: 'custom' }, effort: 'low' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
+    hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
+  } })
+  const haiku = { agent: 'general-purpose', model: 'haiku' }
+  assert.deepEqual(migrated.rules.design, { mode: 'ladder', rungs: { light: { target: haiku, effort: 'low' }, standard: { target: haiku, effort: 'medium' }, hard: { target: haiku, effort: 'high' }, plan: { target: haiku, effort: 'xhigh' } } })
   const current = normalizeSettings({ ...migrated, tiers: { light: { agent: 'obsolete' } } })
   assert.deepEqual(current, migrated)
 })
@@ -58,7 +69,9 @@ test('rules and extras validate without coercion, invalid general inherit become
   assert.equal(s.jevSource, 'zen')
   assert.deepEqual(s.rules.general, DEFAULTS.rules.general)
   assert.deepEqual(s.rules.backend, { mode: 'auto', allow: ['chatgpt', 'deepseek'], effortOffset: 2, floor: 'high', ceiling: 'low' })
-  assert.deepEqual(s.rules.docs, { mode: 'pin', targets: { light: { agent: 'worker' } } })
+  // A pin's one target climbs to every rung, as the pin climbed; a string offset is no calibration.
+  const worker = { agent: 'worker' }
+  assert.deepEqual(s.rules.docs, { mode: 'ladder', rungs: { light: { target: worker, effort: 'low' }, standard: { target: worker, effort: 'medium' }, hard: { target: worker, effort: 'high' }, plan: { target: worker, effort: 'xhigh' } } })
   assert.deepEqual(s.providers, { chatgpt: false })
   assert.deepEqual(s.preference, ['gpt-6.1-sol', 'chatgpt'])
   assert.deepEqual(s.autoFloors, { light: 0, standard: 45, deep: 53 })
@@ -136,7 +149,7 @@ test('a field rule equal to the main choice is no exception and saves as inherit
   assert.deepEqual(exceptionDomains(s), ['design'])
   const saved = foldExceptions(s)
   assert.deepEqual(saved.rules.frontend, { mode: 'inherit' })
-  assert.equal(saved.rules.design.mode, 'pin')
+  assert.equal(saved.rules.design.mode, 'ladder')
   assert.equal(sameRule({ mode: 'auto', allow: ['b', 'a'] }, { mode: 'auto', allow: ['a', 'b'] }), true)
   assert.equal(sameRule({ mode: 'auto', allow: [] }, { mode: 'auto', allow: [], floor: 'high' }), false)
 })

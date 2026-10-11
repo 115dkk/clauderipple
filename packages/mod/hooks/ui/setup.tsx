@@ -21,9 +21,9 @@ const STEPS = [
   { title: 'setup.cacheTitle', blurb: 'setup.cacheBlurb' },
 ] as const
 
-/** `Auto · exceptions: Design → Fixed`: the main choice, then only the fields that differ. */
+/** `Ladder · exceptions: Design → own ladder`: the main choice, then only the fields that differ. */
 function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
-  const mode = (domain: Domain) => t(lang, 'workers.' + (d.rules[domain].mode === 'auto' ? 'auto' : 'pin'))
+  const mode = (domain: Domain) => t(lang, 'workers.' + (d.rules[domain].mode === 'auto' ? 'auto' : domain === 'general' ? 'ladder' : 'ownLadder'))
   const exceptions = exceptionDomains(d)
   return mode('general') + (exceptions.length ? ' · ' + t(lang, 'workers.exceptionsSummary', { list: exceptions.map(domain => t(lang, 'workers.' + domain) + ' → ' + mode(domain)).join(', ') }) : '')
 }

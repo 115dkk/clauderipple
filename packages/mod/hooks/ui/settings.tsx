@@ -8,15 +8,18 @@
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
-import type { Settings } from '../../types'
-import { action, actions, dismiss, segmented, speak, toggle } from './parts'
+import type { LadderChoice, Settings, Step } from '../../types'
+import { PRESET_IDS } from '../ladder'
+import { RUNGS } from '../settings'
+import { action, actions, dismiss, option, segmented, speak, toggle } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, textTone } from './theme'
 import type { Frame, SettingsActions, SettingsView } from './view'
-import { isRich } from './view'
+import { effortLabel, isRich, targetLabel, targetValue } from './view'
 
 /** Every name a row of quick settings or setup shows: the name column is the widest of them. */
-const ROW_NAMES = ['settings.effortAuto', 'settings.lean', 'settings.judge', 'settings.key', 'settings.keepWarm', 'settings.workers', 'band.effort', 'band.cache'] as const
+const ROW_NAMES = ['settings.effortAuto', 'settings.lean', 'settings.judge', 'settings.key', 'settings.keepWarm', 'settings.workers', 'band.effort', 'band.cache',
+  'workers.rung.light', 'workers.rung.standard', 'workers.rung.hard', 'workers.rung.plan', 'settings.preset'] as const
 
 /** The name column's width in cells: snug to this language's names, so controls sit close to them. */
 function nameCells(frame: Frame): number {
@@ -126,6 +129,53 @@ export function judgeRows(el: Els, frame: Frame, view: SettingsView, a: Settings
   return out
 }
 
+/** How a rung choice reads in a Select: `model · provider`, Claude's own as `Claude Sonnet`. */
+function choiceLabel(choice: LadderChoice): string {
+  return choice.target.model ? targetLabel(choice.target) : choice.model + ' · ' + choice.provider
+}
+
+/**
+ * The main ladder's four rungs as model Selects (each rung keeps its effort), then the presets.
+ * Native Selects and Buttons only: the band redraws on every poll, and a picture would blink.
+ */
+export function ladderRows(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode[] {
+  const { Box, Text } = el
+  const general = view.settings.rules.general
+  const options = view.ladder
+  const out: RenderNode[] = []
+  if (general.mode !== 'ladder') {
+    out.push(row(el, frame, 'ladder-auto', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'settings.ladderAuto')}</Text>))
+  } else if (!options) {
+    out.push(row(el, frame, 'ladder-wait', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'settings.ladderWaiting')}</Text>))
+  } else {
+    for (const rung of RUNGS) {
+      const step = general.rungs[rung]
+      const current = step ? targetValue(step.target) : ''
+      const items = options.choices.map(choice => ({ value: targetValue(choice.target), label: choiceLabel(choice) }))
+      // A rung on a model that is not offered now keeps showing it rather than a wrong neighbour.
+      if (step && !items.some(item => item.value === current)) items.push({ value: current, label: targetLabel(step.target, frame.lang) })
+      if (!step) items.unshift({ value: '', label: '—' })
+      const effort = step ? effortLabel(step.effort, frame.lang) : ''
+      const control = 'Select' in el && a.setRung
+        ? <el.Select key={'rung-' + rung} options={items} value={current} onSelect={(value: string) => { if (value) a.setRung!(rung, value) }} />
+        : <Text>{items.find(item => item.value === current)?.label ?? '—'}</Text>
+      out.push(row(el, frame, 'rung-' + rung, t(frame.lang, 'workers.rung.' + rung), control, effort))
+    }
+  }
+  if (options && a.applyPreset) {
+    // A preset is an action, marked ● when the ladder is exactly what it would fill.
+    const same = (x: Step | undefined, y: Step) => !!x && targetValue(x.target) === targetValue(y.target) && x.effort === y.effort
+    const buttons = PRESET_IDS.flatMap(id => {
+      const p = options.presets[id]
+      if (!p) return []
+      const chosen = general.mode === 'ladder' && RUNGS.every(rung => same(general.rungs[rung], p.rungs[rung]))
+      return [option(el, 'preset-' + id, t(frame.lang, 'settings.preset.' + id), chosen, () => a.applyPreset!(id))]
+    })
+    out.push(row(el, frame, 'presets', t(frame.lang, 'settings.preset'), <Box flexDirection="row" flexWrap="wrap" columnGap={isRich(frame) ? 1 : 2}>{buttons}</Box>))
+  }
+  return out
+}
+
 export function keepWarmRow(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode {
   return row(el, frame, 'warm', t(frame.lang, 'settings.keepWarm'), toggle(el, frame, 'set-warm', d.keepWarm ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.keepWarm, () => a.patch({ keepWarm: !d.keepWarm })), t(frame.lang, 'settings.keepWarmHint'))
 }
@@ -146,6 +196,7 @@ export function renderSettings(el: Els, frame: Frame, view: SettingsView, a: Set
       <Box key="controls" flexDirection="column" rowGap={rich ? 1 : 0}>
         {effortRows(el, frame, view.settings, a)}
         {judgeRows(el, frame, view, a)}
+        {ladderRows(el, frame, view, a)}
         {keepWarmRow(el, frame, view.settings, a)}
       </Box>,
       actions(el, frame, [action(el, frame, 'all-settings', t(frame.lang, 'settings.openAll'), a.openAllSettings, { hotkey: 's', primary: true }), rich ? '' : close]),

@@ -1,15 +1,28 @@
-import type { Calibration, Domain, Effort, Level, Rule, Settings, SettingsChange, TierTarget } from '../types/index.d.ts'
+import type { Calibration, Domain, Effort, Level, Rule, Rung, Settings, SettingsChange, Step, TierTarget } from '../types/index.d.ts'
 
 export const DOMAINS: readonly Domain[] = ['general', 'design', 'frontend', 'backend', 'infra', 'data', 'test', 'docs', 'research']
 export const LEVELS: readonly Level[] = ['light', 'standard', 'deep']
 export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+/** The worker ladder, bottom to top (docs/specs/2026-10-11-worker-ladder.md). */
+export const RUNGS: readonly Rung[] = ['light', 'standard', 'hard', 'plan']
+/** The rung each judged level lands on before kind and confidence move it. */
+export const LEVEL_RUNG: Readonly<Record<Level, Rung>> = { light: 'light', standard: 'standard', deep: 'hard' }
+/** A rung's effort when nothing else says one: a stored rung without one, a migrated pin. */
+export const RUNG_EFFORT: Readonly<Record<Rung, Effort>> = { light: 'low', standard: 'medium', hard: 'high', plan: 'high' }
+
+const claude = (model: string, effort: Effort): Step => ({ target: { agent: 'general-purpose', model }, effort })
 
 export const DEFAULTS: Settings = {
   effortAuto: true, judge: 'haiku', judgeModel: 'deepseek-v4.1-flash', jevSource: 'typesafe',
   bias: 0, floor: 'low', ceiling: 'max', agentAuto: 'auto',
   rules: {
-    general: { mode: 'pin', targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } },
-    design: { mode: 'pin', targets: { light: { agent: 'general-purpose', model: 'sonnet' }, standard: { agent: 'general-purpose', model: 'sonnet' }, deep: { agent: 'general-purpose', model: 'opus' } } },
+    // The spec's "Claude + GPT" example; a rung whose worker is missing moves up and says so.
+    general: { mode: 'ladder', rungs: {
+      light: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
+      hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: claude('opus', 'high'),
+    } },
+    // AA does not measure taste: design stays on Claude, Sonnet then Opus.
+    design: { mode: 'ladder', rungs: { light: claude('sonnet', 'medium'), standard: claude('sonnet', 'high'), hard: claude('opus', 'high'), plan: claude('opus', 'high') } },
     frontend: { mode: 'inherit' }, backend: { mode: 'inherit' }, infra: { mode: 'inherit' }, data: { mode: 'inherit' },
     test: { mode: 'inherit' }, docs: { mode: 'inherit' }, research: { mode: 'inherit' },
   },
@@ -56,15 +69,73 @@ function calibration(value: Record<string, unknown>): Calibration {
   for (const field of ['floor', 'ceiling'] as const) if (EFFORTS.includes(value[field] as Effort)) out[field] = value[field] as Effort
   return out
 }
-function rule(raw: unknown, fallback: Rule, general = false): Rule {
+function copy<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+function sameTarget(a: TierTarget | undefined, b: TierTarget | undefined): boolean {
+  return !!a && !!b && a.agent === b.agent && a.model === b.model
+}
+/** An effort moved by calibration steps, then held between floor and ceiling (the floor wins). */
+function calibrated(effort: Effort, cal: Calibration): Effort {
+  const min = EFFORTS.indexOf(cal.floor ?? 'low')
+  const max = Math.max(min, EFFORTS.indexOf(cal.ceiling ?? 'max'))
+  const shifted = Math.max(0, Math.min(4, EFFORTS.indexOf(effort) + (cal.effortOffset ?? 0)))
+  return EFFORTS[Math.max(min, Math.min(max, shifted))]!
+}
+/** One effort step up, max staying max. */
+export function effortUp(effort: Effort): Effort {
+  return EFFORTS[Math.min(4, EFFORTS.indexOf(effort) + 1)]!
+}
+function step(raw: unknown, rung: Rung): Step | undefined {
   const v = object(raw)
-  if (v.mode === 'inherit' && !general) return { mode: 'inherit' }
+  const chosen = target(v.target)
+  if (!chosen) return undefined
+  const backup = target(v.backup)
+  return { target: chosen, effort: EFFORTS.includes(v.effort as Effort) ? v.effort as Effort : RUNG_EFFORT[rung], ...(backup ? { backup } : {}) }
+}
+/** The effort a migrated rung starts at: the default ladder's when it runs the same model there. */
+function migratedEffort(domain: Domain, rung: Rung, chosen: TierTarget): Effort {
+  for (const source of [DEFAULTS.rules[domain], DEFAULTS.rules.general]) {
+    const own = source.mode === 'ladder' ? source.rungs[rung] : undefined
+    if (own && sameTarget(own.target, chosen)) return own.effort
+  }
+  return RUNG_EFFORT[rung]
+}
+/**
+ * A pin stored before 2026-10-11 as a ladder: light/standard/deep become Light/Standard/Hard, a
+ * missing level takes the nearest one above (as the pin climbed) or else below, each rung's effort
+ * is its default calibrated as the pin was, and Plan is Hard's model one effort higher.
+ */
+export function ladderFromPin(targets: Partial<Record<Level, TierTarget>>, cal: Calibration, domain: Domain): Rule {
+  const known = LEVELS.filter(level => targets[level])
+  if (!known.length) return copy(DEFAULTS.rules[domain].mode === 'ladder' ? DEFAULTS.rules[domain] : DEFAULTS.rules.general)
+  const rungs: Partial<Record<Rung, Step>> = {}
+  LEVELS.forEach((level, at) => {
+    const above = LEVELS.slice(at).find(l => targets[l])
+    const chosen = targets[above ?? [...LEVELS.slice(0, at)].reverse().find(l => targets[l])!]!
+    const rung = LEVEL_RUNG[level]
+    rungs[rung] = { target: { ...chosen }, effort: calibrated(migratedEffort(domain, rung, chosen), cal) }
+  })
+  rungs.plan = { target: { ...rungs.hard!.target }, effort: effortUp(rungs.hard!.effort) }
+  return { mode: 'ladder', rungs }
+}
+function rule(raw: unknown, fallback: Rule, domain: Domain): Rule {
+  const v = object(raw)
+  if (v.mode === 'inherit' && domain !== 'general') return { mode: 'inherit' }
   if (v.mode === 'auto') return { mode: 'auto', allow: names(v.allow), ...calibration(v) }
-  const source = v.mode === 'pin' ? object(v.targets) : fallback.mode === 'pin' ? fallback.targets : null
-  if (!source) return fallback.mode === 'auto' ? { ...fallback, allow: [...fallback.allow] } : { mode: 'inherit' }
-  const targets: Partial<Record<Level, TierTarget>> = {}
-  for (const level of LEVELS) { const parsed = target(source[level]); if (parsed) targets[level] = parsed }
-  return { mode: 'pin', targets, ...calibration(v.mode === 'pin' ? v : fallback) }
+  if (v.mode === 'ladder') {
+    const source = object(v.rungs)
+    const rungs: Partial<Record<Rung, Step>> = {}
+    for (const rung of RUNGS) { const parsed = step(source[rung], rung); if (parsed) rungs[rung] = parsed }
+    return { mode: 'ladder', rungs }
+  }
+  if (v.mode === 'pin') {
+    const source = object(v.targets)
+    const targets: Partial<Record<Level, TierTarget>> = {}
+    for (const level of LEVELS) { const parsed = target(source[level]); if (parsed) targets[level] = parsed }
+    return ladderFromPin(targets, calibration(v), domain)
+  }
+  return copy(fallback)
 }
 
 type Worker = { name: string; provider: string }
@@ -119,7 +190,7 @@ export function toggleProvider(allow: readonly string[], provider: string, worke
 /** Two rules that pick the same way: an exception equal to the main choice is no exception. */
 export function sameRule(a: Rule, b: Rule): boolean {
   // A fixed key list orders every level alike; an allow-list is a set.
-  const keys = ['mode', 'targets', 'allow', 'effortOffset', 'floor', 'ceiling', 'light', 'standard', 'deep', 'agent', 'model']
+  const keys = ['mode', 'rungs', 'allow', 'effortOffset', 'floor', 'ceiling', ...RUNGS, 'target', 'effort', 'backup', 'agent', 'model']
   const canonical = (r: Rule): string => JSON.stringify(r.mode === 'auto' ? { ...r, allow: [...r.allow].sort() } : r, keys)
   return canonical(a) === canonical(b)
 }
@@ -137,24 +208,27 @@ export function exceptionDomains(settings: Settings): Domain[] {
   return DOMAINS.filter(domain => domain !== 'general' && settings.rules[domain].mode !== 'inherit' && !sameRule(settings.rules[domain], settings.rules.general))
 }
 
+/** The general pin every install had before the ladder: what stored `tiers` filled in. */
+const LEGACY_GENERAL: Readonly<Record<Level, TierTarget>> = { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } }
+
 /**
- * Persisted settings may be old; migrate tiers once and never alias nested default data. With
- * `workers`, provider names in Auto allow-lists become those providers' workers.
+ * Persisted settings may be old; migrate tiers and pins once and never alias nested default data.
+ * With `workers`, provider names in Auto allow-lists become those providers' workers. Auto stays
+ * Auto: nobody's routing changes silently.
  */
 export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Settings {
   const value = object(raw)
-  const rules = Object.fromEntries(DOMAINS.map(domain => [domain, rule(object(value.rules)[domain], DEFAULTS.rules[domain], domain === 'general')])) as Record<Domain, Rule>
+  const rules = Object.fromEntries(DOMAINS.map(domain => [domain, rule(object(value.rules)[domain], DEFAULTS.rules[domain], domain)])) as Record<Domain, Rule>
   if (workers?.length) for (const domain of DOMAINS) { const r = rules[domain]; if (r.mode === 'auto' && r.allow.length) r.allow = migrateAllow(r.allow, workers) }
   const old = object(value.tiers)
   if (!Object.hasOwn(object(value.rules), 'general') && Object.keys(old).length) {
-    const defaults = DEFAULTS.rules.general
-    const targets = defaults.mode === 'pin' ? { ...defaults.targets } : {}
+    const targets: Partial<Record<Level, TierTarget>> = copy(LEGACY_GENERAL)
     for (const level of LEVELS) { const parsed = target(old[level]); if (parsed) targets[level] = parsed }
-    rules.general = rule({ mode: 'pin', targets }, DEFAULTS.rules.general, true)
+    rules.general = ladderFromPin(targets, {}, 'general')
   }
   if (!Object.hasOwn(object(value.rules), 'design') && old.design) {
     const parsed = target(old.design)
-    if (parsed) rules.design = rule({ mode: 'pin', targets: { light: parsed, standard: parsed, deep: parsed } }, DEFAULTS.rules.design)
+    if (parsed) rules.design = ladderFromPin({ light: parsed, standard: parsed, deep: parsed }, {}, 'design')
   }
   const result: Settings = { ...DEFAULTS, rules, providers: {}, preference: names(value.preference), autoFloors: { ...DEFAULTS.autoFloors }, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
   for (const [name, enabled] of Object.entries(object(value.providers))) if (typeof enabled === 'boolean') result.providers[name] = enabled

@@ -70,11 +70,41 @@ export type JudgeRun = {
 /** Domain is the kind of work; level is its required capability, independently. */
 export type Domain = 'design' | 'frontend' | 'backend' | 'infra' | 'data' | 'test' | 'docs' | 'research' | 'general'
 export type Level = 'light' | 'standard' | 'deep'
+/** Whether a task decides what to build (plan) or carries out what was decided (do). */
+export type Kind = 'plan' | 'do'
+/**
+ * The worker ladder's rungs (docs/specs/2026-10-11-worker-ladder.md): the judge's level picks
+ * light, standard or hard; a plan at standard or deep goes to plan.
+ */
+export type Rung = 'light' | 'standard' | 'hard' | 'plan'
+/** One rung: what runs there and how hard it thinks, and what runs when it cannot. */
+export type Step = { target: TierTarget; effort: Effort; backup?: TierTarget }
 /** Historical stats include design counts from before the two-axis migration. */
 export type Tier = Level | 'design'
 export type Calibration = { effortOffset?: -2 | -1 | 0 | 1 | 2; floor?: Effort; ceiling?: Effort }
-export type Rule = ({ mode: 'pin'; targets: Partial<Record<Level, TierTarget>> } & Calibration)
+/**
+ * ladder: the four rungs, each model + effort; auto: picked by AA scores among allowed workers
+ * (experimental); inherit: the general rule. Pins stored before 2026-10-11 normalize to ladders.
+ */
+export type Rule = { mode: 'ladder'; rungs: Partial<Record<Rung, Step>> }
   | ({ mode: 'auto'; allow: string[] } & Calibration) | { mode: 'inherit' }
+/** How a provider is paid for: what the Workers card tags each model with, and what presets read. */
+export type Billing = 'free' | 'payg' | 'subscription'
+/** A model a rung can run, as GET /api/mod-options describes it. */
+export type LadderChoice = {
+  target: TierTarget
+  model: string
+  provider: string
+  billing: Billing
+  /** The model's own effort ladder, in order; empty when unknown. */
+  efforts: Effort[]
+  /** Its cheapest measured AA cost per task, when measured. */
+  cost?: number
+}
+export type PresetId = 'claude' | 'claudeGpt' | 'gpt' | 'cheap'
+/** A preset as computed from what is connected: the rungs, and the ones it had to fill otherwise. */
+export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
+export type LadderOptions = { until: number; choices: LadderChoice[]; presets: Partial<Record<PresetId, Preset>> }
 export type RouterModel = { value: string; label: string; provider: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
 export type AaScore = { intelligence: number; costPerTask: number }
@@ -104,7 +134,10 @@ export type Settings = {
   preference: string[]
   autoFloors: Record<Level, number>
   autoTieBand: number
-  /** What runs when a tier's agent is unavailable (its provider out of quota or signed out). */
+  /**
+   * What ran when a pinned tier's agent was unavailable, before the ladder (2026-10-11). Kept so a
+   * stored choice survives; a ladder rung has its own backup instead.
+   */
   fallback: TierTarget
   keepWarm: boolean
   keepWarmHours: 1 | 2 | 4 | 8
@@ -139,11 +172,13 @@ export type Verdict = { effort: Effort; sure?: number; why: string }
 /** The effort the main chat runs at now, and who set it. */
 export type Pick = Verdict & { by: JudgeKind | 'manual' | 'followup'; at: number }
 
-/** A judge's answer for a delegated task. */
-export type WorkerVerdict = { domain: Domain; level: Level; effort: Effort; sure?: number; why: string }
+/** A judge's answer for a delegated task; a judge that names no kind means do. */
+export type WorkerVerdict = { domain: Domain; level: Level; kind?: Kind; effort: Effort; sure?: number; why: string }
 
 /** What a spawn of ripple:auto (or a taken-over spawn) was turned into. */
 export type WorkerPick = WorkerVerdict & {
+  /** The ladder rung that ran it (absent for Auto and explicit choices). */
+  rung?: Rung
   target: TierTarget
   by: JudgeKind | 'marker' | 'default'
   ms: number
@@ -268,6 +303,8 @@ declare module 'claude-code' {
       jev: JevState
       routerModels: RouterModel[]
       modelScores: ScoreCache | null
+      /** The router's rung choices and presets (GET /api/mod-options), for the quick settings. */
+      ladderOptions: LadderOptions | null
       judgeDownHidden: string | null
       /** Judge failure reasons already said this session. */
       judgeSeen: string[]

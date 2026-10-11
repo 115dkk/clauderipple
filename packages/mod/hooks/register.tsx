@@ -2,12 +2,12 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
-import { applySettingsChanges, foldExceptions, normalizeSettings, settingsChanges } from './settings'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, PresetId, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
+import { RUNGS, RUNG_EFFORT, applySettingsChanges, foldExceptions, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerCandidates, workerJudgeInput, zenJev } from './workers'
+import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerCandidates, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
@@ -21,7 +21,7 @@ import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
 import { renderAgents } from './ui/agents'
 import { renderLog } from './ui/log'
-import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
+import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel, targetOf } from './ui/view'
 import type { AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
@@ -81,6 +81,7 @@ const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const modelScores = atom({ plugin: 'ripple', key: 'modelScores' } as const, null)
+const ladderOptions = atom({ plugin: 'ripple', key: 'ladderOptions' } as const, null)
 const demo = atom({ plugin: 'ripple', key: 'demo' } as const, null)
 
 /**
@@ -417,6 +418,41 @@ async function scores($: EngineInterface): Promise<import('../types').ModelScore
     return cached?.models ?? []
   }
 }
+/**
+ * The quick settings' rung choices, read again each time the panel opens: a model ticked on the
+ * dashboard shows in every Select without a restart. A failure keeps what was there.
+ */
+async function refreshLadder($: EngineInterface): Promise<void> {
+  try {
+    const response = await $.http.fetch(`${await adminUrl($)}/api/mod-options`)
+    if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
+    const fresh = ladderOptionsFrom(JSON.parse(response.text), await $.clock.now() + KEEP_MS)
+    if (!same(await read($, ladderOptions), fresh)) await update($, ladderOptions, () => fresh)
+  } catch (error) { await report($, 'ladder options', error) }
+}
+async function setRung($: EngineInterface, rung: Rung, value: string): Promise<void> {
+  const s = await currentSettings($)
+  const general = s.rules.general
+  if (general.mode !== 'ladder') return
+  const step = general.rungs[rung]
+  const next: Step = { ...(step ?? { effort: RUNG_EFFORT[rung] }), target: targetOf(value) }
+  await settingsActions($).patch({ rules: { ...s.rules, general: { mode: 'ladder', rungs: { ...general.rungs, [rung]: next } } } })
+}
+async function applyPreset($: EngineInterface, id: PresetId): Promise<void> {
+  const language = await read($, lang)
+  const options = await read($, ladderOptions)
+  const chosen = options?.presets[id]
+  if (!chosen) return
+  const s = await currentSettings($)
+  // A rung's backup is the person's own: a preset changes what runs there, not what stands in.
+  const general = s.rules.general.mode === 'ladder' ? s.rules.general : null
+  const rungs = Object.fromEntries(RUNGS.map(rung => { const backup = general?.rungs[rung]?.backup; return [rung, { ...chosen.rungs[rung], ...(backup ? { backup } : {}) }] })) as Extract<Rule, { mode: 'ladder' }>['rungs']
+  await settingsActions($).patch({ rules: { ...s.rules, general: { mode: 'ladder', rungs } } })
+  const name = t(language, 'settings.preset.' + id)
+  await $.ui.toast(chosen.substituted.length
+    ? t(language, 'toasts.presetFilled', { name, rungs: chosen.substituted.map(rung => t(language, 'workers.rung.' + rung)).join(', ') })
+    : t(language, 'toasts.presetApplied', { name }))
+}
 async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Promise<string | undefined> {
   const selected = jevSource ?? normalizeSettings(await read($, settingsDraft) ?? await read($, settings)).jevSource
   if (selected === 'zen') {
@@ -606,9 +642,10 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   let prompt = e.prompt
   if (marker) prompt = prompt.replace(MARKER, '').replace(/^\s*\n/, '')
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
-  if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected) }))
-  // The verdict behind a pick is otherwise only in the agents panel; the debug log keeps it checkable.
-  await $.ui.log(`ClaudeRipple worker pick: ${e.description} → ${verdict.domain}/${verdict.level}/${verdict.effort} by ${by}${verdict.sure !== undefined ? ` sure ${verdict.sure.toFixed(2)}` : ''} → ${model ?? selected.agent}${resolved.aa ? ` (AA ${resolved.aa.intelligence.toFixed(1)}, $${resolved.aa.costPerTask.toFixed(3)})` : ''}`, { to: 'debug' })
+  // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
+  // it checkable: what the judge said, the rung it landed on and what ran.
+  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(resolved.aa ? { aa: resolved.aa } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
+  if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
   return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
@@ -648,6 +685,7 @@ async function startPanel($: EngineInterface, which: 'settings' | 'setup'): Prom
   if (which === 'setup') await update($, setupStep, () => 1)
   await update($, panel, () => which)
   await jevKey($)
+  if (which === 'settings') await refreshLadder($)
 }
 /**
  * An open panel's draft follows changes saved elsewhere (another session, the web page): the
@@ -907,7 +945,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
-  return { settings: await currentSettings($), jev: await read($, jev) }
+  return { settings: await currentSettings($), jev: await read($, jev), ladder: await read($, ladderOptions) }
 }
 async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)
@@ -968,6 +1006,7 @@ function settingsActions($: EngineInterface): SettingsActions {
       if (!saved) await $.ui.toast(t(await read($, lang), 'band.routerDown'))
     },
     jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
+    setRung: (rung, value) => setRung($, rung, value), applyPreset: id => applyPreset($, id),
     openAllSettings: () => openAllSettings($), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {

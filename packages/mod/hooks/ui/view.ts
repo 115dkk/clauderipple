@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, Pick, Settings, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, Pick, PresetId, Rung, Settings, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -148,11 +148,17 @@ export type JevState = {
 export type SettingsView = {
   settings: Settings
   jev: JevState
+  /** What each rung can run, and the presets; null until the router has answered. */
+  ladder?: LadderOptions | null
 }
 
 export type SettingsActions = {
   /** Applies and saves each change immediately. */
   patch: (change: Partial<Settings>) => void
+  /** Runs a rung of the main ladder on another model (a Select value); its effort stays. */
+  setRung?: (rung: Rung, value: string) => void
+  /** Fills the main ladder from a preset. */
+  applyPreset?: (id: PresetId) => void
   /** The Jev key typed into the field (Enter). */
   jevKey: (key: string) => void
   testJev: () => void
@@ -241,9 +247,13 @@ export function targetOf(value: string): TierTarget {
   return plus < 0 ? { agent: value } : { agent: value.slice(0, plus), model: value.slice(plus + 1) }
 }
 
-/** A target as a person reads it: the model for Claude's own agents, else the agent. */
-export function targetLabel(target: TierTarget): string {
-  return target.model ? 'Claude ' + modelName(target.model) : target.agent
+/**
+ * A target as a person reads it: the model for Claude's own agents, else the agent; Claude's agent
+ * with no model runs on the session's model and says so.
+ */
+export function targetLabel(target: TierTarget, lang?: Lang): string {
+  if (target.model) return 'Claude ' + modelName(target.model)
+  return lang && target.agent === 'general-purpose' ? t(lang, 'workers.sessionModel') : target.agent
 }
 
 type Usage = NonNullable<StatusRequest['usage']>

@@ -1,4 +1,4 @@
-import type { Domain, Effort, JudgeInput, Level, Pick, Settings, Verdict, WorkerVerdict } from '../types'
+import type { Domain, Effort, JudgeInput, Kind, Level, Pick, Settings, Verdict, WorkerVerdict } from '../types'
 import { DOMAINS, LEVELS } from './settings.ts'
 import { t } from './i18n.ts'
 import type { Lang } from './i18n.ts'
@@ -112,6 +112,14 @@ const domainCriteria: Record<Domain, string> = {
   data: 'Data processing, schemas, queries and analysis.', test: 'Tests, quality assurance and verification.',
   docs: 'Documentation, technical writing and summaries.', research: 'Investigation and research.', general: 'Other or cross-domain work.',
 }
+/** Plan decides what to build; do carries it out. The ladder sends plans at standard or deep to its Plan rung. */
+export const kindCriteria: Record<Kind, string> = {
+  plan: 'Decide what to build: architecture, design decisions, specifications, or a review whose verdict decides.',
+  do: 'Carry out what is decided: implement, fix, run, look up, rename, write, or check.',
+}
+export function kindOf(value: unknown): Kind | undefined {
+  return value === 'plan' || value === 'do' ? value : undefined
+}
 
 function jevBody(input: JudgeInput, task: string) {
   return {
@@ -128,10 +136,11 @@ export function jevEffortRequest(input: JudgeInput) {
 
 /** Capability and kind of work are independent; the judge never chooses a provider. */
 export function jevWorkerRequest(input: { description: string; prompt: string }) {
-  const body = jevBody({ messages: [], next: `${input.description}\n${input.prompt.slice(0, 3000)}` }, 'Choose the domain, capability level and reasoning effort for a delegated coding task. Judge scope and risk independently of the domain.')
+  const body = jevBody({ messages: [], next: `${input.description}\n${input.prompt.slice(0, 3000)}` }, 'Choose the domain, capability level, kind of work and reasoning effort for a delegated coding task. Judge scope and risk independently of the domain.')
   return { ...body, questions: { ...body.questions,
     domain: { type: 'choice' as const, instructions: 'Select the domain of this task.', criteria: { ...domainCriteria } },
     level: { type: 'choice' as const, instructions: 'Select the capability level needed.', criteria: { ...levelCriteria } },
+    kind: { type: 'choice' as const, instructions: 'Select whether this task decides what to build or carries it out.', criteria: { ...kindCriteria } },
   } }
 }
 
@@ -163,8 +172,10 @@ export function parseJevWorker(json: unknown): WorkerVerdict | undefined {
   const effortAnswer = record(reply?.effort)
   const selectedEffort = effort(effortAnswer?.choice)
   if (!domainAnswer || !DOMAINS.includes(domainAnswer.choice as Domain) || !levelAnswer || !LEVELS.includes(levelAnswer.choice as Level) || !effortAnswer || !selectedEffort) return undefined
+  // Confidence moves a task up the ladder, so it is the level's question that counts, not the kind's.
   const scores = [answerSure(domainAnswer), answerSure(levelAnswer), answerSure(effortAnswer)].filter((score): score is number => score !== undefined)
-  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, effort: selectedEffort, ...(scores.length ? { sure: Math.min(...scores) } : {}), why: '' }
+  const kind = kindOf(record(reply?.kind)?.choice) ?? 'do'
+  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, kind, effort: selectedEffort, ...(scores.length ? { sure: Math.min(...scores) } : {}), why: '' }
 }
 
 export function jevUsage(json: unknown): number {

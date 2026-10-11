@@ -466,13 +466,13 @@ test('setup steps draw on both surfaces and move on', async ($, on) => {
   for (const surface of SURFACES) {
     await (await mount($, 'setup-1', surface)).press({ key: 'next' })
     const workers = await mount($, 'setup-2', surface)
-    expect(await workers.find({ type: 'Text', text: 'Workers start on Auto; details are on the dashboard.' })).toBeDefined()
+    expect(await workers.find({ type: 'Text', text: 'Workers start on the ladder; set it up on the dashboard.' })).toBeDefined()
     expect(await workers.find({ key: 'rule-mode-auto' })).toBeUndefined()
     await workers.press({ key: 'all-settings' })
     await workers.press({ key: 'back' })
     await (await mount($, 'setup-3', surface)).press({ key: 'set-warm' })
     const done = await mount($, 'setup-4', surface)
-    expect(await done.find({ type: 'Text', text: /^Fixed · exceptions: Design → Fixed$/ }), "done { type: 'Text', text: /Fixed · exceptions: Design → Fixed/ } " + surface).toBeDefined()
+    expect(await done.find({ type: 'Text', text: /^Ladder · exceptions: Design → own ladder$/ }), "done { type: 'Text', text: /Ladder · exceptions: Design → own ladder/ } " + surface).toBeDefined()
     expect(await done.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
     await done.press({ key: 'finish' })
   }

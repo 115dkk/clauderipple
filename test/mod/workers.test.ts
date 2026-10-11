@@ -23,7 +23,10 @@ const pick = (s = DEFAULTS, v = verdict, data = scores, workers = candidates, us
 test('judge separates domain and level, rejects mixed-tier legacy verdicts', () => {
   assert.match(WORKER_JUDGE_SYSTEM, /independent/)
   assert.equal(workerJudgeInput({ description: 'Review', prompt: 'x'.repeat(3000) + 'discard' }).includes('discard'), false)
-  assert.deepEqual(parseWorkerVerdict('```json\n{"domain":"design","level":"deep","effort":"high","sure":0.9,"why":"taste"}\n```'), { domain: 'design', level: 'deep', effort: 'high', sure: 0.9, why: 'taste' })
+  assert.match(WORKER_JUDGE_SYSTEM, /"kind":"plan\|do"/)
+  assert.deepEqual(parseWorkerVerdict('```json\n{"domain":"design","level":"deep","effort":"high","sure":0.9,"why":"taste"}\n```'), { domain: 'design', level: 'deep', kind: 'do', effort: 'high', sure: 0.9, why: 'taste' })
+  assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"plan","effort":"high","sure":0.8,"why":"billing design"}')?.kind, 'plan')
+  assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"ponder","effort":"high"}')?.kind, 'do')
   for (const text of ['', '{}', '{"tier":"design","effort":"high"}', '{"domain":"bad","level":"light","effort":"low"}']) assert.equal(parseWorkerVerdict(text), undefined)
 })
 test('markers and frontmatter provider retain existing parsing semantics', () => {
@@ -53,12 +56,19 @@ test('inherit resolves general, design defaults are level-dependent and pinned t
   assert.equal(pick(DEFAULTS, { ...verdict, domain: 'design', level: 'deep' }).target?.model, 'opus')
   assert.equal(pick(DEFAULTS, { ...verdict, level: 'light' }, [], candidates.slice(1)).target?.agent, 'gpt-6-1-sol')
 })
-test('quota/off never chooses the blocked provider; preference wins quota fallback', () => {
-  assert.equal(pick(DEFAULTS, verdict, [], candidates, false).target?.model, 'sonnet')
-  const s = normalizeSettings({ providers: { chatgpt: false }, preference: ['deepseek'] })
-  assert.equal(pick(s).target?.agent, 'deepseek-v4-1-flash')
-  const none = normalizeSettings({ providers: { chatgpt: false, deepseek: false, zen: false, anthropic: false } })
-  assert.equal(pick(none).target, undefined)
+test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {
+  // Standard (Sol) and the rung above (Astra) are both ChatGPT: out of quota, the session model runs.
+  const out = pick(DEFAULTS, verdict, [], candidates, false)
+  assert.deepEqual(out.target, { agent: 'general-purpose' })
+  assert.equal(out.effort, 'medium')
+  assert.match(out.fallbackReason ?? '', /ChatGPT/)
+  // Light (DeepSeek) switched off moves up to Standard, never down.
+  const off = normalizeSettings({ providers: { deepseek: false } })
+  const up = pick(off, { ...verdict, level: 'light' })
+  assert.equal(up.target?.agent, 'gpt-6-1-sol')
+  assert.equal(up.rung, 'standard')
+  assert.equal(up.effort, 'medium')
+  assert.match(up.fallbackReason ?? '', /deepseek is switched off/)
 })
 test('calibration offsets are steps; floor wins inverted ceiling', () => {
   assert.equal(calibratedEffort('medium', { effortOffset: 2 }), 'xhigh')
@@ -106,8 +116,9 @@ test('auto offsets constrain measured efforts and no-data fallback preserves rul
   const noData = pick(allow, verdict, [])
   assert.equal(noData.target?.agent, 'deepseek-v4-1-flash')
   assert.equal(noData.effort, 'max')
+  // A model of a switched-off provider named on Claude's own agent does not run either.
   const pinnedModel = normalizeSettings({ providers: { chatgpt: false }, rules: { backend: { mode: 'pin', targets: { standard: { agent: 'general-purpose', model: 'gpt-6.1-sol' } } } } })
-  assert.equal(pick(pinnedModel).target?.model, 'sonnet')
+  assert.deepEqual(pick(pinnedModel).target, { agent: 'general-purpose' })
 })
 
 test('worker strings come from the translated tables and interpolate', async () => {

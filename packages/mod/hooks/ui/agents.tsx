@@ -23,15 +23,15 @@ import { compactNumber, effortLabel, elapsed, isRich, modelName, targetLabel } f
 
 const BY = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', marker: 'agents.marker', default: 'agents.default' } as const
 
-function who(agent: AgentRec): string {
+function who(agent: AgentRec, lang: Frame['lang']): string {
   const pick = agent.pick
   // The agent a person picked by name; Claude's own agents by their model.
-  return pick ? targetLabel(pick.target) : agent.model ? modelName(agent.model.split('@')[0]!) : agent.type
+  return pick ? targetLabel(pick.target, lang) : agent.model ? modelName(agent.model.split('@')[0]!) : agent.type
 }
 
 /** The model it ran on, unless that is what the description's own prefix ("Sol·high · …") already says. */
 function modelLine(frame: Frame, agent: AgentRec): string[] {
-  const out = [who(agent)]
+  const out = [who(agent, frame.lang)]
   if (agent.pick) out.push(effortLabel(agent.pick.effort, frame.lang))
   // The type only when it says something the model does not (Explore, Plan, a named agent).
   if (agent.type && !out[0]!.toLowerCase().replace(/[^a-z0-9]/g, '').includes(agent.type.toLowerCase().replace(/[^a-z0-9]/g, ''))) out.push(agent.type)
@@ -42,7 +42,7 @@ function modelLine(frame: Frame, agent: AgentRec): string[] {
 function whyLine(frame: Frame, agent: AgentRec): string {
   const pick = agent.pick
   if (!pick) return ''
-  const parts = [t(frame.lang, 'agents.by', { name: t(frame.lang, BY[pick.by]) }) + ' · ' + t(frame.lang, 'agents.domainLevel', { domain: t(frame.lang, 'workers.' + pick.domain), level: t(frame.lang, 'settings.' + pick.level) })]
+  const parts = [t(frame.lang, 'agents.by', { name: t(frame.lang, BY[pick.by]) }) + ' · ' + t(frame.lang, 'agents.domainLevel', { domain: t(frame.lang, 'workers.' + pick.domain), level: t(frame.lang, 'settings.' + pick.level) }) + (pick.rung ? ' · ' + t(frame.lang, 'workers.rung.' + pick.rung) : '')]
   if (pick.why) parts.push('“' + pick.why + '”')
   return parts.join(' · ')
 }
@@ -70,7 +70,7 @@ function liveCard(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNo
       ) : '',
       pick?.aa ? (
         <Box key="aa" paddingLeft={2}>
-          <Text dimColor wrap="wrap">{t(frame.lang, 'agents.aa', { index: pick.aa.intelligence.toFixed(1), cost: pick.aa.costPerTask.toFixed(2), next: pick.runnerUp ? t(frame.lang, 'agents.aaNext', { name: targetLabel(pick.runnerUp.target), effort: pick.runnerUp.effort, index: pick.runnerUp.intelligence.toFixed(1), cost: pick.runnerUp.costPerTask.toFixed(2) }) : '' })}</Text>
+          <Text dimColor wrap="wrap">{t(frame.lang, 'agents.aa', { index: pick.aa.intelligence.toFixed(1), cost: pick.aa.costPerTask.toFixed(2), next: pick.runnerUp ? t(frame.lang, 'agents.aaNext', { name: targetLabel(pick.runnerUp.target, frame.lang), effort: pick.runnerUp.effort, index: pick.runnerUp.intelligence.toFixed(1), cost: pick.runnerUp.costPerTask.toFixed(2) }) : '' })}</Text>
         </Box>
       ) : '',
       pick?.fallbackReason ? (

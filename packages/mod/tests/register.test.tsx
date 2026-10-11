@@ -2,7 +2,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteInput, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
-import { normalizeSettings } from '../hooks/settings'
+import { DEFAULTS, normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
 import type { ModSettingsSnapshot, Settings } from '../types'
 
@@ -19,6 +19,17 @@ const AA = { models: [
   { model: 'claude-sonnet-5-5', provider: 'anthropic', variants: [{ effort: 'high', intelligence: 46.8, costPerTask: 0.884 }] },
   { model: 'deepseek-v4.1-flash', provider: 'deepseek', variants: [{ effort: 'max', intelligence: 39.46, costPerTask: 0.2652 }] },
 ] }
+// GET /api/mod-options as a router of 2026-10-11 answers it: workers with ladders and billing.
+const MOD_OPTIONS = {
+  agents: [
+    { name: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash', provider: 'deepseek', efforts: ['low', 'high', 'max'], billing: 'payg' },
+    { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], billing: 'subscription' },
+    { name: 'gpt-6-astra', model: 'gpt-6-astra', provider: 'chatgpt', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], billing: 'subscription' },
+  ],
+  providers: [{ name: 'deepseek', type: 'anthropic-compatible', usable: true, billing: 'payg' }, { name: 'chatgpt', type: 'chatgpt', usable: true, billing: 'subscription' }],
+  claudeEfforts: ['low', 'medium', 'high', 'max'],
+  scores: AA,
+}
 const CONFIG = { admin: { port: 9992 }, providers: { deepseek: { models: [{ id: 'deepseek-v4.1-flash' }] }, chatgpt: { models: [{ id: 'gpt-6.1-sol' }, { id: 'gpt-6-astra' }] }, anthropic: { models: [{ id: 'claude-sonnet-5-5' }] } } }
 const SPAWN: AgentSpawnInput = { tool_use_id: 'tool1', subagentType: 'ripple:auto', prompt: 'Rename one local variable and verify it.', description: 'Rename variable', parentModel: 'claude-opus-5-5', provider: { plugin: 'engine', tier: 'core' }, background: false, fork: false }
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specified change and verify it.', toolUses: [] }, { role: 'assistant', text: 'The implementation is ready.', toolUses: [] }]
@@ -117,7 +128,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
       zen(e)
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
     }
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : { requests: [] }
+    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : e.url.endsWith('/api/mod-options') ? MOD_OPTIONS : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
@@ -202,7 +213,7 @@ test('legacy settings and setup completion migrate once; unrelated store keys su
   b.saved.set('handoffChoice', { kind: 'full', after: 'copy' })
   http(on)
   await start($)
-  expect(b.router().settings).toMatchObject({ language: 'pt', keepWarm: true, setupDone: true, rules: { general: { mode: 'pin', targets: { light: { agent: 'old-worker' } } } } })
+  expect(b.router().settings).toMatchObject({ language: 'pt', keepWarm: true, setupDone: true, rules: { general: { mode: 'ladder', rungs: { light: { target: { agent: 'old-worker' } } } } } })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(1)
   expect(b.settingsRequests.find(r => r.method === 'PUT')?.revision).toBe(0)
   b.saved.set('settings', { language: 'ko' })
@@ -401,7 +412,7 @@ test('dashboard language changes re-resolve auto from current host settings', as
   await ui.unmount()
 })
 
-test('ripple:auto is judged and rewritten to the light agent with @effort', async ($, on) => {
+test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung\'s effort, and the pick is logged', async ($, on) => {
   const b = boundaries(on)
   const urls = http(on)
   const judges = judgeStub(on)
@@ -409,27 +420,50 @@ test('ripple:auto is judged and rewritten to the light agent with @effort', asyn
   await start($)
   const result = await $.agent.spawn(SPAWN)
   expect(result.agentId).toBe('worker-1')
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@low' })
+  // The default ladder runs light work on DeepSeek at max, whatever effort the judge named.
+  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max' })
   expect(judges[0]?.model).toBe('claude-haiku-5-5')
   expect(urls).toContain('http://127.0.0.1:9992/api/status')
   // The only debug line is the pick itself: no error was reported on the way.
-  expect(b.logs).toEqual(['ClaudeRipple worker pick: Rename variable → general/light/low by haiku sure 0.90 → deepseek-v4.1-flash@low'])
+  expect(b.logs.length).toBe(1)
+  expect(b.logs[0]!.startsWith('ClaudeRipple worker pick: ')).toBe(true)
+  expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toEqual({
+    task: 'Rename variable', domain: 'general', level: 'light', kind: 'do', sure: 0.9, rung: 'light',
+    target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash@max', effort: 'max', by: 'haiku',
+  })
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
   expect(stats.text).toContain('light 1')
 })
 
-test('ChatGPT exhaustion selects the configured fallback and explains it in a toast', async ($, on) => {
-  const b = boundaries(on, { fallback: { agent: 'general-purpose', model: 'opus' } })
+test('ChatGPT exhaustion runs the rung\'s backup at the rung\'s effort and explains it in a toast', async ($, on) => {
+  const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
+    standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'high', backup: { agent: 'general-purpose', model: 'opus' } },
+    hard: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
+  } } } }).rules
+  const b = boundaries(on, { rules })
   http(on, true)
-  judgeStub(on, '{"domain":"backend","level":"standard","effort":"high","why":"implementation"}')
+  judgeStub(on, '{"domain":"backend","level":"standard","effort":"low","why":"implementation"}')
   const sent = spawnStub(on)
   const steps = stepStub(on)
   await start($)
   await $.agent.spawn(SPAWN)
   expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'opus' })
-  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes('fallback') === false)).toBe(true)
+  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes('Claude Opus'))).toBe(true)
   await step($, 'claude-opus-5-5', 'low', 'worker-1')
   expect(steps[0]?.effort).toBe('high')
+})
+
+test('without a backup, ChatGPT exhaustion moves one rung up, then to the session model', async ($, on) => {
+  const b = boundaries(on)
+  http(on, true)
+  judgeStub(on, '{"domain":"backend","level":"standard","effort":"high","why":"implementation"}')
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn(SPAWN)
+  // Standard is Sol and Hard is Astra, both ChatGPT: the subagent runs on the session's model.
+  expect(sent[0]?.subagentType).toBe('general-purpose')
+  expect(sent[0]?.model).toBeUndefined()
+  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes("the session's model"))).toBe(true)
 })
 
 test('explicit generated worker preserves the old dropped-model and misplaced-marker fix', async ($, on) => {
@@ -456,8 +490,11 @@ test('an explicit marker on ripple:auto bypasses its judge', async ($, on) => {
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' })
 })
 
-test('failed worker judge uses standard/high; unavailable fallback still reaches Sonnet', async ($, on) => {
-  boundaries(on, { fallback: { agent: 'missing-worker' } })
+test('failed worker judge uses the standard rung; a missing worker moves up to the next rung', async ($, on) => {
+  const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
+    standard: { target: { agent: 'missing-worker' }, effort: 'medium' }, hard: { target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'high' },
+  } } } }).rules
+  boundaries(on, { rules })
   http(on, true)
   on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: USAGE } }))
   const sent = spawnStub(on)
@@ -466,6 +503,7 @@ test('failed worker judge uses standard/high; unavailable fallback still reaches
   expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'sonnet' })
   const debug = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
   expect(debug.text).toContain('"effort": "high"')
+  expect(debug.text).toContain('"rung": "hard"')
   expect(debug.text).toContain('"by": "default"')
 })
 
@@ -723,11 +761,52 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick controls sav
   await ui.press({ key: 'close' })
   expect(puts()).toBe(count)
   expect(b.router().settings).toMatchObject({ bias: 2, effortAuto: true, judge: 'haiku', keepWarm: true })
-  expect(urls.some(url => url.endsWith('/api/mod-options'))).toBe(false)
+  // Opening the panel reads the rung choices once, so a model ticked on the dashboard is offered.
+  expect(urls.filter(url => url.endsWith('/api/mod-options')).length).toBe(1)
   await ui.press({ key: 'hide' })
   expect(b.saved.get('bandHidden')).toBe(true)
   await $.command.run({ command: 'ripple-bar', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: '' })
   expect(b.saved.get('bandHidden')).toBe(false)
+  await ui.unmount()
+})
+
+for (const surface of ['terminal', 'desktop'] as const) test('quick settings move a rung to another model at its own effort, and a preset fills all four on ' + surface, async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  const ui = await band($, surface)
+  await ui.press({ key: 'settings' })
+  const rung = await ui.find({ key: 'rung-standard' })
+  expect(rung?.type).toBe('Select')
+  expect((rung?.props.options as { value: string; label: string }[]).map(o => o.label)).toEqual(['deepseek-v4.1-flash · deepseek', 'gpt-6.1-sol · chatgpt', 'gpt-6-astra · chatgpt', 'Claude Haiku', 'Claude Sonnet', 'Claude Opus'])
+  await ui.select({ key: 'rung-standard', value: 'general-purpose+sonnet' })
+  const general = b.router().settings.rules.general
+  expect(general.mode === 'ladder' && general.rungs.standard).toEqual({ target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'medium' })
+  // Claude only: every rung on Claude; nothing had to stand in.
+  await ui.press({ key: 'preset-claude' })
+  const claude = b.router().settings.rules.general
+  expect(claude.mode === 'ladder' && claude.rungs.light).toEqual({ target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' })
+  expect(b.toasts.at(-1)).toBe('Claude only preset applied')
+  // Mostly GPT has no Luna here: Light takes Haiku and the toast says so.
+  await ui.press({ key: 'preset-gpt' })
+  const gpt = b.router().settings.rules.general
+  expect(gpt.mode === 'ladder' && [gpt.rungs.light?.target, gpt.rungs.plan]).toEqual([{ agent: 'general-purpose', model: 'haiku' }, { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' }])
+  expect(b.toasts.at(-1)).toBe('Mostly GPT preset applied; filled with what is connected: Light work')
+  await ui.unmount()
+})
+
+test('on Auto the quick settings say so, and a preset puts the workers on the ladder', async ($, on) => {
+  const b = boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } }).rules })
+  http(on)
+  await start($)
+  const ui = await band($)
+  await ui.press({ key: 'settings' })
+  expect(await ui.find({ key: 'rung-light' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Workers are picked by Auto (experimental). A preset puts them on the ladder.' })).toBeDefined()
+  await ui.press({ key: 'preset-claudeGpt' })
+  const general = b.router().settings.rules.general
+  expect(general.mode === 'ladder' && general.rungs.light).toEqual({ target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' })
+  expect(await ui.find({ key: 'rung-light' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -1116,7 +1195,7 @@ test('quick handoff runs on the timer and copies without clearing', async ($, on
 // ---- Regressions of 2026-10-10 (setup step 2, the band) ----------------------------------------
 
 test('setup step 2 opens the dashboard; its draft preserves edits and follows remote worker settings', async ($, on) => {
-  const general = { mode: 'pin' as const, targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } }
+  const general = DEFAULTS.rules.general
   const b = boundaries(on, { setupDone: false, rules: normalizeSettings({ rules: { general, frontend: general } }).rules })
   http(on)
   await start($)
@@ -1124,7 +1203,7 @@ test('setup step 2 opens the dashboard; its draft preserves edits and follows re
   await ui.press({ key: 'judge-model' })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
   await ui.press({ key: 'next' })
-  expect(await ui.find({ type: 'Text', text: 'Workers start on Auto; details are on the dashboard.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Workers start on the ladder; set it up on the dashboard.' })).toBeDefined()
   expect(await ui.find({ key: 'exception-design' })).toBeUndefined()
   await ui.press({ key: 'all-settings' })
   expect(b.processes.at(-1)?.argv).toEqual(['xdg-open', 'http://127.0.0.1:9992/#mod'])
@@ -1134,10 +1213,10 @@ test('setup step 2 opens the dashboard; its draft preserves edits and follows re
   await ui.press({ key: 'next' })
   await ui.press({ key: 'set-warm' })
   await ui.press({ key: 'next' })
-  expect(await ui.find({ type: 'Text', text: 'Fixed · exceptions: Design → Auto' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Ladder · exceptions: Design → Auto (experimental)' })).toBeDefined()
   await ui.press({ key: 'finish' })
   expect(b.router().settings).toMatchObject({ judge: 'model', keepWarm: true, keepWarmHours: 8, setupDone: true })
-  expect(b.router().settings.rules.general.mode).toBe('pin')
+  expect(b.router().settings.rules.general.mode).toBe('ladder')
   expect(b.router().settings.rules.design).toEqual({ mode: 'auto', allow: ['general-purpose:opus'] })
   expect(b.router().settings.rules.frontend).toEqual({ mode: 'inherit' })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
