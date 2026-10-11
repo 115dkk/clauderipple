@@ -1,17 +1,20 @@
 // The dashboard band above the prompt, and its minimal form in the footer.
 //
-// One quiet row of native text: on the desktop 리플이's crest (∿, lit while Auto picks), the effort,
-// the cache countdown in whole minutes, the context and plan-limit figures when switched on in
-// Look, the last route; then small toggles at the right end (Handoff when advised, Auto, Warm, Log,
-// Agents, settings), with air but no rule between the two. What a caption used to say sits in a
-// hover card on the desktop. The terminal draws the same facts.
+// One quiet row of native text: on the desktop 리플이 first (20 px, acting out what the band is
+// doing: thinking while Auto picks, busy while a request is out, drowsy as the cache runs out,
+// asleep once it has, otherwise its idle life), the effort, the cache countdown in whole minutes,
+// the context and plan-limit figures when switched on in Look, the last route; then small toggles
+// at the right end (Handoff when advised, Auto, Warm, Log, Agents, settings), with air but no rule
+// between the two. What a caption used to say sits in a hover card on the desktop. The terminal
+// draws the same facts, without 리플이.
 //
 // Two facts of the desktop host shape it (claude.ai assets c2719cf1b-C7sTDzb6.js, read 2026-10-10):
 // - Each answer the band gives is drawn as a freshly built DOM tree swapped in for the last one
 //   (`Qc`: `o.replaceWith(a)`), and an Svg becomes a new <img> of a data URL or, interactive, a new
-//   sandboxed <iframe srcdoc> (`Pa`). Those paint blank until decoded or loaded, so every redraw
-//   blinked the pictures, byte-identical markup or not. Native text and buttons swap within one
-//   frame, so the band draws no Svg.
+//   sandboxed <iframe srcdoc> (`Pa`). The frame paints blank until loaded, so an interactive Svg
+//   blinked on every redraw; the image does not (seen in the owner's app, 2026-10-11), and its CSS
+//   motion runs. So 리플이 is the band's one picture, a plain image whose source is fixed per mood
+//   (bandMood): a redraw hands the host the same document and only starts its motion over.
 // - The surface asks again on every write of state the band read and on every invalidate, and
 //   takes each answer as new (`if(t===n)return` compares the object). So the countdown shows whole
 //   minutes, and register.tsx invalidates only when the minute shown changes.
@@ -34,10 +37,10 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
-import { textButton } from './parts'
+import { rippleSource, textButton } from './parts'
 import type { Els } from './parts'
-import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, svgDoc, textTone } from './theme'
-import { GRID, rippleBody, rippleCss } from './ripple'
+import type { Face } from './ripple'
+import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, textTone } from './theme'
 import type { BandActions, DashboardView, Frame } from './view'
 import { EFFORTS, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, resetsLabel, seconds, compactNumber } from './view'
 
@@ -54,27 +57,41 @@ const ROUTE_MIN = 14
 const RICH_ROUTE_MIN = 6
 /** Desktop: the slot of the live agents' count after its control. */
 const COUNT_CELLS = 2
+/** 리플이 in the band, px: one text line high, so the mini drawing (ripple.ts). */
+export const BAND_RIPPLE = 20
 /**
- * Desktop: 리플이's crest as a glyph at the row's start, and the gap after it (it took the place
- * of the rule that stood between the facts and the controls: the same cells, one mark fewer).
+ * Desktop: 리플이's slot at the row's start, in cells: 20 px in a ch of 8.8 px, rounded up, the
+ * rest its air. All the facts' room gives up for it (the ∿ glyph and its gap took the same).
  */
-const MARK_CELLS = 3
-/** The crest: a wave, a single cell in the host's sans (∿ measured 8.2 px at 14 px, a ch 8.8). */
+const MARK_SLOT = 3
+const MARK_CELLS = MARK_SLOT
+/** Without an Svg in the table, the crest as a glyph: one cell in the host's sans (∿ 8.2 px at 14 px). */
 const CREST = '∿'
+/** The cache's last stretch, when 리플이 grows drowsy: five minutes, or a fifth of a short life. */
+const DROWSY_MS = 5 * 60_000
 
-/** 리플이 in the band, px: one text line high. */
-const BAND_RIPPLE = 20
-const bandRippleCache = new Map<string, string>()
-/** An image (never a frame): calm and gently moving while Auto picks, still and dimmed otherwise. Built once per state. */
-function bandRipple(frame: Frame, working: boolean): string {
-  const key = frame.appearance + (working ? '1' : '0')
-  let source = bandRippleCache.get(key)
-  if (!source) {
-    const css = working ? rippleCss('calm') : 'svg>g{opacity:.45}'
-    source = svgDoc(BAND_RIPPLE, BAND_RIPPLE, frame.appearance, rippleBody('calm'), css, '0 0 ' + GRID + ' ' + GRID)
-    bandRippleCache.set(key, source)
+/** What 리플이 acts out in the band, and so which of its fixed sources the band shows. */
+export type BandMood = { face: Extract<Face, 'thinking' | 'working' | 'drowsy' | 'sleepy' | 'calm'>; dim: boolean }
+
+/**
+ * Thinking while Auto picks, working while a request is out, asleep once the cache has run out
+ * and drowsy in its last minutes (not while keep-warm holds it), else its idle life; dimmed at
+ * rest when Auto is off or paused. Read from whole minutes, as the countdown is, so the mood
+ * changes no more often than what the band shows.
+ */
+export function bandMood(frame: Frame, view: DashboardView): BandMood {
+  const quiet = view.effort.mode === 'off' || view.effort.mode === 'paused'
+  if (view.effort.mode === 'deciding') return { face: 'thinking', dim: false }
+  if (view.isWorking) return { face: 'working', dim: false }
+  const cache = view.cache
+  if (cache && !view.hide.includes('timer')) {
+    const left = cache.expiresAt - frame.now
+    if (left <= 0) return { face: 'sleepy', dim: quiet }
+    const shown = Math.ceil(left / 60_000) * 60_000
+    const held = view.warm.on && !view.warm.stopped
+    if (!held && shown <= Math.min(DROWSY_MS, cache.ttlMs / 5)) return { face: 'drowsy', dim: quiet }
   }
-  return source
+  return { face: 'calm', dim: quiet }
 }
 /** The reason's slot on a wide terminal. */
 const WHY_CELLS = 28
@@ -423,8 +440,7 @@ function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   // less, it wraps under the controls rather than overlap them. Widths alone decide, never values.
   const ctrlCells = controlsCells(frame, view, actions)
   const room = cols - ctrlCells - MARK_CELLS
-  // The crest is lit while Auto picks the effort, quiet otherwise: Ripple at work or standing by.
-  const working = view.effort.mode === 'auto' || view.effort.mode === 'deciding'
+  const mood = bandMood(frame, view)
   const need = (facts: readonly Fact[]) => facts.filter(f => !f.grow).reduce((n, f) => n + f.width, 0) + GAP * Math.max(0, facts.length - 1) + (facts.some(f => f.grow) ? RICH_ROUTE_MIN : 0)
   let facts: Fact[] = []
   for (const drop of [[], ['limit'], ['limit', 'context']]) {
@@ -434,24 +450,27 @@ function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   return (
     <Box flexDirection="column" width="100%" minWidth={0}>
       <Box key="band-row" flexDirection="row" alignItems="center" width="100%" columnGap={1} flexWrap="wrap">
-        <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={GAP} flexGrow={1} flexShrink={1} width={0} minWidth={need(facts) + GAP + 1}>
-          <Box key="band-crest" flexShrink={0}>
+        <Box key="band-facts" flexDirection="row" alignItems="center" flexGrow={1} flexShrink={1} width={0} minWidth={need(facts) + MARK_CELLS}>
+          {/* A slot of fixed width, whatever the mood, so 리플이 never moves the facts; the image
+              sits at its start and the slot's spare (about 6 px) is the air before the first
+              fact, an icon's gap to its label rather than a whole fact's. */}
+          <Box key="band-crest" width={MARK_SLOT} flexShrink={0} alignItems="center" justifyContent="flex-start">
             {'Svg' in el ? (
-              // Trial (2026-10-11): 리플이 as one image, its source fixed per state so every redraw
-              // hands the host the same document. Pulled again if the owner sees it blink.
-              <el.Svg key={'band-ripple-' + (working ? 'on' : 'off') + '-' + frame.appearance} source={bandRipple(frame, working)} alt="ClaudeRipple" width={BAND_RIPPLE} height={BAND_RIPPLE} />
+              <el.Svg key={'band-ripple-' + mood.face + (mood.dim ? '-dim' : '') + '-' + frame.appearance} source={rippleSource(mood.face, BAND_RIPPLE, frame.appearance, undefined, mood.dim)} alt="ClaudeRipple" width={BAND_RIPPLE} height={BAND_RIPPLE} />
             ) : (
-              <Text color={working ? textTone(frame.appearance).accent : undefined} dimColor={!working} bold>
+              <Text color={mood.dim ? undefined : textTone(frame.appearance).accent} dimColor={mood.dim} bold>
                 {CREST}
               </Text>
             )}
           </Box>
-          {facts.map(f => factRich(el, f))}
-          {/* The reason sits right after the route in only what the facts leave (it starts from no
-              width), cut at its end; with no reason the box stays, empty, so nothing else moves.
-              Its own air is the gap before the controls: no rule between them. */}
-          <Box key="band-why" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
-            {reason ? <Text dimColor wrap="truncate">{reason}</Text> : null}
+          <Box key="band-say" flexDirection="row" alignItems="center" columnGap={GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
+            {facts.map(f => factRich(el, f))}
+            {/* The reason sits right after the route in only what the facts leave (it starts from no
+                width), cut at its end; with no reason the box stays, empty, so nothing else moves.
+                Its own air is the gap before the controls: no rule between them. */}
+            <Box key="band-why" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
+              {reason ? <Text dimColor wrap="truncate">{reason}</Text> : null}
+            </Box>
           </Box>
         </Box>
         <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={CTRL_GAP} flexShrink={0}>

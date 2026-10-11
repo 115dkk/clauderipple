@@ -14,7 +14,8 @@ import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
-import { besideBand, renderBand, renderFooter } from '../hooks/ui/band'
+import { BAND_RIPPLE, bandMood, besideBand, renderBand, renderFooter } from '../hooks/ui/band'
+import { rippleSource } from '../hooks/ui/parts'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
@@ -685,6 +686,43 @@ test('within a minute the band draws the same tree; a minute on, only the countd
     expect(await drawn('later-' + surface)).toBe(now)
     expect((await drawn('minute-' + surface)).replace(/\b41m\b/g, '42m')).toBe(now)
   }
+})
+
+test('리플이 acts out the band: thinking, working, drowsy, asleep or idle, one fixed source per mood in a slot that never moves', async ($, on) => {
+  const cache = (minutes: number) => ({ cache: { expiresAt: NOW + minutes * 60_000 - 1, ttlMs: 3_600_000 } })
+  const cases: [string, DashboardView, ReturnType<typeof bandMood>][] = [
+    ['idle', DASH, { face: 'calm', dim: false }],
+    ['deciding', { ...DASH, effort: { level: null, mode: 'deciding' }, isWorking: true }, { face: 'thinking', dim: false }],
+    ['working', { ...DASH, isWorking: true, ...cache(2) }, { face: 'working', dim: false }],
+    ['drowsy-4', { ...DASH, ...cache(4) }, { face: 'drowsy', dim: false }],
+    ['drowsy-2', { ...DASH, ...cache(2) }, { face: 'drowsy', dim: false }],
+    ['held', { ...DASH, ...cache(2), warm: { on: true, pings: 1, cost: 0 } }, { face: 'calm', dim: false }],
+    ['short-life', { ...DASH, cache: { expiresAt: NOW + 3 * 60_000, ttlMs: 300_000 } }, { face: 'calm', dim: false }],
+    ['asleep', { ...DASH, cache: { expiresAt: NOW - 1, ttlMs: 3_600_000 } }, { face: 'sleepy', dim: false }],
+    ['off', { ...DASH, effort: { level: 'high', mode: 'off' } }, { face: 'calm', dim: true }],
+  ]
+  for (const [id, view, mood] of cases) {
+    expect(bandMood(frameOf('desktop'), view), id).toEqual(mood)
+    drawPane(on, 'mood-' + id, el => renderBand(el, frameOf('desktop'), view, BAND_ACTIONS))
+  }
+  const sources: Record<string, string> = {}
+  for (const [id, , mood] of cases) {
+    const ui = await mount($, 'mood-' + id, 'desktop')
+    const tree = await ui.drawn()
+    const found = mascots(tree)
+    expect(found.length, id).toBe(1)
+    expect(found[0]!.props?.width, id).toBe(BAND_RIPPLE)
+    expect(found[0]!.props?.isInteractive, id).toBeFalsy()
+    sources[id] = String(found[0]!.props?.source)
+    expect(sources[id], id).toBe(rippleSource(mood.face, BAND_RIPPLE, 'auto', undefined, mood.dim))
+    // The mini drawing at 20 px: every part in the tone, no ink face.
+    expect(/="var\(--ink\)"/.test(sources[id]!), id).toBe(false)
+    expect((await ui.find({ type: 'Box', key: 'band-crest' }))?.props.width, id).toBe(3)
+    await ui.unmount()
+  }
+  // The source changes with the mood alone: four minutes or two, drowsy is one picture.
+  expect(sources['drowsy-4']).toBe(sources['drowsy-2'])
+  expect(new Set(Object.values(sources)).size).toBe(6)
 })
 
 /** Each fact's slot width and each control's label, by key, as drawn. */

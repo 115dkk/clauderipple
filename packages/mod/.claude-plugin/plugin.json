@@ -1,7 +1,7 @@
 {
   "name": "ripple",
   "displayName": "ClaudeRipple",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Picks the reasoning effort for every prompt and the worker for every delegated task, can keep the prompt cache warm, and shows where ClaudeRipple sent each request.",
   "author": { "name": "ClaudeRipple" },
   "license": "GPL-3.0-only",
