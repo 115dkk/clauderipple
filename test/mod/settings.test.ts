@@ -5,7 +5,7 @@ import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, candidateKey, exception
 test('defaults use independent domain rules, two axes and measured floors', () => {
   assert.equal(DEFAULTS.judge, 'haiku')
   assert.equal(DEFAULTS.jevSource, 'typesafe')
-  assert.deepEqual(DEFAULTS.autoFloors, { light: 30, standard: 45, deep: 50 })
+  assert.deepEqual(DEFAULTS.autoFloors, { light: 20, standard: 45, deep: 50 })
   assert.equal(DEFAULTS.autoTieBand, 2)
   assert.deepEqual(DEFAULTS.rules.general, { mode: 'pin', targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } })
   assert.deepEqual(DEFAULTS.rules.backend, { mode: 'inherit' })

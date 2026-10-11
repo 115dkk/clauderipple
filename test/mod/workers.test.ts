@@ -161,7 +161,8 @@ test('Auto over Claude only picks the cheapest Claude model and effort above the
   const s = normalizeSettings({ rules: { general: DEFAULTS.rules.general, design: { mode: 'auto', allow: onlyClaude } } })
   const all = [...candidates, ...claudeCandidates()]
   const design = (level: WorkerVerdict['level']) => resolveWorker({ domain: 'design', level, effort: 'high', why: 'taste' }, s, all, [...scores, ...claude], true)
-  assert.deepEqual(design('light'), { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'medium', aa: { intelligence: 34.46, costPerTask: 0.047 }, runnerUp: { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'max', intelligence: 43.4, costPerTask: 0.2128 } })
+  // Light floor 20: Haiku low (29.45) qualifies; at the old 30 it fell to medium.
+  assert.deepEqual(design('light'), { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low', aa: { intelligence: 29.45, costPerTask: 0.0245 }, runnerUp: { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'medium', intelligence: 34.46, costPerTask: 0.047 } })
   assert.deepEqual(design('standard').target, { agent: 'general-purpose', model: 'sonnet' })
   assert.equal(design('standard').effort, 'medium')
   assert.deepEqual(design('deep').target, { agent: 'general-purpose', model: 'opus' })

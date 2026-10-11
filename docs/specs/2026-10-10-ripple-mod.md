@@ -124,7 +124,10 @@ prose when they disagree.
   wins; generated-agent names also accepted), then configured `fallback`, built-in Sonnet,
   finally another enabled generated worker. If none can run, refuse. Apply the resolved rule's
   effort offset, floor and ceiling. A usable explicit Pin wins over preference.
-- **Auto:** `autoFloors:{light:30,standard:45,deep:50}`, `autoTieBand:2` by default.
+- **Auto:** `autoFloors:{light:20,standard:45,deep:50}`, `autoTieBand:2` by default. Light was
+  30 until 2026-10-11: GPT-6 Luna medium scores 29.9, so every light task — "reply OK" included —
+  went to Luna high, the cheapest variant at or above 30. Light work is renames, lookups and
+  one-line answers; 20 lets it reach the low variants (Luna low 21.5, $0.0045 a task).
   - candidates = readable `generated-agents.json` workers and exact file models intersected with
     the router's declared model/provider catalogue × measured effort variants from
     GET `/api/model-scores`. Scores live in a session atom for 10 minutes; retrieval failure logs

@@ -13,7 +13,7 @@ export const DEFAULTS: Settings = {
     frontend: { mode: 'inherit' }, backend: { mode: 'inherit' }, infra: { mode: 'inherit' }, data: { mode: 'inherit' },
     test: { mode: 'inherit' }, docs: { mode: 'inherit' }, research: { mode: 'inherit' },
   },
-  providers: {}, preference: [], autoFloors: { light: 30, standard: 45, deep: 50 }, autoTieBand: 2,
+  providers: {}, preference: [], autoFloors: { light: 20, standard: 45, deep: 50 }, autoTieBand: 2,
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: 'haiku', handoffSkill: '', handoffAfter: 'continue', handoffButton: 'advised',
