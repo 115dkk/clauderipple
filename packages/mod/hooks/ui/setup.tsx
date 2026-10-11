@@ -1,28 +1,28 @@
-// First run: three short steps (who judges, which agent runs each worker tier, keep warm) and a
-// done card. Shown once, in the band; every step can be changed later in settings.
+// First run: three short steps (who judges, workers on the dashboard, keep warm) and a
+// done card. Shown once, in the band; detailed settings live on the router dashboard.
 
 import { t } from '../i18n'
-import { DOMAINS } from '../settings'
+import { exceptionDomains } from '../settings'
 import type { RenderNode } from 'claude-code'
 import type { Domain } from '../../types'
 
 import { action, chip } from './parts'
 import type { Els } from './parts'
-import { cacheCard, judgeCard, row, workersCard } from './settings'
+import { judgeRows, keepWarmRow, row } from './settings'
 import { svgDoc, textTone, v } from './theme'
 import type { Frame, SettingsActions, SettingsView, SetupActions, SetupView } from './view'
 import { isRich } from './view'
 
 const STEPS = [
   { title: 'setup.judgeTitle', blurb: 'setup.judgeBlurb' },
-  { title: 'setup.workersTitle', blurb: 'workers.setupBlurb' },
+  { title: 'setup.workersTitle', blurb: 'setup.workersDashboardBlurb' },
   { title: 'setup.cacheTitle', blurb: 'setup.cacheBlurb' },
 ] as const
 
 /** `Auto · exceptions: Design → Fixed`: the main choice, then only the fields that differ. */
 function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
   const mode = (domain: Domain) => t(lang, 'workers.' + (d.rules[domain].mode === 'auto' ? 'auto' : 'pin'))
-  const exceptions = DOMAINS.filter(domain => domain !== 'general' && d.rules[domain].mode !== 'inherit')
+  const exceptions = exceptionDomains(d)
   return mode('general') + (exceptions.length ? ' · ' + t(lang, 'workers.exceptionsSummary', { list: exceptions.map(domain => t(lang, 'workers.' + domain) + ' → ' + mode(domain)).join(', ') }) : '')
 }
 
@@ -50,39 +50,31 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, actions: Set
   const { Box, Text } = el
   const rich = isRich(frame)
   const tone = textTone(frame.appearance)
-  // The settings cards draw the controls; setup lends them its draft and handlers.
-  const asSettings: SettingsView = { tab: 'judge', draft: view.draft, dirty: false, agents: view.agents, routerModels: view.routerModels, workers: view.workers, skills: [], jev: view.jev, workerUi: view.workerUi }
-  const noop = () => undefined
-  const asActions: SettingsActions = {
-    setTab: noop,
-    patch: actions.patch,
-    setRule: actions.setRule,
-    setWorkerUi: actions.setWorkerUi,
-    setFallback: noop,
-    jevKey: actions.jevKey,
-    testJev: actions.testJev,
-    save: noop,
-    close: noop,
-  }
+  // Setup lends the same small controls its draft and handlers.
+  const asSettings: SettingsView = { settings: view.draft, jev: view.jev }
+  const asActions: SettingsActions = { ...actions, close: () => undefined }
   const d = view.draft
   const done = view.step === 4
   const step = done ? null : STEPS[view.step - 1]!
   const body: RenderNode[] = done
     ? [
-        row(el, 'sum-effort', t(frame.lang, 'band.effort'), <Text>{t(frame.lang, 'setup.effortSummary', { state: t(frame.lang, d.effortAuto ? 'band.on' : 'band.off').toLowerCase(), judge: d.judge === 'haiku' ? t(frame.lang, 'settings.haiku') : d.judge === 'jev' ? t(frame.lang, 'settings.jev') : d.judgeModel })}</Text>),
+        row(el, 'sum-effort', t(frame.lang, 'band.effort'), <Text wrap="wrap">{t(frame.lang, 'setup.effortSummary', { state: t(frame.lang, d.effortAuto ? 'band.on' : 'band.off').toLowerCase(), judge: d.judge === 'haiku' ? t(frame.lang, 'settings.haiku') : d.judge === 'jev' ? t(frame.lang, 'settings.jev') : d.judgeModel })}</Text>),
         row(el, 'sum-workers', t(frame.lang, 'settings.workers'), <Text wrap="wrap">{workersSummary(frame.lang, d)}</Text>),
-        row(el, 'sum-cache', t(frame.lang, 'band.cache'), <Text>{d.keepWarm ? t(frame.lang, 'setup.cacheSummary', { hours: d.keepWarmHours }) : t(frame.lang, 'setup.cacheOff')}</Text>),
-        <Text dimColor>
-          {rich ? t(frame.lang, 'setup.changeRich') : t(frame.lang, 'setup.changeText')}
+        row(el, 'sum-cache', t(frame.lang, 'band.cache'), <Text wrap="wrap">{d.keepWarm ? t(frame.lang, 'setup.cacheSummary', { hours: d.keepWarmHours }) : t(frame.lang, 'setup.cacheOff')}</Text>),
+        <Text dimColor wrap="wrap">
+          {t(frame.lang, 'setup.changeDashboard')}
         </Text>,
       ]
     : view.step === 1
-      ? judgeCard(el, frame, asSettings, asActions)
+      ? judgeRows(el, frame, asSettings, asActions)
       : view.step === 2
-        ? workersCard(el, frame, asSettings, asActions).slice(1)
-        : cacheCard(el, frame, view.draft, asActions)
+        ? [
+            row(el, 'workers-note', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'setup.workersNote')}</Text>),
+            action(el, frame, 'all-settings', t(frame.lang, 'settings.openAll'), actions.openAllSettings, { hotkey: 's' }),
+          ]
+        : [keepWarmRow(el, frame, view.draft, asActions)]
   return (
-    <Box flexDirection="column" rowGap={rich ? 1 : 0}>
+    <Box flexDirection="column" rowGap={rich ? 1 : 0} width="100%">
       <Box key="head" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
         <Text bold>{done ? t(frame.lang, 'setup.ready') : t(frame.lang, 'setup.welcome')}</Text>
         {done ? null : <Text dimColor>{'· ' + t(frame.lang, step!.title)}</Text>}

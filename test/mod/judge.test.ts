@@ -92,8 +92,10 @@ test('Jev worker body asks tier and effort, not model, and truncates prompt to 3
   assert.ok(!body.state.next_message.includes('omitted'))
 })
 
-test('Jev parses direct/nested answers and confidence fallback, keeps current only below .5', () => {
-  assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'low', confidence: 0.49 } } }, pick), { effort: 'high', sure: 0.49, why: 'unsure' })
+test('Jev parses direct/nested answers and confidence fallback, keeps a plausible current effort only below .5', () => {
+  assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'low', confidence: 0.49 } } }, pick), { effort: 'high', sure: 0.49, why: 'Unsure, kept the running effort' })
+  assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'medium', confidence: 0.4, probabilities: { medium: 0.6, high: 0.3, low: 0.1 } } } }, pick), { effort: 'high', sure: 0.4, why: 'Unsure, kept the running effort' })
+  assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'medium', confidence: 0.4, probabilities: { medium: 0.6, low: 0.3, high: 0.1 } } } }, pick), { effort: 'medium', sure: 0.4, why: '' })
   assert.deepEqual(parseJevEffort({ result: { answers: { effort: { choice: 'low', probabilities: { low: 0.5 } } } } }, pick), { effort: 'low', sure: 0.5, why: '' })
   assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'low', confidence: 0.1 } } }), { effort: 'low', sure: 0.1, why: '' })
   assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'max', confidence: 0, probabilities: { max: 1 } } } }), { effort: 'max', sure: 0, why: '' })

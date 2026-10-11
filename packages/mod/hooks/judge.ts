@@ -144,12 +144,15 @@ function answerSure(answer: Record<string, unknown>): number | undefined {
   return confidence(answer.confidence ?? record(answer.probabilities)?.[String(answer.choice)])
 }
 
-export function parseJevEffort(json: unknown, current?: { effort: Effort } | null): Verdict | undefined {
+/** Torn between levels, Jev leaves a session at the effort it runs when that effort is still a plausible answer. */
+export function parseJevEffort(json: unknown, current?: { effort: Effort } | null, lang: Lang = 'en'): Verdict | undefined {
   const answer = record(answers(json)?.effort)
   const level = effort(answer?.choice)
   if (!answer || !level) return undefined
   const sure = answerSure(answer)
-  if (sure !== undefined && sure < 0.5 && current) return { effort: current.effort, sure, why: 'unsure' }
+  const odds = record(answer.probabilities)
+  const plausible = current && (!odds || (confidence(odds[current.effort]) ?? 0) >= 0.25)
+  if (sure !== undefined && sure < 0.5 && current && current.effort !== level && plausible) return { effort: current.effort, sure, why: t(lang, 'judge.keptUnsure') }
   return { effort: level, ...(sure !== undefined ? { sure } : {}), why: '' }
 }
 

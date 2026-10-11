@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULTS, applySettingsChanges, normalizeSettings, settingsChanges } from '../../packages/mod/hooks/settings.ts'
+import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, candidateKey, exceptionDomains, foldExceptions, normalizeSettings, providerAllowed, sameRule, settingsChanges, toggleProvider } from '../../packages/mod/hooks/settings.ts'
 
 test('defaults use independent domain rules, two axes and measured floors', () => {
   assert.equal(DEFAULTS.judge, 'haiku')
@@ -94,4 +94,56 @@ test('Auto allow-lists name workers; provider names from old settings migrate to
   assert.deepEqual(toggleAllow(['deepseek-v4-1-flash', 'glm-5-3-flash', 'gpt-6-1-sol'], 'deepseek-flash', workers), [])
   assert.deepEqual(toggleAllow(['gpt-6-1-sol'], 'gpt-6-1-sol', workers), ['gpt-6-1-sol'])
   assert.deepEqual(toggleAllow(['opencode-go'], 'glm-5-3-flash', workers), ['deepseek-v4-1-flash'])
+})
+
+// The router's seven workers (GET /api/mod-options, 2026-10-10) and Claude's own models.
+const LISTED = [
+  { name: 'deepseek-flash', provider: 'deepseek' }, { name: 'deepseek-v4-1-flash', provider: 'opencode-go' },
+  { name: 'gemini-3-8-flash', provider: 'google-gemini' }, { name: 'glm-5-3-flash', provider: 'opencode-go' },
+  { name: 'gpt-6-1-sol', provider: 'chatgpt' }, { name: 'gpt-6-astra', provider: 'chatgpt' }, { name: 'gpt-6-luna', provider: 'chatgpt' },
+  ...CLAUDE_WORKERS.map(w => ({ name: w.name, provider: w.provider })),
+]
+
+test('Claude models are candidates keyed general-purpose:<model>', () => {
+  assert.deepEqual(CLAUDE_WORKERS.map(w => w.name), ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
+  assert.deepEqual(CLAUDE_WORKERS.map(w => w.model), ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'])
+  for (const w of CLAUDE_WORKERS) assert.equal(candidateKey(w.target), w.name)
+  assert.equal(candidateKey({ agent: 'gpt-6-1-sol' }), 'gpt-6-1-sol')
+})
+
+test('a provider switch sets all its candidates; some on reads mixed', () => {
+  assert.equal(providerAllowed([], 'anthropic', LISTED), true)
+  // Design → Auto → only Anthropic: every other provider off, anthropic on.
+  let allow: string[] = []
+  for (const provider of ['deepseek', 'opencode-go', 'google-gemini', 'chatgpt']) allow = toggleProvider(allow, provider, LISTED)
+  assert.deepEqual(allow, ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
+  assert.equal(providerAllowed(allow, 'anthropic', LISTED), true)
+  assert.equal(providerAllowed(allow, 'chatgpt', LISTED), false)
+  // The last provider on cannot go off.
+  assert.deepEqual(toggleProvider(allow, 'anthropic', LISTED), allow)
+  const some = ['gpt-6-1-sol', 'general-purpose:sonnet']
+  assert.equal(providerAllowed(some, 'chatgpt', LISTED), 'mixed')
+  assert.deepEqual(toggleProvider(some, 'chatgpt', LISTED), ['gpt-6-1-sol', 'gpt-6-astra', 'gpt-6-luna', 'general-purpose:sonnet'])
+  // All on again is stored as [].
+  assert.deepEqual(toggleProvider(LISTED.filter(w => w.provider !== 'chatgpt').map(w => w.name), 'chatgpt', LISTED), [])
+})
+
+test('a field rule equal to the main choice is no exception and saves as inherit', () => {
+  // The router's settings of 2026-10-10 (revision 3): frontend pinned exactly as the main choice.
+  const general = { mode: 'pin', targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } }
+  const s = normalizeSettings({ rules: { general, design: DEFAULTS.rules.design, frontend: { ...general, targets: { deep: general.targets.deep, light: general.targets.light, standard: general.targets.standard } } } })
+  assert.equal(sameRule(s.rules.frontend, s.rules.general), true)
+  assert.deepEqual(exceptionDomains(s), ['design'])
+  const saved = foldExceptions(s)
+  assert.deepEqual(saved.rules.frontend, { mode: 'inherit' })
+  assert.equal(saved.rules.design.mode, 'pin')
+  assert.equal(sameRule({ mode: 'auto', allow: ['b', 'a'] }, { mode: 'auto', allow: ['a', 'b'] }), true)
+  assert.equal(sameRule({ mode: 'auto', allow: [] }, { mode: 'auto', allow: [], floor: 'high' }), false)
+})
+
+test('the heavy-context band and optional chips are off unless switched on', () => {
+  assert.equal(DEFAULTS.swampAlert, false)
+  assert.deepEqual(DEFAULTS.extras, [])
+  assert.equal(normalizeSettings({ swampAt: 50 }).swampAlert, false)
+  assert.deepEqual(normalizeSettings({ swampAlert: true, extras: ['context', 'bogus', 'context'] }), { ...DEFAULTS, swampAlert: true, extras: ['context'] })
 })

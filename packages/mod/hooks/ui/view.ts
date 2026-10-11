@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Domain, Effort, HandoffKind, JudgeKind, RouterModel, Rule, Settings, StatusRequest, TierTarget, WorkerOption, WorkerUi } from '../../types'
+import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, Pick, Settings, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -55,6 +55,8 @@ export type DashboardView = {
     mode: EffortMode
     /** The judge's reason, a few words. */
     why?: string
+    /** Who gave it. */
+    by?: Pick['by']
     /** When the judge started (deciding): keeps the glow's phase across redraws. */
     since?: number
   }
@@ -79,8 +81,10 @@ export type DashboardView = {
   effortMenu: boolean
   /** Context percent at which the swamp colour starts (settings.swampAt). */
   swampAt: number
-  /** Band parts switched off: 'timer' | 'reason' | 'route' | 'limits'. */
+  /** Band parts switched off: 'timer' | 'reason' | 'route'. */
   hide: readonly string[]
+  /** Optional chips switched on: 'context' | 'limits'. */
+  extras: readonly string[]
   isWorking: boolean
 }
 
@@ -110,7 +114,7 @@ export type AlertView =
   /** A plan window at or above 80%. */
   | { kind: 'hot'; limitKind: string; percent: number; resetsAt?: string; save: boolean }
   /** The judge failed and Auto fell back. */
-  | { kind: 'judgeDown'; judge: JudgeKind; reason: string }
+  | { kind: 'judgeDown'; judge: JudgeKind; reason: string; network?: boolean }
   | { kind: 'result'; stage: ResultStage; handoffKind?: HandoffKind; detail?: string }
   /** Compact with an optional note of what to keep. */
   | { kind: 'compactNote'; draft: string }
@@ -135,11 +139,6 @@ export type AlertActions = {
 
 // ---- Settings and setup ----------------------------------------------------------------------
 
-export type SettingsTab = 'effort' | 'workers' | 'judge' | 'cache' | 'handoff' | 'look'
-
-/** An agent a tier can map to. `value` is a TierTarget encoded by targetValue. */
-export type AgentOption = { value: string; label: string; available: boolean }
-
 export type JevState = {
   /** Where the key comes from; null when there is none. */
   source: 'env' | 'file' | 'pasted' | 'zen' | null
@@ -147,32 +146,17 @@ export type JevState = {
 }
 
 export type SettingsView = {
-  tab: SettingsTab
-  draft: Settings
-  /** The draft differs from what is saved. */
-  dirty: boolean
-  agents: readonly AgentOption[]
-  /** Router model ids the `model` judge can ask. */
-  routerModels: readonly RouterModel[]
-  /** Generated workers Auto may pick, with their shown AA variant. */
-  workers: readonly WorkerOption[]
-  workerUi: WorkerUi
-  /** Skills a full handoff can run. */
-  skills: readonly string[]
+  settings: Settings
   jev: JevState
 }
 
 export type SettingsActions = {
-  setTab: (tab: SettingsTab) => void
+  /** Applies and saves each change immediately. */
   patch: (change: Partial<Settings>) => void
-  setRule: (domain: Domain, rule: Rule) => void
-  setWorkerUi: (ui: Partial<WorkerUi>) => void
-  setFallback: (target: TierTarget) => void
   /** The Jev key typed into the field (Enter). */
   jevKey: (key: string) => void
   testJev: () => void
-  save: () => void
-  /** Closes and drops the draft. */
+  openAllSettings: () => void
   close: () => void
 }
 
@@ -181,20 +165,14 @@ export type SetupStep = 1 | 2 | 3 | 4
 export type SetupView = {
   step: SetupStep
   draft: Settings
-  agents: readonly AgentOption[]
-  routerModels: readonly RouterModel[]
-  /** Generated workers Auto may pick, with their shown AA variant. */
-  workers: readonly WorkerOption[]
-  workerUi: WorkerUi
   jev: JevState
 }
 
 export type SetupActions = {
   patch: (change: Partial<Settings>) => void
-  setRule: (domain: Domain, rule: Rule) => void
-  setWorkerUi: (ui: Partial<WorkerUi>) => void
   jevKey: (key: string) => void
   testJev: () => void
+  openAllSettings: () => void
   back: () => void
   next: () => void
   /** Saves the draft with setupDone and closes. */
@@ -218,6 +196,8 @@ export type AgentsActions = {
 export type LogView = {
   rows: readonly StatusRequest[]
   mineOnly: boolean
+  /** This session's verdicts, listed among its requests. */
+  judges?: readonly JudgeRun[]
 }
 
 export type LogActions = {
@@ -283,7 +263,8 @@ export function cachePercent(usage: Usage | undefined): number | undefined {
 export function modelOf(record: StatusRequest): string {
   const at = record.source.lastIndexOf('@')
   const source = at < 0 ? record.source : record.source.slice(0, at)
-  return source === record.target ? record.target : record.target + ' (' + source + ')'
+  // A dated id of the same model (claude-haiku-5-5-20260815 for claude-haiku-5-5) says nothing new.
+  return source.startsWith(record.target) || record.target.startsWith(source) ? record.target : record.target + ' (' + source + ')'
 }
 
 export function routeOf(record: StatusRequest): RouteView {
@@ -316,6 +297,22 @@ export function countdown(ms: number, lang: Lang): string {
   const s = Math.ceil(ms / 1000)
   if (s >= 120) return t(lang, 'units.minutes', { n: Math.ceil(s / 60) })
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+}
+
+/**
+ * The cache countdown as the band and the footer show it: whole minutes rounded up ("42m" … "1m"),
+ * "cold" at zero. It changes once a minute, so the band redraws at most once a minute for it.
+ */
+export function minutesLeft(ms: number, lang: Lang): string {
+  if (ms <= 0) return t(lang, 'band.cold')
+  return t(lang, 'units.minutes', { n: Math.ceil(ms / 60_000) })
+}
+
+/** When minutesLeft next changes for a cache expiring at `expiresAt` (epoch ms); null once cold. */
+export function nextMinuteChange(expiresAt: number, now: number): number | null {
+  const left = expiresAt - now
+  if (left <= 0) return null
+  return expiresAt - (Math.ceil(left / 60_000) - 1) * 60_000
 }
 
 /** A duration the Agents pane shows: "12s", "4m 05s", "1h 02m". */

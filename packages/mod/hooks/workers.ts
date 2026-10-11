@@ -1,5 +1,5 @@
 import type { AaScore, Calibration, Domain, Effort, Level, ModelScore, RouterModel, Rule, Settings, TierTarget, WorkerAgent, WorkerCandidate, WorkerOption, WorkerVerdict } from '../types'
-import { DEFAULTS, DOMAINS, EFFORTS, LEVELS } from './settings'
+import { CLAUDE_WORKERS, DEFAULTS, DOMAINS, EFFORTS, LEVELS, candidateKey } from './settings'
 import { MARKER, agentModel } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
@@ -102,9 +102,20 @@ function rank(candidate: WorkerCandidate, settings: Settings): number {
   const at = settings.preference.findIndex(p => p === candidate.provider || p === candidate.model || p === candidate.target.agent)
   return at < 0 ? Number.MAX_SAFE_INTEGER : at
 }
-/** Allow-lists name worker agents; provider names from settings saved before 2026-10-10 still match. */
+/**
+ * Allow-lists name worker agents, and Claude's own models as `general-purpose:<model>`; provider
+ * names from settings saved before 2026-10-10 still match.
+ */
 export function allowed(candidate: WorkerCandidate, allow: readonly string[]): boolean {
-  return !allow.length || allow.includes(candidate.target.agent) || allow.includes(candidate.provider)
+  return !allow.length || allow.includes(candidateKey(candidate.target)) || allow.includes(candidate.provider)
+}
+/** Claude's own models as candidates: general-purpose on each, scored as the model's AA id. */
+export function claudeCandidates(): WorkerCandidate[] {
+  return CLAUDE_WORKERS.map(w => ({ target: { ...w.target }, model: w.model, provider: w.provider }))
+}
+/** The router's workers and Claude's own models, as the Workers card lists them. */
+export function withClaude(agents: readonly WorkerAgent[]): WorkerAgent[] {
+  return [...agents, ...CLAUDE_WORKERS.map(w => ({ name: w.name, model: w.model, provider: w.provider }))]
 }
 /** The router's generated-worker list (GET /api/mod-options `agents`), validated at the boundary. */
 export function workerAgents(raw: unknown): WorkerAgent[] {

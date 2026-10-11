@@ -1,17 +1,25 @@
 // The pieces every drawing is made of: the element table, the desktop chip (an SVG with a
-// transparent native button laid over it), the terminal's hotkey button, and the SVG glyphs that
-// give the mod its look (the effort meter: five rising bars, one per effort step).
+// transparent native button laid over it), the terminal's hotkey button, and the SVG glyphs of
+// the cards and panels.
 //
 // Engine facts these follow (Claude Code 2.1.293):
 // - A Button's label is text only and its colours are the host's, so a styled control is an Svg
 //   in the flow with an absolutely placed Box after it holding a plain Button whose label is
 //   no-break spaces. The hit layer comes after the picture so it paints, and takes the pointer,
 //   above it. Braille blanks are not used: some fonts draw them as dots.
+// - The desktop's native button truncates a label wider than its room with an ellipsis, drawn in
+//   the host's ink: seen 2026-10-10 as "자동 (권장) …" on every chip, the blank label (sized at
+//   3.4 px a space) being wider than the chip in the host's 14 px font. So the blank label is
+//   sized at HIT_SPACE_PX, above a no-break space's width in any sans-serif up to 16 px (system-ui
+//   16 px measures 4.19, Hiragino Sans 15 px 4.99 / 16 px 5.33 is not a UI font), minus the
+//   button's own padding, and the button sits in a Box that does not shrink: should a host font
+//   still be wider, the button is clipped by the chip, never shortened to an ellipsis.
 // - An Svg needs alt, width and height (an interactive one without both falls back to ~300×150),
 //   and animates only with isInteractive.
-// - A band redraw restarts every SVG animation, so motion is SMIL/CSS inside the SVG, phased by a
-//   negative delay computed from a stable anchor, and markup stays byte-identical when nothing
-//   it shows changed.
+// - The desktop draws every answer as a new DOM tree: each Svg becomes a new <img> or <iframe>,
+//   blank until decoded or loaded, so every redraw blinks the pictures and restarts their
+//   animations, identical markup or not (see band.tsx). A drawing that redraws while idle (the
+//   band) uses native text; motion is SMIL/CSS inside the SVG.
 
 import { t } from '../i18n'
 import type { ElementTable, RenderNode } from 'claude-code'
@@ -24,9 +32,22 @@ export type Els = ElementTable
 
 const NBSP = ' '
 
-/** A label of no-break spaces wide enough to cover a chip `width` px across (clipped to it). */
+/** The widest a no-break space is taken to draw in the host's button font, px. */
+export const HIT_SPACE_PX = 4.5
+/** Room left for the native button's own padding and border, px. */
+export const HIT_PAD_PX = 8
+
+/**
+ * A label of no-break spaces that fits a chip `width` px across: at HIT_SPACE_PX a space, with the
+ * button's padding, it is never wider than the chip, so the host has nothing to cut.
+ */
 export function hitLabel(width: number): string {
-  return NBSP.repeat(Math.max(2, Math.ceil(width / 3.4)))
+  return NBSP.repeat(Math.max(1, Math.floor((width - HIT_PAD_PX) / HIT_SPACE_PX)))
+}
+
+/** The widest a blank hit label can draw, padding included: what the tests hold to the chip. */
+export function hitLabelWidth(label: string): number {
+  return [...label].length * HIT_SPACE_PX + HIT_PAD_PX
 }
 
 export type ChipSpec = {
@@ -54,10 +75,14 @@ export function chip(el: Els, spec: ChipSpec): RenderNode {
   if (!onPress) return picture
   return (
     // flexShrink 0: an overflow-hidden flex item may shrink below its content, cutting the label.
+    // The hit button is centred, so what its blank label leaves uncovered is split between the
+    // chip's two ends, and sits in a Box that never shrinks (see the note at the top).
     <Box key={'chip-' + spec.key} position="relative" overflow="hidden" flexShrink={0}>
       {picture}
-      <Box position="absolute" top={0} left={0} right={0} bottom={0} overflow="hidden">
-        <Button key={spec.key} plain label={hitLabel(spec.width)} onPress={() => onPress()} />
+      <Box position="absolute" top={0} left={0} right={0} bottom={0} overflow="hidden" flexDirection="row" justifyContent="center">
+        <Box flexShrink={0}>
+          <Button key={spec.key} plain label={hitLabel(spec.width)} onPress={() => onPress()} />
+        </Box>
       </Box>
     </Box>
   )
@@ -73,7 +98,6 @@ export function textButton(el: Els, key: string, label: string, onPress: () => v
 
 // ---- SVG building blocks -----------------------------------------------------------------------
 
-export const CHIP_H = 34
 export const PILL_H = 28
 
 /** A chip's body: translucent ink, or the accent wash when lit. */
@@ -96,34 +120,6 @@ export function text(x: number, y: number, cls: string, content: string, fill?: 
   )
 }
 
-const BAR_H = [4, 6.5, 9, 11.5, 14]
-const BAR_W = 2.4
-const BAR_GAP = 1.6
-
-/** One bar of the meter, bottom-aligned on the box centred at (cx, cy). */
-function bar(cx: number, cy: number, i: number, scale: number, attrs: string): string {
-  const x = cx - ((BAR_W * 5 + BAR_GAP * 4) / 2) * scale + i * (BAR_W + BAR_GAP) * scale
-  const h = BAR_H[i]! * scale
-  return '<rect ' + attrs + ' x="' + x.toFixed(2) + '" y="' + (cy + 7 * scale - h).toFixed(2) + '" width="' + (BAR_W * scale).toFixed(2) + '" height="' + h.toFixed(2) + '" rx="' + (0.9 * scale).toFixed(2) + '"/>'
-}
-
-/** The effort meter: five rising bars, `level` 0..4 lighting low (one bar) to max (all five). */
-export function meter(cx: number, cy: number, level: number, tone: string, unlit = v('faint'), scale = 1): string {
-  let out = ''
-  for (let i = 0; i < 5; i++) out += bar(cx, cy, i, scale, 'fill="' + (i <= level ? tone : unlit) + '"' + (i <= level ? '' : ' opacity="0.7"'))
-  return out
-}
-
-/**
- * The meter while the judge thinks: bars light up left to right in a loop. `phase` (seconds into
- * the loop) becomes a negative delay, so a redraw continues the sweep instead of restarting it.
- */
-export function meterWave(cx: number, cy: number, phase: number, scale = 1): string {
-  let out = ''
-  for (let i = 0; i < 5; i++) out += bar(cx, cy, i, scale, 'class="wave" style="animation-delay:' + (i * 0.18 - phase).toFixed(2) + 's" fill="' + v('accent') + '"')
-  return out
-}
-
 export const WAVE_PERIOD = 1.8
 export const WAVE_CSS =
   '@keyframes wave{0%{opacity:.14}28%{opacity:1}70%{opacity:.14}100%{opacity:.14}}' +
@@ -131,21 +127,14 @@ export const WAVE_CSS =
   '@keyframes glow{0%,100%{opacity:.25}50%{opacity:.9}}' +
   '.glow{animation:glow ' + WAVE_PERIOD + 's ease-in-out infinite}'
 
-/** A ring gauge: track and an arc from 12 o'clock, `frac` 0..1. */
-export function gauge(cx: number, cy: number, r: number, frac: number, tone: string, width = 2.6): string {
-  const c = 2 * Math.PI * r
-  const f = Math.max(0, Math.min(1, frac))
-  return (
-    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + v('faint') + '" stroke-width="' + width + '" opacity="0.55"/>' +
-    (f > 0
-      ? '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + tone + '" stroke-width="' + width +
-        '" stroke-linecap="round" stroke-dasharray="' + (c * f).toFixed(2) + ' ' + c.toFixed(2) + '" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>'
-      : '')
-  )
-}
-
-/** A small switch: track and knob, lit in the accent. */
-export function switchGlyph(x: number, y: number, on: boolean): string {
+/** A small switch: track and knob, lit in the accent; `mixed` (a group partly on) centres the knob. */
+export function switchGlyph(x: number, y: number, on: boolean | 'mixed'): string {
+  if (on === 'mixed') {
+    return (
+      '<rect x="' + x + '" y="' + y + '" width="22" height="12" rx="6" fill="' + v('accentWash') + '" stroke="' + v('accent') + '" stroke-width="1.2"/>' +
+      '<rect x="' + (x + 7) + '" y="' + (y + 5.2) + '" width="8" height="1.6" rx="0.8" fill="' + v('accent') + '"/>'
+    )
+  }
   return (
     '<rect x="' + x + '" y="' + y + '" width="22" height="12" rx="6" fill="' + (on ? v('accent') : 'none') + '" stroke="' +
     (on ? v('accent') : v('muted')) + '" stroke-width="1.2"/>' +
@@ -207,8 +196,8 @@ export type PillOptions = {
   primary?: boolean
   /** Leading glyph, drawn in a 14px box whose top-left is (x, y). */
   glyph?: (x: number, y: number) => string
-  /** A switch before the label, on or off. */
-  toggle?: boolean
+  /** A switch before the label: on, off, or mixed (a group partly on). */
+  toggle?: boolean | 'mixed'
   /** A small count badge after the label. */
   badge?: string
   /** A quiet second line under the label (a candidate's provider and score). */
@@ -264,7 +253,7 @@ export function pill(el: Els, frame: Frame, o: PillOptions): RenderNode {
   return chip(el, {
     key: o.key,
     source: svgDoc(w, ht, frame.appearance, plateMarkup + body),
-    alt: o.alt ?? o.label + (o.sub ? ', ' + o.sub : '') + (o.toggle !== undefined ? (o.toggle ? t(frame.lang, 'settings.onSuffix') : t(frame.lang, 'settings.offSuffix')) : o.lit ? t(frame.lang, 'settings.selected') : ''),
+    alt: o.alt ?? o.label + (o.sub ? ', ' + o.sub : '') + (o.toggle !== undefined ? t(frame.lang, o.toggle === 'mixed' ? 'settings.mixedSuffix' : o.toggle ? 'settings.onSuffix' : 'settings.offSuffix') : o.lit ? t(frame.lang, 'settings.selected') : ''),
     width: w,
     height: ht,
     onPress: o.onPress,
@@ -302,23 +291,6 @@ export function segmented<T extends string>(
 export function toggle(el: Els, frame: Frame, key: string, label: string, on: boolean, onPress: () => void, hotkey?: string): RenderNode {
   if (frame.surface === 'desktop' || frame.surface === 'vscode') return pill(el, frame, { key, label, toggle: on, onPress, height: 26 })
   return textButton(el, key, (on ? '● ' : '○ ') + label, onPress, hotkey)
-}
-
-/** The desktop width of a switchRow pill, for lining a list of them up. */
-export function switchRowWidth(title: string, sub: string): number {
-  return Math.ceil(11 + 29 + Math.max(textWidth(title, 12), textWidth(sub, 11.5)) + 11)
-}
-
-/** A switch with a title and a quiet second line: one two-line pill, or `● title` and dim text. */
-export function switchRow(el: Els, frame: Frame, key: string, title: string, sub: string, on: boolean, onPress: () => void, minWidth?: number): RenderNode {
-  if (frame.surface === 'desktop' || frame.surface === 'vscode') return pill(el, frame, { key, label: title, sub, toggle: on, onPress, ...(minWidth ? { minWidth } : {}) })
-  const { Box, Text } = el
-  return (
-    <Box key={'switch-' + key} flexDirection="row" columnGap={2} flexWrap="wrap">
-      {textButton(el, key, (on ? '● ' : '○ ') + title, onPress)}
-      <Text dimColor>{sub}</Text>
-    </Box>
-  )
 }
 
 /** A button: the desktop pill (primary filled) or a terminal button. */

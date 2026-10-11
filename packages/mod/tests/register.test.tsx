@@ -23,7 +23,7 @@ const CONFIG = { admin: { port: 9992 }, providers: { deepseek: { models: [{ id: 
 const SPAWN: AgentSpawnInput = { tool_use_id: 'tool1', subagentType: 'ripple:auto', prompt: 'Rename one local variable and verify it.', description: 'Rename variable', parentModel: 'claude-opus-5-5', provider: { plugin: 'engine', tier: 'core' }, background: false, fork: false }
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specified change and verify it.', toolUses: [] }, { role: 'assistant', text: 'The implementation is ready.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string; language?: unknown; env?: Record<string, string>; platform?: string; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[] } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[] } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
@@ -69,6 +69,10 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   })
   on('process.run', ($, e) => {
     processes.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
+    if (['open', 'xdg-open', 'cmd'].includes(e.argv[0] ?? '') && options.browserFailure) {
+      if (options.browserFailure === 'throw') throw new Error('browser unavailable')
+      return { value: { exitCode: 1, stdout: '', stderr: 'browser unavailable', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (e.argv[0] === 'uname') return { value: { exitCode: 0, stdout: options.platform ?? 'Linux', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (e.argv[0] === 'defaults' && options.appleFail) return { value: { exitCode: 1, stdout: '', stderr: 'locale timed out', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: options.appleLocale ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -78,7 +82,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
     if (e.path.endsWith('generated-agents.json')) return { value: JSON.stringify({ agents: [...Object.keys(FILES), 'claude-sonnet-5-5'] }) }
     if (e.path.endsWith('/claude-sonnet-5-5.md')) return { value: '---\nname: claude-sonnet-5-5\ndescription: Execute via anthropic.\nmodel: claude-sonnet-5-5@high\n---\nExecute.' }
     if (e.path.endsWith('config.json')) return { value: JSON.stringify(options.config ?? CONFIG) }
-    if (e.path.endsWith('/.config/jev/.env')) return { value: options.envFile ?? '' }
+    if (e.path.endsWith('/.config/jev/.env')) return { value: typeof options.envFile === 'function' ? options.envFile() : options.envFile ?? '' }
     const name = e.path.split('/').pop()?.replace(/\.md$/, '') ?? ''
     return { value: FILES[name] ?? '' }
   })
@@ -104,13 +108,6 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
   return { clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
-// GET /api/mod-options: one model from two providers, and a worker without AA data.
-const MOD_OPTIONS = { agents: [
-  { name: 'deepseek-flash', model: 'deepseek-v4.1-flash', provider: 'deepseek' },
-  { name: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash', provider: 'opencode-go' },
-  { name: 'glm-5-3-flash', model: 'glm-5.3-flash', provider: 'opencode-go' },
-  { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt' },
-], scores: AA }
 function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
   on('http.fetch', ($, e, next) => {
@@ -120,7 +117,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
       zen(e)
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
     }
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : e.url.endsWith('/api/mod-options') ? MOD_OPTIONS : { requests: [] }
+    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
@@ -217,18 +214,17 @@ test('legacy settings and setup completion migrate once; unrelated store keys su
   expect(b.saved.get('handoffChoice')).toEqual({ kind: 'full', after: 'copy' })
 })
 
-test('panel save retries a stale revision once and preserves remote sibling fields', async ($, on) => {
+test('a quick change retries a stale revision once and preserves remote sibling fields', async ($, on) => {
   const b = boundaries(on)
   http(on)
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  await ui.select({ key: 'floor', value: 'medium' })
   b.conflict(normalizeSettings({ setupDone: true, ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } }))
-  await ui.press({ key: 'save' })
+  await ui.press({ key: 'bias-1' })
   const writes = b.settingsRequests.filter(r => r.method === 'PUT')
   expect(writes.map(r => r.revision)).toEqual([1, 2])
-  expect(b.router().settings).toMatchObject({ floor: 'medium', ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } })
+  expect(b.router().settings).toMatchObject({ bias: 1, ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } })
   expectLanguage(b, 'pt')
   expect(b.storeWrites).not.toContain('settings')
   await ui.unmount()
@@ -240,17 +236,18 @@ test('two conflicts stop the save retry and retain the edit for the next poll', 
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  await ui.select({ key: 'floor', value: 'medium' })
   b.alwaysConflict(true)
-  await ui.press({ key: 'save' })
+  await ui.press({ key: 'bias-1' })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(2)
-  expect(b.router().settings.floor).toBe('low')
+  expect(b.router().settings.bias).toBe(0)
+  // Opening the panel syncs first, which tries the kept edit again (two more conflicts).
   await command($, 'settings')
-  expect((await ui.find({ key: 'floor' }))?.props.value).toBe('medium')
+  expect((await ui.find({ key: 'bias-1' }))?.props.label).toBe('● +1')
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(4)
   b.alwaysConflict(false)
   await b.clock.advance(3000)
-  expect(b.router().settings.floor).toBe('medium')
-  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(3)
+  expect(b.router().settings.bias).toBe(1)
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(5)
   await ui.unmount()
 })
 
@@ -282,40 +279,39 @@ test('offline startup recovers and migrates legacy settings only after reaching 
   expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(1)
 })
 
-test('an open draft saves only its edits after polling newer settings', async ($, on) => {
+test('an open quick panel follows newer settings and saves only the next change', async ($, on) => {
   const b = boundaries(on)
   http(on)
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  await ui.select({ key: 'floor', value: 'medium' })
-  b.remote({ settings: normalizeSettings({ setupDone: true, ceiling: 'high', keepWarmHours: 8 }), revision: 2, stored: true })
+  b.remote({ settings: normalizeSettings({ setupDone: true, bias: -1, ceiling: 'high', keepWarmHours: 8 }), revision: 2, stored: true })
   await b.clock.advance(3000)
-  await ui.press({ key: 'save' })
-  expect(b.router().settings).toMatchObject({ floor: 'medium', ceiling: 'high', keepWarmHours: 8 })
+  expect((await ui.find({ key: 'bias--1' }))?.props.label).toBe('● −1')
+  await ui.press({ key: 'bias-1' })
+  expect(b.router().settings).toMatchObject({ bias: 1, ceiling: 'high', keepWarmHours: 8 })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
   await ui.unmount()
 })
 
-test('offline panel save keeps local edits, shows router notice and retries on next poll', async ($, on) => {
+test('offline quick changes stay local, show router notice and retry on next poll', async ($, on) => {
   const b = boundaries(on)
   http(on)
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  await ui.select({ key: 'floor', value: 'medium' })
   b.offline(true)
-  await ui.press({ key: 'save' })
-  expect(b.router().settings.floor).toBe('low')
+  await ui.press({ key: 'bias-1' })
+  expect(b.router().settings.bias).toBe(0)
   await command($, 'settings')
-  expect((await ui.find({ key: 'floor' }))?.props.value).toBe('medium')
+  expect((await ui.find({ key: 'bias-1' }))?.props.label).toBe('● +1')
   expect(b.toasts.some(text => text.includes('router not answering'))).toBe(true)
   expect(b.toasts).not.toContain('Settings saved')
   expect(b.storeWrites).not.toContain('settings')
   b.remote({ settings: normalizeSettings({ setupDone: true, ceiling: 'high' }), revision: 2, stored: true })
   b.offline(false)
   await b.clock.advance(3000)
-  expect(b.router().settings).toMatchObject({ floor: 'medium', ceiling: 'high' })
+  expect(b.router().settings).toMatchObject({ bias: 1, ceiling: 'high' })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
   await ui.unmount()
 })
@@ -389,23 +385,19 @@ test('a failed macOS locale lookup logs the failure and falls back without preve
   expect((await command($, 'stats')).text).toContain('Auto:')
 })
 
-test('saving language re-resolves auto from current host settings', async ($, on) => {
+test('dashboard language changes re-resolve auto from current host settings', async ($, on) => {
   const b = boundaries(on, { language: 'pt' }, { language: 'Korean' })
   http(on)
   await start($)
-  await command($, 'settings')
-  let ui = await band($)
-  await ui.press({ key: 'tab-look' })
-  await ui.select({ key: 'language', value: 'auto' })
-  await ui.press({ key: 'save' })
+  b.remote({ settings: normalizeSettings({ setupDone: true, language: 'auto' }), revision: 2, stored: true })
+  await b.clock.advance(3000)
   expectLanguage(b, 'ko')
-  expect(b.router().settings).toMatchObject({ language: 'auto' })
-  await ui.unmount()
   b.setLanguage('Japanese')
   await command($, 'settings')
-  ui = await band($)
-  await ui.press({ key: 'save' })
+  const ui = await band($)
+  await ui.press({ key: 'bias-1' })
   expectLanguage(b, 'ja')
+  expect(b.router().settings.language).toBe('auto')
   await ui.unmount()
 })
 
@@ -492,11 +484,9 @@ test('Zen Jev uses the exact config authorization and first Jev model with CLAUD
   expect(paths).toContain('/custom/ripple/config.json')
   await command($, 'settings')
   const ui = await band($)
-  await ui.press({ key: 'tab-judge' })
   expect(await ui.find({ key: 'jev-key' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: 'uses your OpenCode Zen key from ClaudeRipple' })).toBeDefined()
-  await ui.press({ key: 'jev-test' })
-  expect(sent.length).toBe(2)
+  expect(await ui.find({ key: 'jev-test' })).toBeUndefined()
+  expect(await ui.find({ key: 'jev-source-zen' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -538,24 +528,6 @@ test('provider off refuses named workers and every-provider-off refuses automati
   const automatic = await $.agent.spawn(SPAWN)
   expect(automatic.deny).toContain('No enabled worker')
   expect(sent.length).toBe(0)
-})
-
-test('judge model Select includes nongenerated provider models and native Anthropic', async ($, on) => {
-  const b = boundaries(on, { judge: 'model' })
-  http(on, false, { ...CONFIG, providers: { ...CONFIG.providers, 'opencode-zen': { models: [{ id: 'jev-1.13' }] } } })
-  await start($)
-  await command($, 'settings')
-  const ui = await band($)
-  await ui.press({ key: 'tab-judge' })
-  await ui.select({ key: 'judge-model', value: 'jev-1.13' })
-  await ui.press({ key: 'save' })
-  expect(b.router().settings).toMatchObject({ judgeModel: 'jev-1.13' })
-  await command($, 'settings')
-  await ui.press({ key: 'tab-judge' })
-  await ui.select({ key: 'judge-model', value: 'claude-sonnet-5-5' })
-  await ui.press({ key: 'save' })
-  expect(b.router().settings).toMatchObject({ judgeModel: 'claude-sonnet-5-5' })
-  await ui.unmount()
 })
 
 test('prompt judge rewrites every Opus 5.5 main step, not subagent effort', async ($, on) => {
@@ -718,41 +690,71 @@ test('/ripple stats returns plain measured text', async ($, on) => {
   expect(out.text).toContain('Workers: light 0, standard 0, deep 0, design 0')
 })
 
-test('settings draft saves only on Save, and the dashboard title remains ClaudeRipple', async ($, on) => {
+for (const surface of ['terminal', 'desktop'] as const) test('quick controls save immediately on ' + surface + ' and Close keeps the changes', async ($, on) => {
   const b = boundaries(on)
-  http(on)
+  const urls = http(on)
   await start($)
-  const ui = await band($)
-  expect(await ui.find({ type: 'Text', text: 'ClaudeRipple' })).toBeDefined()
+  const ui = await band($, surface)
+  expect(await ui.find({ type: 'Text', text: 'ClaudeRipple' })).toBeUndefined()
   await ui.press({ key: 'settings' })
-  await ui.select({ key: 'floor', value: 'medium' })
-  expect(b.router().settings).toMatchObject({ floor: 'low' })
-  await ui.press({ key: 'save' })
-  expect(b.router().settings).toMatchObject({ floor: 'medium' })
+  expect(await ui.find({ type: 'Text', text: 'Quick settings' })).toBeDefined()
+  expect(await ui.find({ key: 'save' })).toBeUndefined()
+  const puts = () => b.settingsRequests.filter(r => r.method === 'PUT').length
+  let count = puts()
+  await ui.press({ key: 'bias-2' })
+  expect(b.router().settings.bias).toBe(2)
+  expect(puts()).toBe(++count)
+  await ui.press({ key: 'set-auto' })
+  expect(b.router().settings.effortAuto).toBe(false)
+  expect(puts()).toBe(++count)
+  expect(await ui.find({ key: 'bias-2' })).toBeUndefined()
+  await ui.press({ key: 'set-auto' })
+  expect(b.router().settings.effortAuto).toBe(true)
+  expect(puts()).toBe(++count)
+  for (const judge of ['jev', 'model', 'haiku'] as const) {
+    await ui.press({ key: 'judge-' + judge })
+    expect(b.router().settings.judge).toBe(judge)
+    expect(puts()).toBe(++count)
+  }
+  await ui.press({ key: 'set-warm' })
+  expect(b.router().settings.keepWarm).toBe(true)
+  expect(puts()).toBe(++count)
+  await ui.press({ key: 'close' })
+  expect(puts()).toBe(count)
+  expect(b.router().settings).toMatchObject({ bias: 2, effortAuto: true, judge: 'haiku', keepWarm: true })
+  expect(urls.some(url => url.endsWith('/api/mod-options'))).toBe(false)
   await ui.press({ key: 'hide' })
   expect(b.saved.get('bandHidden')).toBe(true)
   await $.command.run({ command: 'ripple-bar', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: '' })
   expect(b.saved.get('bandHidden')).toBe(false)
+  await ui.unmount()
 })
 
-test('Workers lists generated workers from mod-options; Save stores provider allow-lists as worker names', async ($, on) => {
-  const b = boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: ['opencode-go'] } } }).rules })
-  const urls = http(on)
+for (const platform of ['Darwin', 'Windows_NT', 'Linux'] as const) test('all settings opens the mod dashboard on ' + platform, async ($, on) => {
+  const b = boundaries(on, { language: 'en' }, { platform, env: platform === 'Windows_NT' ? { OS: 'Windows_NT' } : {} })
+  http(on)
   await start($)
+  await command($, 'settings')
   const ui = await band($)
-  await ui.press({ key: 'settings' })
-  await ui.press({ key: 'tab-workers' })
-  const drawn = JSON.stringify(await ui.drawn())
-  expect(drawn).toContain('● deepseek-v4.1-flash')
-  expect(drawn).toContain('○ deepseek-v4.1-flash')
-  expect(drawn).toContain('deepseek · 39.5 · $0.27 at max')
-  expect(drawn).toContain('opencode-go · no AA data')
-  expect(await ui.find({ type: 'Text', text: '● unsaved' })).toBeUndefined()
-  await ui.press({ key: 'candidate-glm-5-3-flash' })
-  await ui.press({ key: 'save' })
-  expect(b.router().settings.rules.general).toEqual({ mode: 'auto', allow: ['deepseek-v4-1-flash'] })
-  await ui.press({ key: 'settings' })
-  expect(urls.filter(url => url.endsWith('/api/mod-options')).length).toBe(1)
+  await ui.press({ key: 'all-settings' })
+  const url = 'http://127.0.0.1:9992/#mod'
+  const argv = platform === 'Darwin' ? ['open', url] : platform === 'Windows_NT' ? ['cmd', '/c', 'start', '', url] : ['xdg-open', url]
+  expect(b.processes.map(p => p.argv)).toEqual(platform === 'Windows_NT' ? [argv] : [['uname', '-s'], argv])
+  expect(b.toasts).toEqual([])
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
+  await ui.unmount()
+})
+
+for (const failure of ['exit', 'throw'] as const) test('a browser ' + failure + ' failure toasts the dashboard URL', async ($, on) => {
+  const b = boundaries(on, { language: 'en' }, { platform: 'Darwin', browserFailure: failure })
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.press({ key: 'all-settings' })
+  expect(b.toasts).toContain('http://127.0.0.1:9992/#mod')
+  expect(b.logs.some(log => log.includes('open mod settings'))).toBe(true)
+  await ui.unmount()
 })
 
 test('host survey wins; minimal layout renders through SessionMode', async ($, on) => {
@@ -810,8 +812,8 @@ test('Save caps a high judge pick until the reported limit resets', async ($, on
   expect(sent.map(s => s.effort)).toEqual(['medium', 'max'])
 })
 
-test('Jev low confidence falls back to Haiku and sends the key only to TypeSafe', async ($, on) => {
-  boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
+test('an unsure Jev still decides: no Haiku call, no alert, key only to TypeSafe', async ($, on) => {
+  const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
   const judges = judgeStub(on, '{"effort":"high","why":"fallback"}')
   const sent = stepStub(on)
   const destinations: string[] = []
@@ -829,12 +831,16 @@ test('Jev low confidence falls back to Haiku and sends the key only to TypeSafe'
   await start($)
   await submit($)
   await step($)
-  expect(judges.length).toBe(1)
-  expect(sent[0]?.effort).toBe('high')
+  expect(judges.length).toBe(0)
+  // Torn at 0.2 with no odds given, the session keeps the effort it runs at.
+  expect(sent[0]?.effort).toBe('medium')
   expect(destinations).toEqual(['https://api.typesafe.ai/v1/systemone'])
+  // An unsure answer is not a judge failure: no toast, no alert card.
+  expect(b.toasts).toEqual([])
+  expect(await (await band($)).find({ type: 'Text', text: /not answering/ })).toBeUndefined()
 })
 
-test('Jev times out at three seconds without blocking the person prompt', async ($, on) => {
+test('Jev times out at three seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
   const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
   const judges = judgeStub(on, '{"effort":"medium","why":"fallback"}')
   on('http.fetch', async ($, e, next) => {
@@ -849,7 +855,34 @@ test('Jev times out at three seconds without blocking the person prompt', async 
   const out = await pending
   expect(out.text).toContain('Implement')
   expect(judges.length).toBe(1)
+  // One slow answer is a bad moment: Haiku covered it and nothing is said.
+  expect(b.toasts.some(t => t.includes('timed out'))).toBe(false)
+  const again = submit($, 'Refactor the parser across three files and verify.')
+  await b.clock.settle()
+  await b.clock.advance(3000)
+  await again
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(true)
+})
+
+test('a dropped Jev connection says it in plain words, and only the second time running', async ($, on) => {
+  const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
+  const judges = judgeStub(on, '{"effort":"medium","why":"fallback"}')
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
+    if (e.url.includes('typesafe.ai')) throw new Error('ripple: $.http.fetch(https://api.typesafe.ai/v1/systemone) failed: ECONNRESET: The socket connection was closed unexpectedly.')
+    return { value: { ok: true, status: 200, headers: {}, text: '{"requests":[]}' } }
+  })
+  await start($)
+  await submit($)
+  expect(judges.length).toBe(1)
+  expect(b.toasts).toEqual([])
+  await submit($, 'Refactor the parser across three files and verify.')
+  expect(b.toasts.some(t => t.includes('network unavailable'))).toBe(true)
+  expect(b.toasts.some(t => t.includes('ECONNRESET'))).toBe(false)
+  // The card blames the connection, not the judge.
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /connection is unsteady/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /not answering/ })).toBeUndefined()
 })
 
 test('router judge falls back and Haiku retries its alias when unanswered', async ($, on) => {
@@ -869,7 +902,8 @@ test('router judge falls back and Haiku retries its alias when unanswered', asyn
 })
 
 test('Jev key input preserves other env lines and chmods the file 600', async ($, on) => {
-  const b = boundaries(on, { judge: 'jev' }, { envFile: 'OTHER=keep\nTYPESAFE_API_KEY=old\nTAIL=yes\n' })
+  let readingForSave = false
+  const b = boundaries(on, { judge: 'jev' }, { envFile: () => readingForSave ? 'OTHER=keep\nTYPESAFE_API_KEY=old\nTAIL=yes\n' : '' })
   http(on)
   let written = ''
   let path = ''
@@ -877,22 +911,25 @@ test('Jev key input preserves other env lines and chmods the file 600', async ($
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  await ui.press({ key: 'tab-judge' })
+  readingForSave = true
   await ui.input({ key: 'jev-key', text: 'new-$&-$$-key' })
+  expect(await ui.find({ key: 'jev-key' })).toBeUndefined()
+  expect(await ui.find({ key: 'jev-test' })).toBeUndefined()
   expect(written).toBe('OTHER=keep\nTYPESAFE_API_KEY=new-$&-$$-key\nTAIL=yes\n')
   expect(path).toBe('/home/test/.config/jev/.env')
   expect(b.processes.at(-1)?.argv).toEqual(['chmod', '600', path])
 })
 
-test('Jev Test displays latency/result from the selected judge', async ($, on) => {
-  boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
-  on('http.fetch', ($, e, next) => e.url.endsWith('/api/mod-settings') ? next(e) : { value: { ok: true, status: 200, headers: {}, text: e.url.includes('typesafe.ai') ? '{"answers":{"effort":{"choice":"low","confidence":0.9}}}' : '{"requests":[]}' } })
+test('Jev Test displays latency and a missing-key result', async ($, on) => {
+  boundaries(on, { judge: 'jev' })
+  http(on)
+  judgeStub(on, '{"effort":"low","why":"fallback"}')
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  await ui.press({ key: 'tab-judge' })
   await ui.press({ key: 'jev-test' })
-  expect(await ui.find({ type: 'Text', text: /0 ms · low · jev/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /0 ms · low · Jev key missing/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('known agents show waiting after an eight-second tool and finish with cost', async ($, on) => {
@@ -996,8 +1033,7 @@ test('saving unrelated settings cannot revive stopped keep-warm; toggling it can
   expect(forks).toBe(1)
   await command($, 'settings')
   const ui = await band($)
-  await ui.select({ key: 'floor', value: 'medium' })
-  await ui.press({ key: 'save' })
+  await ui.press({ key: 'bias-1' })
   await b.clock.advance(15000)
   expect(forks).toBe(1)
   await command($, 'warm')
@@ -1074,4 +1110,152 @@ test('quick handoff runs on the timer and copies without clearing', async ($, on
   expect(forks).toBe(1)
   expect(copied).toContain('Pending: verify the changed files.')
   expect(copied).toContain('Continue with the justified next action')
+})
+
+// ---- Regressions of 2026-10-10 (setup step 2, the band) ----------------------------------------
+
+test('setup step 2 opens the dashboard; its draft preserves edits and follows remote worker settings', async ($, on) => {
+  const general = { mode: 'pin' as const, targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } }
+  const b = boundaries(on, { setupDone: false, rules: normalizeSettings({ rules: { general, frontend: general } }).rules })
+  http(on)
+  await start($)
+  const ui = await band($)
+  await ui.press({ key: 'judge-model' })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
+  await ui.press({ key: 'next' })
+  expect(await ui.find({ type: 'Text', text: 'Workers start on Auto; details are on the dashboard.' })).toBeDefined()
+  expect(await ui.find({ key: 'exception-design' })).toBeUndefined()
+  await ui.press({ key: 'all-settings' })
+  expect(b.processes.at(-1)?.argv).toEqual(['xdg-open', 'http://127.0.0.1:9992/#mod'])
+  // Changes on the dashboard reach setup without replacing the person's judge edit.
+  b.remote({ settings: normalizeSettings({ setupDone: false, rules: { general, frontend: general, design: { mode: 'auto', allow: ['general-purpose:opus'] } }, keepWarmHours: 8 }), revision: 2, stored: true })
+  await b.clock.advance(3000)
+  await ui.press({ key: 'next' })
+  await ui.press({ key: 'set-warm' })
+  await ui.press({ key: 'next' })
+  expect(await ui.find({ type: 'Text', text: 'Fixed · exceptions: Design → Auto' })).toBeDefined()
+  await ui.press({ key: 'finish' })
+  expect(b.router().settings).toMatchObject({ judge: 'model', keepWarm: true, keepWarmHours: 8, setupDone: true })
+  expect(b.router().settings.rules.general.mode).toBe('pin')
+  expect(b.router().settings.rules.design).toEqual({ mode: 'auto', allow: ['general-purpose:opus'] })
+  expect(b.router().settings.rules.frontend).toEqual({ mode: 'inherit' })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
+  await ui.unmount()
+})
+
+test('a poll that finds nothing new writes no state, and the band draws the same pictures', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const writes: string[] = []
+  let counting = false
+  on('state.set', { plugin: 'ripple' }, async ($, e, next) => { if (counting) writes.push(e.key); return next(e) })
+  await start($)
+  const ui = await band($, 'desktop')
+  await b.clock.advance(3000)
+  const before = JSON.stringify(await ui.drawn())
+  counting = true
+  await b.clock.advance(3000)
+  await b.clock.advance(3000)
+  expect(writes).toEqual([])
+  expect(JSON.stringify(await ui.drawn())).toBe(before)
+  await ui.unmount()
+})
+
+test('an idle band is asked again only when the minute it shows changes', async ($, on) => {
+  // Each ask is a new answer the desktop draws afresh; idle, only the countdown may cause one.
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  const writes: string[] = []
+  const invalidates: number[] = []
+  let counting = false
+  on('state.set', { plugin: 'ripple' }, async ($, e, next) => { if (counting) writes.push(e.key); return next(e) })
+  on('ui.invalidate', ($, e, next) => { if (counting) invalidates.push(b.clock.now()); return next(e) })
+  await start($)
+  await submit($)
+  await step($)
+  await complete($)
+  const replied = b.clock.now()
+  const ui = await band($, 'desktop')
+  await b.clock.advance(20_000)
+  const before = JSON.stringify(await ui.drawn())
+  expect(before).toMatch(/"\d+m"/)
+  counting = true
+  // Three minutes of polls (3 s) and ticks (15 s).
+  for (let i = 0; i < 12; i++) await b.clock.advance(15_000)
+  expect(writes).toEqual([])
+  expect(invalidates).toEqual([replied + 60_000, replied + 120_000, replied + 180_000])
+  const after = JSON.stringify(await ui.drawn())
+  expect(after).not.toBe(before)
+  // Only the countdown moved: its minutes (value and card) and the pie of its share.
+  const countdownless = (tree: string) => tree.replace(/"handle":\d+/g, '').replace(/\b\d+m\b/g, 'm').replace(/[●◕◑◔○]/g, 'o')
+  expect(countdownless(after)).toBe(countdownless(before))
+  await ui.unmount()
+})
+
+test('the judge says a failure once per reason, and Jev without a TypeSafe key asks Zen', async ($, on) => {
+  const b = boundaries(on, { judge: 'jev' }, { config: { ...CONFIG, providers: { ...CONFIG.providers, 'opencode-zen': { headers: { authorization: 'zen-key' }, models: [{ id: 'jev-1.13' }] } } } })
+  const sent: string[] = []
+  http(on, false, { ...CONFIG, providers: { ...CONFIG.providers, 'opencode-zen': { headers: { authorization: 'zen-key' }, models: [{ id: 'jev-1.13' }] } } }, e => { sent.push(e.init?.headers?.authorization ?? '') })
+  judgeStub(on)
+  stepStub(on)
+  await start($)
+  await submit($)
+  expect(sent).toEqual(['zen-key'])
+  expect(b.toasts.filter(t => t.startsWith('Judge'))).toEqual([])
+})
+
+test('a judge failing for the same reason is said once in a session', async ($, on) => {
+  const b = boundaries(on, { judge: 'jev' })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  await start($)
+  await submit($)
+  await complete($)
+  await submit($, 'Implement the next bounded change and verify the tests again.')
+  expect(b.toasts.filter(text => text.includes('keeping the current effort or asking Haiku')).length, JSON.stringify(b.toasts)).toBe(1)
+})
+
+// 2026-10-11: on the desktop a toggle was told only by dimness, which the host's hover undoes, so a
+// click showed nothing. Each control must change what is drawn next, and a toggle's state must be in
+// the drawing itself (a primary Button on the desktop, ● / ○ on the terminal).
+test('every band control changes the next drawing, and a toggle says its state outright', async ($, on) => {
+  const b = boundaries(on)
+  on('http.fetch', { url: /\/api\/requests/ }, () => ({ value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ requests: [{ at: '2026-10-10T13:19:10', source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, session: 'session-test' }] }) } }))
+  http(on)
+  await start($)
+  await b.clock.advance(3000)
+  const state = (n: { props: Record<string, unknown> } | undefined, surface: string) =>
+    surface === 'desktop' ? (n?.props.variant === 'primary' ? 'on' : n?.props.plain === true && n?.props.dimColor === true ? 'off' : 'other') : /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other'
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await band($, surface)
+    const drawn = async () => JSON.stringify(await ui.drawn()).replace(/"handle":\d+/g, '')
+    for (const key of surface === 'terminal' ? ['auto', 'warm', 'log', 'agents'] : ['auto', 'warm', 'agents']) {
+      const before = state(await ui.find({ type: 'Button', key }), surface)
+      expect(before, surface + ' ' + key).not.toBe('other')
+      const tree = await drawn()
+      await ui.press({ key })
+      expect(await drawn(), surface + ' ' + key).not.toBe(tree)
+      expect(state(await ui.find({ type: 'Button', key }), surface), surface + ' ' + key).toBe(before === 'on' ? 'off' : 'on')
+      await ui.press({ key })
+      expect(state(await ui.find({ type: 'Button', key }), surface), surface + ' ' + key + ' again').toBe(before)
+    }
+    // The effort opens its row of levels (the terminal's `e: Effort`, the desktop's level itself).
+    expect(await ui.find({ key: 'pick-low' })).toBeUndefined()
+    await ui.press({ key: 'effort' })
+    expect(await ui.find({ type: 'Button', key: 'pick-low' }), surface).toBeDefined()
+    await ui.press({ key: 'effort' })
+    expect(await ui.find({ key: 'pick-low' })).toBeUndefined()
+    if (surface === 'desktop') {
+      // The route opens the log, shown as on at once.
+      expect((await ui.find({ type: 'Button', key: 'route' }))?.props.label).toBe('gpt-6.1-sol (gpt-6-1-sol)')
+      await ui.press({ key: 'route' })
+      expect(b.panes.has('ripple-log')).toBe(true)
+      await ui.press({ key: 'route' })
+      expect(b.panes.has('ripple-log')).toBe(false)
+    }
+    await ui.unmount()
+  }
 })

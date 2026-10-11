@@ -1,471 +1,545 @@
-// The dashboard above the prompt, and its minimal form in the footer.
+// The dashboard band above the prompt, and its minimal form in the footer.
 //
-// Desktop: a row of SVG chips (effort ripple with the model, context ring, cache countdown, plan
-// limit, the last route) and a row of controls; both wrap at narrow widths. Terminal: the same
-// facts as text in rows packed to the band's width, controls as hotkey buttons.
+// One quiet row of native text: the effort (a ripple glyph and its name), the cache countdown in
+// whole minutes, the context and plan-limit figures when switched on in Look, the last route; then
+// small toggles at the right end (Handoff when advised, Auto, Warm, Log, Agents, settings). What a
+// caption used to say sits in a hover card on the desktop. The terminal draws the same facts.
 //
-// The cache chip counts down by itself (SMIL frames and a CSS drain), so the band needs no
-// per-second redraw; markup that shows nothing new stays byte-identical between redraws.
+// Two facts of the desktop host shape it (claude.ai assets c2719cf1b-C7sTDzb6.js, read 2026-10-10):
+// - Each answer the band gives is drawn as a freshly built DOM tree swapped in for the last one
+//   (`Qc`: `o.replaceWith(a)`), and an Svg becomes a new <img> of a data URL or, interactive, a new
+//   sandboxed <iframe srcdoc> (`Pa`). Those paint blank until decoded or loaded, so every redraw
+//   blinked the pictures, byte-identical markup or not. Native text and buttons swap within one
+//   frame, so the band draws no Svg.
+// - The surface asks again on every write of state the band read and on every invalidate, and
+//   takes each answer as new (`if(t===n)return` compares the object). So the countdown shows whole
+//   minutes, and register.tsx invalidates only when the minute shown changes.
+//
+// - In the band the host draws every Button the size of a small control (its own padding, a
+//   control's height), and a plain Button under the pointer turns full ink on a ghost fill whether
+//   it is dimmed or not (`button[data-press-dim]:hover{color:text.primary}`). So a toggle told by
+//   dimness alone looks the same on and off right after the click: on the desktop a toggle that is
+//   on, an open pane, the advised Handoff and the picked level are primary Buttons (the host's
+//   filled accent), the rest plain and dimmed. Both have the same box, so a press moves nothing.
+//
+// No item's width depends on its value: each fact has a slot sized for the widest value its
+// language can show (in cells, East Asian wide characters two); on the desktop the route takes what
+// the row leaves (a flex item, cut by the host only when the row has no room for the whole name),
+// on the terminal the room the frame's width leaves. The controls sit at the right end with the one
+// that comes and goes (Handoff) first, so a changing value never moves a neighbour.
 
 import { t } from '../i18n'
+import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
-import { CHIP_H, WAVE_CSS, WAVE_PERIOD, chip, gauge, icon, meter, meterWave, pill, plate, text, textButton } from './parts'
+import { textButton } from './parts'
 import type { Els } from './parts'
-import { clip, contextTone, displayWidth, esc, limitTone, providerColor, cacheTone, svgDoc, textTone, textWidth, v } from './theme'
+import { cacheTone, clip, contextTone, displayWidth, limitTone, textTone } from './theme'
 import type { BandActions, DashboardView, Frame } from './view'
-import { EFFORTS, compactNumber, countdown, effortIndex, effortLabel, effortName, isRich, limitName, resetsLabel, seconds } from './view'
+import { EFFORTS, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, resetsLabel, seconds, compactNumber } from './view'
 
-const CAP_Y = 13.5
-const VAL_Y = 27
+/** Growing ripples: low → max. */
+const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
+/** Theme keys: they follow the person's light or dark theme on every surface. */
+const WARN = 'warning'
+const BAD = 'error'
+/** Cells between facts, and between controls. */
+const GAP = 2
+const CTRL_GAP = 1
+/** The least room a route is drawn in; on the desktop the host cuts the name to what is left. */
+const ROUTE_MIN = 14
+const RICH_ROUTE_MIN = 6
+/** Desktop: the slot of the live agents' count after its control. */
+const COUNT_CELLS = 2
+/** Desktop: the rule between the facts and the controls, with the gaps either side of it. */
+const RULE_CELLS = 3
+/** The reason's slot on a wide terminal. */
+const WHY_CELLS = 28
 
-// ---- Desktop chips -----------------------------------------------------------------------------
+type Run = { text: string; color?: string; dim?: boolean; bold?: boolean }
 
-type Chip = { key: string; source: string; alt: string; width: number; live?: boolean; onPress?: () => void }
-
-function effortChip(frame: Frame, view: DashboardView, onPress: () => void): Chip {
-  const { level, mode, why } = view.effort
-  const idx = effortIndex(level)
-  const model = (view.model ?? t(frame.lang, 'band.model')).toUpperCase()
-  const tag = t(frame.lang, mode === 'auto' || mode === 'deciding' ? 'band.auto' : mode === 'manual' ? 'band.manual' : mode === 'paused' ? 'band.paused' : 'band.autoOff').toUpperCase()
-  const caption = model + ' · ' + tag
-  const value =
-    mode === 'deciding' ? t(frame.lang, 'band.deciding') : level ? effortName(level, frame.lang) : mode === 'paused' ? t(frame.lang, 'band.paused') : mode === 'off' ? t(frame.lang, 'band.off') : '—'
-  const showWhy = mode === 'auto' && why && !view.hide.includes('reason')
-  const whyText = showWhy ? clip(why!, 34) : ''
-  const gx = 22
-  const cy = CHIP_H / 2
-  const tx = 44
-  const valW = textWidth(value, 12.5, 'bold')
-  const width = Math.ceil(tx + Math.max(textWidth(caption, 8.5) * 1.12, valW + (whyText ? 8 + textWidth(whyText, 11.5) : 0)) + 14)
-  let glyph: string
-  let css = ''
-  let outline = ''
-  if (mode === 'deciding') {
-    const since = view.effort.since ?? frame.now
-    const phase = ((frame.now - since) / 1000) % WAVE_PERIOD
-    glyph = meterWave(gx, cy, phase)
-    css = WAVE_CSS
-    outline =
-      '<rect class="glow" style="animation-delay:-' + phase.toFixed(2) + 's" x="1" y="1" width="' + (width - 2) + '" height="' + (CHIP_H - 2) +
-      '" rx="8.5" fill="none" stroke="' + v('accent') + '" stroke-width="1.6"/>'
-  } else {
-    const quiet = mode === 'off' || mode === 'paused'
-    glyph = meter(gx, cy, Math.max(0, idx), mode === 'auto' ? v('accent') : quiet ? v('muted') : v('ink'))
-  }
-  let body = plate(width, CHIP_H, mode === 'deciding') + outline + glyph
-  body += text(tx, CAP_Y, 'cap', caption)
-  body += text(tx, VAL_Y, 'val', value, mode === 'deciding' ? v('accent') : mode === 'off' || mode === 'paused' ? v('muted') : undefined)
-  if (whyText) body += text(tx + valW + 8, VAL_Y, 'sub', whyText)
-  const hint =
-    mode === 'paused'
-      ? t(frame.lang, 'band.pausedHint')
-      : mode === 'off'
-        ? t(frame.lang, 'band.offHint')
-        : mode === 'deciding'
-          ? t(frame.lang, 'band.decidingHint')
-          : why ?? ''
-  body += '<title>' + esc(t(frame.lang, 'band.effortTitle', { value, hint: hint ? ' — ' + hint : '' })) + '</title>'
-  return {
-    key: 'effort',
-    source: svgDoc(width, CHIP_H, frame.appearance, body, css),
-    alt: t(frame.lang, 'band.effortAlt', { value, mode: tag.toLowerCase(), why: whyText ? ': ' + whyText : '' }),
-    width,
-    live: true,
-    onPress,
-  }
-}
-
-function contextChip(frame: Frame, view: DashboardView): Chip | null {
-  const ctx = view.context
-  if (!ctx) return null
-  const tone = contextTone(ctx.percent, view.swampAt)
-  const paint = tone === 'ink' ? v('ink') : v(tone)
-  const value = Math.round(ctx.percent) + '%'
-  const sub = compactNumber(ctx.tokens)
-  const tx = 38
-  const valW = textWidth(value, 12.5, 'bold')
-  const width = Math.ceil(tx + Math.max(textWidth(t(frame.lang, 'band.context').toUpperCase(), 8.5) * 1.12, valW + 6 + textWidth(sub, 11.5)) + 14)
-  const body =
-    plate(width, CHIP_H, false) + gauge(20, CHIP_H / 2, 8.5, ctx.percent / 100, paint) +
-    text(tx, CAP_Y, 'cap', t(frame.lang, 'band.context').toUpperCase()) + text(tx, VAL_Y, 'val', value, tone === 'ink' ? undefined : paint) +
-    text(tx + valW + 6, VAL_Y, 'sub', sub)
-  return { key: 'context', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: t(frame.lang, 'band.contextAlt', { value, window: compactNumber(ctx.window), tokens: sub }), width }
+/** One fact of the band: a slot of fixed width holding a glyph, a value and quiet trailing runs. */
+type Fact = {
+  key: string
+  /** Cells the slot takes, whatever it shows. */
+  width: number
+  /** Desktop: a quiet name before the value, so a bare "60 min" says what it is. */
+  label?: Run
+  glyph?: Run
+  value: Run
+  /** The value is a button (desktop): the effort opens its menu, the route the log. */
+  onPress?: () => void
+  /** Desktop: the slot takes the room the row leaves instead of `width` (the route). */
+  grow?: true
+  tail?: Run[]
+  /** What a hover card says, a line each (desktop). */
+  card?: string[]
 }
 
 /**
- * The cache countdown. Frames of text switch with SMIL `set` at each change of the shown value, and
- * the ring drains with a CSS animation, both timed from the drawing's load, so it keeps time with
- * no redraw; the last minute turns amber and zero reads "cold".
+ * Cells `text` takes: terminal columns, or on the desktop the host's `ch`, the width of "0" in its
+ * 14 px sans. Measured 2026-10-10 in Chromium on macOS: ch 8.8 px, Hangul and kana ~12 px (1.36 ch),
+ * "Medium" 5.9 ch, "X-High" 5.1 ch. Each class of character is taken a little wide of that; the
+ * terminal's 2 cells for a wide character would leave a gap after every short Korean value.
  */
-function cacheChip(frame: Frame, view: DashboardView): Chip | null {
-  if (view.hide.includes('timer')) return null
-  const cache = view.cache
-  const warm = view.warm
-  const left = cache ? Math.max(0, cache.expiresAt - frame.now) : 0
-  const leftS = Math.ceil(left / 1000)
-  const caption = t(frame.lang, warm.on ? (warm.stopped ? 'band.cacheStopped' : 'band.cacheWarm') : 'band.cache').toUpperCase()
-  const sub = warm.on && warm.pings > 0 ? '×' + warm.pings : ''
-  const tx = 38
-  const longest = cache ? countdown(left, frame.lang) : '—'
-  const valW = Math.max(textWidth('0:00', 12.5, 'bold'), textWidth(longest, 12.5, 'bold'))
-  const width = Math.ceil(tx + Math.max(textWidth(caption, 8.5) * 1.12, valW + (sub ? 6 + textWidth(sub, 11.5) : 0)) + 14)
-  const cx = 20
-  const cy = CHIP_H / 2
-  const r = 8.5
-  const c = 2 * Math.PI * r
-  const ring = warm.on && !warm.stopped ? v('accent') : v('ink')
-  let body = plate(width, CHIP_H, false)
-  let css = ''
-  body += '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + v('faint') + '" stroke-width="2.6" opacity="0.55"/>'
-  if (!cache) {
-    body += text(tx, VAL_Y, 'val', '—', v('muted'))
-  } else if (leftS <= 0) {
-    body += icon('snow', cx - 7, cy - 7, v('muted')) + text(tx, VAL_Y, 'val', t(frame.lang, 'band.cold'), v('muted'))
-  } else {
-    const frac = Math.min(1, left / cache.ttlMs)
-    const start = (c * (1 - frac)).toFixed(2)
-    css =
-      '@keyframes drain{from{stroke-dashoffset:' + start + '}to{stroke-dashoffset:' + c.toFixed(2) + '}}' +
-      '.drain{animation:drain ' + leftS + 's linear forwards}'
-    const warnAt = Math.max(0, leftS - 60)
-    body +=
-      '<circle class="drain" cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="' + ring + '" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="' +
-      c.toFixed(2) + ' ' + c.toFixed(2) + '" stroke-dashoffset="' + start + '" transform="rotate(-90 ' + cx + ' ' + cy + ')">' +
-      (leftS > 60 ? '<set attributeName="stroke" to="' + v('warn') + '" begin="' + warnAt + 's"/>' : '') + '</circle>'
-    // One <text> per shown value, each visible from its start to the next one's.
-    let shown = countdown(left, frame.lang)
-    let from = 0
-    const frames: [number, number, string][] = []
-    for (let t = 1; t <= leftS; t++) {
-      const next = countdown(left - t * 1000, frame.lang)
-      if (next !== shown) {
-        frames.push([from, t, shown])
-        shown = next
-        from = t
-      }
-    }
-    frames.push([from, -1, shown])
-    for (const [a, b, label] of frames) {
-      const cold = b === -1
-      const late = !cold && leftS - a <= 60
-      const fill = cold ? v('muted') : late ? v('warn') : undefined
-      body +=
-        '<text x="' + tx + '" y="' + VAL_Y + '" class="val"' + (fill ? ' style="fill:' + fill + '"' : '') + ' visibility="' + (a === 0 ? 'visible' : 'hidden') + '">' + esc(label) +
-        (a > 0 ? '<set attributeName="visibility" to="visible" begin="' + a + 's"/>' : '') +
-        (b > 0 ? '<set attributeName="visibility" to="hidden" begin="' + b + 's"/>' : '') +
-        '</text>'
-    }
+function cells(frame: Frame, text: string): number {
+  return isRich(frame) ? Math.ceil(chOf(text)) : displayWidth(text)
+}
+
+/** The desktop width of `text` in `ch`, unrounded (see cells). */
+function chOf(text: string): number {
+  let ch = 0
+  for (const char of text) {
+    if (displayWidth(char) === 2) ch += 1.45
+    else if (char === ' ') ch += 0.45
+    else if (/[ilIj.,:;|'!]/.test(char)) ch += 0.4
+    else if (/[mwMW@%]/.test(char)) ch += 1.35
+    else if (/[A-Z]/.test(char)) ch += 1.1
+    else if (/[0-9]/.test(char)) ch += 1
+    else ch += 0.85
   }
-  body += text(tx, CAP_Y, 'cap', caption, warm.on && !warm.stopped ? v('accent') : undefined)
-  // Keep-warm's mark: a small flame inside the ring.
-  if (warm.on && cache && leftS > 0) body += '<g transform="translate(' + (cx - 4.2) + ' ' + (cy - 4.6) + ') scale(0.6)">' + icon('flame', 0, 0, warm.stopped ? v('muted') : v('accent')) + '</g>'
-  if (sub) body += text(tx + valW + 6, VAL_Y, 'sub', sub)
-  const tip = cache
-    ? t(frame.lang, 'band.cacheTip', { state: leftS > 0 ? t(frame.lang, 'band.warmFor', { time: countdown(left, frame.lang) }) : t(frame.lang, 'band.expired'), warm: warm.on ? warm.stopped ? t(frame.lang, 'band.warmStoppedTip', { reason: warm.stopped }) : t(frame.lang, 'band.warmOnTip', { count: warm.pings }) : '' })
-    : t(frame.lang, 'band.noReply')
-  body += '<title>' + esc(tip) + '</title>'
+  return ch
+}
+
+function widest(frame: Frame, texts: readonly string[]): number {
+  return Math.max(1, ...texts.map(text => cells(frame, text)))
+}
+
+/** The host's padding either side of a Button's label in the band, in ch (about 8 px each). */
+const PAD = 2
+
+/** What the effort slot can show: the names and "Deciding…" (a dash when there is no level). */
+function effortWords(lang: Lang, rich: boolean): string[] {
+  const words = [...EFFORTS.map(e => effortName(e, lang)), t(lang, 'band.deciding')]
+  return rich ? words : words.map(w => w.toLowerCase())
+}
+
+// ---- Facts -------------------------------------------------------------------------------------
+
+function effortFact(frame: Frame, view: DashboardView, onPress: () => void): Fact {
+  const rich = isRich(frame)
+  const accent = textTone(frame.appearance).accent
+  const { level, mode, why } = view.effort
+  const idx = effortIndex(level)
+  const quiet = mode === 'off' || mode === 'paused'
+  const glyph: Run =
+    mode === 'deciding' ? { text: '◌', color: accent } : mode === 'paused' ? { text: '‖', dim: true } : { text: idx >= 0 ? RIPPLE_CHAR[idx]! : '○', ...(mode === 'auto' ? { color: accent } : quiet ? { dim: true } : {}) }
+  // Paused or off with no level known: a dash; the glyph, the Auto toggle and the card say why.
+  const word = mode === 'deciding' ? t(frame.lang, 'band.deciding') : level ? effortName(level, frame.lang) : '—'
+  const label = rich ? word : word.toLowerCase()
+  const value: Run = mode === 'deciding' ? { text: label, color: accent } : quiet ? { text: label, dim: true } : { text: label, bold: !rich }
+  const tag = t(frame.lang, mode === 'auto' || mode === 'deciding' ? 'band.auto' : mode === 'manual' ? 'band.manual' : mode === 'paused' ? 'band.paused' : 'band.autoOff')
+  const hint =
+    mode === 'paused' ? t(frame.lang, 'band.pausedHint') : mode === 'off' ? t(frame.lang, 'band.offHint') : mode === 'deciding' ? t(frame.lang, 'band.decidingHint') : why && !view.hide.includes('reason') ? why : ''
+  // Terminal: glyph, a cell, the label. Desktop: the glyph, then the label's button, whose own
+  // padding is the air on both sides.
+  // The desktop names the slot instead of a glyph: a ripple a few pixels across read as noise, not
+  // as a level. A cell to spare: a host font a little wider than the estimate must not wrap it.
+  const name = t(frame.lang, 'band.effortShort')
+  const width = rich ? Math.ceil(chOf(name) + PAD + 1 + Math.max(...effortWords(frame.lang, rich).map(chOf))) : 2 + widest(frame, effortWords(frame.lang, rich))
   return {
-    key: 'cache',
-    source: svgDoc(width, CHIP_H, frame.appearance, body, css),
-    alt: t(frame.lang, 'band.cacheAlt', { state: cache ? leftS > 0 ? t(frame.lang, 'band.timeLeft', { time: countdown(left, frame.lang) }) : t(frame.lang, 'band.cold') : t(frame.lang, 'band.unknown'), warm: warm.on ? t(frame.lang, 'band.keepWarmAlt', { count: sub ? ' ' + sub : '' }) : '' }),
+    key: 'effort',
     width,
-    live: true,
+    ...(rich ? { label: { text: name, dim: true } } : { glyph }),
+    value,
+    ...(rich ? { onPress } : {}),
+    card: [[view.model, tag].filter(Boolean).join(' · '), t(frame.lang, 'band.effortTitle', { value: word, hint: hint ? ' — ' + hint : '' })],
   }
 }
 
-function limitChip(frame: Frame, view: DashboardView): Chip | null {
+/** The pie a share of the cache's life reads as. */
+function pie(frac: number): string {
+  return frac > 0.875 ? '●' : frac > 0.625 ? '◕' : frac > 0.375 ? '◑' : frac > 0.125 ? '◔' : '○'
+}
+
+function cacheFact(frame: Frame, view: DashboardView): Fact | null {
+  if (view.hide.includes('timer')) return null
+  const accent = textTone(frame.appearance).accent
+  const cache = view.cache
+  const left = cache ? cache.expiresAt - frame.now : 0
+  // Whole minutes, as shown: the slot changes once a minute and no more.
+  const shown = cache && left > 0 ? Math.ceil(left / 60_000) : 0
+  const warm = view.warm
+  const lit = warm.on && !warm.stopped
+  const last = shown === 1
+  const glyph: Run = { text: shown > 0 && cache ? pie(Math.min(1, (shown * 60_000) / cache.ttlMs)) : '○', ...(last ? { color: WARN } : lit && shown > 0 ? { color: accent } : { dim: true }) }
+  const text = cache ? minutesLeft(left, frame.lang) : '—'
+  const value: Run = last ? { text, color: WARN } : { text, dim: shown === 0 }
+  const tip = cache
+    ? t(frame.lang, 'band.cacheTip', {
+        state: shown > 0 ? t(frame.lang, 'band.warmFor', { time: text }) : t(frame.lang, 'band.expired'),
+        warm: warm.on ? (warm.stopped ? t(frame.lang, 'band.warmStoppedTip', { reason: warm.stopped }) : t(frame.lang, 'band.warmOnTip', { count: warm.pings })) : '',
+      })
+    : t(frame.lang, 'band.noReply')
+  const words = [t(frame.lang, 'units.minutes', { n: 60 }), t(frame.lang, 'band.cold'), '—']
+  if (!isRich(frame)) return { key: 'cache', width: 2 + widest(frame, words), glyph, value, card: [tip] }
+  // Desktop: "Cache 58 min", the last minute in the warning colour; the pie read as a status dot.
+  const name = t(frame.lang, 'band.cache')
+  return { key: 'cache', width: Math.ceil(chOf(name) + 1 + Math.max(...words.map(chOf))), label: { text: name, dim: true }, value, card: [tip] }
+}
+
+function contextFact(frame: Frame, view: DashboardView): Fact | null {
+  const ctx = view.context
+  if (!ctx || !view.extras.includes('context')) return null
+  const tone = contextTone(ctx.percent, view.swampAt)
+  const rich = isRich(frame)
+  // Desktop: "Context 38%" in the facts' idiom; the terminal keeps its short "ctx 38%".
+  const text = rich ? Math.round(ctx.percent) + '%' : t(frame.lang, 'band.footerContext', { percent: Math.round(ctx.percent) })
+  const value: Run = tone === 'ink' ? { text, dim: !rich } : { text, color: tone === 'warn' ? WARN : BAD }
+  const name = t(frame.lang, 'band.context')
+  const width = rich ? Math.ceil(chOf(name) + 1 + chOf('100%')) : cells(frame, t(frame.lang, 'band.footerContext', { percent: 100 }))
+  return { key: 'context', width, ...(rich ? { label: { text: name, dim: true } } : {}), value, card: [t(frame.lang, 'band.contextAlt', { value: Math.round(ctx.percent) + '%', window: compactNumber(ctx.window), tokens: compactNumber(ctx.tokens) })] }
+}
+
+function limitFact(frame: Frame, view: DashboardView): Fact | null {
   const limit = view.limit
-  if (!limit || view.hide.includes('limits')) return null
+  if (!limit || !view.extras.includes('limits')) return null
   const tone = limitTone(limit.percent)
-  const paint = tone === 'ink' ? v('ink') : v(tone)
-  const caption = t(frame.lang, 'band.limitCaption', { window: limitName(limit.kind, frame.lang).toUpperCase(), save: limit.save ? t(frame.lang, 'band.saveCaption') : '' })
-  const value = Math.round(limit.percent) + '%'
+  const rich = isRich(frame)
+  const save = t(frame.lang, 'band.save')
+  const tail: Run[] = limit.save ? [{ text: save, color: textTone(frame.appearance).accent }] : []
   const resets = resetsLabel(limit.resetsAt, frame.now, frame.lang)
-  const tx = 12
-  const valW = textWidth(value, 12.5, 'bold')
-  const barW = 34
-  const subW = resets ? textWidth(resets, 11.5) + 8 : 0
-  const width = Math.ceil(tx + Math.max(textWidth(caption, 8.5) * 1.12, valW + 8 + barW + subW) + 14)
-  const bx = tx + valW + 8
-  const fill = Math.max(2, (barW * Math.min(100, limit.percent)) / 100)
-  const body =
-    plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', caption, limit.save ? v('accent') : undefined) + text(tx, VAL_Y, 'val', value, tone === 'ink' ? undefined : paint) +
-    '<rect x="' + bx + '" y="' + (VAL_Y - 6) + '" width="' + barW + '" height="4" rx="2" fill="' + v('faint') + '" opacity="0.6"/>' +
-    '<rect x="' + bx + '" y="' + (VAL_Y - 6) + '" width="' + fill.toFixed(1) + '" height="4" rx="2" fill="' + paint + '"/>' +
-    (resets ? text(bx + barW + 8, VAL_Y, 'sub', resets) : '')
-  return { key: 'limit', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: t(frame.lang, 'band.limitAlt', { window: limitName(limit.kind, frame.lang), value, reset: resets ? ', ' + resets : '' }), width }
+  const card = [t(frame.lang, 'band.limitAlt', { window: limitName(limit.kind, frame.lang), value: Math.round(limit.percent) + '%', reset: resets ? ', ' + resets : '' })]
+  if (rich) {
+    // Desktop: "5h limit 64%", not a bare "5h 64%".
+    const names = (['five_hour', 'seven_day'] as const).map(kind => t(frame.lang, 'band.limitCaption', { window: limitName(kind, frame.lang), save: '' }))
+    const text = Math.round(limit.percent) + '%'
+    const value: Run = tone === 'ink' ? { text } : { text, color: tone === 'warn' ? WARN : BAD }
+    const width = Math.ceil(Math.max(...names.map(chOf)) + 1 + chOf('100%') + 1 + chOf(save))
+    return { key: 'limit', width, label: { text: names[limit.kind === 'five_hour' ? 0 : 1]!, dim: true }, value, tail, card }
+  }
+  const text = limitName(limit.kind, frame.lang) + ' ' + Math.round(limit.percent) + '%'
+  const value: Run = tone === 'ink' ? { text, dim: true } : { text, color: tone === 'warn' ? WARN : BAD }
+  const width = widest(frame, [limitName('five_hour', frame.lang), limitName('seven_day', frame.lang)]) + cells(frame, ' 100%') + 1 + cells(frame, save)
+  return { key: 'limit', width, value, tail, card: [t(frame.lang, 'band.limitAlt', { window: limitName(limit.kind, frame.lang), value: Math.round(limit.percent) + '%', reset: resets ? ', ' + resets : '' })] }
 }
 
-function routeChip(frame: Frame, view: DashboardView, onPress: () => void): Chip | null {
-  if (view.hide.includes('route')) return null
-  const tx = 12
-  if (!view.route) {
-    if (!view.notice) return null
-    const value = clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), 52)
-    const width = Math.ceil(tx + Math.max(textWidth(t(frame.lang, 'band.router').toUpperCase(), 8.5) * 1.12, textWidth(value, 12)) + 14)
-    const body = plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', t(frame.lang, 'band.router').toUpperCase()) + text(tx, VAL_Y, 'lbl', value, v('muted'))
-    return { key: 'route', source: svgDoc(width, CHIP_H, frame.appearance, body), alt: t(frame.lang, 'band.routerAlt', { value }), width, onPress }
-  }
+/** The last route in `room` cells, or the router's notice; null when there is neither or no room. */
+function routeFact(frame: Frame, view: DashboardView, room: number, onPress: () => void): Fact | null {
+  const rich = isRich(frame)
+  if (view.hide.includes('route') || room < (rich ? RICH_ROUTE_MIN : ROUTE_MIN)) return null
   const r = view.route
-  const caption = t(frame.lang, r.resent ? 'band.resentCaption' : !r.ok ? 'band.failedCaption' : 'band.lastRoute', { status: r.status })
-  const model = clip(r.model, 30)
-  let x = tx + 13
-  let line = '<path d="M' + tx + ' ' + (VAL_Y - 9) + 'v5.5a2 2 0 0 0 2 2h6M' + (tx + 6.5) + ' ' + (VAL_Y - 4) + 'l2.6 2.5-2.6 2.5" fill="none" stroke="' + (r.ok ? v('muted') : r.resent ? v('muted') : v('bad')) + '" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>'
-  line += text(x, VAL_Y, 'val', model, r.ok || r.resent ? undefined : v('bad'))
-  x += textWidth(model, 12.5, 'bold') + 9
-  const hue = providerColor(r.provider)
-  line += '<circle cx="' + (x + 3) + '" cy="' + (VAL_Y - 4) + '" r="3.2" fill="' + hue + '"/>'
-  x += 10
-  line += '<text x="' + x + '" y="' + VAL_Y + '" class="sub" style="fill:' + hue + ';font-weight:600">' + esc(r.provider) + '</text>'
-  x += textWidth(r.provider, 11.5, 'bold') + 8
-  if (r.effort) {
-    line += text(x, VAL_Y, 'sub', effortLabel(r.effort, frame.lang))
-    x += textWidth(effortLabel(r.effort, frame.lang), 11.5) + 8
+  if (!r) {
+    if (!view.notice) return null
+    return { key: 'route', width: room, ...(rich ? { grow: true as const } : {}), value: { text: clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), room), dim: true } }
   }
-  if (r.ok && r.cachePct !== undefined) {
-    const label = r.cachePct + '%'
-    line += text(x, VAL_Y, 'sub', label, v(cacheTone(r.cachePct)))
-    x += textWidth(label, 11.5) + 8
-  }
+  const glyph: Run = r.resent ? { text: '↻', dim: true } : r.ok ? { text: rich ? '→' : '↳', dim: true } : { text: '✕', color: BAD }
+  // The desktop says what the figure is ("hit 100%"); a bare percentage beside a model name read as anything.
+  const hit = r.cachePct !== undefined ? (rich ? t(frame.lang, 'band.hit', { percent: r.cachePct }) : r.cachePct + '%') : ''
+  const tail: Run[] = !r.ok
+    ? [r.resent ? { text: t(frame.lang, 'band.resent', { status: r.status }), dim: true } : { text: r.status, color: BAD }]
+    : r.cachePct !== undefined
+      ? [cacheTone(r.cachePct) === 'ok' ? { text: hit, dim: true } : { text: hit, color: cacheTone(r.cachePct) === 'warn' ? WARN : BAD }]
+      : []
+  const tailCells = tail.reduce((n, run) => n + 1 + cells(frame, run.text), 0)
+  const modelRoom = room - 2 - tailCells
+  if (!rich && modelRoom < 4) return null
   const secs = seconds(r.seconds, frame.lang)
-  line += text(x, VAL_Y, 'sub', secs)
-  x += textWidth(secs, 11.5)
-  const width = Math.ceil(Math.max(x, tx + textWidth(caption, 8.5) * 1.12) + 14)
-  const body =
-    plate(width, CHIP_H, false) + text(tx, CAP_Y, 'cap', caption, !r.ok && !r.resent ? v('bad') : undefined) + line +
-    '<title>' + esc((r.note ? r.note + ' · ' : '') + t(frame.lang, 'band.logHint')) + '</title>'
-  const alt =
-    t(frame.lang, 'band.routeAlt', { model: r.model, provider: r.provider, effort: r.effort ? ', ' + effortLabel(r.effort, frame.lang) : '', cache: r.cachePct !== undefined ? t(frame.lang, 'band.routeCache', { percent: r.cachePct }) : '', time: secs, status: r.ok ? '' : t(frame.lang, r.resent ? 'band.routeResent' : 'band.routeFailed', { status: r.status }) })
-  return { key: 'route', source: svgDoc(width, CHIP_H, frame.appearance, body), alt, width, live: r.note !== undefined, onPress }
+  const card = [
+    t(frame.lang, 'band.routeAlt', { model: r.model, provider: r.provider, effort: r.effort ? ', ' + effortLabel(r.effort, frame.lang) : '', cache: r.cachePct !== undefined ? t(frame.lang, 'band.routeCache', { percent: r.cachePct }) : '', time: secs, status: r.ok ? '' : t(frame.lang, r.resent ? 'band.routeResent' : 'band.routeFailed', { status: r.status }) }),
+    ...(r.note ? [r.note] : []),
+    t(frame.lang, 'band.logHint'),
+  ]
+  // The desktop shows the whole name in whatever the row leaves; the host cuts it only past that.
+  if (rich) return { key: 'route', width: room, grow: true, glyph, value: { text: r.model, dim: true }, onPress, tail, card }
+  return { key: 'route', width: room, glyph, value: { text: clip(r.model, modelRoom) }, tail, card }
 }
 
-function drawChip(el: Els, c: Chip): RenderNode {
-  const spec: Parameters<typeof chip>[1] = { key: c.key, source: c.source, alt: c.alt, width: c.width, height: CHIP_H }
-  if (c.live) spec.live = true
-  if (c.onPress) spec.onPress = c.onPress
-  return chip(el, spec)
+// ---- Controls ----------------------------------------------------------------------------------
+
+/**
+ * A control: its label, the terminal's hotkey, and whether it is on (a toggle that is on, an open
+ * pane, the advised Handoff). The desktop draws an on control as a primary Button and the rest
+ * plain and dimmed; the terminal says it in the label (● / ○), as its plain Buttons take no colour.
+ */
+type Control = { key: string; label: string; hotkey: string; onPress: () => void; on: boolean; count?: string }
+
+function controls(frame: Frame, view: DashboardView, actions: BandActions): Control[] {
+  const rich = isRich(frame)
+  const L = frame.lang
+  const mark = (on: boolean) => (rich ? '' : on ? ' ●' : ' ○')
+  const out: Control[] = []
+  // Handoff comes and goes; first in the row, it moves nothing when it does.
+  if (view.handoff !== 'off') {
+    const advised = view.handoff === 'advised'
+    out.push({ key: 'handoff', label: t(L, 'band.handoff') + (!rich && advised ? ' ◆' : ''), hotkey: 'h', onPress: actions.handoff, on: advised })
+  }
+  out.push(
+    { key: 'auto', label: t(L, 'band.auto') + mark(view.auto), hotkey: 'a', onPress: actions.toggleAuto, on: view.auto },
+    { key: 'warm', label: t(L, 'band.warm') + mark(view.warm.on), hotkey: 'w', onPress: actions.toggleWarm, on: view.warm.on },
+    // The desktop opens the log from the route itself (its value is that button), so it has no Log of its own.
+    ...(rich ? [] : [{ key: 'log', label: t(L, 'band.log') + mark(view.logOpen), hotkey: 'l', onPress: actions.toggleLog, on: view.logOpen }]),
+    // The count has a slot of its own (desktop) or is always a number (terminal): no width change.
+    { key: 'agents', label: t(L, 'band.agents') + (rich ? '' : ' ' + (view.agents.live || '·')) + mark(view.agentsOpen), hotkey: 'g', onPress: actions.toggleAgents, on: view.agentsOpen, ...(rich ? { count: view.agents.live > 0 ? String(view.agents.live) : '' } : {}) },
+    // A word on the desktop: the host's 14 px font draws ⚙ as a small ring that reads as "o".
+    { key: 'settings', label: rich ? t(L, 'band.settings') : '⚙', hotkey: 's', onPress: actions.openSettings, on: false },
+  )
+  return out
 }
 
-function effortMenuRich(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
-  const { Box } = el
-  const current = view.effort.mode === 'manual' || view.effort.mode === 'off' ? view.effort.level : null
+/** Cells a control takes. Desktop: the label in the button's padding, then the count's slot. */
+function controlCells(frame: Frame, c: Control): number {
+  if (!isRich(frame)) return cells(frame, c.hotkey) + 2 + cells(frame, c.label)
+  return cells(frame, c.label) + PAD + (c.count !== undefined ? COUNT_CELLS : 0)
+}
+
+/** Every control's cells, Handoff counted whether shown or not, so the route's room stays put. */
+function controlsCells(frame: Frame, view: DashboardView, actions: BandActions): number {
+  const list = controls(frame, { ...view, handoff: 'advised' }, actions)
+  return list.reduce((n, c) => n + controlCells(frame, c), 0) + CTRL_GAP * (list.length - 1) * (isRich(frame) ? 1 : 2)
+}
+
+// ---- Layout ------------------------------------------------------------------------------------
+
+const span = (facts: readonly Fact[]) => facts.reduce((n, f) => n + f.width, 0) + GAP * Math.max(0, facts.length - 1)
+
+/** The facts in order, the route in what the row leaves it. */
+function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room: number, drop: readonly string[] = []): Fact[] {
+  const fixed = [effortFact(frame, view, actions.toggleEffortMenu), contextFact(frame, view), cacheFact(frame, view), limitFact(frame, view)].filter(
+    (f): f is Fact => f !== null && !drop.includes(f.key),
+  )
+  const left = room - span(fixed) - (fixed.length ? GAP : 0)
+  // The desktop's route is a flex item: it takes what the row really leaves (the room counted here
+  // keeps Handoff's place, which it mostly does not need) and the host cuts its name past that.
+  const route = drop.includes('route') ? null : routeFact(frame, view, isRich(frame) ? Math.max(left, RICH_ROUTE_MIN) : left, actions.toggleLog)
+  return route ? [...fixed, route] : fixed
+}
+
+// ---- Desktop -----------------------------------------------------------------------------------
+
+function runText(el: Els, key: string, run: Run): RenderNode {
+  const { Text } = el
   return (
-    <Box key="effort-menu" flexDirection="row" flexWrap="wrap" gap={1}>
-      {pill(el, frame, { key: 'pick-auto', label: t(frame.lang, 'band.auto'), lit: view.auto, onPress: actions.toggleAuto, height: CHIP_H - 4, glyph: (x, y) => meter(x + 7, y + 7, 2, v('accent'), v('faint'), 0.75) })}
-      {EFFORTS.map((effort, i) =>
-        pill(el, frame, {
-          key: 'pick-' + effort,
-          label: effortName(effort, frame.lang),
-          lit: current === effort,
-          onPress: () => actions.pickEffort(effort),
-          height: CHIP_H - 4,
-          glyph: (x, y) => meter(x + 7, y + 7, i, current === effort ? v('accent') : v('ink'), v('faint'), 0.75),
-        }),
-      )}
+    <Text key={key} color={run.color} dimColor={run.dim} bold={run.bold}>
+      {run.text}
+    </Text>
+  )
+}
+
+function card(el: Els, f: Fact): RenderNode {
+  const { Box, Text } = el
+  if (!f.card) return ''
+  return (
+    <Box position="absolute" left={0} bottom={1} display="none" hover={{ display: 'flex' }} flexDirection="column">
+      {f.card.map(line => <Text>{line}</Text>)}
     </Box>
   )
 }
 
-function controlsRich(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode[] {
-  const ht = CHIP_H
-  const handoff = view.handoff !== 'off'
-  return [
-    pill(el, frame, { key: 'auto', label: t(frame.lang, 'band.auto'), toggle: view.auto, onPress: actions.toggleAuto, height: ht, alt: t(frame.lang, 'band.effortAutoAlt', { state: t(frame.lang, view.auto ? 'band.on' : 'band.off').toLowerCase() }) }),
-    pill(el, frame, { key: 'warm', label: t(frame.lang, 'band.warm'), toggle: view.warm.on, onPress: actions.toggleWarm, height: ht, alt: t(frame.lang, 'band.warmAlt', { state: t(frame.lang, view.warm.on ? 'band.on' : 'band.off').toLowerCase() }) }),
-    handoff
-      ? pill(el, frame, { key: 'handoff', label: t(frame.lang, 'band.handoff'), lit: view.handoff === 'advised', onPress: actions.handoff, height: ht, glyph: (x, y) => icon('handoff', x, y, view.handoff === 'advised' ? v('accent') : v('ink')), alt: view.handoff === 'advised' ? t(frame.lang, 'band.handoffAdvised') : t(frame.lang, 'band.handoff') })
-      : pill(el, frame, { key: 'compact', label: t(frame.lang, 'band.compact'), onPress: actions.compact, height: ht, glyph: (x, y) => icon('compact', x, y, v('ink')) }),
-    pill(el, frame, { key: 'log', label: t(frame.lang, 'band.log'), lit: view.logOpen, onPress: actions.toggleLog, height: ht, glyph: (x, y) => icon('log', x, y, view.logOpen ? v('accent') : v('ink')), alt: view.logOpen ? t(frame.lang, 'band.closeLog') : t(frame.lang, 'band.openLog') }),
-    pill(el, frame, (() => {
-      const o: Parameters<typeof pill>[2] = { key: 'agents', label: t(frame.lang, 'band.agents'), lit: view.agentsOpen, onPress: actions.toggleAgents, height: ht, glyph: (x, y) => icon('agents', x, y, view.agentsOpen ? v('accent') : v('ink')), alt: t(frame.lang, 'band.agentsAlt', { count: view.agents.live }) }
-      if (view.agents.live > 0) o.badge = String(view.agents.live)
-      return o
-    })()),
-    pill(el, frame, { key: 'settings', label: '', onPress: actions.openSettings, height: ht, glyph: (x, y) => icon('gear', x, y, v('muted')), alt: t(frame.lang, 'band.settingsAlt') }),
-  ]
+function factRich(el: Els, f: Fact): RenderNode {
+  const { Box, Button } = el
+  // A pressable value brings its button's padding, which is the air after the glyph; a text value
+  // is a cell from it.
+  const gap = f.onPress ? 0 : 1
+  const value = f.onPress ? <Button key={f.key} plain dimColor={f.value.dim} label={f.value.text} onPress={() => f.onPress!()} /> : runText(el, 'value', f.value)
+  if (f.grow) {
+    // The route: its own width (the reason takes what is left after it), the name cut by the host
+    // only when the row has no room for it, its cache figure kept whole after it.
+    return (
+      <Box key={'fact-' + f.key} flexDirection="row" flexShrink={1} minWidth={0}>
+        <Box flexDirection="row" alignItems="center" columnGap={gap} flexShrink={1} minWidth={0} overflow="hidden">
+          {f.glyph ? <Box flexShrink={0}>{runText(el, 'glyph', f.glyph)}</Box> : null}
+          <Box flexDirection="row" flexShrink={1} minWidth={0}>
+            {value}
+          </Box>
+          {f.tail?.length ? (
+            <Box flexDirection="row" columnGap={1} flexShrink={0}>
+              {f.tail.map((run, i) => runText(el, 'tail-' + i, run))}
+            </Box>
+          ) : null}
+        </Box>
+        {card(el, f)}
+      </Box>
+    )
+  }
+  return (
+    // Keyed: the hover card's scope. The inner Box holds the slot's width and clips nothing it
+    // was sized for; the card is lifted out of the band by the host.
+    <Box key={'fact-' + f.key} flexDirection="row" flexShrink={0} width={f.width}>
+      <Box flexDirection="row" alignItems="center" columnGap={gap} width={f.width} overflow="hidden">
+        {f.label ? <Box flexShrink={0}>{runText(el, 'label', f.label)}</Box> : null}
+        {f.glyph ? <Box flexShrink={0}>{runText(el, 'glyph', f.glyph)}</Box> : null}
+        {value}
+        {(f.tail ?? []).map((run, i) => runText(el, 'tail-' + i, run))}
+      </Box>
+      {card(el, f)}
+    </Box>
+  )
+}
+
+/** On: the host's primary Button. Off: plain and dimmed. The same box either way. */
+function stateButton(el: Els, key: string, label: string, on: boolean, onPress: () => void): RenderNode {
+  const { Button } = el
+  return on ? <Button key={key} variant="primary" label={label} onPress={() => onPress()} /> : <Button key={key} plain dimColor label={label} onPress={() => onPress()} />
+}
+
+function controlRich(el: Els, frame: Frame, c: Control): RenderNode {
+  const { Box, Text } = el
+  if (c.count === undefined) return stateButton(el, c.key, c.label, c.on, c.onPress)
+  return (
+    <Box key={'ctl-' + c.key} flexDirection="row" alignItems="center" flexShrink={0}>
+      {stateButton(el, c.key, c.label, c.on, c.onPress)}
+      <Box width={COUNT_CELLS} flexShrink={0} justifyContent="center">
+        <Text color={textTone(frame.appearance).accent} bold>{c.count}</Text>
+      </Box>
+    </Box>
+  )
+}
+
+function effortMenu(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
+  const { Box } = el
+  const current = view.effort.mode === 'manual' || view.effort.mode === 'off' ? view.effort.level : null
+  return (
+    <Box key="effort-menu" flexDirection="row" alignItems="center" flexWrap="wrap" columnGap={CTRL_GAP}>
+      {stateButton(el, 'pick-auto', t(frame.lang, 'band.auto'), view.auto, actions.toggleAuto)}
+      {EFFORTS.map((effort, i) => stateButton(el, 'pick-' + effort, RIPPLE_CHAR[i]! + ' ' + effortName(effort, frame.lang), current === effort, () => actions.pickEffort(effort)))}
+    </Box>
+  )
+}
+
+/** Who chose the effort and why, as "Jev: one small fix"; empty unless Auto chose it. */
+function reasonText(frame: Frame, view: DashboardView): string {
+  const { why, by, mode } = view.effort
+  if (!why || mode !== 'auto' || view.hide.includes('reason')) return ''
+  const who = by === 'jev' ? 'Jev' : by === 'haiku' ? 'Haiku' : by === 'model' ? t(frame.lang, 'band.router') : ''
+  return who ? who + ': ' + why : why
 }
 
 function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
-  const { Box } = el
-  const chips = [
-    effortChip(frame, view, actions.toggleEffortMenu),
-    contextChip(frame, view),
-    cacheChip(frame, view),
-    limitChip(frame, view),
-    routeChip(frame, view, actions.toggleLog),
-  ].filter((c): c is Chip => c !== null)
+  const { Box, Text } = el
+  const reason = reasonText(frame, view)
+  const cols = Math.max(20, frame.columns)
+  // Facts, a rule, the controls. The route takes what is left; narrow, the extras give way (by the
+  // cells counted here, Handoff's place kept). The facts' group starts from nothing and grows into
+  // the row, never below what its slots and a short route need: where the host's real widths leave
+  // less, it wraps under the controls rather than overlap them. Widths alone decide, never values.
+  const ctrlCells = controlsCells(frame, view, actions)
+  const room = cols - ctrlCells - RULE_CELLS
+  const need = (facts: readonly Fact[]) => facts.filter(f => !f.grow).reduce((n, f) => n + f.width, 0) + GAP * Math.max(0, facts.length - 1) + (facts.some(f => f.grow) ? RICH_ROUTE_MIN : 0)
+  let facts: Fact[] = []
+  for (const drop of [[], ['limit'], ['limit', 'context']]) {
+    facts = factsFor(frame, view, actions, room, drop)
+    if (need(facts) <= room) break
+  }
   return (
-    <Box flexDirection="column" rowGap={1}>
-      <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="center" rowGap={1} columnGap={2}>
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
-          {chips.map(c => drawChip(el, c))}
+    <Box flexDirection="column" width="100%" minWidth={0}>
+      <Box key="band-row" flexDirection="row" alignItems="center" width="100%" columnGap={1} flexWrap="wrap">
+        <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={GAP} flexGrow={1} flexShrink={1} width={0} minWidth={need(facts) + GAP + 1}>
+          {facts.map(f => factRich(el, f))}
+          {/* The reason sits right after the route in only what the facts leave (it starts from no
+              width), cut at its end; with no reason the box stays, empty, so nothing else moves. */}
+          <Box key="band-why" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
+            {reason ? <Text dimColor wrap="truncate">{reason}</Text> : null}
+          </Box>
+          <Box flexShrink={0}>
+            <Text dimColor>│</Text>
+          </Box>
         </Box>
-        <Box flexDirection="row" flexWrap="wrap" gap={1}>
-          {controlsRich(el, frame, view, actions)}
+        <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={CTRL_GAP} flexShrink={0}>
+          {controls(frame, view, actions).map(c => controlRich(el, frame, c))}
         </Box>
       </Box>
-      {view.effortMenu ? effortMenuRich(el, frame, view, actions) : null}
+      {view.effortMenu ? effortMenu(el, frame, view, actions) : null}
     </Box>
   )
 }
 
 // ---- Terminal ----------------------------------------------------------------------------------
 
-type Run = { text: string; color?: string; dim?: boolean; bold?: boolean }
-type Segment = { key: string; runs: Run[] }
-
-/** Growing ripples: low → max. */
-const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
-
-function width(seg: Segment): number {
-  return seg.runs.reduce((n, r) => n + displayWidth(r.text), 0) + Math.max(0, seg.runs.length - 1)
-}
-
-function infoSegments(frame: Frame, view: DashboardView): Segment[] {
-  const tone = textTone(frame.appearance)
-  const segs: Segment[] = []
-  const { level, mode, why } = view.effort
-  const idx = effortIndex(level)
-  const runs: Run[] = []
-  if (mode === 'deciding') runs.push({ text: t(frame.lang, 'band.decidingText'), color: tone.accent, bold: true })
-  else if (mode === 'paused') runs.push({ text: '‖ ' + (level ? effortName(level, frame.lang).toLowerCase() : t(frame.lang, 'band.paused').toLowerCase()), dim: true }, { text: t(frame.lang, 'band.autoPaused'), dim: true })
-  else if (mode === 'off') runs.push({ text: (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : t(frame.lang, 'band.off').toLowerCase()), bold: true }, { text: t(frame.lang, 'band.autoOff').toLowerCase(), dim: true })
-  else runs.push({ text: (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : '—'), bold: true, color: mode === 'auto' ? tone.accent : undefined }, { text: t(frame.lang, mode === 'auto' ? 'band.auto' : 'band.manual').toLowerCase(), dim: true })
-  if (view.model) runs.push({ text: '· ' + view.model, dim: true })
-  segs.push({ key: 'effort', runs })
-  if (mode === 'auto' && why && !view.hide.includes('reason')) segs.push({ key: 'why', runs: [{ text: '“' + clip(why, 30) + '”', dim: true }] })
-  if (view.context) {
-    const shade = contextTone(view.context.percent, view.swampAt)
-    const pct = view.context.percent
-    const pie = pct >= 87.5 ? '●' : pct >= 62.5 ? '◕' : pct >= 37.5 ? '◑' : pct >= 12.5 ? '◔' : '○'
-    segs.push({ key: 'context', runs: [{ text: pie + ' ' + Math.round(pct) + '%', color: shade === 'ink' ? undefined : tone[shade] }, { text: compactNumber(view.context.tokens), dim: true }] })
-  }
-  if (!view.hide.includes('timer')) {
-    const left = view.cache ? view.cache.expiresAt - frame.now : 0
-    const r: Run[] = [{ text: '⧗ ' + (view.cache ? countdown(left, frame.lang) : '—'), color: view.cache && left > 0 && left <= 60_000 ? tone.warn : undefined, dim: !view.cache || left <= 0 }]
-    if (view.warm.on) r.push({ text: view.warm.stopped ? t(frame.lang, 'band.warmStopped') : t(frame.lang, 'band.warmText') + (view.warm.pings ? ' ×' + view.warm.pings : ''), color: view.warm.stopped ? undefined : tone.accent, dim: view.warm.stopped !== undefined })
-    segs.push({ key: 'cache', runs: r })
-  }
-  if (view.limit && !view.hide.includes('limits')) {
-    const shade = limitTone(view.limit.percent)
-    const r: Run[] = [{ text: limitName(view.limit.kind, frame.lang), dim: true }, { text: Math.round(view.limit.percent) + '%', color: shade === 'ink' ? undefined : tone[shade] }]
-    if (view.limit.save) r.push({ text: t(frame.lang, 'band.save'), color: tone.accent })
-    segs.push({ key: 'limit', runs: r })
-  }
-  if (!view.hide.includes('route')) {
-    const route = view.route
-    if (route) {
-      const r: Run[] = [
-        route.resent ? { text: '↻', dim: true } : { text: route.ok ? '↳' : '✕', color: route.ok ? tone.ok : tone.bad },
-        { text: clip(route.model, 34), bold: true },
-        { text: route.provider, color: providerColor(route.provider) },
-      ]
-      if (route.effort) r.push({ text: effortLabel(route.effort, frame.lang), dim: true })
-      if (!route.ok) r.push(route.resent ? { text: t(frame.lang, 'band.resent', { status: route.status }), dim: true } : { text: route.status, color: tone.bad })
-      if (route.ok && route.cachePct !== undefined) r.push({ text: t(frame.lang, 'band.cachePercent', { percent: route.cachePct }), color: tone[cacheTone(route.cachePct)] })
-      r.push({ text: seconds(route.seconds, frame.lang), dim: true })
-      segs.push({ key: 'route', runs: r })
-    } else if (view.notice) {
-      segs.push({ key: 'route', runs: [{ text: view.notice, dim: true }] })
-    }
-  }
-  return segs
-}
-
-type Control = { key: string; label: string; hotkey: string; onPress: () => void; primary?: boolean }
-
-function controls(frame: Frame, view: DashboardView, actions: BandActions): Control[] {
-  const handoff = view.handoff !== 'off'
-  return [
-    { key: 'auto', label: t(frame.lang, 'band.auto') + ' ' + (view.auto ? '●' : '○'), hotkey: 'a', onPress: actions.toggleAuto },
-    { key: 'warm', label: t(frame.lang, 'band.warm') + ' ' + (view.warm.on ? '●' : '○'), hotkey: 'w', onPress: actions.toggleWarm },
-    handoff
-      ? { key: 'handoff', label: view.handoff === 'advised' ? t(frame.lang, 'band.handoff') + ' ◆' : t(frame.lang, 'band.handoff'), hotkey: 'h', onPress: actions.handoff }
-      : { key: 'compact', label: t(frame.lang, 'band.compact'), hotkey: 'c', onPress: actions.compact },
-    { key: 'log', label: view.logOpen ? t(frame.lang, 'band.closeLogText') : t(frame.lang, 'band.log'), hotkey: 'l', onPress: actions.toggleLog },
-    { key: 'agents', label: t(frame.lang, 'band.agents') + (view.agents.live ? ' ' + view.agents.live : ''), hotkey: 'g', onPress: actions.toggleAgents },
-    { key: 'settings', label: '⚙', hotkey: 's', onPress: actions.openSettings },
-  ]
-}
-
-/** Packs items of the given widths into rows no wider than `columns`, `gap` apart. */
-export function pack<T>(items: readonly T[], widthOf: (item: T) => number, columns: number, gap: number): T[][] {
-  const rows: T[][] = []
-  let row: T[] = []
-  let used = 0
-  for (const item of items) {
-    const w = widthOf(item)
-    if (row.length > 0 && used + gap + w > columns) {
-      rows.push(row)
-      row = []
-      used = 0
-    }
-    used += (row.length > 0 ? gap : 0) + w
-    row.push(item)
-  }
-  if (row.length > 0) rows.push(row)
-  return rows
-}
-
-function drawSegment(el: Els, seg: Segment): RenderNode {
-  const { Box, Text } = el
+function factText(el: Els, f: Fact): RenderNode {
+  const { Box } = el
   return (
-    <Box key={'seg-' + seg.key} flexDirection="row" columnGap={1}>
-      {seg.runs.map(run => (
-        <Text color={run.color} dimColor={run.dim} bold={run.bold}>
-          {run.text}
-        </Text>
-      ))}
+    <Box key={'fact-' + f.key} flexDirection="row" columnGap={1} width={f.width} flexShrink={0}>
+      {f.glyph ? runText(el, 'glyph', f.glyph) : null}
+      {runText(el, 'value', f.value)}
+      {(f.tail ?? []).map((run, i) => runText(el, 'tail-' + i, run))}
     </Box>
   )
+}
+
+/**
+ * The judge's reason in a slot of its own on a wide terminal, cut to it; the slot stays, blank,
+ * while there is no reason, so the route beside it never changes width.
+ */
+function whyFact(view: DashboardView): Fact | null {
+  if (view.hide.includes('reason')) return null
+  const why = view.effort.mode === 'auto' ? view.effort.why : undefined
+  return { key: 'why', width: WHY_CELLS, value: { text: why ? clip('“' + why + '”', WHY_CELLS) : '', dim: true } }
 }
 
 function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   const { Box } = el
   const cols = Math.max(20, frame.columns)
-  let segs = infoSegments(frame, view)
   const ctrls = controls(frame, view, actions)
-  const ctrlWidth = (c: Control) => displayWidth(c.hotkey) + 2 + displayWidth(c.label)
-  const layout = (s: Segment[]) => {
-    // Wide: facts and controls share rows; otherwise controls get their own.
-    const all: (Segment | Control)[] = [...s, ...ctrls]
-    const together = pack(all, i => ('runs' in i ? width(i) : ctrlWidth(i)), cols, 2)
-    const apart = [...pack(s, width, cols, 2), ...pack(ctrls, ctrlWidth, cols, 2)]
-    return cols >= 120 && together.length === 1 ? together : apart
-  }
-  let rows = layout(segs)
+  const ctrlCells = controlsCells(frame, view, actions)
   const budget = Math.max(1, frame.maxRows)
-  // Too tall for the band: drop the quietest facts first.
-  for (const drop of ['why', 'limit', 'cache', 'context']) {
-    if (rows.length <= budget) break
-    segs = segs.filter(s => s.key !== drop)
-    rows = layout(segs)
+  // One row when the facts (a route at its least) and the controls fit; else facts, then controls.
+  // Too tall for the band: the quietest facts go first. Widths alone decide, never values.
+  let drop: string[] = []
+  const plan = () => {
+    const routeCells = view.hide.includes('route') || drop.includes('route') ? 0 : GAP + ROUTE_MIN
+    const oneRow = span(factsFor(frame, view, actions, cols, [...drop, 'route'])) + routeCells + GAP + ctrlCells <= cols
+    const room = oneRow ? cols - ctrlCells - GAP : cols
+    return { oneRow, facts: factsFor(frame, view, actions, room, drop), room }
   }
-  const menu = view.effortMenu
-    ? [
-        textButton(el, 'pick-auto', t(frame.lang, 'band.auto') + ' ' + (view.auto ? '●' : '○'), actions.toggleAuto, '0'),
-        ...EFFORTS.map((effort: Effort, i) => textButton(el, 'pick-' + effort, RIPPLE_CHAR[i]! + ' ' + effortName(effort, frame.lang).toLowerCase(), () => actions.pickEffort(effort), String(i + 1))),
-      ]
-    : null
+  let p = plan()
+  for (const key of ['limit', 'context', 'route', 'cache']) {
+    if ((p.oneRow ? 1 : 2) <= budget) break
+    drop = [...drop, key]
+    p = plan()
+  }
+  let facts = p.facts
+  // The reason only where the row has room for its whole slot and a roomy route beside it.
+  const why = whyFact(view)
+  const routeNeed = view.hide.includes('route') || drop.includes('route') ? 0 : GAP + 2 * WHY_CELLS
+  if (why && p.room - span(factsFor(frame, view, actions, p.room, [...drop, 'route'])) - GAP >= WHY_CELLS + routeNeed) {
+    const room = p.room - WHY_CELLS - GAP
+    facts = factsFor(frame, view, actions, room, drop)
+    const at = facts.findIndex(f => f.key === 'route')
+    facts = at < 0 ? [...facts, why] : [...facts.slice(0, at), why, ...facts.slice(at)]
+  }
+  const factRow = (
+    <Box key="facts" flexDirection="row" columnGap={GAP} flexShrink={0}>
+      {facts.map(f => factText(el, f))}
+    </Box>
+  )
+  const ctrlRow = (
+    <Box key="controls" flexDirection="row" flexWrap="wrap" columnGap={GAP} flexShrink={0}>
+      {ctrls.map(c => textButton(el, c.key, c.label, c.onPress, c.hotkey))}
+    </Box>
+  )
+  const menu = view.effortMenu ? (
+    <Box key="effort-menu" flexDirection="row" flexWrap="wrap" columnGap={GAP}>
+      {textButton(el, 'pick-auto', t(frame.lang, 'band.auto') + ' ' + (view.auto ? '●' : '○'), actions.toggleAuto, '0')}
+      {EFFORTS.map((effort: Effort, i) => textButton(el, 'pick-' + effort, RIPPLE_CHAR[i]! + ' ' + effortName(effort, frame.lang).toLowerCase(), () => actions.pickEffort(effort), String(i + 1)))}
+    </Box>
+  ) : null
   return (
-    <Box flexDirection="column">
-      {rows.map((row, i) => (
-        <Box key={'row-' + i} flexDirection="row" columnGap={2}>
-          {row.map(item => ('runs' in item ? drawSegment(el, item) : textButton(el, item.key, item.label, item.onPress, item.hotkey, item.primary)))}
+    <Box flexDirection="column" width="100%">
+      {p.oneRow ? (
+        <Box key="row" flexDirection="row" width="100%">
+          {factRow}
+          <Box flexGrow={1} minWidth={GAP} />
+          {ctrlRow}
         </Box>
-      ))}
-      {menu ? (
-        <Box key="effort-menu" flexDirection="row" flexWrap="wrap" columnGap={2}>
-          {menu}
-        </Box>
-      ) : null}
+      ) : (
+        [factRow, ctrlRow]
+      )}
+      {menu}
     </Box>
   )
 }
 
-/** The dashboard band. */
+/**
+ * Cells the caller's controls beside the band take (the close control, and the terminal's effort
+ * button `e: Effort`), with the gap before them: what to take off the frame's columns.
+ */
+export function besideBand(frame: Frame): number {
+  return isRich(frame) ? 5 : 2 + displayWidth('e: ' + t(frame.lang, 'band.effort')) + 2 + 1
+}
+
+/** The dashboard band, `frame.columns` being its own width (see besideBand). */
 export function renderBand(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   return isRich(frame) ? bandRich(el, frame, view, actions) : bandText(el, frame, view, actions)
 }
@@ -486,18 +560,19 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
   const effortText =
     mode === 'deciding' ? t(frame.lang, 'band.decidingText') : (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : '—') + (mode === 'auto' ? '' : mode === 'paused' ? t(frame.lang, 'band.footerPaused') : mode === 'off' ? t(frame.lang, 'band.footerOff') : t(frame.lang, 'band.footerManual'))
   const left = view.cache ? view.cache.expiresAt - frame.now : 0
+  const ctxTone = view.context ? contextTone(view.context.percent, view.swampAt) : 'ink'
   return (
-    <Box flexDirection="row" columnGap={2} alignItems="center">
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2} alignItems="center">
       <Text color={mode === 'deciding' || mode === 'auto' ? tone.accent : undefined} dimColor={mode === 'paused' || mode === 'off'}>
         {effortText}
       </Text>
-      {view.context ? (
-        <Text dimColor color={contextTone(view.context.percent, view.swampAt) === 'ink' ? undefined : tone[contextTone(view.context.percent, view.swampAt) as 'warn' | 'bad']}>
+      {view.context && view.extras.includes('context') ? (
+        <Text dimColor color={ctxTone === 'ink' ? undefined : ctxTone === 'warn' ? WARN : BAD}>
           {t(frame.lang, 'band.footerContext', { percent: Math.round(view.context.percent) })}
         </Text>
       ) : null}
-      {view.cache && !view.hide.includes('timer') ? <Text dimColor>{'⧗ ' + countdown(left, frame.lang) + (view.warm.on ? ' ≈' : '')}</Text> : null}
-      {view.limit && !view.hide.includes('limits') ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
+      {view.cache && !view.hide.includes('timer') ? <Text dimColor>{'⧗ ' + minutesLeft(left, frame.lang) + (view.warm.on ? ' ≈' : '')}</Text> : null}
+      {view.limit && view.extras.includes('limits') ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
       {textButton(el, 'auto', t(frame.lang, 'band.auto') + (view.auto ? ' ●' : ' ○'), actions.toggleAuto)}
       {textButton(el, 'settings', '⚙', actions.openSettings)}
       {engine ?? null}

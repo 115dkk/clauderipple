@@ -8,7 +8,7 @@ registerHooks({ resolve(specifier, context, next) {
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
-  resolveWorker, resolvedRule, calibratedEffort, routerModelOptions, workerCandidates, zenJev, scoreModels, spawnModel, takesOver } = await import('../../packages/mod/hooks/workers.ts')
+  resolveWorker, resolvedRule, calibratedEffort, routerModelOptions, workerCandidates, zenJev, scoreModels, spawnModel, takesOver, claudeCandidates, allowed, withClaude } = await import('../../packages/mod/hooks/workers.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -148,4 +148,26 @@ test('allow-lists pick by worker agent, so one model from two providers is told 
   assert.deepEqual(shownVariant(variants, 60), { effort: 'high', intelligence: 50, costPerTask: 0.4 })
   assert.equal(shownVariant(undefined, 45), undefined)
   assert.deepEqual(workerOptions([{ name: 'a', model: 'm', provider: 'p' }, { name: 'b', model: 'm', provider: 'q' }], [variants], 45), [{ name: 'a', model: 'm', provider: 'p', aa: { effort: 'medium', intelligence: 46, costPerTask: 0.2 } }, { name: 'b', model: 'm', provider: 'q' }])
+})
+
+test('Auto over Claude only picks the cheapest Claude model and effort above the floor, as general-purpose', () => {
+  // AA variants as GET /api/mod-options gave them on 2026-10-10 (rounded).
+  const claude: ModelScore[] = [
+    { model: 'claude-haiku-5-5', provider: 'anthropic', variants: [{ effort: 'low', intelligence: 29.45, costPerTask: 0.0245 }, { effort: 'medium', intelligence: 34.46, costPerTask: 0.047 }, { effort: 'max', intelligence: 43.4, costPerTask: 0.2128 }] },
+    { model: 'claude-sonnet-5-5', provider: 'anthropic', variants: [{ effort: 'medium', intelligence: 46.2, costPerTask: 0.61 }, { effort: 'high', intelligence: 48.1, costPerTask: 0.884 }] },
+    { model: 'claude-opus-5-5', provider: 'anthropic', variants: [{ effort: 'high', intelligence: 53.1, costPerTask: 2.9 }] },
+  ]
+  const onlyClaude = claudeCandidates().map(c => c.target.model).map(m => 'general-purpose:' + m)
+  const s = normalizeSettings({ rules: { general: DEFAULTS.rules.general, design: { mode: 'auto', allow: onlyClaude } } })
+  const all = [...candidates, ...claudeCandidates()]
+  const design = (level: WorkerVerdict['level']) => resolveWorker({ domain: 'design', level, effort: 'high', why: 'taste' }, s, all, [...scores, ...claude], true)
+  assert.deepEqual(design('light'), { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'medium', aa: { intelligence: 34.46, costPerTask: 0.047 }, runnerUp: { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'max', intelligence: 43.4, costPerTask: 0.2128 } })
+  assert.deepEqual(design('standard').target, { agent: 'general-purpose', model: 'sonnet' })
+  assert.equal(design('standard').effort, 'medium')
+  assert.deepEqual(design('deep').target, { agent: 'general-purpose', model: 'opus' })
+  // Spawned as Claude's own agent on the model; its effort is set per step.
+  assert.equal(spawnModel({ agent: 'general-purpose', model: 'sonnet' }, 'medium'), 'sonnet')
+  assert.equal(allowed(claudeCandidates()[1]!, ['general-purpose:sonnet']), true)
+  assert.equal(allowed(claudeCandidates()[1]!, ['gpt-6-1-sol']), false)
+  assert.deepEqual(withClaude([]).map(w => w.name), ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
 })

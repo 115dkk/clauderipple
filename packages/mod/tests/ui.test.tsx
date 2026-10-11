@@ -14,12 +14,13 @@ import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
-import { pack, renderBand, renderFooter } from '../hooks/ui/band'
+import { besideBand, renderBand, renderFooter } from '../hooks/ui/band'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
-import { countdown, elapsed, modelName, resetsLabel, routeOf, seconds, targetOf, targetValue } from '../hooks/ui/view'
-import type { AlertView, DashboardView, Frame, SettingsTab, Surface } from '../hooks/ui/view'
+import { countdown, elapsed, minutesLeft, modelName, nextMinuteChange, resetsLabel, routeOf, seconds, targetOf, targetValue } from '../hooks/ui/view'
+import { hitLabelWidth } from '../hooks/ui/parts'
+import type { AlertView, DashboardView, Frame, JevState, SettingsActions, Surface } from '../hooks/ui/view'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const NOW = Date.parse('2026-10-10T13:20:00')
@@ -59,6 +60,7 @@ const DASH: DashboardView = {
   effortMenu: false,
   swampAt: 50,
   hide: [],
+  extras: ['context'],
   isWorking: false,
 }
 
@@ -87,19 +89,7 @@ const SETTINGS: Settings = normalizeSettings({
   setupDone: false,
 })
 
-const AGENT_OPTIONS = [
-  { value: 'deepseek-v4-1-flash', label: 'deepseek-v4-1-flash', available: true },
-  { value: 'gpt-6-1-sol', label: 'gpt-6-1-sol', available: true },
-  { value: 'gpt-6-astra', label: 'gpt-6-astra', available: false },
-  { value: 'general-purpose+sonnet', label: 'Claude Sonnet', available: true },
-]
-// One model from two providers: the candidate list tells them apart by provider.
-const WORKERS = [
-  { name: 'deepseek-flash', model: 'deepseek-v4.1-flash', provider: 'deepseek', aa: { intelligence: 39.46, costPerTask: 0.2652, effort: 'max' as const } },
-  { name: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash', provider: 'opencode-go', aa: { intelligence: 39.46, costPerTask: 0.2652, effort: 'max' as const } },
-  { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt', aa: { intelligence: 50.24, costPerTask: 0.3191, effort: 'high' as const } },
-  { name: 'glm-5-3-flash', model: 'glm-5.3-flash', provider: 'opencode-go' },
-]
+const QUICK_ACTIONS: SettingsActions = { patch: () => undefined, jevKey: () => undefined, testJev: () => undefined, openAllSettings: () => undefined, close: () => undefined }
 
 type Draw = (el: Parameters<typeof renderBand>[0], surface: Surface) => ReturnType<typeof renderBand>
 
@@ -137,7 +127,15 @@ test('view helpers', () => {
   expect(targetOf('gpt-6-1-sol')).toEqual({ agent: 'gpt-6-1-sol' })
   const record: StatusRequest = { at: '2026-10-10T13:19:10', source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, usage: { input: 3000, cached: 41_000, output: 900 } }
   expect(routeOf(record)).toMatchObject({ model: 'gpt-6.1-sol (gpt-6-1-sol)', cachePct: 93, seconds: 2.14 })
-  expect(pack([5, 5, 5, 5], n => n, 12, 2)).toEqual([[5, 5], [5, 5]])
+  expect(minutesLeft(41 * 60_000 + 1, 'en')).toBe('42m')
+  expect(minutesLeft(41 * 60_000, 'en')).toBe('41m')
+  expect(minutesLeft(30_000, 'ko')).toBe('1분')
+  expect(minutesLeft(0, 'en')).toBe('cold')
+  // The shown minute changes exactly when a whole minute is left, and at expiry.
+  expect(nextMinuteChange(NOW + 41 * 60_000 + 30_000, NOW)).toBe(NOW + 30_000)
+  expect(nextMinuteChange(NOW + 41 * 60_000, NOW)).toBe(NOW + 60_000)
+  expect(nextMinuteChange(NOW + 20_000, NOW)).toBe(NOW + 20_000)
+  expect(nextMinuteChange(NOW, NOW)).toBe(null)
 })
 
 // ---- Band --------------------------------------------------------------------------------------
@@ -154,25 +152,28 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
   )
   for (const surface of SURFACES) {
     const ui = await mount($, 'band', surface)
-    for (const key of ['auto', 'warm', 'compact', 'log', 'agents', 'settings']) {
+    // Compact left the band (it is /compact and the alerts' choice).
+    expect(await ui.find({ key: 'compact' })).toBeUndefined()
+    // The desktop's Log is the route itself.
+    for (const key of surface === 'terminal' ? ['auto', 'warm', 'log', 'agents', 'settings'] : ['auto', 'warm', 'agents', 'settings']) {
       expect(await ui.find({ type: 'Button', key }), "ui { type: 'Button', key } " + surface).toBeDefined()
       await ui.press({ key })
     }
+    // No pictures on any surface: the desktop draws each answer afresh, and a picture blinks.
+    expect(await ui.find({ type: 'Svg' })).toBeUndefined()
     if (surface === 'terminal') {
-      expect(await ui.find({ type: 'Svg' })).toBeUndefined()
       expect((await ui.find({ key: 'auto' }))?.props.hotkey).toBe('a')
       expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol' }), "ui { type: 'Text', text: 'gpt-6.1-sol' } " + surface).toBeDefined()
     } else {
-      const svgs = await ui.findAll({ type: 'Svg' })
-      expect(svgs.length > 5).toBe(true)
-      for (const svg of svgs) {
-        expect(typeof svg.props.alt).toBe('string')
-        expect(typeof svg.props.width).toBe('number')
-        expect(typeof svg.props.height).toBe('number')
-        expect((svg.props.source as string).length < 131_072).toBe(true)
-      }
-      // The route chip opens the log too.
+      expect((await ui.find({ type: 'Button', key: 'route' }))?.props.label).toBe('gpt-6.1-sol')
+      expect((await ui.find({ type: 'Button', key: 'effort' }))?.props.label).toBe('High')
+      // What captions said is in the hover cards.
+      expect(await ui.find({ type: 'Text', text: 'Opus 5.5 · Auto' })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Effort High — multi-file refactor/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^Last route: gpt-6.1-sol via chatgpt, high, cache 96%/ })).toBeDefined()
+      // The route opens the log too; the effort its menu.
       await ui.press({ key: 'route' })
+      await ui.press({ key: 'effort' })
     }
     await ui.unmount()
 
@@ -182,16 +183,17 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
     await busy.press({ key: 'handoff' })
     await busy.press({ key: 'pick-low' })
     if (surface === 'desktop') {
-      const alts = (await busy.findAll({ type: 'Svg' })).map(svg => String(svg.props.alt))
-      expect(alts.some(alt => alt.startsWith('Effort Deciding'))).toBe(true)
-      expect(alts.some(alt => alt.includes('keep warm on'))).toBe(true)
+      expect((await busy.find({ type: 'Button', key: 'effort' }))?.props.label).toBe('Deciding…')
+      expect(await busy.find({ type: 'Text', text: /keep-warm on, 2 pings/ })).toBeDefined()
+      expect(await busy.find({ type: 'Text', text: '2' })).toBeDefined()
     } else {
       expect(await busy.find({ type: 'Text', text: /deciding/ }), "busy { type: 'Text', text: /deciding/ } " + surface).toBeDefined()
     }
     await busy.unmount()
   }
   expect(calls.filter(c => c === 'auto').length).toBe(2)
-  expect(calls.filter(c => c === 'log').length).toBe(3)
+  expect(calls.filter(c => c === 'log').length).toBe(2)
+  expect(calls.filter(c => c === 'menu').length).toBe(1)
   expect(calls.filter(c => c === 'pick:["low"]').length).toBe(2)
   expect(calls.filter(c => c === 'handoff').length).toBe(2)
 })
@@ -230,7 +232,7 @@ test('the minimal footer draws on both surfaces', async ($, on) => {
   expect(calls).toEqual(['settings', 'settings'])
 })
 
-test('a ko frame resolves temporary Korean text, SVG captions, alt and title', async ($, on) => {
+test('a ko frame resolves temporary Korean text in labels and hover cards', async ($, on) => {
   const original = { ...STRINGS.ko }
   const noop = () => undefined
   const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
@@ -245,10 +247,9 @@ test('a ko frame resolves temporary Korean text, SVG captions, alt and title', a
     expect(await terminal.find({ type: 'Text', text: /높음/ })).toBeDefined()
     await terminal.unmount()
     const desktop = await mount($, 'ko-band', 'desktop')
-    const svgs = await desktop.findAll({ type: 'Svg' })
-    expect(svgs.some(svg => String(svg.props.alt).startsWith('강도 높음'))).toBe(true)
-    expect(svgs.some(svg => String(svg.props.source).includes('<title>강도 높음'))).toBe(true)
-    expect(svgs.some(svg => String(svg.props.source).includes('자동'))).toBe(true)
+    expect((await desktop.find({ type: 'Button', key: 'effort' }))?.props.label).toBe('높음')
+    expect((await desktop.find({ type: 'Button', key: 'auto' }))?.props.label).toBe('자동')
+    expect(await desktop.find({ type: 'Text', text: /^강도 높음 — multi-file refactor · 선택$/ })).toBeDefined()
     await desktop.unmount()
   } finally { Object.assign(STRINGS.ko, original) }
 })
@@ -312,131 +313,91 @@ test('alert choices reach their callbacks', async ($, on) => {
 
 // ---- Settings and setup ------------------------------------------------------------------------
 
-const TABS: SettingsTab[] = ['effort', 'workers', 'judge', 'cache', 'handoff', 'look']
+test('quick settings draw on both surfaces with only session controls', async ($, on) => {
+  drawPane(on, 'quick', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS))
+  drawPane(on, 'quick-off', (el, surface) => renderSettings(el, frameOf(surface), { settings: { ...SETTINGS, effortAuto: false }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'quick', surface)
+    expect((await ui.find({ type: 'Text', text: 'ClaudeRipple' }))?.props.bold).toBe(true)
+    expect((await ui.find({ type: 'Text', text: 'Quick settings' }))?.props.dimColor).toBe(true)
+    for (const key of ['set-auto', 'bias-2', 'judge-haiku', 'judge-jev', 'judge-model', 'set-warm', 'all-settings', 'close']) expect(await ui.find({ key }), surface + ' ' + key).toBeDefined()
+    for (const key of ['save', 'tab-workers', 'floor', 'judge-model', 'jev-source', 'warm-hours', 'worker-next']) {
+      if (key === 'judge-model') expect(await ui.find({ type: 'Select', key })).toBeUndefined()
+      else expect(await ui.find({ key })).toBeUndefined()
+    }
+    expect(await ui.find({ type: 'Text', text: '● unsaved' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
+    await ui.unmount()
+    const off = await mount($, 'quick-off', surface)
+    expect(await off.find({ key: 'bias-2' })).toBeUndefined()
+    await off.unmount()
+  }
+})
 
-test('every settings card draws on both surfaces without the affiliation footer', async ($, on) => {
-  const noop = () => undefined
-  const actions = { setTab: noop, patch: noop, setRule: noop, setWorkerUi: noop, setFallback: noop, jevKey: noop, testJev: noop, save: noop, close: noop }
-  for (const tab of TABS) {
-    for (const judge of tab === 'judge' ? (['haiku', 'jev', 'model'] as const) : (['haiku'] as const)) {
-      drawPane(on, 'settings-' + tab + '-' + judge, (el, surface) =>
-        renderSettings(el, frameOf(surface, 120, 14), { tab, draft: { ...SETTINGS, judge }, dirty: false, agents: AGENT_OPTIONS, routerModels: [{ value: 'deepseek-v4.1-flash', label: 'deepseek-v4.1-flash · deepseek', provider: 'deepseek' }], workers: WORKERS, workerUi: { section: 'general', page: 0 }, skills: ['handoff'], jev: { source: 'file', test: { state: 'ok' } } }, actions),
-      )
+test('quick settings controls reach their callbacks on both surfaces', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { patch: fn('patch'), jevKey: fn('key'), testJev: fn('test'), openAllSettings: fn('all'), close: fn('close') }
+  drawPane(on, 'quick', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, actions))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'quick', surface)
+    await ui.press({ key: 'set-auto' })
+    await ui.press({ key: 'bias-2' })
+    await ui.press({ key: 'judge-model' })
+    await ui.press({ key: 'set-warm' })
+    await ui.input({ key: 'jev-key', text: 'ts-key' })
+    await ui.press({ key: 'jev-test' })
+    await ui.press({ key: 'all-settings' })
+    await ui.press({ key: 'close' })
+    await ui.unmount()
+  }
+  const once = ['patch:[{"effortAuto":false}]', 'patch:[{"bias":2}]', 'patch:[{"judge":"model"}]', 'patch:[{"keepWarm":true}]', 'key:["ts-key"]', 'test', 'all', 'close']
+  expect(calls).toEqual([...once, ...once])
+})
+
+test('Jev key and Test row appear only for TypeSafe Jev with no known key', async ($, on) => {
+  const sources: JevState['source'][] = [null, 'zen', 'env', 'file', 'pasted']
+  for (const judge of ['haiku', 'jev', 'model'] as const) {
+    for (const jevSource of ['typesafe', 'zen'] as const) {
+      for (const source of sources) drawPane(on, [judge, jevSource, source].join('-'), (el, surface) => renderSettings(el, frameOf(surface), { settings: { ...SETTINGS, judge, jevSource }, jev: { source, test: { state: 'idle' } } }, QUICK_ACTIONS))
     }
   }
   for (const surface of SURFACES) {
-    for (const tab of TABS) {
-      for (const judge of tab === 'judge' ? ['haiku', 'jev', 'model'] : ['haiku']) {
-        const ui = await mount($, 'settings-' + tab + '-' + judge, surface)
-        expect(await ui.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
-        expect(await ui.find({ key: 'save' }), "ui { key: 'save' } " + surface).toBeDefined()
-        await ui.unmount()
+    for (const judge of ['haiku', 'jev', 'model'] as const) {
+      for (const jevSource of ['typesafe', 'zen'] as const) {
+        for (const source of sources) {
+          const ui = await mount($, [judge, jevSource, source].join('-'), surface)
+          const shown = judge === 'jev' && jevSource === 'typesafe' && (source === null || source === 'zen')
+          expect(!!await ui.find({ type: 'Input', key: 'jev-key' }), surface + ' ' + [judge, jevSource, source]).toBe(shown)
+          expect(!!await ui.find({ key: 'jev-test' })).toBe(shown)
+          await ui.unmount()
+        }
       }
     }
   }
 })
 
-test('settings controls reach their callbacks', async ($, on) => {
-  const { calls, fn } = recorder()
-  const actions = { setTab: fn('tab'), patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
-  const view = (tab: SettingsTab) => ({ tab, draft: SETTINGS, dirty: true, agents: AGENT_OPTIONS, routerModels: [], workers: WORKERS, workerUi: { section: 'general' as const, page: 0 }, skills: [], jev: { source: null, test: { state: 'idle' as const } } })
-  drawPane(on, 'effort', (el, surface) => renderSettings(el, frameOf(surface), view('effort'), actions))
-  drawPane(on, 'workers', (el, surface) => renderSettings(el, frameOf(surface), view('workers'), actions))
-  drawPane(on, 'judge', (el, surface) => renderSettings(el, frameOf(surface), view('judge'), actions))
-  for (const surface of SURFACES) {
-    const effort = await mount($, 'effort', surface)
-    await effort.press({ key: 'tab-cache' })
-    await effort.press({ key: surface === 'desktop' ? 'bias-2' : 'bias-2' })
-    await effort.select({ key: 'floor', value: 'medium' })
-    await effort.press({ key: 'save' })
-    await effort.press({ key: 'close' })
-    const workers = await mount($, 'workers', surface)
-    await workers.select({ key: 'pin-light', value: 'gpt-6-1-sol' })
-    await workers.press({ key: 'agent-auto-all' })
-    const judge = await mount($, 'judge', surface)
-    await judge.input({ key: 'jev-key', text: 'ts-key' })
-    await judge.press({ key: 'jev-test' })
-  }
-  const once = [
-    'tab:["cache"]',
-    'patch:[{"bias":2}]',
-    'patch:[{"floor":"medium"}]',
-    'save',
-    'close',
-    'rule:["general",{"mode":"pin","targets":{"light":{"agent":"gpt-6-1-sol"},"standard":{"agent":"gpt-6-1-sol"},"deep":{"agent":"gpt-6-astra"}}}]',
-    'patch:[{"agentAuto":"all"}]',
-    'key:["ts-key"]',
-    'test',
-  ]
-  expect(calls).toEqual([...once, ...once])
-})
-
-test('workers: Auto candidates per worker, details, exceptions and paging on narrow surfaces', async ($, on) => {
-  const { calls, fn } = recorder()
-  const actions = { setTab: fn('tab'), patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), setFallback: fn('fallback'), jevKey: fn('key'), testJev: fn('test'), save: fn('save'), close: fn('close') }
-  const draft = normalizeSettings({ rules: { general: { mode: 'auto', allow: ['deepseek-v4-1-flash', 'gpt-6-1-sol'] } } })
-  const view = (workerUi: { section: 'general' | 'design'; page: number; details?: boolean }, rows = 12) => (el: Parameters<Draw>[0], surface: Surface) => renderSettings(el, frameOf(surface, 80, rows), { tab: 'workers', draft, dirty: false, agents: AGENT_OPTIONS, routerModels: [], workers: WORKERS, skills: [], jev: { source: null, test: { state: 'idle' } }, workerUi }, actions)
-  drawPane(on, 'workers-auto', view({ section: 'general', page: 0 }, 20))
-  drawPane(on, 'workers-paged', view({ section: 'general', page: 0 }, 9))
-  drawPane(on, 'workers-details', view({ section: 'general', page: 0, details: true }, 20))
-  drawPane(on, 'workers-design', view({ section: 'design', page: 0 }, 20))
-  for (const surface of SURFACES) {
-    const auto = await mount($, 'workers-auto', surface, 80)
-    // Desktop draws the second line inside the candidate's picture, so read the whole tree.
-    const drawn = JSON.stringify(await auto.drawn())
-    expect(drawn).toMatch(/deepseek · 39\.5 · \$0\.27 at max/)
-    expect(drawn).toMatch(/opencode-go · 39\.5 · \$0\.27 at max/)
-    expect(drawn).toMatch(/opencode-go · no AA data/)
-    expect(await auto.find({ key: 'provider-chatgpt' })).toBeUndefined()
-    await auto.press({ key: 'candidate-deepseek-flash' })
-    await auto.press({ key: 'candidate-gpt-6-1-sol' })
-    await auto.press({ key: 'exception-design' })
-    await auto.select({ key: 'exception-add', value: 'docs' })
-    await auto.press({ key: 'rule-mode-pin' })
-    const paged = await mount($, 'workers-paged', surface, 80)
-    await paged.press({ key: 'worker-next' })
-    const details = await mount($, 'workers-details', surface, 80)
-    expect(await details.find({ type: 'Text', text: /cheapest above index 45.*Data: Artificial Analysis/ })).toBeDefined()
-    await details.select({ key: 'tie-band', value: '3' })
-    const design = await mount($, 'workers-design', surface, 80)
-    await design.select({ key: 'pin-deep', value: 'gpt-6-1-sol' })
-    await design.press({ key: 'exception-remove' })
-  }
-  const once = [
-    'rule:["general",{"mode":"auto","allow":["deepseek-flash","deepseek-v4-1-flash","gpt-6-1-sol"]}]',
-    'rule:["general",{"mode":"auto","allow":["deepseek-v4-1-flash"]}]',
-    'workerUi:[{"section":"design","page":0,"details":false}]',
-    'rule:["docs",{"mode":"auto","allow":["deepseek-v4-1-flash","gpt-6-1-sol"]}]',
-    'workerUi:[{"section":"docs","page":0,"details":false}]',
-    'workerUi:[{"page":0,"details":false}]',
-    'rule:["general",{"mode":"pin","targets":{"light":{"agent":"deepseek-v4-1-flash"},"standard":{"agent":"gpt-6-1-sol"},"deep":{"agent":"gpt-6-astra"}}}]',
-    'workerUi:[{"page":1}]',
-    'patch:[{"autoTieBand":3}]',
-    'rule:["design",{"mode":"pin","targets":{"light":{"agent":"general-purpose","model":"sonnet"},"standard":{"agent":"general-purpose","model":"sonnet"},"deep":{"agent":"gpt-6-1-sol"}}}]',
-    'rule:["design",{"mode":"inherit"}]',
-    'workerUi:[{"section":"general","page":0,"details":false}]',
-  ]
-  expect(calls).toEqual([...once, ...once])
-})
-
 test('setup steps draw on both surfaces and move on', async ($, on) => {
   const { calls, fn } = recorder()
-  const actions = { patch: fn('patch'), setRule: fn('rule'), setWorkerUi: fn('workerUi'), jevKey: fn('key'), testJev: fn('test'), back: fn('back'), next: fn('next'), finish: fn('finish'), skip: fn('skip') }
+  const actions = { patch: fn('patch'), jevKey: fn('key'), testJev: fn('test'), openAllSettings: fn('all'), back: fn('back'), next: fn('next'), finish: fn('finish'), skip: fn('skip') }
   for (const step of [1, 2, 3, 4] as const) {
     drawPane(on, 'setup-' + step, (el, surface) =>
-      renderSetup(el, frameOf(surface), { step, draft: SETTINGS, agents: AGENT_OPTIONS, routerModels: [], workers: WORKERS, workerUi: { section: 'general' as const, page: 0 }, jev: { source: 'env', test: { state: 'idle' } } }, actions),
+      renderSetup(el, frameOf(surface), { step, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, actions),
     )
   }
   for (const surface of SURFACES) {
     await (await mount($, 'setup-1', surface)).press({ key: 'next' })
-    await (await mount($, 'setup-2', surface)).press({ key: 'back' })
+    const workers = await mount($, 'setup-2', surface)
+    expect(await workers.find({ type: 'Text', text: 'Workers start on Auto; details are on the dashboard.' })).toBeDefined()
+    expect(await workers.find({ key: 'rule-mode-auto' })).toBeUndefined()
+    await workers.press({ key: 'all-settings' })
+    await workers.press({ key: 'back' })
     await (await mount($, 'setup-3', surface)).press({ key: 'set-warm' })
     const done = await mount($, 'setup-4', surface)
     expect(await done.find({ type: 'Text', text: /^Fixed · exceptions: Design → Fixed$/ }), "done { type: 'Text', text: /Fixed · exceptions: Design → Fixed/ } " + surface).toBeDefined()
     expect(await done.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
     await done.press({ key: 'finish' })
   }
-  const once = ['next', 'back', 'patch:[{"keepWarm":true}]', 'finish']
+  const once = ['next', 'all', 'back', 'patch:[{"keepWarm":true}]', 'finish']
   expect(calls).toEqual([...once, ...once])
 })
 
@@ -466,7 +427,9 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
   for (const surface of SURFACES) {
     const ui = await mount($, 'agents', surface, 64)
     expect(await ui.find({ type: 'Text', text: 'Port the request log renderer' }), "ui { type: 'Text', text: 'Port the request log renderer' } " + surface).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), "ui { type: 'Text', text: /Edit hooks\/ui\/log.tsx/ } " + surface).toBeDefined()
+    // The desktop leaves what an agent is doing to the host's task list above the pane.
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), surface).toBeDefined()
+    else expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), surface).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'Summarize the docs' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Frontend \/ Standard/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /index 50.2.*\$0.32\/task.*next:.*Data: Artificial Analysis/ })).toBeDefined()
@@ -477,6 +440,30 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
     expect(await empty.find({ type: 'Text', text: 'No agents yet' }), "empty { type: 'Text', text: 'No agents yet' } " + surface).toBeDefined()
   }
   expect(calls).toEqual(['done', 'done'])
+})
+
+test('the log pane lists this session\'s verdicts among its requests, a fallback in plain words', async ($, on) => {
+  const rows: StatusRequest[] = [{ at: '2026-10-10T13:19:10', source: 'claude-opus-5-5', target: 'claude-opus-5-5', provider: 'anthropic', status: 200, ok: true, ms: 19_400, effort: 'low', mine: true }]
+  const judges = [
+    { at: Date.parse('2026-10-10T13:19:09'), for: 'prompt' as const, asked: 'jev' as const, by: 'jev' as const, ms: 610, effort: 'low' as const, sure: 0.94 },
+    { at: Date.parse('2026-10-10T13:20:00'), for: 'prompt' as const, asked: 'jev' as const, by: 'haiku' as const, ms: 3400, effort: 'medium' as const, error: 'Jev timed out' },
+  ]
+  drawPane(on, 'log-judges', (el, surface) => renderLog(el, frameOf(surface, 80), { rows, mineOnly: true, judges }, { toggleScope: () => undefined }))
+  drawPane(on, 'log-all', (el, surface) => renderLog(el, frameOf(surface, 80), { rows, mineOnly: false, judges }, { toggleScope: () => undefined }))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'log-judges', surface, 80)
+    expect(await ui.find({ type: 'Text', text: 'Effort judge' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /sure 94%/ }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Jev failed → Haiku' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Jev timed out' }), surface).toBeDefined()
+    // Newest first: the fallback, the request, then the verdict that preceded it.
+    const order: string[] = []
+    walk(await ui.drawn(), n => { const text = (n.children ?? []).join(''); if (n.type === 'Text' && /^(Jev failed → Haiku|claude-opus-5-5|Jev)$/.test(text)) order.push(text) })
+    expect(order).toEqual(['Jev failed → Haiku', 'claude-opus-5-5', 'Jev'])
+    // Another session's requests have no verdicts of ours beside them.
+    const all = await mount($, 'log-all', surface, 80)
+    expect(await all.find({ type: 'Text', text: 'Effort judge' }), surface).toBeUndefined()
+  }
 })
 
 test('the log pane keeps its content', async ($, on) => {
@@ -499,4 +486,189 @@ test('the log pane keeps its content', async ($, on) => {
     expect(await empty.find({ type: 'Text', text: 'No model requests yet.' }), "empty { type: 'Text', text: 'No model requests yet.' } " + surface).toBeDefined()
   }
   expect(calls).toEqual(['scope', 'scope'])
+})
+
+// ---- Nothing cut, nothing reloaded (2026-10-10) -------------------------------------------------
+
+type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+function walk(node: unknown, visit: (n: Drawn) => void): void {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) { for (const child of node) walk(child, visit); return }
+  const n = node as Drawn
+  visit(n)
+  for (const child of n.children ?? []) walk(child, visit)
+}
+/** Each pressable chip: its picture's width and its blank hit label. */
+function chips(tree: unknown): { key: string; width: number; label: string }[] {
+  const out: { key: string; width: number; label: string }[] = []
+  walk(tree, n => {
+    const [picture, layer] = n.children ?? []
+    if (n.type !== 'Box' || (picture as Drawn)?.type !== 'Svg') return
+    walk(layer, b => {
+      const label = b.props?.label
+      if (b.type === 'Button' && typeof label === 'string' && /^\u00a0+$/.test(label)) out.push({ key: String(b.props?.key), width: Number((picture as Drawn).props?.width), label })
+    })
+  })
+  return out
+}
+
+test('every blank hit label fits its chip, with long Korean and Japanese labels', async ($, on) => {
+  const original = { ko: { ...STRINGS.ko }, ja: { ...STRINGS.ja } }
+  const noop = () => undefined
+  const settingsActions = QUICK_ACTIONS
+  const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+  const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  try {
+    STRINGS.ko['settings.openAll'] = '라우터 대시보드에서 모든 세부 설정 열기'
+    STRINGS.ko['settings.effortAuto'] = '각 프롬프트의 추론 강도를 자동으로 선택하기'
+    STRINGS.ja['settings.openAll'] = 'ルーターのダッシュボードですべての詳細設定を開く'
+    STRINGS.ja['alerts.notNow'] = 'あとで、コンテキストがさらに増えたときに'
+    const auto = normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } })
+    const cases: [string, Draw][] = []
+    for (const lang of ['ko', 'ja'] as const) {
+      const frame = (surface: Surface, columns = 64) => ({ ...frameOf(surface, columns, 30), lang })
+      cases.push([lang + '-quick', (el, surface) => renderSettings(el, frame(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, settingsActions)])
+      cases.push([lang + '-setup', (el, surface) => renderSetup(el, frame(surface), { step: 2, draft: auto, jev: { source: null, test: { state: 'idle' } } }, { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop })])
+      cases.push([lang + '-band', (el, surface) => renderBand(el, frame(surface), { ...DASH, handoff: 'advised', agents: { live: 2, total: 3 }, effortMenu: true }, bandActions)])
+      ALERTS.forEach((alert, i) => cases.push([lang + '-alert-' + i, (el, surface) => renderAlert(el, frame(surface, 60), alert, alertActions)]))
+    }
+    for (const [id, draw] of cases) drawPane(on, id, draw)
+    let seen = 0
+    for (const [id] of cases) {
+      const ui = await mount($, id, 'desktop', 64)
+      for (const c of chips(await ui.drawn())) {
+        seen++
+        expect(hitLabelWidth(c.label) <= c.width, id + ' ' + c.key + ': ' + hitLabelWidth(c.label) + ' > ' + c.width).toBe(true)
+      }
+      await ui.unmount()
+    }
+    expect(seen > 50).toBe(true)
+  } finally { Object.assign(STRINGS.ko, original.ko); Object.assign(STRINGS.ja, original.ja) }
+})
+
+test('no drawing cuts its text: no truncating Text on any surface', async ($, on) => {
+  const noop = () => undefined
+  const settingsActions = QUICK_ACTIONS
+  const cases: [string, Draw][] = [
+    ['cut-quick', (el, surface) => renderSettings(el, frameOf(surface, 60, 30), { settings: SETTINGS, jev: { source: null, test: { state: 'fail', message: 'key rejected (401) '.repeat(4) } } }, settingsActions)],
+    ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { toggleDone: noop })],
+    ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop })],
+    ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
+    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop })]),
+  ]
+  for (const [id, draw] of cases) drawPane(on, id, draw)
+  for (const surface of SURFACES) {
+    for (const [id] of cases) {
+      const ui = await mount($, id, surface, 40)
+      walk(await ui.drawn(), n => {
+        if (n.type === 'Text') expect(String(n.props?.wrap ?? 'wrap').startsWith('truncate'), id + ' ' + surface).toBe(false)
+      })
+      await ui.unmount()
+    }
+  }
+})
+
+// ---- The band holds still (2026-10-10) ----------------------------------------------------------
+
+const BAND_ACTIONS = { toggleAuto: () => undefined, toggleWarm: () => undefined, compact: () => undefined, handoff: () => undefined, toggleLog: () => undefined, toggleAgents: () => undefined, openSettings: () => undefined, toggleEffortMenu: () => undefined, pickEffort: () => undefined }
+const unhandled = (tree: unknown) => JSON.stringify(tree).replace(/"handle":\d+/g, '')
+
+test('within a minute the band draws the same tree; a minute on, only the countdown changes', async ($, on) => {
+  const view: DashboardView = { ...DASH, cache: { expiresAt: NOW + 41 * 60_000 + 30_000, ttlMs: 3_600_000 }, effort: { level: null, mode: 'deciding', since: NOW - 300 } }
+  for (const surface of SURFACES) {
+    drawPane(on, 'now-' + surface, el => renderBand(el, frameOf(surface), view, BAND_ACTIONS))
+    // Twenty-nine seconds on, the judge further along: the same minute shown, so the same tree.
+    drawPane(on, 'later-' + surface, el => renderBand(el, { ...frameOf(surface), now: NOW + 29_000 }, { ...view, effort: { ...view.effort, since: NOW - 2_000 } }, BAND_ACTIONS))
+    drawPane(on, 'minute-' + surface, el => renderBand(el, { ...frameOf(surface), now: NOW + 31_000 }, view, BAND_ACTIONS))
+  }
+  for (const surface of SURFACES) {
+    const drawn = async (id: string) => unhandled(await (await mount($, id, surface)).drawn())
+    const now = await drawn('now-' + surface)
+    expect(now).toContain('"42m"')
+    expect(await drawn('later-' + surface)).toBe(now)
+    expect((await drawn('minute-' + surface)).replace(/\b41m\b/g, '42m')).toBe(now)
+  }
+})
+
+/** Each fact's slot width and each control's label, by key, as drawn. */
+function layoutOf(tree: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  walk(tree, n => {
+    const key = String(n.props?.key ?? '')
+    if (n.type === 'Box' && key.startsWith('fact-')) out[key] = n.props?.width
+    if (n.type === 'Button' && ['auto', 'warm', 'log', 'agents', 'settings'].includes(key)) out[key] = typeof n.props?.label === 'string' ? [...n.props.label].map(c => (/[●○·0-9]/.test(c) ? '#' : c)).join('') : n.props?.label
+  })
+  return out
+}
+
+test('no value moves a neighbour: every slot keeps its width whatever it shows', async ($, on) => {
+  const levels: DashboardView['effort'][] = [
+    ...(['low', 'medium', 'high', 'xhigh', 'max'] as const).flatMap(level => [{ level, mode: 'auto' as const, why: 'w' }, { level, mode: 'manual' as const }]),
+    { level: null, mode: 'deciding' }, { level: 'high', mode: 'paused' }, { level: null, mode: 'off' },
+  ]
+  const caches: DashboardView['cache'][] = [{ expiresAt: NOW + 3_600_000, ttlMs: 3_600_000 }, { expiresAt: NOW + 9 * 60_000, ttlMs: 3_600_000 }, { expiresAt: NOW + 20_000, ttlMs: 300_000 }, { expiresAt: NOW - 1, ttlMs: 300_000 }, null]
+  const routes: Pick<DashboardView, 'route' | 'notice'>[] = [
+    { route: DASH.route, notice: null },
+    { route: { ...DASH.route!, model: 'a-very-long-routed-model-name (and-what-was-asked)', cachePct: 100 }, notice: null },
+    { route: { ...DASH.route!, ok: false, status: '429', cachePct: undefined }, notice: null },
+    { route: { ...DASH.route!, ok: false, resent: true, status: '529' }, notice: null },
+    { route: null, notice: 'ClaudeRipple: router not answering' },
+  ]
+  const views: DashboardView[] = [
+    ...levels.map(effort => ({ ...DASH, effort })),
+    ...caches.map(cache => ({ ...DASH, cache })),
+    ...routes.map(r => ({ ...DASH, ...r })),
+    { ...DASH, agents: { live: 2, total: 3 }, agentsOpen: true, logOpen: true, auto: false, warm: { on: true, pings: 12, cost: 0, stopped: 'no cache' } },
+    { ...DASH, handoff: 'advised', context: { percent: 100, tokens: 200_000, window: 200_000 } },
+  ]
+  const LANGS = ['en', 'ko', 'ja', 'es'] as const
+  for (const lang of LANGS) {
+    for (const surface of SURFACES) {
+      // A terminal wide enough for the reason's slot, a desktop band of ~1000 px.
+      for (const [i, view] of views.entries()) drawPane(on, lang + '-' + surface + '-' + i, el => renderBand(el, { ...frameOf(surface, surface === 'terminal' ? 200 : 110), lang }, view, BAND_ACTIONS))
+    }
+  }
+  for (const lang of LANGS) {
+    for (const surface of SURFACES) {
+      const seen: Record<string, unknown> = {}
+      for (let i = 0; i < views.length; i++) {
+        const ui = await mount($, lang + '-' + surface + '-' + i, surface, 110)
+        for (const [key, value] of Object.entries(layoutOf(await ui.drawn()))) {
+          if (key in seen) expect(value, lang + ' ' + surface + ' view ' + i + ' ' + key).toEqual(seen[key])
+          else seen[key] = value
+        }
+        await ui.unmount()
+      }
+      // A wide enough terminal keeps a slot for the reason, blank while there is none.
+      const why = surface === 'terminal' ? ['fact-why'] : []
+      expect(Object.keys(seen).sort()).toEqual(['agents', 'auto', 'fact-cache', 'fact-context', 'fact-effort', 'fact-route', ...why, ...(surface === 'terminal' ? ['log'] : []), 'settings', 'warm'])
+    }
+  }
+})
+
+test('the desktop band is one row at 700 px in Korean and Chinese, 770 px in English and Japanese, 870 px in Spanish and Portuguese, Handoff advised', async ($, on) => {
+  // 700 px is 79 ch of the host's 14 px sans; the close control beside the band takes its share.
+  // The facts' names (Effort, Cache) and the word Settings cost the Latin and kana labels the most.
+  // The row wraps only where the host's real widths leave the facts less than their group's least
+  // width: that least width plus the controls' cells must fit, and the route must be there.
+  // Narrower than that, the controls wrap under the facts.
+  const busy: DashboardView = { ...DASH, effort: { level: 'xhigh', mode: 'manual' }, handoff: 'advised', agents: { live: 2, total: 3 }, warm: { on: true, pings: 3, cost: 0 } }
+  const langs = Object.keys(STRINGS) as (keyof typeof STRINGS)[]
+  for (const lang of langs) {
+    const frame = { ...frameOf('desktop', 79), lang }
+    drawPane(on, 'row-' + lang, el => renderBand(el, { ...frame, columns: frame.columns - besideBand(frame) }, busy, BAND_ACTIONS))
+  }
+  for (const lang of langs) {
+    const ui = await mount($, 'row-' + lang, 'desktop', 79)
+    const least = Number((await ui.find({ type: 'Box', key: 'band-facts' }))?.props.minWidth)
+    // Each control: its label (Hangul and kana 1.36 ch, measured 2026-10-10), the host's padding
+    // (2), the gap (1); the agents' count slot (2).
+    let controls = 2
+    walk(await ui.drawn(), n => {
+      if (n.type === 'Button' && ['handoff', 'auto', 'warm', 'log', 'agents', 'settings'].includes(String(n.props?.key))) controls += [...String(n.props?.label)].reduce((w, c) => w + (/[ᄀ-ᇿ　-鿿가-힯＀-￯]/.test(c) ? 1.36 : 0.9), 0) + 3
+    })
+    expect(least + controls, lang).toBeLessThanOrEqual((lang === 'es' || lang === 'pt' ? 99 : lang === 'en' || lang === 'ja' ? 87 : 79) - 5)
+    expect(await ui.find({ type: 'Box', key: 'fact-route' }), lang).toBeDefined()
+    await ui.unmount()
+  }
 })

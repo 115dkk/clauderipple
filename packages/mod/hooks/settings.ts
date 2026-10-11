@@ -17,7 +17,25 @@ export const DEFAULTS: Settings = {
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: 'haiku', handoffSkill: '', handoffAfter: 'continue', handoffButton: 'advised',
-  swampAt: 50, layout: 'dashboard', appearance: 'auto', language: 'auto', hide: ['reason'], setupDone: false,
+  swampAt: 50, swampAlert: false, layout: 'dashboard', appearance: 'auto', language: 'auto', hide: ['reason'], extras: [], setupDone: false,
+}
+
+/** Band chips that show only when switched on in Look. */
+export const EXTRAS: readonly string[] = ['context', 'limits']
+
+/**
+ * Claude's own models as Auto candidates: the built-in general-purpose agent run on the model, its
+ * AA scores those of the model's current id. The key is what an Auto allow-list stores.
+ */
+export const CLAUDE_WORKERS: readonly { name: string; model: string; provider: string; target: TierTarget }[] = [
+  { name: 'general-purpose:haiku', model: 'claude-haiku-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'haiku' } },
+  { name: 'general-purpose:sonnet', model: 'claude-sonnet-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'sonnet' } },
+  { name: 'general-purpose:opus', model: 'claude-opus-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'opus' } },
+]
+
+/** The allow-list key of a target: the agent's name, or `general-purpose:<model>` for Claude's own. */
+export function candidateKey(target: TierTarget): string {
+  return target.model ? target.agent + ':' + target.model : target.agent
 }
 
 function object(raw: unknown): Record<string, unknown> {
@@ -76,6 +94,49 @@ export function toggleAllow(allow: readonly string[], name: string, workers: rea
   return next.length === workers.length ? [] : next
 }
 
+/** A provider's switch in Auto's candidate list: all its workers on, none, or some. */
+export function providerAllowed(allow: readonly string[], provider: string, workers: readonly Worker[]): boolean | 'mixed' {
+  const on = new Set(allowedWorkers(allow, workers))
+  const mine = workers.filter(w => w.provider === provider)
+  const count = mine.filter(w => on.has(w.name)).length
+  return count === 0 ? false : count === mine.length ? true : 'mixed'
+}
+
+/**
+ * Switches a provider's workers together: on when any of them is off, else off. Keys stay worker
+ * keys; every worker on again is stored as [], and the last ones on cannot all go off.
+ */
+export function toggleProvider(allow: readonly string[], provider: string, workers: readonly Worker[]): string[] {
+  const on = new Set(allowedWorkers(allow, workers))
+  const mine = workers.filter(w => w.provider === provider).map(w => w.name)
+  const turnOn = mine.some(name => !on.has(name))
+  for (const name of mine) turnOn ? on.add(name) : on.delete(name)
+  const next = workers.filter(w => on.has(w.name)).map(w => w.name)
+  if (!next.length) return [...allow]
+  return next.length === workers.length ? [] : next
+}
+
+/** Two rules that pick the same way: an exception equal to the main choice is no exception. */
+export function sameRule(a: Rule, b: Rule): boolean {
+  // A fixed key list orders every level alike; an allow-list is a set.
+  const keys = ['mode', 'targets', 'allow', 'effortOffset', 'floor', 'ceiling', 'light', 'standard', 'deep', 'agent', 'model']
+  const canonical = (r: Rule): string => JSON.stringify(r.mode === 'auto' ? { ...r, allow: [...r.allow].sort() } : r, keys)
+  return canonical(a) === canonical(b)
+}
+
+/** Exceptions that pick as the main choice does become inherit again: what Save stores. */
+export function foldExceptions(settings: Settings): Settings {
+  const main = settings.rules.general
+  const rules = { ...settings.rules }
+  for (const domain of DOMAINS) if (domain !== 'general' && rules[domain].mode !== 'inherit' && sameRule(rules[domain], main)) rules[domain] = { mode: 'inherit' }
+  return { ...settings, rules }
+}
+
+/** The fields whose rule differs from the main choice. */
+export function exceptionDomains(settings: Settings): Domain[] {
+  return DOMAINS.filter(domain => domain !== 'general' && settings.rules[domain].mode !== 'inherit' && !sameRule(settings.rules[domain], settings.rules.general))
+}
+
 /**
  * Persisted settings may be old; migrate tiers once and never alias nested default data. With
  * `workers`, provider names in Auto allow-lists become those providers' workers.
@@ -95,11 +156,12 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
     const parsed = target(old.design)
     if (parsed) rules.design = rule({ mode: 'pin', targets: { light: parsed, standard: parsed, deep: parsed } }, DEFAULTS.rules.design)
   }
-  const result: Settings = { ...DEFAULTS, rules, providers: {}, preference: names(value.preference), autoFloors: { ...DEFAULTS.autoFloors }, hide: [...DEFAULTS.hide], fallback: { ...DEFAULTS.fallback } }
+  const result: Settings = { ...DEFAULTS, rules, providers: {}, preference: names(value.preference), autoFloors: { ...DEFAULTS.autoFloors }, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
   for (const [name, enabled] of Object.entries(object(value.providers))) if (typeof enabled === 'boolean') result.providers[name] = enabled
   for (const level of LEVELS) { const n = object(value.autoFloors)[level]; if (typeof n === 'number' && Number.isFinite(n) && n >= 0) result.autoFloors[level] = n }
   if (typeof value.autoTieBand === 'number' && Number.isFinite(value.autoTieBand) && value.autoTieBand >= 0) result.autoTieBand = value.autoTieBand
-  for (const key of ['effortAuto', 'keepWarm', 'setupDone'] as const) if (typeof value[key] === 'boolean') result[key] = value[key]
+  for (const key of ['effortAuto', 'keepWarm', 'setupDone', 'swampAlert'] as const) if (typeof value[key] === 'boolean') result[key] = value[key]
+  if (Array.isArray(value.extras)) result.extras = [...new Set(value.extras.filter((part): part is string => typeof part === 'string' && EXTRAS.includes(part)))]
   const choices = {
     judge: ['haiku', 'jev', 'model'], jevSource: ['typesafe', 'zen'], bias: [-2, -1, 0, 1, 2], floor: EFFORTS,
     ceiling: EFFORTS, agentAuto: ['off', 'auto', 'all'], keepWarmHours: [1, 2, 4, 8], compactWith: ['haiku', 'session'],

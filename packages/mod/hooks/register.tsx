@@ -2,12 +2,12 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, ModelScore, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerAgent, WorkerPick, WorkerVerdict } from '../types'
-import { DOMAINS, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
+import { applySettingsChanges, foldExceptions, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerAgents, workerCandidates, workerJudgeInput, workerOptions, zenJev } from './workers'
+import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerCandidates, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
@@ -15,13 +15,13 @@ import { bandPriority, coldAlert, hotAlert, hottest, saveUntil as limitSaveUntil
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
 import { addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, weighted } from './stats'
-import { renderBand, renderFooter } from './ui/band'
+import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
 import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
 import { renderAgents } from './ui/agents'
 import { renderLog } from './ui/log'
-import { EFFORTS, countdown, modelName, routeOf, targetLabel, targetValue } from './ui/view'
+import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
 import type { AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
@@ -56,6 +56,10 @@ const swampHidden = atom({ plugin: 'ripple', key: 'swampHidden' } as const, null
 const coldHidden = atom({ plugin: 'ripple', key: 'coldHidden' } as const, false)
 const judgeDown = atom({ plugin: 'ripple', key: 'judgeDown' } as const, null)
 const judgeDownHidden = atom({ plugin: 'ripple', key: 'judgeDownHidden' } as const, null)
+const judgeSeen = atom({ plugin: 'ripple', key: 'judgeSeen' } as const, [])
+const judgeRuns = atom({ plugin: 'ripple', key: 'judgeRuns' } as const, [])
+// The standing judge failure was a dropped connection or a timeout: the card blames the network, not the judge.
+const judgeDownNetwork = atom({ plugin: 'ripple', key: 'judgeDownNetwork' } as const, false)
 const advice = atom({ plugin: 'ripple', key: 'advice' } as const, null)
 const adviceQueue = atom({ plugin: 'ripple', key: 'adviceQueue' } as const, null)
 const promptCount = atom({ plugin: 'ripple', key: 'promptCount' } as const, 0)
@@ -69,20 +73,25 @@ const panel = atom({ plugin: 'ripple', key: 'panel' } as const, null)
 const busy = atom({ plugin: 'ripple', key: 'busy' } as const, false)
 const stats = atom({ plugin: 'ripple', key: 'stats' } as const, emptyStats())
 const settingsDraft = atom({ plugin: 'ripple', key: 'settingsDraft' } as const, null)
-const settingsTab = atom({ plugin: 'ripple', key: 'settingsTab' } as const, 'effort')
 const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
-const agentOptions = atom({ plugin: 'ripple', key: 'agentOptions' } as const, [])
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const modelScores = atom({ plugin: 'ripple', key: 'modelScores' } as const, null)
-const workerList = atom({ plugin: 'ripple', key: 'workerList' } as const, null)
-const workerUi = atom({ plugin: 'ripple', key: 'workerUi' } as const, { section: 'general', page: 0 })
-const skills = atom({ plugin: 'ripple', key: 'skills' } as const, [])
 const demo = atom({ plugin: 'ripple', key: 'demo' } as const, null)
+
+/**
+ * Whether a state write would change anything. A write redraws each reader, and a redraw that
+ * hands the host new pictures reads as a blink (2026-10-10: the band flashed on polls and steps),
+ * so the writes on every step and poll are skipped when they would store what is there. The
+ * engine's scan wants each atom named at its read and update, hence a test rather than a wrapper.
+ */
+function same(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
 
 const LOG_PANE = 'ripple-log'
 const AGENTS_PANE = 'ripple-agents'
@@ -93,8 +102,10 @@ let polling = false
 let ticking = false
 let forking = false
 let forkUsage: TurnUsage | null = null
-let cacheBoundary: string | undefined
+let countdownTimer: { at: number; cancel: () => void } | null = null
 let judgeSequence = 0
+/** Jev's network blips and timeouts in a row. */
+let jevBlips = 0
 let generation = 0
 let carriedPick = false
 // Serialize settings reads and writes so a slow poll cannot overwrite a queued edit.
@@ -141,6 +152,23 @@ async function adminUrl($: EngineInterface): Promise<string> {
   const listen = object(config.listen).port
   const port = typeof admin === 'number' ? admin : (typeof listen === 'number' ? listen : 8791) + 1
   return `http://127.0.0.1:${port}`
+}
+async function openAllSettings($: EngineInterface): Promise<void> {
+  const url = `${await adminUrl($)}/#mod`
+  try {
+    let argv: string[]
+    if (await $.env.get('OS') === 'Windows_NT') argv = ['cmd', '/c', 'start', '', url]
+    else {
+      const platform = await $.process.run(['uname', '-s'], { timeoutMs: 2000 })
+      if (platform.exitCode !== 0) throw new Error(platform.stderr || 'uname failed')
+      argv = [platform.stdout.trim() === 'Darwin' ? 'open' : 'xdg-open', url]
+    }
+    const result = await $.process.run(argv, { timeoutMs: 2000 })
+    if (result.exitCode !== 0) throw new Error(result.stderr || `browser exited ${result.exitCode}`)
+  } catch (error) {
+    await report($, 'open mod settings', error)
+    await $.ui.toast(url)
+  }
 }
 async function currentSettings($: EngineInterface): Promise<Settings> {
   return normalizeSettings(await read($, settings))
@@ -195,6 +223,7 @@ async function acceptSettings($: EngineInterface, snapshot: ModSettingsSnapshot,
   const sync = await update($, settingsSync, value => ({ ...value, revision: snapshot.revision, pending: value.pending.slice(sent), migration: snapshot.stored ? null : value.migration }))
   const base = snapshot.stored ? snapshot.settings : sync.migration ?? snapshot.settings
   await installSettings($, applySettingsChanges(base, sync.pending))
+  await rebaseDraft($)
 }
 async function putSettings($: EngineInterface, admin: string, base: Settings): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -361,31 +390,15 @@ async function availability($: EngineInterface): Promise<boolean> {
     return status.ok ? chatgptUsable(JSON.parse(status.text)) : true
   } catch (error) { await report($, 'availability unknown', error); return true }
 }
-async function choices($: EngineInterface): Promise<void> {
-  const files = await workerFiles($)
-  const s = await currentSettings($)
-  const targets: TierTarget[] = [...files.keys()].map(agent => ({ agent }))
-  targets.push(...['sonnet', 'opus', 'haiku'].map(model => ({ agent: 'general-purpose', model })), ...DOMAINS.flatMap(domain => { const r = s.rules[domain]; return r.mode === 'pin' ? Object.values(r.targets) : [] }), s.fallback)
-  const unique = [...new Map(targets.map(t => [targetValue(t), t])).values()]
-  // A worker reads as `model · provider`: one model can come from two providers.
-  const workerLabel = (target: TierTarget): string => {
-    const file = target.agent === 'general-purpose' ? undefined : files.get(target.agent)
-    const model = file ? agentModel(file)?.replace(/@[^@]*$/, '') : undefined
-    const provider = file ? agentProvider(file) : undefined
-    return model ? model + (provider ? ' · ' + provider : '') : targetLabel(target)
-  }
-  await update($, agentOptions, () => unique.map(t => ({ value: targetValue(t), label: workerLabel(t), available: t.agent === 'general-purpose' || files.has(t.agent) })))
-  await refreshModels($)
-  const commands = await $.command.list()
-  await update($, skills, () => commands.filter(c => c.source !== 'builtin' && !c.name.startsWith('ripple')).map(c => c.name))
-  await jevKey($)
-}
-
 async function refreshModels($: EngineInterface): Promise<void> {
   const response = await $.http.fetch(`${await adminUrl($)}/api/config`)
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   await update($, routerModels, () => routerModelOptions(JSON.parse(response.text)))
 }
+/** How long an answer is kept: a good one ten minutes; a failure or an empty one only briefly. */
+const KEEP_MS = 600000
+const RETRY_MS = 20000
+
 async function scores($: EngineInterface): Promise<import('../types').ModelScore[]> {
   const now = await $.clock.now()
   const cached = await read($, modelScores)
@@ -394,42 +407,12 @@ async function scores($: EngineInterface): Promise<import('../types').ModelScore
     const response = await $.http.fetch(`${await adminUrl($)}/api/model-scores`)
     if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
     const models = scoreModels(JSON.parse(response.text))
-    await update($, modelScores, () => ({ until: now + 600000, models }))
+    await update($, modelScores, () => ({ until: now + (models.length ? KEEP_MS : RETRY_MS), models }))
     return models
   } catch (error) {
     await report($, 'model scores', error)
-    await update($, modelScores, () => ({ until: now + 600000, models: cached?.models ?? [] }))
+    await update($, modelScores, () => ({ until: now + RETRY_MS, models: cached?.models ?? [] }))
     return cached?.models ?? []
-  }
-}
-/**
- * Auto's candidates for the Workers card: the router's generated workers with their AA scores
- * (GET /api/mod-options), cached like the scores. Without the router's answer, the readable worker
- * files on the router's catalogue stand in, and the previous list is kept.
- */
-async function refreshWorkerList($: EngineInterface): Promise<{ agents: WorkerAgent[]; scores: ModelScore[] }> {
-  const now = await $.clock.now()
-  const cached = await read($, workerList)
-  if (cached && cached.until > now) return cached
-  try {
-    const response = await $.http.fetch(`${await adminUrl($)}/api/mod-options`)
-    if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
-    const raw = JSON.parse(response.text)
-    const value = { until: now + 600000, agents: workerAgents(raw), scores: scoreModels(object(raw).scores) }
-    await update($, workerList, () => value)
-    return value
-  } catch (error) {
-    await report($, 'worker list', error)
-    let agents = cached?.agents ?? []
-    if (!agents.length) {
-      try {
-        await refreshModels($)
-        agents = workerCandidates(await workerFiles($), await read($, routerModels)).map(c => ({ name: c.target.agent, model: c.model, provider: c.provider }))
-      } catch (inner) { await report($, 'worker catalogue', inner) }
-    }
-    const value = { until: now + 600000, agents, scores: cached?.scores ?? (await read($, modelScores))?.models ?? [] }
-    await update($, workerList, () => value)
-    return value
   }
 }
 async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Promise<string | undefined> {
@@ -451,6 +434,15 @@ async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Pr
   if ((await read($, jev)).source !== source) await update($, jev, value => ({ ...value, source }))
   return key
 }
+/** OpenCode Zen's key from the router's config, when Zen lists a Jev model there; else none. */
+async function zenJevKey($: EngineInterface): Promise<string | undefined> {
+  const file = await optionalFile($, `${await rippleHome($)}/config.json`)
+  if (!file) return undefined
+  const config: unknown = JSON.parse(file)
+  const models = object(object(object(config).providers)['opencode-zen']).models
+  const listed = Array.isArray(models) && models.some(m => { const id = object(m).id; return typeof id === 'string' && id.toLowerCase().includes('jev') })
+  return listed ? zenJev(config).authorization : undefined
+}
 async function saveJevKey($: EngineInterface, input: string): Promise<void> {
   const language = await read($, lang)
   const key = parseJevKey(input) ?? input.trim()
@@ -468,11 +460,16 @@ async function saveJevKey($: EngineInterface, input: string): Promise<void> {
   await update($, judgeDown, () => null)
   await $.ui.toast(t(language, 'toasts.keySaved'))
 }
-async function down($: EngineInterface, message: string): Promise<void> {
-  if (await read($, judgeDown) !== message) {
-    await update($, judgeDown, () => message)
-    await $.ui.toast(t(await read($, lang), 'toasts.judgeDown', { reason: message }))
-  }
+/**
+ * A judge failure is said once per reason in a session (a toast and the band); the same reason
+ * again stays quiet, so a judge that keeps failing does not speak on every message.
+ */
+async function down($: EngineInterface, message: string, network = false): Promise<void> {
+  if ((await read($, judgeSeen)).includes(message)) return
+  await update($, judgeSeen, value => [...value, message].slice(-20))
+  await update($, judgeDownNetwork, () => network)
+  await update($, judgeDown, () => message)
+  await $.ui.toast(t(await read($, lang), 'toasts.judgeDown', { reason: message }))
 }
 
 type Judged = { verdict: Verdict | WorkerVerdict | undefined; by: JudgeKind; ms: number; error?: string }
@@ -487,26 +484,39 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
   let failure: string | undefined
   let by: JudgeKind = s.judge
   let verdict: Verdict | WorkerVerdict | undefined
+  let blip = false
   if (s.judge === 'jev') {
     try {
-      const key = await jevKey($, s.jevSource)
-      if (!key) throw new Error(t(language, s.jevSource === 'zen' ? 'jev.zenMissing' : 'toasts.keyMissing'))
+      let source = s.jevSource
+      let key = await jevKey($, source)
+      // No TypeSafe key, but the router's OpenCode Zen offers Jev: ask Jev there.
+      if (!key && source === 'typesafe') {
+        key = await zenJevKey($)
+        if (key) source = 'zen'
+      }
+      if (!key) throw new Error(t(language, source === 'zen' ? 'jev.zenMissing' : 'toasts.keyMissing'))
       const body = 'description' in input ? jevWorkerRequest(input) : jevEffortRequest(input)
       let model = 'jev-latest'
-      if (s.jevSource === 'zen') {
+      if (source === 'zen') {
         const file = await optionalFile($, `${await rippleHome($)}/config.json`)
         model = file ? zenJev(JSON.parse(file)).model : model
       }
       const response = await Promise.race([
-        $.http.fetch(s.jevSource === 'zen' ? 'https://opencode.ai/zen/v1/systemone' : 'https://api.typesafe.ai/v1/systemone', { method: 'POST', headers: { 'content-type': 'application/json', authorization: s.jevSource === 'zen' ? key : `Bearer ${key}` }, body: JSON.stringify({ ...body, model }) }),
+        $.http.fetch(source === 'zen' ? 'https://opencode.ai/zen/v1/systemone' : 'https://api.typesafe.ai/v1/systemone', { method: 'POST', headers: { 'content-type': 'application/json', authorization: source === 'zen' ? key : `Bearer ${key}` }, body: JSON.stringify({ ...body, model }) })
+          .catch(() => 'network' as const),
         $.clock.sleep(3000).then(() => null),
       ])
-      if (!response) throw new Error(jevFailure('timeout', language))
+      // A dropped connection or a slow answer is often one bad moment, not a broken judge.
+      if (!response || response === 'network') {
+        blip = true
+        throw new Error(jevFailure(response ? 'network' : 'timeout', language))
+      }
       if (!response.ok) throw new Error(jevFailure(response.status, language))
       const json: unknown = JSON.parse(response.text)
-      verdict = worker ? parseJevWorker(json) : parseJevEffort(json)
+      // An unsure Jev still answered: its odds settle it here and the bias setting tips it later. Haiku is only for a Jev that failed.
+      verdict = worker ? parseJevWorker(json) : parseJevEffort(json, 'current' in input ? input.current : null, language)
       await update($, stats, value => addJudge(value, 'jev', 0, jevUsage(json)))
-      if (!verdict || (verdict.sure !== undefined && verdict.sure < 0.5)) throw new Error(t(language, 'toasts.jevUnsure'))
+      if (!verdict) throw new Error(t(language, 'toasts.jevNoVerdict'))
     } catch (error) { failure = reason(error); verdict = undefined }
   }
   if (s.judge === 'model') {
@@ -533,7 +543,12 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
   const ms = Math.max(0, await $.clock.now() - started)
   await update($, stats, value => ({ ...value, judge: { ...value.judge, ms: value.judge.ms + ms } }))
   if (!testing) {
-    if (failure) await down($, failure)
+    // The log pane lists it: a Jev call never reaches the router, so nothing else would show it.
+    const run: JudgeRun = { at: started, for: worker ? 'worker' : 'prompt', asked: s.judge, by, ms, ...(verdict?.effort ? { effort: verdict.effort } : {}), ...(verdict?.sure !== undefined ? { sure: verdict.sure } : {}), ...(failure ? { error: failure } : {}) }
+    await update($, judgeRuns, value => [...value, run].slice(-40))
+    // A network blip or timeout is said only when it happens twice running; Haiku covers the one prompt.
+    jevBlips = blip ? jevBlips + 1 : 0
+    if (failure && !(blip && jevBlips < 2)) await down($, failure, blip)
     else if (await read($, judgeDown)) await update($, judgeDown, () => null)
   }
   return { verdict, by, ms, ...(failure ? { error: failure } : {}) }
@@ -555,8 +570,9 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const language = await read($, lang)
   const files = await workerFiles($)
   try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
-  const candidates = workerCandidates(files, await read($, routerModels))
-  const pinnedCandidates = [...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] })
+  // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
+  const candidates = [...workerCandidates(files, await read($, routerModels)), ...claudeCandidates()]
+  const pinnedCandidates = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
   const marker = readMarker(e.prompt)
   const explicit = marker && !['auto', 'ripple'].includes(marker.name) ? marker : null
@@ -618,26 +634,42 @@ async function manualPick($: EngineInterface, effort: Effort): Promise<void> {
     await $.ui.toast(t(language, 'toasts.effortEnter'))
   }
 }
-// A draft is cloned through normalization, never aliased to saved settings.
+// Only first-run setup has a draft; quick settings read the saved state directly.
 async function startPanel($: EngineInterface, which: 'settings' | 'setup'): Promise<void> {
+  try { await settingsTask(async () => { await syncSettings($, await adminUrl($)) }) }
+  catch (error) { await report($, 'panel settings', error) }
   const s = await currentSettings($)
-  // The base stays as saved, so saving the draft also stores migrated allow-lists.
-  await update($, settingsDraft, () => normalizeSettings(s))
-  await update($, settingsBase, () => normalizeSettings(s))
-  const { agents } = await refreshWorkerList($)
-  await update($, settingsDraft, value => normalizeSettings(value ?? s, agents))
+  await update($, settingsDraft, () => which === 'setup' ? foldExceptions(normalizeSettings(s)) : null)
+  await update($, settingsBase, () => which === 'setup' ? normalizeSettings(s) : null)
   if (which === 'setup') await update($, setupStep, () => 1)
   await update($, panel, () => which)
-  await choices($)
+  await jevKey($)
+}
+/**
+ * An open panel's draft follows changes saved elsewhere (another session, the web page): the
+ * person's own edits (draft against base) are replayed on the settings now held, and the base
+ * moves to them. Without a base (a draft from an older mod) the draft starts over from them.
+ */
+async function rebaseDraft($: EngineInterface): Promise<void> {
+  if (await read($, panel) !== 'setup') return
+  const draft = await read($, settingsDraft)
+  if (!draft) return
+  const fresh = await currentSettings($)
+  const base = await read($, settingsBase)
+  const next = base ? applySettingsChanges(fresh, settingsChanges(normalizeSettings(base), normalizeSettings(draft))) : foldExceptions(normalizeSettings(fresh))
+  if (base && JSON.stringify(normalizeSettings(base)) === JSON.stringify(fresh)) return
+  await update($, settingsBase, () => normalizeSettings(fresh))
+  if (JSON.stringify(next) !== JSON.stringify(normalizeSettings(draft))) await update($, settingsDraft, () => next)
 }
 async function patchDraft($: EngineInterface, change: Partial<Settings>): Promise<void> {
   const current = normalizeSettings(await read($, settingsDraft) ?? await read($, settings))
   await update($, settingsDraft, () => normalizeSettings({ ...current, ...change }))
   if (change.jevSource) { await update($, jev, value => ({ ...value, test: { state: 'idle' as const } })); await jevKey($, change.jevSource) }
 }
-async function finishSettings($: EngineInterface, setup: boolean, skip = false): Promise<void> {
-  const draft = normalizeSettings(skip ? await read($, settings) : await read($, settingsDraft))
-  const saved = await saveSettings($, { ...draft, setupDone: setup || draft.setupDone }, skip ? undefined : normalizeSettings(await read($, settingsBase) ?? await currentSettings($)))
+async function finishSetup($: EngineInterface, skip = false): Promise<void> {
+  // A field whose rule picks as the main choice does is stored as no exception.
+  const draft = foldExceptions(normalizeSettings(skip ? await read($, settings) : await read($, settingsDraft)))
+  const saved = await saveSettings($, { ...draft, setupDone: true }, skip ? undefined : normalizeSettings(await read($, settingsBase) ?? await currentSettings($)))
   await update($, panel, () => null)
   await update($, settingsDraft, () => null)
   await update($, settingsBase, () => null)
@@ -767,6 +799,9 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const percent = c.percent ?? (c.tokens !== undefined && c.window > 0 ? c.tokens / c.window * 100 : undefined)
   const ctx = c.tokens !== undefined && percent !== undefined ? { tokens: c.tokens, percent, window: c.window } : null
   if (JSON.stringify(ctx) !== JSON.stringify(await read($, context))) await update($, context, () => ctx)
+  // Below the line again (a compact, a clear), the next crossing shows the heavy-context band once.
+  const putOff = await read($, swampHidden)
+  if (putOff !== null && (putOff > 100 || !ctx || ctx.percent < (await currentSettings($)).swampAt)) await update($, swampHidden, () => null)
   const h = hottest(usage.rateLimits)
   const previous = await read($, hot)
   if (previous && (!h || previous.kind !== h.kind || previous.resetsAt !== h.resetsAt)) await update($, hotHidden, () => null)
@@ -776,6 +811,30 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   if (JSON.stringify(l) !== JSON.stringify(await read($, limit))) await update($, limit, () => l)
   const until = await read($, saveUntil)
   if (until !== null && until <= await $.clock.now()) await update($, saveUntil, () => null)
+}
+/**
+ * Redraws when the countdown's shown minute changes and at expiry (the cold alert), at no other
+ * time: the desktop draws each answer afresh (see ui/band.tsx), so a redraw that shows nothing new
+ * is wasted at best. With the timer not on show, only the expiry. The 15-second tick re-aims it
+ * after a reply moved the expiry.
+ */
+async function scheduleCountdown($: EngineInterface): Promise<void> {
+  const memo = await read($, cache)
+  const now = await $.clock.now()
+  const shown = !(await currentSettings($)).hide.includes('timer') && !await read($, bandHidden)
+  const at = !memo || memo.expiresAt <= now ? null : shown ? nextMinuteChange(memo.expiresAt, now) : memo.expiresAt
+  if (countdownTimer?.at === at) return
+  countdownTimer?.cancel()
+  countdownTimer = null
+  if (at === null) return
+  const timer = $.clock.after(Math.max(1, at - now), () => {
+    countdownTimer = null
+    void (async () => {
+      await $.ui.invalidate('ui.render')
+      await scheduleCountdown($)
+    })().catch(error => report($, 'countdown', error))
+  })
+  countdownTimer = { at, cancel: () => timer.cancel() }
 }
 async function tick($: EngineInterface): Promise<void> {
   const language = await read($, lang)
@@ -788,12 +847,7 @@ async function tick($: EngineInterface): Promise<void> {
     if (list.some(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000)) {
       await update($, agents, value => value.map(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000 ? { ...a, state: 'waiting' } : a))
     }
-    const memo = await read($, cache)
-    const left = memo ? memo.expiresAt - now : null
-    const boundary = left === null ? 'unknown' : left <= 0 ? 'expired' : left <= 60000 ? 'last-minute' : countdown(left, language)
-    // Text/minimal counters need minute changes; SVG countdown animates between them itself.
-    if (cacheBoundary !== undefined && boundary !== cacheBoundary) await $.ui.invalidate('ui.render')
-    cacheBoundary = boundary
+    await scheduleCountdown($)
     if (await read($, handoff)) await driveHandoff($)
     const queued = await read($, adviceQueue)
     if (queued && !await read($, busy)) {
@@ -838,23 +892,18 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   return {
     effort: { level: p?.effort ?? effortOf(await read($, appEffort)) ?? null,
       mode: await read($, deciding) ? 'deciding' : await read($, paused) ? 'paused' : p?.by === 'manual' ? 'manual' : s.effortAuto ? 'auto' : 'off',
-      ...(p?.why ? { why: p.why } : {}), ...(await read($, decidingSince) !== null ? { since: (await read($, decidingSince))! } : {}) },
+      ...(p?.why ? { why: p.why, by: p.by } : {}), ...(await read($, decidingSince) !== null ? { since: (await read($, decidingSince))! } : {}) },
     model: await read($, modelIs) ? modelName((await read($, modelIs))!) : null,
     context: await read($, context), cache: await read($, cache), warm: { ...w, on: s.keepWarm },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
     auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
     agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
-    swampAt: s.swampAt, hide: s.hide, isWorking: working,
+    swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
-  const list = await read($, workerList)
-  const agents = list?.agents ?? []
-  // Saved settings may still name providers in Auto allow-lists; compare as the draft shows them.
-  const s = normalizeSettings(await currentSettings($), agents)
-  const draft = normalizeSettings(await read($, settingsDraft) ?? s, agents)
-  return { tab: await read($, settingsTab), draft, dirty: JSON.stringify(draft) !== JSON.stringify(s), agents: await read($, agentOptions), routerModels: await read($, routerModels), workers: workerOptions(agents, list?.scores ?? [], draft.autoFloors.standard), skills: await read($, skills), jev: await read($, jev), workerUi: await read($, workerUi) }
+  return { settings: await currentSettings($), jev: await read($, jev) }
 }
 async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)
@@ -875,21 +924,30 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
   const which = bandPriority({ panel: await read($, panel), judgeDown: d === 'down' || (!!downReason && downReason !== await read($, judgeDownHidden)),
     hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!writing || !!result,
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
-    swamp: d === 'swamp' || (!await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
+    swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
   if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
   if (which === 'handoff') return { kind: 'handoffChoice', handoffKind: await read($, handoffChoiceKind), after: await read($, handoffChoiceAfter) }
-  if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason! }
+  if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
   if (which === 'result') return writing ? { kind: 'result', stage: ['writing', 'clearing'].includes(writing.stage) ? 'handingOff' : writing.stage === 'failed' ? 'failed' : 'handoffDone', handoffKind: writing.kind, ...(writing.stage === 'copied' ? { detail: t(language, 'alerts.copied') } : {}) } : { kind: 'result', ...result! }
   if (which === 'cold') return { kind: 'cold', tokens: d === 'cold' ? 180000 : c!.tokens, idleMinutes: m ? Math.round((now - m.lastReplyAt) / 60000) : 61 }
   if (which === 'swamp') return { kind: 'swamp', percent: d === 'swamp' ? 65 : c!.percent, tokens: d === 'swamp' ? 160000 : c!.tokens }
   return null
 }
+/**
+ * A prompt sent while the cold, heavy or hot band shows counts as having seen it: it comes back
+ * only on its own next occasion (the next expiry, 15 more points of context, 10 more of the plan
+ * window), never after every message.
+ */
+async function markSeen($: EngineInterface): Promise<void> {
+  const view = await alertView($, await $.clock.now())
+  if (view && (view.kind === 'cold' || view.kind === 'swamp' || view.kind === 'hot')) await dismiss($, view)
+}
 async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
   await update($, demo, () => null)
   if (view.kind === 'hot') await update($, hotHidden, () => view.percent)
   else if (view.kind === 'cold') await update($, coldHidden, () => true)
-  else if (view.kind === 'swamp') await update($, swampHidden, () => view.tokens)
+  else if (view.kind === 'swamp') await update($, swampHidden, () => view.percent)
   else if (view.kind === 'judgeDown') await update($, judgeDownHidden, () => view.reason)
   else if (view.kind === 'result') { await update($, resultCard, () => null); await update($, handoff, () => null) }
   else await update($, panel, () => null)
@@ -899,16 +957,19 @@ function bandActions($: EngineInterface, surface: Frame['surface']): BandActions
     toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
-  return { setTab: tab => update($, settingsTab, () => tab), patch: change => patchDraft($, change),
-    setWorkerUi: ui => update($, workerUi, value => ({ ...value, ...ui })),
-    setRule: async (domain, rule) => { const s = normalizeSettings(await read($, settingsDraft)); await patchDraft($, { rules: { ...s.rules, [domain]: rule } }) },
-    setFallback: target => patchDraft($, { fallback: target }), jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
-    save: () => finishSettings($, false), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
+  return { patch: async change => {
+      const s = await currentSettings($)
+      const saved = await saveSettings($, { ...s, ...change }, s)
+      if (change.judge || change.jevSource) await jevKey($)
+      if (!saved) await $.ui.toast(t(await read($, lang), 'band.routerDown'))
+    },
+    jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
+    openAllSettings: () => openAllSettings($), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {
   const a = settingsActions($)
-  return { patch: a.patch, setRule: a.setRule, setWorkerUi: a.setWorkerUi, jevKey: a.jevKey, testJev: a.testJev,
-    back: () => update($, setupStep, step => Math.max(1, step - 1) as 1 | 2 | 3 | 4), next: () => update($, setupStep, step => Math.min(4, step + 1) as 1 | 2 | 3 | 4), finish: () => finishSettings($, true), skip: () => finishSettings($, true, true) }
+  return { patch: change => patchDraft($, change), jevKey: a.jevKey, testJev: a.testJev, openAllSettings: a.openAllSettings,
+    back: () => update($, setupStep, step => Math.max(1, step - 1) as 1 | 2 | 3 | 4), next: () => update($, setupStep, step => Math.min(4, step + 1) as 1 | 2 | 3 | 4), finish: () => finishSetup($), skip: () => finishSetup($, true) }
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
   return { compact: note => runCompact($, note), handoff: () => openHandoff($), dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
@@ -958,7 +1019,7 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   if (!changedModel && oldEffort === null && e.effort !== undefined) await update($, appEffort, () => e.effort!)
   s = await currentSettings($)
   const p = await read($, pick)
-  await update($, busy, () => true)
+  if (!await read($, busy)) await update($, busy, () => true)
   if (!safe || !p || (!s.effortAuto && p.by !== 'manual')) return e
   const saving = s.effortAuto && (await read($, saveUntil) ?? 0) > await $.clock.now()
   return { ...e, effort: saving && EFFORTS.indexOf(p.effort) > EFFORTS.indexOf('medium') ? 'medium' : p.effort }
@@ -967,6 +1028,7 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    jevBlips = 0
     try {
       await loadSettings($)
       const language = await read($, lang)
@@ -975,7 +1037,11 @@ export const register: Register = on => {
       await $.command.register({ name: 'ripple-log', description: t(language, 'commands.logDescription'), immediate: true })
       await $.command.register({ name: 'ripple-bar', description: t(language, 'commands.barDescription'), immediate: true })
       startTimers($)
-      if (!(await currentSettings($)).setupDone && !await read($, panel)) await startPanel($, 'setup')
+      // Setup keeps its draft across a reload; quick settings never keep one.
+      const open = await read($, panel)
+      if (open === 'setup') await rebaseDraft($)
+      if (open === 'settings') { await update($, settingsDraft, () => null); await update($, settingsBase, () => null); await jevKey($) }
+      if (!(await currentSettings($)).setupDone && !open) await startPanel($, 'setup')
     } catch (error) { await report($, 'session.start', error) }
     return result
   })
@@ -1022,6 +1088,7 @@ export const register: Register = on => {
         hostCommand = !command || command.source === 'builtin' || name.startsWith('ripple')
       }
       const human = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
+      if (human && !hostCommand) await markSeen($)
       if (human && !hostCommand && (e.text.trim() || e.attachments?.length) && (!isShortFollowUp(e.text) || !!e.attachments?.length)) {
         const count = await read($, promptCount) + 1
         await update($, promptCount, () => count)
@@ -1048,9 +1115,9 @@ export const register: Register = on => {
       } else if (human && !hostCommand && s.effortAuto && current && isCacheSafeModel(model)) {
         await update($, stats, old => addPrompt(old, current.effort))
       }
-      if (!hostCommand) await update($, busy, () => true)
+      if (!hostCommand && !await read($, busy)) await update($, busy, () => true)
     } catch (error) { await report($, 'prompt.submit', error) }
-    finally { if (sequence === judgeSequence) await update($, deciding, () => false) }
+    finally { if (sequence === judgeSequence && await read($, deciding)) await update($, deciding, () => false) }
     return next(e)
   })
   on('turn.step', async function* ($, e, next) {
@@ -1059,7 +1126,8 @@ export const register: Register = on => {
     let request = e
     try {
       if (!ownFork) request = await prepareStep($, e)
-      if (!e.agentId && !ownFork) await update($, lastRequest, () => ({ model: request.model, appEffort: e.effort, sentEffort: request.effort }))
+      const sent = { model: request.model, appEffort: e.effort, sentEffort: request.effort }
+      if (!e.agentId && !ownFork && !same(await read($, lastRequest), sent)) await update($, lastRequest, () => sent)
     } catch (error) { request = e; await report($, 'turn.step prepare', error) }
     const answer = yield* next(request)
     try {
@@ -1072,9 +1140,9 @@ export const register: Register = on => {
         if (answer.usage.model === await $.session.model()) {
           const memo = nextMemo(await read($, cache), answer.usage, now)
           await update($, cache, () => memo)
-          await update($, coldHidden, () => false)
+          if (await read($, coldHidden)) await update($, coldHidden, () => false)
           await update($, lastRealReplyAt, () => now)
-          await update($, warm, value => ({ ...value, stopped: undefined }))
+          if ((await read($, warm)).stopped !== undefined) await update($, warm, value => ({ ...value, stopped: undefined }))
         }
         const p = await read($, pick)
         if (p && (await currentSettings($)).effortAuto && isCacheSafeModel(request.model)) await update($, stats, value => addRequest(value, answer.usage!, effortOf(request.effort) ?? p.effort))
@@ -1089,7 +1157,7 @@ export const register: Register = on => {
         const now = await $.clock.now()
         await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state: e.reason === 'answer' ? 'done' : 'failed', endedAt: now, now: undefined, toolSince: undefined } : a))
       } else if (!forking) {
-        await update($, busy, () => false)
+        if (await read($, busy)) await update($, busy, () => false)
         const held = await read($, heldPick)
         if (held && (await currentSettings($)).effortAuto) await installPick($, held)
         await update($, heldPick, () => null)
@@ -1229,8 +1297,7 @@ export const register: Register = on => {
         if (choice) return renderAlert(el, frame, choice, alertActions($, choice)) as RenderElement
       }
       if (which === 'setup') {
-        const view = await settingsView($)
-        return renderSetup(el, frame, { ...view, step: await read($, setupStep) }, setupActions($)) as RenderElement
+        return renderSetup(el, frame, { draft: normalizeSettings(await read($, settingsDraft) ?? await read($, settings)), jev: await read($, jev), step: await read($, setupStep) }, setupActions($)) as RenderElement
       }
       if (await read($, bandHidden)) return next(e)
       const alert = await alertView($, frame.now)
@@ -1239,7 +1306,16 @@ export const register: Register = on => {
       if (s.layout === 'minimal') return next(e)
       const { Box, Button, Text } = el
       const actions = bandActions($, e.surface)
-      return <Box flexDirection="column"><Box flexDirection="row" justifyContent="space-between"><Text dimColor>{t(language, 'commands.logTitle')}</Text><Box flexDirection="row" columnGap={2}>{e.surface === 'terminal' || e.surface === 'mobile' ? <Button key="effort" plain hotkey="e" label={t(language, 'band.effort')} onPress={actions.toggleEffortMenu} /> : null}<Button key="hide" plain role="dismiss" label="×" onPress={() => toggleBar($)} /></Box></Box>{renderBand(el, frame, await dashboard($, e.props.isWorking), actions)}</Box>
+      // No title line: the band is the row of facts and controls, its close control at the end.
+      return (
+        <Box flexDirection="row" alignItems={e.surface === 'terminal' || e.surface === 'mobile' ? 'flex-start' : 'center'} columnGap={2}>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>{renderBand(el, { ...frame, columns: frame.columns - besideBand(frame) }, await dashboard($, e.props.isWorking), actions)}</Box>
+          <Box flexDirection="row" columnGap={2} flexShrink={0}>
+            {e.surface === 'terminal' || e.surface === 'mobile' ? <Button key="effort" plain hotkey="e" label={t(language, 'band.effort')} onPress={actions.toggleEffortMenu} /> : null}
+            <Button key="hide" plain role="dismiss" label="×" onPress={() => toggleBar($)} />
+          </Box>
+        </Box>
+      )
     } catch (error) { await report($, 'AbovePrompt render', error); return next(e) }
   })
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
@@ -1253,7 +1329,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e, next) => {
     try {
       startTimers($)
-      return renderLog($.ui.resolve(e), await frameOf($, e), { rows: await read($, requests), mineOnly: await read($, onlySession) }, { toggleScope: async () => { await update($, onlySession, value => !value); await refreshRouter($) } }) as RenderElement
+      return renderLog($.ui.resolve(e), await frameOf($, e), { rows: await read($, requests), mineOnly: await read($, onlySession), judges: await read($, judgeRuns) }, { toggleScope: async () => { await update($, onlySession, value => !value); await refreshRouter($) } }) as RenderElement
     } catch (error) { await report($, 'log render', error); return next(e) }
   })
   on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e, next) => {

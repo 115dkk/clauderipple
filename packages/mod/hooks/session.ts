@@ -26,10 +26,11 @@ export function saveUntil(hot: Hot | null, now: number): number {
   return Number.isFinite(reset) && reset > now ? reset : now + 5 * 3600000
 }
 
+/** The context percent when it is at or past `swampAt`, else null. */
 export function swamped(context: SessionContextUsage | null, swampAt: number): number | null {
   if (!context || context.tokens === undefined) return null
   const percent = context.percent ?? (context.window > 0 ? context.tokens / context.window * 100 : undefined)
-  return percent !== undefined && percent >= swampAt ? context.tokens : null
+  return percent !== undefined && percent >= swampAt ? percent : null
 }
 
 export function coldAlert(memo: CacheMemo | null, contextTokens: number, now: number, hidden: boolean): boolean {
@@ -40,8 +41,14 @@ export function hotAlert(hot: Hot | null, hidden: number | null): boolean {
   return hot !== null && hot.percent >= 80 && (hidden === null || hot.percent >= hidden + 10)
 }
 
-export function swampAlert(tokens: number | null, hidden: number | null): boolean {
-  return tokens !== null && (hidden === null || tokens >= hidden + 50000)
+/**
+ * The heavy-context band shows once per crossing: seen (or put off) at `hidden` percent, it waits
+ * until the context grows SWAMP_STEP points more. A hidden value over 100 is a token count kept by
+ * an older mod and is ignored.
+ */
+export const SWAMP_STEP = 15
+export function swampAlert(percent: number | null, hidden: number | null): boolean {
+  return percent !== null && (hidden === null || hidden > 100 || percent >= hidden + SWAMP_STEP)
 }
 
 /** Rendering consumes eligibility, keeping dismissal and idle decisions outside drawing code. */

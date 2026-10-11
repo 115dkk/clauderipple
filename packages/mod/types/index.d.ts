@@ -49,6 +49,23 @@ export type JudgeInput = {
 
 /** Who judges: Haiku on the person's Claude login, TypeSafe's Jev, or a model through the router. */
 export type JudgeKind = 'haiku' | 'jev' | 'model'
+/**
+ * One verdict as the log pane lists it beside the router's requests: a Jev call never reaches the
+ * router, so without this nothing showed who judged, how long it took or that it fell back.
+ */
+export type JudgeRun = {
+  at: number
+  /** The effort of a prompt, or the worker for a spawn. */
+  for: 'prompt' | 'worker'
+  /** The judge the settings ask for, and the one that answered (Haiku when it fell back). */
+  asked: JudgeKind
+  by: JudgeKind
+  ms: number
+  effort?: Effort
+  sure?: number
+  /** Why the asked judge gave no verdict. */
+  error?: string
+}
 
 /** Domain is the kind of work; level is its required capability, independently. */
 export type Domain = 'design' | 'frontend' | 'backend' | 'infra' | 'data' | 'test' | 'docs' | 'research' | 'general'
@@ -67,9 +84,6 @@ export type ScoreCache = { until: number; models: ModelScore[] }
 export type WorkerAgent = { name: string; model: string; provider: string }
 /** A worker Auto may pick, with the measured variant shown beside it (none: no AA data). */
 export type WorkerOption = WorkerAgent & { aa?: AaScore & { effort: Effort | null } }
-/** The Workers card: `general` is the main choice, any other domain an exception being edited. */
-export type WorkerSection = Domain
-export type WorkerUi = { section: WorkerSection; page: number; details?: boolean }
 
 /** An agent to spawn: a dispatchable `subagentType`, and a model only for Claude's own agents. */
 export type TierTarget = { agent: string; model?: string }
@@ -99,13 +113,17 @@ export type Settings = {
   handoffSkill: string
   handoffAfter: 'continue' | 'confirm' | 'copy'
   handoffButton: 'advised' | 'always'
-  /** Context percent at which the swamp band shows. */
+  /** Context percent at which the context reads heavy (and the swamp band shows, when on). */
   swampAt: number
+  /** The heavy-context band; off unless switched on. */
+  swampAlert: boolean
   layout: 'dashboard' | 'minimal'
   appearance: 'auto' | 'dark' | 'light'
   language: 'auto' | Lang
-  /** Band parts switched off: 'timer' | 'reason' | 'route' | 'limits'. */
+  /** Band parts switched off: 'timer' | 'reason' | 'route'. */
   hide: string[]
+  /** Band chips switched on, off by default: 'context' | 'limits'. */
+  extras: string[]
   setupDone: boolean
 }
 
@@ -189,10 +207,8 @@ export type Stats = {
 
 export type HandoffKind = 'quick' | 'full'
 export type HandoffStage = 'writing' | 'clearing' | 'done' | 'copied' | 'failed'
-export type SettingsTab = 'effort' | 'workers' | 'judge' | 'cache' | 'handoff' | 'look'
 export type SetupStep = 1 | 2 | 3 | 4
 export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
-export type AgentOption = { value: string; label: string; available: boolean }
 export type JevState = {
   source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
@@ -244,20 +260,19 @@ declare module 'claude-code' {
       handoffChoiceAfter: 'continue' | 'confirm' | 'copy'
       result: { stage: ResultStage; detail?: string } | null
       settingsDraft: Settings | null
-      settingsTab: SettingsTab
       setupStep: SetupStep
       compactNote: string
       effortMenuOpen: boolean
       agentsOpen: boolean
       agentsShowDone: boolean
       jev: JevState
-      agentOptions: AgentOption[]
       routerModels: RouterModel[]
       modelScores: ScoreCache | null
-      workerList: { until: number; agents: WorkerAgent[]; scores: ModelScore[] } | null
-      workerUi: WorkerUi
-      skills: string[]
       judgeDownHidden: string | null
+      /** Judge failure reasons already said this session. */
+      judgeSeen: string[]
+      judgeRuns: JudgeRun[]
+      judgeDownNetwork: boolean
       limit: Hot | null
       demo: 'cold' | 'swamp' | 'hot' | 'down' | null
     }

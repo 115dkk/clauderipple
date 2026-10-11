@@ -104,7 +104,7 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'judge',
         tone: 'bad',
         glyph: 'alert',
-        title: t(frame.lang, 'alerts.judgeTitle'),
+        title: t(frame.lang, alert.network ? 'alerts.judgeNetworkTitle' : 'alerts.judgeTitle'),
         body: t(frame.lang, 'alerts.judgeBody', { judge: t(frame.lang, JUDGE_NAME[alert.judge]), reason: alert.reason, fallback: t(frame.lang, alert.judge === 'haiku' ? 'alerts.keepEffort' : 'alerts.askHaiku') }),
         choices: [
           { key: 'settings', label: t(frame.lang, 'alerts.openSettings'), hotkey: 'o', onPress: a.openSettings, primary: true },
@@ -201,11 +201,11 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
       { value: 'copy', label: t(frame.lang, 'alerts.copy'), hotkey: '3' },
     ]
     return [
-      <Box key="kind" flexDirection="row" columnGap={2} alignItems="center">
+      <Box key="kind" flexDirection="row" flexWrap="wrap" columnGap={2} rowGap={isRich(frame) ? 1 : 0} alignItems="center">
         <Text dimColor>{t(frame.lang, 'alerts.kind')}</Text>
         {segmented(el, frame, 'kind', kinds, alert.handoffKind, k => a.setHandoffKind(k))}
       </Box>,
-      <Box key="after" flexDirection="row" columnGap={2} alignItems="center">
+      <Box key="after" flexDirection="row" flexWrap="wrap" columnGap={2} rowGap={isRich(frame) ? 1 : 0} alignItems="center">
         <Text dimColor>{t(frame.lang, 'alerts.then')}</Text>
         {segmented(el, frame, 'after', afters, alert.after, k => a.setHandoffAfter(k))}
       </Box>,
@@ -222,32 +222,35 @@ export function renderAlert(el: Els, frame: Frame, alert: AlertView, actions: Al
   const tone = textTone(frame.appearance)
   const titleColor = card.tone === 'accent' ? undefined : tone[card.tone]
   if (isRich(frame)) {
+    // The text takes the width the badge leaves and wraps in it (a row that wraps sizes its items
+    // to their whole line, which ran the body past the card: seen 2026-10-10); the choices go
+    // under it and wrap as a row of whole chips.
     return (
-      <Box key={'alert-' + card.key} flexDirection="column" rowGap={1}>
-        <Box flexDirection="row" alignItems="center" columnGap={2} flexWrap="wrap" rowGap={1}>
+      <Box key={'alert-' + card.key} flexDirection="column" rowGap={1} width="100%">
+        <Box flexDirection="row" alignItems="flex-start" columnGap={2}>
           {badge(el, frame, card)}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={30}>
-            <Text bold color={titleColor}>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text bold color={titleColor} wrap="wrap">
               {card.title}
             </Text>
             <Text dimColor wrap="wrap">
               {card.body}
             </Text>
           </Box>
-          {card.choices.length > 0 ? (
-            <Box flexDirection="row" gap={1}>
-              {card.choices.map(c => {
-                const o: { primary?: boolean; lit?: boolean } = {}
-                if (c.primary) o.primary = true
-                if (c.lit) o.lit = true
-                return action(el, frame, c.key, c.label, c.onPress, o)
-              })}
-            </Box>
-          ) : null}
         </Box>
         {extra.length > 0 ? (
           <Box flexDirection="column" rowGap={1} paddingLeft={6}>
             {extra}
+          </Box>
+        ) : null}
+        {card.choices.length > 0 ? (
+          <Box flexDirection="row" flexWrap="wrap" gap={1} paddingLeft={6}>
+            {card.choices.map(c => {
+              const o: { primary?: boolean; lit?: boolean } = {}
+              if (c.primary) o.primary = true
+              if (c.lit) o.lit = true
+              return action(el, frame, c.key, c.label, c.onPress, o)
+            })}
           </Box>
         ) : null}
       </Box>
@@ -255,7 +258,7 @@ export function renderAlert(el: Els, frame: Frame, alert: AlertView, actions: Al
   }
   const mark = card.glyph === 'wave' ? '…' : card.tone === 'ok' ? '✓' : card.tone === 'bad' ? '✕' : card.tone === 'warn' ? '▲' : '◉'
   return (
-    <Box key={'alert-' + card.key} flexDirection="column">
+    <Box key={'alert-' + card.key} flexDirection="column" width="100%">
       <Text wrap="wrap">
         <Text bold color={card.tone === 'accent' ? tone.accent : tone[card.tone]}>
           {mark + ' ' + card.title}
