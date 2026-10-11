@@ -7,15 +7,15 @@
 // count started at the spawn and summed every step, so the same agent showed two different times
 // and totals a few lines apart. The terminal has no such list, so it keeps them.
 //
-// No pictures while agents run: the host builds every answer afresh and a picture blinks on each
-// redraw (band.tsx), and every step of an agent redraws this pane. Only the empty pane, which
-// nothing redraws, shows 리플이.
+// No pictures while agents run: every step of an agent redraws this pane, and each redraw starts
+// 리플이's motion over, so among running agents it would never get past its first second. Only the
+// empty pane, which nothing redraws, shows 리플이, waiting at its greeting size.
 
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { AgentRec } from '../../types'
-import { speak, textButton } from './parts'
+import { GREET_SIZE, speak, textButton } from './parts'
 import type { Els } from './parts'
 import { textTone } from './theme'
 import type { AgentsActions, AgentsView, Frame } from './view'
@@ -116,8 +116,8 @@ export function renderAgents(el: Els, frame: Frame, view: AgentsView, actions: A
   const { Box, Text } = el
   const live = view.agents.filter(a => a.state === 'running' || a.state === 'waiting').sort((a, b) => a.startedAt - b.startedAt)
   const done = view.agents.filter(a => a.state === 'done' || a.state === 'failed').sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
-  // Empty, the pane has nothing to redraw it, so 리플이 can wait here without blinking.
-  if (view.agents.length === 0) return speak(el, frame, { key: 'agents', face: 'calm', title: t(frame.lang, 'agents.emptyTitle'), line: t(frame.lang, 'agents.emptyBody') })
+  // Empty, the pane has nothing to redraw it, so 리플이 can live out its idle loops here.
+  if (view.agents.length === 0) return speak(el, frame, { key: 'agents', face: 'calm', size: GREET_SIZE, title: t(frame.lang, 'agents.emptyTitle'), line: t(frame.lang, 'agents.emptyBody') })
   const { Button } = el
   return (
     <Box flexDirection="column" rowGap={1} width="100%">

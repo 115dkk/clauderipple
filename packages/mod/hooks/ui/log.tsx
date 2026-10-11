@@ -6,7 +6,7 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { JudgeRun, StatusRequest } from '../../types'
-import { action, actions as actions_, speak } from './parts'
+import { GREET_SIZE, action, actions as actions_, speak } from './parts'
 import type { Els } from './parts'
 import { cacheTone, providerColor, textTone } from './theme'
 import type { Frame, LogActions, LogView } from './view'
@@ -88,9 +88,9 @@ export function renderLog(el: Els, frame: Frame, view: LogView, actions: LogActi
   const scopeName = view.mineOnly ? t(frame.lang, 'log.thisSession') : t(frame.lang, 'log.allSessions')
   const scope = action(el, frame, 'scope', view.mineOnly ? t(frame.lang, 'log.showAll') : t(frame.lang, 'log.onlySession'), actions.toggleScope, { hotkey: 'a' })
   const legend = !view.mineOnly ? <Text key="legend" dimColor wrap="wrap">{t(frame.lang, 'log.legend')}</Text> : ''
-  // Empty, the pane has nothing to redraw it, so 리플이 can wait here without blinking; with
-  // requests every poll redraws it, so the list has no picture.
-  if (items.length === 0) return speak(el, frame, { key: 'log', face: 'calm', title: scopeName, line: t(frame.lang, 'log.empty'), blocks: [legend, actions_(el, frame, [scope])] })
+  // Empty, the pane has nothing to redraw it, so 리플이 can live out its idle loops here; with
+  // requests every poll redraws it and would start its motion over, so the list has no picture.
+  if (items.length === 0) return speak(el, frame, { key: 'log', face: 'calm', size: GREET_SIZE, title: scopeName, line: t(frame.lang, 'log.empty'), blocks: [legend, actions_(el, frame, [scope])] })
   return (
     <Box flexDirection="column" gap={1} width="100%">
       <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={2}>

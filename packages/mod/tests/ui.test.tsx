@@ -374,12 +374,14 @@ test('리플이 greets in setup and quick settings and waits in empty panes, nev
   drawPane(on, 'm-agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop }))
   drawPane(on, 'm-agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { toggleDone: noop }))
   drawPane(on, 'm-log-empty', (el, surface) => renderLog(el, frameOf(surface, 64), { rows: [], mineOnly: true }, { toggleScope: noop }))
-  const expected: [string, number, string][] = [['m-setup-1', 1, 'var(--accent)'], ['m-setup-4', 1, 'var(--ok)'], ['m-quick', 1, 'var(--accent)'], ['m-agents', 0, ''], ['m-agents-empty', 1, 'var(--accent)'], ['m-log-empty', 1, 'var(--accent)']]
-  for (const [id, count, tone] of expected) {
+  // It greets and waits bigger (56 px) than it speaks on a card (44 px).
+  const expected: [string, number, string, number][] = [['m-setup-1', 1, 'var(--accent)', 56], ['m-setup-4', 1, 'var(--ok)', 56], ['m-quick', 1, 'var(--accent)', 44], ['m-agents', 0, '', 0], ['m-agents-empty', 1, 'var(--accent)', 56], ['m-log-empty', 1, 'var(--accent)', 56]]
+  for (const [id, count, tone, size] of expected) {
     const ui = await mount($, id, 'desktop', 64)
     const found = mascots(await ui.drawn())
     expect(found.length, id).toBe(count)
     if (tone) expect(String(found[0]!.props?.source).includes('stroke="' + tone + '"'), id).toBe(true)
+    if (size) expect(found[0]!.props?.width, id).toBe(size)
     await ui.unmount()
     const terminal = await mount($, id, 'terminal', 64)
     expect(mascots(await terminal.drawn()).length, id).toBe(0)

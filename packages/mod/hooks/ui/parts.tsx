@@ -3,11 +3,14 @@
 //
 // One picture per surface, the rest native: 리플이 is the only Svg, every control a host Button.
 // Engine and host facts behind that (Claude Code 2.1.293, the desktop app's assets, 2026-10-10):
-// - The desktop draws every answer as a new DOM tree: each Svg becomes a new <img> or <iframe>,
-//   blank until decoded or loaded, so every redraw blinks the pictures and restarts their
-//   animations, identical markup or not (see band.tsx). A card that redraws while it is up blinks
-//   all its pictures; with one picture, only 리플이 does, and its motion starts from its rest pose
-//   so a restart reads as going on (ripple.ts).
+// - The desktop draws every answer as a new DOM tree, each Svg a new element. What blinked was the
+//   interactive Svg: isInteractive makes it a sandboxed <iframe srcdoc>, which the host rebuilds
+//   blank on every redraw. A plain Svg is an <img> of a data URL; it does not blink across
+//   redraws, and CSS @keyframes inside the SVG run in it (seen in the owner's desktop app on
+//   2026-10-11 at commit 8d43b97: 리플이 moving in the band and the quick settings with no
+//   flicker; Effortless animates its band the same way). So 리플이 is always a plain image, never
+//   interactive. A redraw still starts its motion over, so every loop opens on a natural pose
+//   (ripple.ts).
 // - A Button's label is text only and its colours are the host's. Styled chips were an Svg with a
 //   blank native button laid over it, and that blank label had to be sized against the host's font
 //   or the host cut it to an ellipsis (seen 2026-10-10 as "자동 (권장) …"). Native buttons have
@@ -17,42 +20,57 @@
 //   says so in its shape: ● chosen, ○ not (the terminal's marks too), the unchosen also dimmed.
 // - `role="dismiss"` is drawn by the desktop as its native close control at the site's trailing
 //   edge (the band's × is one), the label its accessible name; the terminal draws a Button.
-// - An Svg needs alt, width and height (an interactive one without both falls back to ~300×150),
-//   and animates only with isInteractive.
+// - An Svg needs alt, width and height (an interactive one without both falls back to ~300×150).
+//   Its CSS animations run without isInteractive (the 2026-10-10 reading that they need it was
+//   wrong); what isInteractive adds is the frame, and with it the blink.
 
 import type { ElementTable, RenderNode } from 'claude-code'
 
 import type { Frame } from './view'
 import { isRich } from './view'
-import { GRID, MIN_SIZE, rippleBody, rippleCss } from './ripple'
+import { GAUGE_FACES, GRID, detailOf, gaugeStep, rippleBody, rippleCss } from './ripple'
 import type { Face } from './ripple'
 import { svgDoc } from './theme'
+import type { Appearance } from './theme'
 
 export type Els = ElementTable
 
-/** 리플이's size wherever it speaks (cards, panels, setup), px: the sheet's card badge. */
+/** 리플이's size on a card (alerts, quick settings), px: the sheet's card badge. */
 export const FACE_SIZE = 44
+/** Where it greets or waits with nothing else to show (setup, empty panes), px: a bigger presence. */
+export const GREET_SIZE = 56
+
+const sources = new Map<string, string>()
 
 /**
- * 리플이 with one of its faces (ripple.ts), `size` px square, never below MIN_SIZE. A plain image:
- * CSS motion runs inside an SVG image too (Effortless animates its band this way), while an
- * interactive picture is a frame the desktop rebuilds blank on every redraw, which is what blinked.
- * The motion starts from the rest pose, so a redraw reads as going on. `percent` fills the ring of
- * a gauge face. Desktop and the editor only.
+ * 리플이's SVG document: `face` at `size` px (the mini drawing below 34 px), the gauge in its 5%
+ * steps, dimmed or not. One fixed string per state, built once: the host is handed the same
+ * source until the state changes.
+ */
+export function rippleSource(face: Face, size: number, appearance: Appearance, percent?: number, dim = false): string {
+  const step = percent !== undefined && GAUGE_FACES.includes(face) ? gaugeStep(percent) : undefined
+  const key = [face, size, appearance, step ?? '', dim ? 'dim' : ''].join('|')
+  let source = sources.get(key)
+  if (!source) {
+    const detail = detailOf(size)
+    source = svgDoc(size, size, appearance, rippleBody(face, step, detail), rippleCss(face, step, detail) + (dim ? 'svg>g{opacity:.5}' : ''), '0 0 ' + GRID + ' ' + GRID)
+    sources.set(key, source)
+  }
+  return source
+}
+
+/**
+ * 리플이 with one of its faces (ripple.ts), `size` px square, alive: a plain image whose CSS motion
+ * runs inside it and survives redraws without a blink (never isInteractive, see above). `percent`
+ * fills the ring of a gauge face. Desktop and the editor only.
  */
 export function mascot(el: Els, frame: Frame, key: string, face: Face, alt: string, size = FACE_SIZE, percent?: number): RenderNode {
-  const s = Math.max(MIN_SIZE, size)
   if (!('Svg' in el)) return ''
   const { Box, Svg } = el
-  // Drawn interactive, the document is the frame's page, and a page's body has a margin that
-  // pushed the picture 8 px in and cut its right ear (seen in Chromium's srcdoc frames); an image
-  // has no body, so the rule is idle there.
-  const page = 'html,body{margin:0;padding:0;overflow:hidden;background:transparent}svg{display:block}'
-  const source = svgDoc(s, s, frame.appearance, rippleBody(face, percent), page + rippleCss(face), '0 0 ' + GRID + ' ' + GRID)
   // In a Box of its own that never shrinks: beside a column of text it keeps its size.
   return (
     <Box key={'ripple-' + key} flexShrink={0}>
-      <Svg source={source} alt={alt} width={s} height={s} />
+      <Svg source={rippleSource(face, size, frame.appearance, percent)} alt={alt} width={size} height={size} />
     </Box>
   )
 }
@@ -75,6 +93,8 @@ export type Speech = {
   line?: string
   /** The ring as a gauge (a percent). */
   percent?: number
+  /** 리플이's size, px (FACE_SIZE unless it greets or waits: GREET_SIZE). */
+  size?: number
   /** What follows, each block a row apart: fields, options, the actions. */
   blocks?: RenderNode[]
   /** The site's close control (desktop: the host's native ×; terminal: in the last block). */
@@ -117,7 +137,7 @@ export function speak(el: Els, frame: Frame, s: Speech): RenderNode {
   }
   return (
     <Box key={'say-' + s.key} flexDirection="row" alignItems="flex-start" columnGap={2} width="100%">
-      {mascot(el, frame, s.key, s.face, s.title, FACE_SIZE, s.percent)}
+      {mascot(el, frame, s.key, s.face, s.title, s.size ?? FACE_SIZE, s.percent)}
       {column}
       {s.dismiss ?? null}
     </Box>

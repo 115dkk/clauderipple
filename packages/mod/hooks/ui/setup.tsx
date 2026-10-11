@@ -10,7 +10,7 @@ import { exceptionDomains } from '../settings'
 import type { RenderNode } from 'claude-code'
 import type { Domain } from '../../types'
 
-import { action, actions, speak } from './parts'
+import { GREET_SIZE, action, actions, speak } from './parts'
 import type { Els } from './parts'
 import { judgeRows, keepWarmRow, row } from './settings'
 import type { Frame, SettingsActions, SettingsView, SetupActions, SetupView } from './view'
@@ -65,6 +65,8 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
   return speak(el, frame, {
     key: 'setup',
     face: done ? 'pleased' : view.step === 1 ? 'asking' : 'calm',
+    // It greets here, the first thing a new session shows: at its greeting size.
+    size: GREET_SIZE,
     // It greets first; the first step's question is its one row (who judges).
     title: done ? t(frame.lang, 'setup.ready') : view.step === 1 ? t(frame.lang, 'setup.welcome') : t(frame.lang, step!.title),
     aside: done ? '' : dots(view.step),
