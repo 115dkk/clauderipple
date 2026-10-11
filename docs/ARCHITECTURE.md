@@ -254,6 +254,25 @@ files), all configured `models` (`model`, `provider`, `name`, `judgeOnly`), `pro
 (`name`, `type`, `usable`), `zen:{configured,model}`, and `scores`. ChatGPT usability
 shares `/api/status`'s quota refresh and account states, including purchased credits;
 AA scores reuse `model-scores.ts` and retain its attribution. No provider key is exposed.
+Since 2026-10-11 (the worker ladder, docs/specs/2026-10-11-worker-ladder.md) each agent also
+carries `efforts` (its model's ladder from `effortLevels`, mod efforts only) and `billing`
+(`free | payg | subscription`, `hooks/ladder.ts:billingOf`: ChatGPT, Claude login, Antigravity
+and the OpenCode Go preset are subscriptions, Ollama/LM Studio, a hand-entered local URL and
+`:free`/`-free` models are free, every other preset or API is pay-per-token); providers carry
+`billing`; `claudeEfforts` is Anthropic's ladder; `presets` are the four ladder presets computed
+by the mod's own `hooks/ladder.ts` from the usable workers plus Claude's models, so the dashboard
+and the session's quick settings fill rungs alike.
+
+The worker ladder replaced Pin as the default rule mode (`{mode:'ladder', rungs:{light, standard,
+hard, plan}}`, each rung `{target, effort, backup?}`). The judge adds `kind: plan|do`; level picks
+Light/Standard/Hard, a plan at standard or deep goes to Plan, and `sure < 0.5` moves Light→Standard
+→Hard (Plan does not move). An unavailable rung tries its backup, then one rung up (its model, then
+its backup), then the session model (`general-purpose` with no model; refused only when Anthropic is
+switched off), never down. Stored pins normalize to ladders on every read (missing levels climb,
+efforts start at the default ladder's for the same model or low/medium/high, calibrated as the pin
+was; Plan is Hard's model one effort up); Auto stays Auto, shown as experimental. `fallback` and
+`preference` are kept; only Auto still reads `preference`. Every pick writes one
+`ClaudeRipple worker pick:` debug line. Tests: `test/mod/ladder.test.ts`, `test/admin.test.ts`.
 
 `model-policy.ts:isJudgeOnlyModel` is the single judge-only rule: ids beginning with
 `jev` are not chat models (the OpenCode Zen note in `presets.ts`: `/systemone` only).

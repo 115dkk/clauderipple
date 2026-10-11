@@ -114,6 +114,10 @@ prose when they disagree.
 
 ### 2a. Resolution and controls (implemented 2026-10-10)
 
+> Superseded 2026-10-11 for Pin and the Workers card by docs/specs/2026-10-11-worker-ladder.md
+> (built; ARCHITECTURE §3b). Pin is gone (stored pins become ladders); Auto below stays, labelled
+> experimental.
+
 - There is no global `workerMode`. `rules.general` is the **main choice** (Auto or Fixed = Pin);
   every other domain whose rule is not `inherit` is an **exception**. Design defaults to an
   exception (Fixed: Claude Sonnet, deep → Opus) because AA does not measure taste, but can
