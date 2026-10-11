@@ -6,8 +6,9 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { JudgeRun, StatusRequest } from '../../types'
-import { textButton } from './parts'
+import { mascot, textButton } from './parts'
 import type { Els } from './parts'
+import { MIN_SIZE } from './ripple'
 import { cacheTone, providerColor, textTone } from './theme'
 import type { Frame, LogActions, LogView } from './view'
 import { cachePercent, clockTime, effortLabel, isRich, modelOf, promptTokens, seconds } from './view'
@@ -92,7 +93,16 @@ export function renderLog(el: Els, frame: Frame, view: LogView, actions: LogActi
         {textButton(el, 'scope', view.mineOnly ? t(frame.lang, 'log.showAll') : t(frame.lang, 'log.onlySession'), actions.toggleScope, isRich(frame) ? undefined : 'a')}
       </Box>
       {!view.mineOnly && <Text dimColor wrap="wrap">{t(frame.lang, 'log.legend')}</Text>}
-      {items.length === 0 && <Text dimColor>{t(frame.lang, 'log.empty')}</Text>}
+      {items.length === 0 &&
+        (isRich(frame) && 'Svg' in el ? (
+          // Empty, the pane has nothing to redraw it, so 리플이 can wait here without blinking.
+          <Box flexDirection="row" alignItems="center" columnGap={2}>
+            {mascot(el, frame, 'log', 'calm', t(frame.lang, 'log.empty'), MIN_SIZE)}
+            <Text dimColor wrap="wrap">{t(frame.lang, 'log.empty')}</Text>
+          </Box>
+        ) : (
+          <Text dimColor>{t(frame.lang, 'log.empty')}</Text>
+        ))}
       {items.map(item => item.node())}
     </Box>
   )

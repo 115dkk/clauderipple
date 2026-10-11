@@ -1,6 +1,6 @@
 // The pieces every drawing is made of: the element table, the desktop chip (an SVG with a
-// transparent native button laid over it), the terminal's hotkey button, and the SVG glyphs of
-// the cards and panels.
+// transparent native button laid over it), the terminal's hotkey button, the mascot's chip, and
+// the controls of the cards and panels.
 //
 // Engine facts these follow (Claude Code 2.1.293):
 // - A Button's label is text only and its colours are the host's, so a styled control is an Svg
@@ -19,12 +19,15 @@
 // - The desktop draws every answer as a new DOM tree: each Svg becomes a new <img> or <iframe>,
 //   blank until decoded or loaded, so every redraw blinks the pictures and restarts their
 //   animations, identical markup or not (see band.tsx). A drawing that redraws while idle (the
-//   band) uses native text; motion is SMIL/CSS inside the SVG.
+//   band) uses native text; motion is CSS inside the SVG, looping from and back to its rest pose
+//   so a restart does not jump (ripple.ts).
 
 import { t } from '../i18n'
 import type { ElementTable, RenderNode } from 'claude-code'
 
 import type { Frame } from './view'
+import { GRID, MIN_SIZE, rippleBody, rippleCss } from './ripple'
+import type { Face } from './ripple'
 import { esc, svgDoc, textWidth, v } from './theme'
 import type { Palette } from './theme'
 
@@ -120,12 +123,27 @@ export function text(x: number, y: number, cls: string, content: string, fill?: 
   )
 }
 
-export const WAVE_PERIOD = 1.8
-export const WAVE_CSS =
-  '@keyframes wave{0%{opacity:.14}28%{opacity:1}70%{opacity:.14}100%{opacity:.14}}' +
-  '.wave{animation:wave ' + WAVE_PERIOD + 's ease-in-out infinite;opacity:.14}' +
-  '@keyframes glow{0%,100%{opacity:.25}50%{opacity:.9}}' +
-  '.glow{animation:glow ' + WAVE_PERIOD + 's ease-in-out infinite}'
+/**
+ * 리플이 with one of its faces (ripple.ts), `size` px square, never below MIN_SIZE. It moves, so it
+ * is drawn interactive; the motion starts from the rest pose, so a redraw reads as going on.
+ * `percent` fills the ring of a gauge face. Desktop and the editor only.
+ */
+export function mascot(el: Els, frame: Frame, key: string, face: Face, alt: string, size = 44, percent?: number): RenderNode {
+  const s = Math.max(MIN_SIZE, size)
+  if (!('Svg' in el)) return ''
+  const { Box } = el
+  // Drawn interactive, the document is the frame's page, and a page's body has a margin that
+  // pushed the picture 8 px in and cut its right ear (seen in Chromium's srcdoc frames); an image
+  // has no body, so the rule is idle there.
+  const page = 'html,body{margin:0;padding:0;overflow:hidden;background:transparent}svg{display:block}'
+  const source = svgDoc(s, s, frame.appearance, rippleBody(face, percent), page + rippleCss(face), '0 0 ' + GRID + ' ' + GRID)
+  // In a Box of its own that never shrinks: beside a column of text it keeps its size.
+  return (
+    <Box key={'ripple-' + key} flexShrink={0}>
+      {chip(el, { key: 'ripple-' + key, source, alt, width: s, height: s, live: true })}
+    </Box>
+  )
+}
 
 /** A small switch: track and knob, lit in the accent; `mixed` (a group partly on) centres the knob. */
 export function switchGlyph(x: number, y: number, on: boolean | 'mixed'): string {
@@ -140,48 +158,6 @@ export function switchGlyph(x: number, y: number, on: boolean | 'mixed'): string
     (on ? v('accent') : v('muted')) + '" stroke-width="1.2"/>' +
     '<circle cx="' + (on ? x + 16 : x + 6) + '" cy="' + (y + 6) + '" r="' + (on ? 4 : 3.4) + '" fill="' + (on ? '#fff' : v('muted')) + '"/>'
   )
-}
-
-// A cog of eight teeth around (7, 7): outer radius 6.2, root 4.6.
-const COG = (() => {
-  const pts: string[] = []
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2
-    for (const [da, r] of [[-0.2, 4.6], [-0.12, 6.2], [0.12, 6.2], [0.2, 4.6]] as const) {
-      pts.push((7 + r * Math.cos(a + da)).toFixed(2) + ' ' + (7 + r * Math.sin(a + da)).toFixed(2))
-    }
-  }
-  return 'M' + pts.join('L') + 'Z'
-})()
-
-/** Line icons, 14px boxes, drawn in `tone`. */
-export function icon(name: 'log' | 'agents' | 'gear' | 'compact' | 'handoff' | 'flame' | 'check' | 'cross' | 'alert' | 'clock' | 'snow', x: number, y: number, tone: string): string {
-  const s = ' fill="none" stroke="' + tone + '" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"'
-  const t = 'translate(' + x + ' ' + y + ')'
-  switch (name) {
-    case 'log':
-      return '<g transform="' + t + '"' + s + '><path d="M2 3.5h10M2 7h10M2 10.5h6"/></g>'
-    case 'agents':
-      return '<g transform="' + t + '"' + s + '><circle cx="7" cy="3.2" r="1.9"/><circle cx="2.8" cy="10.8" r="1.9"/><circle cx="11.2" cy="10.8" r="1.9"/><path d="M7 5.1v2.4M7 7.5 3.6 9.2M7 7.5l3.4 1.7"/></g>'
-    case 'gear':
-      return '<g transform="' + t + '"' + s + '><circle cx="7" cy="7" r="1.9"/><path d="' + COG + '"/></g>'
-    case 'compact':
-      return '<g transform="' + t + '"' + s + '><path d="M2 2.5h10M2 11.5h10M7 4.2v5.6M4.8 6.3 7 4.2l2.2 2.1M4.8 7.7 7 9.8l2.2-2.1"/></g>'
-    case 'handoff':
-      return '<g transform="' + t + '"' + s + '><path d="M2 7h8.5M7.6 3.8 10.8 7l-3.2 3.2M12.5 2.5v9"/></g>'
-    case 'flame':
-      return '<g transform="' + t + '"' + s + '><path d="M7 1.8c.4 2.2 3.6 3.4 3.6 6.7a3.6 3.6 0 0 1-7.2 0c0-1.6.9-2.6 1.7-3.3.1 1.2.7 1.9 1.4 2.1C6 5.4 6.3 3.4 7 1.8z"/></g>'
-    case 'check':
-      return '<g transform="' + t + '"' + s + '><path d="M2.5 7.4 5.6 10.4 11.6 3.8"/></g>'
-    case 'cross':
-      return '<g transform="' + t + '"' + s + '><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></g>'
-    case 'alert':
-      return '<g transform="' + t + '"' + s + '><path d="M7 1.8 12.8 12H1.2z"/><path d="M7 5.6v3"/><circle cx="7" cy="10.3" r=".3"/></g>'
-    case 'clock':
-      return '<g transform="' + t + '"' + s + '><circle cx="7" cy="7" r="5.4"/><path d="M7 4v3.2l2.1 1.4"/></g>'
-    case 'snow':
-      return '<g transform="' + t + '"' + s + '><path d="M7 1.5v11M2.2 4.2l9.6 5.6M2.2 9.8l9.6-5.6"/></g>'
-  }
 }
 
 // ---- Generic desktop controls ------------------------------------------------------------------

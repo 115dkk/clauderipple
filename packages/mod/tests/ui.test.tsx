@@ -311,6 +311,79 @@ test('alert choices reach their callbacks', async ($, on) => {
   expect(calls).toEqual([...once, ...once])
 })
 
+/** The mascot pictures in a drawn tree: the Svgs on its 56 grid. */
+function mascots(tree: unknown): Drawn[] {
+  const out: Drawn[] = []
+  walk(tree, n => {
+    if (n.type === 'Svg' && String(n.props?.source).includes('viewBox="0 0 56 56"')) out.push(n)
+  })
+  return out
+}
+
+test('each alert shows 리플이 with the face of its state, its gauge in 5% steps; the terminal keeps a text mark', async ($, on) => {
+  const noop = () => undefined
+  const actions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  const variants: [string, AlertView][] = [
+    ['swamp-59', { kind: 'swamp', percent: 59, tokens: 118_000 }],
+    ['swamp-61', { kind: 'swamp', percent: 61, tokens: 122_000 }],
+    ['swamp-66', { kind: 'swamp', percent: 66, tokens: 132_000 }],
+    ['hot-94', { kind: 'hot', limitKind: 'five_hour', percent: 94, save: false }],
+    ['hot-95', { kind: 'hot', limitKind: 'five_hour', percent: 95, save: false }],
+  ]
+  ALERTS.forEach((alert, i) => drawPane(on, 'face-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, actions)))
+  for (const [id, alert] of variants) drawPane(on, id, (el, surface) => renderAlert(el, frameOf(surface), alert, actions))
+  const sources: string[] = []
+  for (let i = 0; i < ALERTS.length; i++) {
+    const ui = await mount($, 'face-' + i, 'desktop')
+    const found = mascots(await ui.drawn())
+    expect(found.length, 'alert ' + i).toBe(1)
+    expect(found[0]!.props?.width).toBe(44)
+    expect(found[0]!.props?.isInteractive, 'alert ' + i).toBe(true)
+    sources.push(String(found[0]!.props?.source))
+    await ui.unmount()
+    const terminal = await mount($, 'face-' + i, 'terminal')
+    expect(mascots(await terminal.drawn()).length).toBe(0)
+    await terminal.unmount()
+  }
+  // handoffDone and compacted share the pleased face, compactNote and handoffChoice the asking
+  // one; every other state has its own.
+  expect(new Set(sources).size).toBe(ALERTS.length - 2)
+  const source = async (id: string) => {
+    const ui = await mount($, id, 'desktop')
+    const s = String(mascots(await ui.drawn())[0]?.props?.source)
+    await ui.unmount()
+    return s
+  }
+  expect(await source('swamp-59')).toBe(await source('swamp-61'))
+  expect(await source('swamp-61') === await source('swamp-66')).toBe(false)
+  expect((await source('hot-94')).includes('fill="var(--warn)"')).toBe(true)
+  expect((await source('hot-95')).includes('fill="var(--bad)"')).toBe(true)
+  const terminal = await mount($, 'hot-95', 'terminal')
+  expect(await terminal.find({ type: 'Text', text: /^✕ / })).toBeDefined()
+})
+
+test('리플이 greets in setup and quick settings and waits in empty panes, never among running agents', async ($, on) => {
+  const noop = () => undefined
+  const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
+  drawPane(on, 'm-setup-1', (el, surface) => renderSetup(el, frameOf(surface), { step: 1, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, setupActions))
+  drawPane(on, 'm-setup-4', (el, surface) => renderSetup(el, frameOf(surface), { step: 4, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, setupActions))
+  drawPane(on, 'm-quick', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS))
+  drawPane(on, 'm-agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop }))
+  drawPane(on, 'm-agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { toggleDone: noop }))
+  drawPane(on, 'm-log-empty', (el, surface) => renderLog(el, frameOf(surface, 64), { rows: [], mineOnly: true }, { toggleScope: noop }))
+  const expected: [string, number, string][] = [['m-setup-1', 1, 'var(--accent)'], ['m-setup-4', 1, 'var(--ok)'], ['m-quick', 1, 'var(--accent)'], ['m-agents', 0, ''], ['m-agents-empty', 1, 'var(--accent)'], ['m-log-empty', 1, 'var(--accent)']]
+  for (const [id, count, tone] of expected) {
+    const ui = await mount($, id, 'desktop', 64)
+    const found = mascots(await ui.drawn())
+    expect(found.length, id).toBe(count)
+    if (tone) expect(String(found[0]!.props?.source).includes('stroke="' + tone + '"'), id).toBe(true)
+    await ui.unmount()
+    const terminal = await mount($, id, 'terminal', 64)
+    expect(mascots(await terminal.drawn()).length, id).toBe(0)
+    await terminal.unmount()
+  }
+})
+
 // ---- Settings and setup ------------------------------------------------------------------------
 
 test('quick settings draw on both surfaces with only session controls', async ($, on) => {

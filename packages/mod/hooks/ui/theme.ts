@@ -140,9 +140,10 @@ const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-u
 
 /**
  * One SVG document. The palette is set as CSS variables on the root: fixed for dark or light, and
- * for auto switched by the frame's `prefers-color-scheme`.
+ * for auto switched by the frame's `prefers-color-scheme`. `viewBox` draws a grid of its own at
+ * this size (the mascot's 56 units); absent, one unit is one pixel.
  */
-export function svgDoc(width: number, height: number, appearance: Appearance, body: string, css = ''): string {
+export function svgDoc(width: number, height: number, appearance: Appearance, body: string, css = '', viewBox = '0 0 ' + width + ' ' + height): string {
   const vars =
     appearance === 'dark'
       ? 'svg{' + varsOf(DARK) + '}'
@@ -157,7 +158,7 @@ export function svgDoc(width: number, height: number, appearance: Appearance, bo
     '.lbl{font-size:12px;font-weight:500}'
   return (
     '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height +
-    '" viewBox="0 0 ' + width + ' ' + height + '"><style>' + vars + base + css + '</style>' + body + '</svg>'
+    '" viewBox="' + viewBox + '"><style>' + vars + base + css + '</style>' + body + '</svg>'
   )
 }
 

@@ -1,57 +1,41 @@
 // The bands that take the dashboard's place when something wants a decision: cold cache, heavy
 // context, a hot plan limit, a judge that failed, the compact and handoff bars, and the cards that
-// report a compact or handoff in progress and done. One layout for all: a tinted badge, a title
-// and one line of why, then the choices — the main one filled.
+// report a compact or handoff in progress and done. One layout for all: 리플이 with the face of
+// the moment on the left, and beside it a title, one line of why, then the choices — the main
+// one filled. Where the card is about a figure (context, plan limit), its ring is that gauge.
 
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
-import { WAVE_CSS, action, chip, icon, segmented } from './parts'
+import { action, mascot, segmented } from './parts'
 import type { Els } from './parts'
-import { svgDoc, textTone, v } from './theme'
-import type { Palette } from './theme'
+import { FACE_TONE } from './ripple'
+import type { Face } from './ripple'
+import { textTone } from './theme'
 import type { AlertActions, AlertView, Frame } from './view'
 import { compactNumber, isRich, limitName, resetsLabel } from './view'
-
-type Tone = 'accent' | 'ok' | 'warn' | 'bad'
-type IconName = Parameters<typeof icon>[0]
 
 type Choice = { key: string; label: string; hotkey: string; onPress: () => void; primary?: boolean; lit?: boolean }
 
 type Card = {
   key: string
-  tone: Tone
-  glyph: IconName | 'wave'
+  /** 리플이's face; its tone colours the title. */
+  face: Face
+  /** The ring as a gauge (context or limit percent). */
+  percent?: number
   title: string
   body: string
   choices: Choice[]
-  /** Controls drawn between the text and the choices (fields, option rows). */
-  extra?: RenderNode[]
 }
 
 const JUDGE_NAME = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'alerts.routerModel' } as const
 
+/** The mascot's size on a card, px: the sheet's card badge. */
+export const CARD_BADGE = 44
+
 function badge(el: Els, frame: Frame, card: Card): RenderNode {
-  const s = 34
-  const paint = v(card.tone as keyof Palette)
-  const plate =
-    '<rect x="0.5" y="0.5" width="' + (s - 1) + '" height="' + (s - 1) + '" rx="10" fill="' + paint + '" fill-opacity="0.13" stroke="' + paint + '" stroke-opacity="0.45"/>'
-  let body: string
-  let css = ''
-  if (card.glyph === 'wave') {
-    // Work in progress: three dots lighting in turn.
-    body = ''
-    ;[11, 17, 23].forEach((x, i) => {
-      body += '<circle class="wave" style="animation-delay:' + (i * 0.25).toFixed(2) + 's" cx="' + x + '" cy="17" r="2.4" fill="' + paint + '"/>'
-    })
-    css = WAVE_CSS
-  } else {
-    body = '<g transform="translate(17 17) scale(1.15) translate(-7 -7)">' + icon(card.glyph, 0, 0, paint) + '</g>'
-  }
-  const spec: Parameters<typeof chip>[1] = { key: 'badge-' + card.key, source: svgDoc(s, s, frame.appearance, plate + body, css), alt: card.title, width: s, height: s }
-  if (css) spec.live = true
-  return chip(el, spec)
+  return mascot(el, frame, card.key, card.face, card.title, CARD_BADGE, card.percent)
 }
 
 function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
@@ -59,8 +43,7 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
     case 'cold':
       return {
         key: 'cold',
-        tone: 'accent',
-        glyph: 'snow',
+        face: 'sleepy',
         title: t(frame.lang, 'alerts.coldTitle'),
         body:
           t(frame.lang, 'alerts.coldBody', { tokens: compactNumber(alert.tokens), minutes: alert.idleMinutes }),
@@ -73,8 +56,8 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
     case 'swamp':
       return {
         key: 'swamp',
-        tone: 'warn',
-        glyph: 'alert',
+        face: 'uneasy',
+        percent: alert.percent,
         title: t(frame.lang, 'alerts.swampTitle', { percent: Math.round(alert.percent) }),
         body: t(frame.lang, 'alerts.swampBody', { tokens: compactNumber(alert.tokens) }),
         choices: [
@@ -87,8 +70,8 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
       const resets = resetsLabel(alert.resetsAt, frame.now, frame.lang)
       return {
         key: 'hot',
-        tone: alert.percent >= 95 ? 'bad' : 'warn',
-        glyph: 'clock',
+        face: alert.percent >= 95 ? 'alarmed' : 'strained',
+        percent: alert.percent,
         title: t(frame.lang, 'alerts.hotTitle', { window: limitName(alert.limitKind, frame.lang), percent: Math.round(alert.percent) }),
         body:
           (resets ? resets.charAt(0).toUpperCase() + resets.slice(1) + '. ' : '') +
@@ -102,8 +85,7 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
     case 'judgeDown':
       return {
         key: 'judge',
-        tone: 'bad',
-        glyph: 'alert',
+        face: 'dazed',
         title: t(frame.lang, alert.network ? 'alerts.judgeNetworkTitle' : 'alerts.judgeTitle'),
         body: t(frame.lang, 'alerts.judgeBody', { judge: t(frame.lang, JUDGE_NAME[alert.judge]), reason: alert.reason, fallback: t(frame.lang, alert.judge === 'haiku' ? 'alerts.keepEffort' : 'alerts.askHaiku') }),
         choices: [
@@ -116,8 +98,7 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
     case 'compactNote':
       return {
         key: 'note',
-        tone: 'accent',
-        glyph: 'compact',
+        face: 'asking',
         title: t(frame.lang, 'alerts.compactTitle'),
         body: t(frame.lang, 'alerts.compactBody'),
         choices: [
@@ -128,8 +109,7 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
     case 'handoffChoice':
       return {
         key: 'handoff',
-        tone: 'accent',
-        glyph: 'handoff',
+        face: 'asking',
         title: t(frame.lang, 'alerts.handoffTitle'),
         body:
           alert.handoffKind === 'quick'
@@ -149,8 +129,7 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
     case 'handingOff':
       return {
         key: 'result',
-        tone: 'accent',
-        glyph: 'wave',
+        face: 'going',
         title: t(frame.lang, 'alerts.handingOff'),
         body: alert.detail ?? (alert.handoffKind === 'full' ? t(frame.lang, 'alerts.fullProgress') : t(frame.lang, 'alerts.quickProgress')),
         choices: [],
@@ -158,18 +137,17 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
     case 'handoffDone':
       return {
         key: 'result',
-        tone: 'ok',
-        glyph: 'check',
+        face: 'pleased',
         title: t(frame.lang, 'alerts.handoffDone'),
         body: alert.detail ?? t(frame.lang, 'alerts.summaryReady'),
         choices: [{ key: 'copy', label: t(frame.lang, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }, dismiss],
       }
     case 'compacting':
-      return { key: 'result', tone: 'accent', glyph: 'wave', title: t(frame.lang, 'alerts.compacting'), body: alert.detail ?? t(frame.lang, 'alerts.compactingBody'), choices: [] }
+      return { key: 'result', face: 'squeezing', title: t(frame.lang, 'alerts.compacting'), body: alert.detail ?? t(frame.lang, 'alerts.compactingBody'), choices: [] }
     case 'compacted':
-      return { key: 'result', tone: 'ok', glyph: 'check', title: t(frame.lang, 'alerts.compacted'), body: alert.detail ?? t(frame.lang, 'alerts.compactedBody'), choices: [dismiss] }
+      return { key: 'result', face: 'pleased', title: t(frame.lang, 'alerts.compacted'), body: alert.detail ?? t(frame.lang, 'alerts.compactedBody'), choices: [dismiss] }
     case 'failed':
-      return { key: 'result', tone: 'bad', glyph: 'cross', title: t(frame.lang, 'alerts.failed'), body: alert.detail ?? t(frame.lang, 'alerts.unchanged'), choices: [dismiss] }
+      return { key: 'result', face: 'sorry', title: t(frame.lang, 'alerts.failed'), body: alert.detail ?? t(frame.lang, 'alerts.unchanged'), choices: [dismiss] }
   }
 }
 
@@ -220,16 +198,18 @@ export function renderAlert(el: Els, frame: Frame, alert: AlertView, actions: Al
   const card = cardOf(frame, alert, actions)
   const extra = extras(el, frame, alert, actions)
   const tone = textTone(frame.appearance)
-  const titleColor = card.tone === 'accent' ? undefined : tone[card.tone]
+  const cardTone = FACE_TONE[card.face]
+  const titleColor = cardTone === 'accent' ? undefined : tone[cardTone]
   if (isRich(frame)) {
-    // The text takes the width the badge leaves and wraps in it (a row that wraps sizes its items
-    // to their whole line, which ran the body past the card: seen 2026-10-10); the choices go
-    // under it and wrap as a row of whole chips.
+    // 리플이 on the left, everything else in one column beside it, as the sheet's cards: the text
+    // takes the width the badge leaves and wraps in it (a row that wraps sizes its items to their
+    // whole line, which ran the body past the card: seen 2026-10-10), the fields and choices line
+    // up under the title, the choices wrapping as a row of whole chips.
     return (
-      <Box key={'alert-' + card.key} flexDirection="column" rowGap={1} width="100%">
-        <Box flexDirection="row" alignItems="flex-start" columnGap={2}>
-          {badge(el, frame, card)}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+      <Box key={'alert-' + card.key} flexDirection="row" alignItems="flex-start" columnGap={2} width="100%">
+        {badge(el, frame, card)}
+        <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} rowGap={1}>
+          <Box flexDirection="column">
             <Text bold color={titleColor} wrap="wrap">
               {card.title}
             </Text>
@@ -237,30 +217,31 @@ export function renderAlert(el: Els, frame: Frame, alert: AlertView, actions: Al
               {card.body}
             </Text>
           </Box>
+          {extra.length > 0 ? (
+            <Box flexDirection="column" rowGap={1}>
+              {extra}
+            </Box>
+          ) : null}
+          {card.choices.length > 0 ? (
+            <Box flexDirection="row" flexWrap="wrap" gap={1}>
+              {card.choices.map(c => {
+                const o: { primary?: boolean; lit?: boolean } = {}
+                if (c.primary) o.primary = true
+                if (c.lit) o.lit = true
+                return action(el, frame, c.key, c.label, c.onPress, o)
+              })}
+            </Box>
+          ) : null}
         </Box>
-        {extra.length > 0 ? (
-          <Box flexDirection="column" rowGap={1} paddingLeft={6}>
-            {extra}
-          </Box>
-        ) : null}
-        {card.choices.length > 0 ? (
-          <Box flexDirection="row" flexWrap="wrap" gap={1} paddingLeft={6}>
-            {card.choices.map(c => {
-              const o: { primary?: boolean; lit?: boolean } = {}
-              if (c.primary) o.primary = true
-              if (c.lit) o.lit = true
-              return action(el, frame, c.key, c.label, c.onPress, o)
-            })}
-          </Box>
-        ) : null}
       </Box>
     )
   }
-  const mark = card.glyph === 'wave' ? '…' : card.tone === 'ok' ? '✓' : card.tone === 'bad' ? '✕' : card.tone === 'warn' ? '▲' : '◉'
+  // The terminal keeps a text mark: work in progress, done, failed or broken, a warning, a question.
+  const mark = card.face === 'squeezing' || card.face === 'going' ? '…' : cardTone === 'ok' ? '✓' : cardTone === 'bad' ? '✕' : cardTone === 'warn' ? '▲' : '◉'
   return (
     <Box key={'alert-' + card.key} flexDirection="column" width="100%">
       <Text wrap="wrap">
-        <Text bold color={card.tone === 'accent' ? tone.accent : tone[card.tone]}>
+        <Text bold color={cardTone === 'accent' ? tone.accent : tone[cardTone]}>
           {mark + ' ' + card.title}
         </Text>
         <Text dimColor>{'  ' + card.body}</Text>
