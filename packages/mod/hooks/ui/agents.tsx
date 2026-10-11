@@ -15,17 +15,13 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { AgentRec } from '../../types'
-import { mascot, textButton } from './parts'
+import { speak, textButton } from './parts'
 import type { Els } from './parts'
 import { textTone } from './theme'
 import type { AgentsActions, AgentsView, Frame } from './view'
 import { compactNumber, effortLabel, elapsed, isRich, modelName, targetLabel } from './view'
 
 const BY = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', marker: 'agents.marker', default: 'agents.default' } as const
-
-/** A card's fill and hairline: grey at low alpha reads on the host's light and dark panes alike. */
-const CARD_FILL = 'rgba(128,128,128,0.07)'
-const CARD_LINE = 'rgba(128,128,128,0.22)'
 
 function who(agent: AgentRec): string {
   const pick = agent.pick
@@ -91,11 +87,9 @@ function liveCard(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNo
         </Box>
       ),
   ]
-  return rich ? (
-    <Box key={'agent-' + agent.id} flexDirection="column" rowGap={0} borderStyle="round" borderColor={CARD_LINE} backgroundColor={CARD_FILL} paddingX={1}>
-      {body}
-    </Box>
-  ) : (
+  // No box around it: the dot, the bold name and the rows under it are the card, a row of air
+  // the gap to the next.
+  return (
     <Box key={'agent-' + agent.id} flexDirection="column">
       {body}
     </Box>
@@ -122,33 +116,25 @@ export function renderAgents(el: Els, frame: Frame, view: AgentsView, actions: A
   const { Box, Text } = el
   const live = view.agents.filter(a => a.state === 'running' || a.state === 'waiting').sort((a, b) => a.startedAt - b.startedAt)
   const done = view.agents.filter(a => a.state === 'done' || a.state === 'failed').sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
-  if (view.agents.length === 0) {
-    const text = (
-      <Box flexDirection="column" rowGap={1} flexGrow={1} flexShrink={1} minWidth={0}>
-        <Text bold>{t(frame.lang, 'agents.emptyTitle')}</Text>
-        <Text dimColor wrap="wrap">
-          {t(frame.lang, 'agents.emptyBody')}
-        </Text>
-      </Box>
-    )
-    if (!isRich(frame) || !('Svg' in el)) return <Box flexDirection="column" width="100%">{text}</Box>
-    return (
-      <Box flexDirection="row" alignItems="flex-start" columnGap={2} width="100%">
-        {mascot(el, frame, 'agents', 'calm', t(frame.lang, 'agents.emptyTitle'))}
-        {text}
-      </Box>
-    )
-  }
+  // Empty, the pane has nothing to redraw it, so 리플이 can wait here without blinking.
+  if (view.agents.length === 0) return speak(el, frame, { key: 'agents', face: 'calm', title: t(frame.lang, 'agents.emptyTitle'), line: t(frame.lang, 'agents.emptyBody') })
+  const { Button } = el
   return (
     <Box flexDirection="column" rowGap={1} width="100%">
-      <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
         <Text bold>{live.length ? t(frame.lang, 'agents.liveCount', { count: live.length }) : t(frame.lang, 'agents.noneRunning')}</Text>
-        {done.length ? <Text dimColor>{'· ' + t(frame.lang, 'agents.doneCount', { count: done.length })}</Text> : null}
+        {done.length ? <Text dimColor>{t(frame.lang, 'agents.doneCount', { count: done.length })}</Text> : null}
       </Box>
       {live.map(agent => liveCard(el, frame, agent, view.now))}
       {done.length ? (
         <Box flexDirection="column">
-          <Box flexDirection="row">{textButton(el, 'done', (view.showDone ? '▾ ' : '▸ ') + t(frame.lang, 'agents.doneCount', { count: done.length }), actions.toggleDone, isRich(frame) ? undefined : 'f')}</Box>
+          <Box flexDirection="row">
+            {isRich(frame) ? (
+              <Button key="done" plain dimColor label={(view.showDone ? '▾ ' : '▸ ') + t(frame.lang, 'agents.doneCount', { count: done.length })} onPress={() => actions.toggleDone()} />
+            ) : (
+              textButton(el, 'done', (view.showDone ? '▾ ' : '▸ ') + t(frame.lang, 'agents.doneCount', { count: done.length }), actions.toggleDone, 'f')
+            )}
+          </Box>
           {view.showDone ? done.map(agent => doneLine(el, frame, agent)) : null}
         </Box>
       ) : null}

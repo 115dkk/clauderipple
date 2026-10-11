@@ -19,7 +19,6 @@ import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
 import { countdown, elapsed, minutesLeft, modelName, nextMinuteChange, resetsLabel, routeOf, seconds, targetOf, targetValue } from '../hooks/ui/view'
-import { hitLabelWidth } from '../hooks/ui/parts'
 import type { AlertView, DashboardView, Frame, JevState, SettingsActions, Surface } from '../hooks/ui/view'
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -585,38 +584,57 @@ function chips(tree: unknown): { key: string; width: number; label: string }[] {
   return out
 }
 
-test('every blank hit label fits its chip, with long Korean and Japanese labels', async ($, on) => {
-  const original = { ko: { ...STRINGS.ko }, ja: { ...STRINGS.ja } }
+test('리플이 is the one picture: every control is a native button, none a picture with a blank label over it', async ($, on) => {
+  // Each Svg is a new <img> or <iframe> on every desktop redraw (parts.tsx), and a blank label laid
+  // over a picture had to be sized against the host's font or it was cut to "…" (2026-10-10).
   const noop = () => undefined
-  const settingsActions = QUICK_ACTIONS
-  const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+  const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
   const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
-  try {
-    STRINGS.ko['settings.openAll'] = '라우터 대시보드에서 모든 세부 설정 열기'
-    STRINGS.ko['settings.effortAuto'] = '각 프롬프트의 추론 강도를 자동으로 선택하기'
-    STRINGS.ja['settings.openAll'] = 'ルーターのダッシュボードですべての詳細設定を開く'
-    STRINGS.ja['alerts.notNow'] = 'あとで、コンテキストがさらに増えたときに'
-    const auto = normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } })
-    const cases: [string, Draw][] = []
-    for (const lang of ['ko', 'ja'] as const) {
-      const frame = (surface: Surface, columns = 64) => ({ ...frameOf(surface, columns, 30), lang })
-      cases.push([lang + '-quick', (el, surface) => renderSettings(el, frame(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, settingsActions)])
-      cases.push([lang + '-setup', (el, surface) => renderSetup(el, frame(surface), { step: 2, draft: auto, jev: { source: null, test: { state: 'idle' } } }, { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop })])
-      cases.push([lang + '-band', (el, surface) => renderBand(el, frame(surface), { ...DASH, handoff: 'advised', agents: { live: 2, total: 3 }, effortMenu: true }, bandActions)])
-      ALERTS.forEach((alert, i) => cases.push([lang + '-alert-' + i, (el, surface) => renderAlert(el, frame(surface, 60), alert, alertActions)]))
-    }
-    for (const [id, draw] of cases) drawPane(on, id, draw)
-    let seen = 0
-    for (const [id] of cases) {
-      const ui = await mount($, id, 'desktop', 64)
-      for (const c of chips(await ui.drawn())) {
-        seen++
-        expect(hitLabelWidth(c.label) <= c.width, id + ' ' + c.key + ': ' + hitLabelWidth(c.label) + ' > ' + c.width).toBe(true)
-      }
-      await ui.unmount()
-    }
-    expect(seen > 50).toBe(true)
-  } finally { Object.assign(STRINGS.ko, original.ko); Object.assign(STRINGS.ja, original.ja) }
+  const cases: [string, Draw][] = [
+    ['one-quick', (el, surface) => renderSettings(el, frameOf(surface, 64, 30), { settings: { ...SETTINGS, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
+    ...([1, 2, 3, 4] as const).map((step): [string, Draw] => ['one-setup-' + step, (el, surface) => renderSetup(el, frameOf(surface, 64, 30), { step, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, setupActions)]),
+    ...ALERTS.map((alert, i): [string, Draw] => ['one-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 60), alert, alertActions)]),
+    ['one-hot-save', (el, surface) => renderAlert(el, frameOf(surface, 60), { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }, alertActions)],
+  ]
+  for (const [id, draw] of cases) drawPane(on, id, draw)
+  for (const [id] of cases) {
+    const ui = await mount($, id, 'desktop', 64)
+    const tree = await ui.drawn()
+    let pictures = 0
+    walk(tree, n => { if (n.type === 'Svg') pictures++ })
+    expect(pictures, id).toBe(1)
+    expect(mascots(tree).length, id).toBe(1)
+    expect(chips(tree), id).toEqual([])
+    await ui.unmount()
+  }
+})
+
+test('a card says one thing: the title in ink, at most one main action, the others quiet, the host’s × to let it go', async ($, on) => {
+  const noop = () => undefined
+  const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  const all: AlertView[] = [...ALERTS, { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }]
+  all.forEach((alert, i) => drawPane(on, 'say-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, alertActions)))
+  for (let i = 0; i < all.length; i++) {
+    const ui = await mount($, 'say-' + i, 'desktop')
+    const buttons: Drawn[] = []
+    walk(await ui.drawn(), n => { if (n.type === 'Button') buttons.push(n) })
+    const main = buttons.filter(b => b.props?.variant === 'primary')
+    const closes = buttons.filter(b => b.props?.role === 'dismiss')
+    const others = buttons.filter(b => b.props?.variant !== 'primary' && b.props?.role !== 'dismiss')
+    expect(main.length <= 1, 'alert ' + i).toBe(true)
+    expect(closes.length <= 1, 'alert ' + i).toBe(true)
+    // Quiet: dim at rest; an option says whether it is chosen in its mark, not its dimness alone.
+    for (const b of others) expect(b.props?.dimColor === true || /^● /.test(String(b.props?.label)), 'alert ' + i + ' ' + String(b.props?.key)).toBe(true)
+    // The title (the first bold Text) takes no colour: 리플이's face is the card's colour.
+    let title: Drawn | undefined
+    walk(await ui.drawn(), n => { if (!title && n.type === 'Text' && n.props?.bold) title = n })
+    expect(title?.props?.color, 'alert ' + i).toBeUndefined()
+    await ui.unmount()
+  }
+  // Save mode on: nothing left to press but turning it off, quietly.
+  const on_ = await mount($, 'say-' + (all.length - 1), 'desktop')
+  expect((await on_.find({ type: 'Button', key: 'save' }))?.props).toMatchObject({ label: 'Turn save mode off', dimColor: true })
+  expect((await on_.find({ type: 'Button', key: 'dismiss' }))?.props.role).toBe('dismiss')
 })
 
 test('no drawing cuts its text: no truncating Text on any surface', async ($, on) => {

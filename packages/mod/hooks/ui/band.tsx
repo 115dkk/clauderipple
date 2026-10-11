@@ -1,9 +1,10 @@
 // The dashboard band above the prompt, and its minimal form in the footer.
 //
-// One quiet row of native text: the effort (a ripple glyph and its name), the cache countdown in
-// whole minutes, the context and plan-limit figures when switched on in Look, the last route; then
-// small toggles at the right end (Handoff when advised, Auto, Warm, Log, Agents, settings). What a
-// caption used to say sits in a hover card on the desktop. The terminal draws the same facts.
+// One quiet row of native text: on the desktop 리플이's crest (∿, lit while Auto picks), the effort,
+// the cache countdown in whole minutes, the context and plan-limit figures when switched on in
+// Look, the last route; then small toggles at the right end (Handoff when advised, Auto, Warm, Log,
+// Agents, settings), with air but no rule between the two. What a caption used to say sits in a
+// hover card on the desktop. The terminal draws the same facts.
 //
 // Two facts of the desktop host shape it (claude.ai assets c2719cf1b-C7sTDzb6.js, read 2026-10-10):
 // - Each answer the band gives is drawn as a freshly built DOM tree swapped in for the last one
@@ -35,7 +36,7 @@ import type { RenderChildren, RenderNode } from 'claude-code'
 import type { Effort } from '../../types'
 import { textButton } from './parts'
 import type { Els } from './parts'
-import { cacheTone, clip, contextTone, displayWidth, limitTone, textTone } from './theme'
+import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, textTone } from './theme'
 import type { BandActions, DashboardView, Frame } from './view'
 import { EFFORTS, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, resetsLabel, seconds, compactNumber } from './view'
 
@@ -52,8 +53,13 @@ const ROUTE_MIN = 14
 const RICH_ROUTE_MIN = 6
 /** Desktop: the slot of the live agents' count after its control. */
 const COUNT_CELLS = 2
-/** Desktop: the rule between the facts and the controls, with the gaps either side of it. */
-const RULE_CELLS = 3
+/**
+ * Desktop: 리플이's crest as a glyph at the row's start, and the gap after it (it took the place
+ * of the rule that stood between the facts and the controls: the same cells, one mark fewer).
+ */
+const MARK_CELLS = 3
+/** The crest: a wave, a single cell in the host's sans (∿ measured 8.2 px at 14 px, a ch 8.8). */
+const CREST = '∿'
 /** The reason's slot on a wide terminal. */
 const WHY_CELLS = 28
 
@@ -85,21 +91,6 @@ type Fact = {
  */
 function cells(frame: Frame, text: string): number {
   return isRich(frame) ? Math.ceil(chOf(text)) : displayWidth(text)
-}
-
-/** The desktop width of `text` in `ch`, unrounded (see cells). */
-function chOf(text: string): number {
-  let ch = 0
-  for (const char of text) {
-    if (displayWidth(char) === 2) ch += 1.45
-    else if (char === ' ') ch += 0.45
-    else if (/[ilIj.,:;|'!]/.test(char)) ch += 0.4
-    else if (/[mwMW@%]/.test(char)) ch += 1.35
-    else if (/[A-Z]/.test(char)) ch += 1.1
-    else if (/[0-9]/.test(char)) ch += 1
-    else ch += 0.85
-  }
-  return ch
 }
 
 function widest(frame: Frame, texts: readonly string[]): number {
@@ -415,7 +406,9 @@ function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   // the row, never below what its slots and a short route need: where the host's real widths leave
   // less, it wraps under the controls rather than overlap them. Widths alone decide, never values.
   const ctrlCells = controlsCells(frame, view, actions)
-  const room = cols - ctrlCells - RULE_CELLS
+  const room = cols - ctrlCells - MARK_CELLS
+  // The crest is lit while Auto picks the effort, quiet otherwise: Ripple at work or standing by.
+  const working = view.effort.mode === 'auto' || view.effort.mode === 'deciding'
   const need = (facts: readonly Fact[]) => facts.filter(f => !f.grow).reduce((n, f) => n + f.width, 0) + GAP * Math.max(0, facts.length - 1) + (facts.some(f => f.grow) ? RICH_ROUTE_MIN : 0)
   let facts: Fact[] = []
   for (const drop of [[], ['limit'], ['limit', 'context']]) {
@@ -426,14 +419,17 @@ function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActio
     <Box flexDirection="column" width="100%" minWidth={0}>
       <Box key="band-row" flexDirection="row" alignItems="center" width="100%" columnGap={1} flexWrap="wrap">
         <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={GAP} flexGrow={1} flexShrink={1} width={0} minWidth={need(facts) + GAP + 1}>
+          <Box key="band-crest" flexShrink={0}>
+            <Text color={working ? textTone(frame.appearance).accent : undefined} dimColor={!working} bold>
+              {CREST}
+            </Text>
+          </Box>
           {facts.map(f => factRich(el, f))}
           {/* The reason sits right after the route in only what the facts leave (it starts from no
-              width), cut at its end; with no reason the box stays, empty, so nothing else moves. */}
+              width), cut at its end; with no reason the box stays, empty, so nothing else moves.
+              Its own air is the gap before the controls: no rule between them. */}
           <Box key="band-why" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
             {reason ? <Text dimColor wrap="truncate">{reason}</Text> : null}
-          </Box>
-          <Box flexShrink={0}>
-            <Text dimColor>│</Text>
           </Box>
         </Box>
         <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={CTRL_GAP} flexShrink={0}>
