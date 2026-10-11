@@ -41,8 +41,18 @@ figures (effort judge, cache keep-warm, context/limit gauges, handoff/compact) r
 complaints in Paseo's 1,170 and Happy's 1,061 open issues cluster on four failures, which become
 our requirements below.
 
+Every issue cited here was re-read with `gh api` on 2026-10-11 and is **open**: Paseo #1330
+(created 2026-06-04), #2220 (07-19), #2610 (07-29), #5820 (10-01); Happy #988 (04-04), #1208
+(05-02), #1682 (08-10), #1870 (10-06).
+
 ## How Paseo stays up (read from the installed app, 2026-10-11)
 
+- **The server is the user's own machine.** The daemon runs locally (`127.0.0.1:6767`) and the
+  phone reaches it by SSH, Tailscale (direct, `daemon.listen` set to the tailnet IP) or the Paseo
+  relay. The relay is **off until the user enables it** (paseo.sh/docs/connectivity, read
+  2026-10-11); it is one shared, Paseo-run forwarder of end-to-end-encrypted bytes, not a
+  per-user server and not where sessions live. This Mac's `~/.paseo/daemon.log` shows
+  `relay_control_*` events, so the relay was enabled here.
 - The app spawns the daemon `detached` + `unref()`; a supervisor forks a worker and restarts it on
   crash. By default the daemon still quits with the app (`keepRunningAfterQuit: false`); no login
   item, launchd job or sleep assertion.
@@ -104,7 +114,9 @@ our requirements below.
 
 ## Open questions
 
-- Relay hosting cost and who runs it; self-host option from day one?
+- The relay is optional by design, as Paseo's is: direct (Tailscale / LAN) needs no server of
+  ours. If we run a shared relay it only forwards ciphertext (Cloudflare Worker + Durable Object
+  is cheap at this scale); self-hostable from day one so nobody depends on us.
 - Desktop-session concurrency (above) — measure before M1.
 - Does the Agent SDK accept a non-Claude model id end to end through the router as `query()`'s
   model? The CLI does (§3, measured 2026-09-19); the SDK path is not measured.
