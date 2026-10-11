@@ -1,0 +1,435 @@
+import test from "node:test";
+import type { TestContext } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
+import { WebSocket } from "ws";
+import { PermissionQueue } from "../src/permissions.ts";
+import { FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
+import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
+import { HostServer } from "../src/server.ts";
+import { Sessions } from "../src/sessions.ts";
+import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
+
+const webDir = fileURLToPath(new URL("../web", import.meta.url));
+const token = "remote-test-token-not-a-real-pairing-token";
+const router = {
+  status: async () => ({ ok: true, proxyEnv: { HTTPS_PROXY: "http://127.0.0.1:1" } }),
+  figures: async () => ({ effort: null, cachePct: null, contextPct: null, fiveHourPct: null, fiveHourResetAt: null, workers: [], at: Date.now() }),
+  models: async () => [],
+};
+
+function scriptedQuery() {
+  const options: Record<string, unknown>[] = [];
+  const users: SdkUserMessage[] = [];
+  const spies = { interrupt: 0, setModel: [] as (string | undefined)[], close: 0 };
+  const queryFn: QueryFn = params => {
+    options.push(params.options);
+    return {
+      async *[Symbol.asyncIterator]() {
+        let turn = 0;
+        for await (const user of params.prompt) {
+          users.push(user);
+          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: "sdk-1" };
+          const id = `m${turn}`;
+          yield { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id } } };
+          yield { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", delta: { type: "text_delta", text: "po" } } };
+          yield { type: "assistant", parent_tool_use_id: null, message: { id, model: "x", content: [{ type: "text", text: "pong" }] } };
+          yield { type: "result", subtype: "success", is_error: false, duration_ms: 5, num_turns: 1, modelUsage: { x: { contextWindow: 1000 } } };
+        }
+      },
+      interrupt: async () => { spies.interrupt++; },
+      setModel: async model => { spies.setModel.push(model); },
+      close: () => { spies.close++; },
+    };
+  };
+  return { queryFn, options, users, spies };
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = performance.now() + 2000;
+  while (!predicate()) {
+    assert.ok(performance.now() < deadline, "Timed out waiting for host or socket");
+    await delay(5);
+  }
+  await nextTick();
+}
+
+type Frame = { msg: HostMsg; bytes: number };
+type HostFrame<T extends HostMsg["t"]> = { msg: Extract<HostMsg, { t: T }>; bytes: number };
+
+class Peer {
+  readonly ws: WebSocket;
+  readonly frames: Frame[] = [];
+  readonly received: Frame[] = [];
+  readonly closed: Promise<{ code: number; reason: string }>;
+  private error: Error | null = null;
+  private ping = 0;
+
+  constructor(url: string) {
+    this.ws = new WebSocket(url);
+    this.closed = new Promise(resolve => this.ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
+    this.ws.on("error", error => { this.error = error; });
+    this.ws.on("message", data => {
+      const text = data.toString();
+      const frame = { msg: JSON.parse(text) as HostMsg, bytes: Buffer.byteLength(text) };
+      this.frames.push(frame);
+      this.received.push(frame);
+    });
+  }
+
+  async open(): Promise<void> {
+    await waitFor(() => this.ws.readyState === WebSocket.OPEN || this.error !== null);
+    if (this.error) throw this.error;
+  }
+
+  send(msg: ClientMsg): void { this.ws.send(JSON.stringify(msg)); }
+
+  async take<T extends HostMsg["t"]>(kind: T, matches: (msg: Extract<HostMsg, { t: T }>) => boolean = () => true): Promise<HostFrame<T>> {
+    const index = () => this.frames.findIndex(frame => frame.msg.t === kind && matches(frame.msg as Extract<HostMsg, { t: T }>));
+    await waitFor(() => index() !== -1 || this.error !== null);
+    if (this.error) throw this.error;
+    const frame = this.frames.splice(index(), 1)[0]!;
+    assert.equal(frame.msg.t, kind);
+    return frame as HostFrame<T>;
+  }
+
+  async barrier(): Promise<void> {
+    const n = ++this.ping;
+    this.send({ t: "ping", n });
+    await this.take("pong", msg => msg.n === n);
+  }
+
+  eventFrames(): HostFrame<"events">[] {
+    const frames = this.frames.filter(frame => frame.msg.t === "events") as HostFrame<"events">[];
+    for (let i = this.frames.length - 1; i >= 0; i--) if (this.frames[i]!.msg.t === "events") this.frames.splice(i, 1);
+    return frames;
+  }
+}
+
+async function fixture(t: TestContext) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-server-"));
+  const cwd = path.join(dir, "project");
+  fs.mkdirSync(cwd);
+  const permissions = PermissionQueue.open(path.join(dir, "permissions.json"));
+  const fake = scriptedQuery();
+  const peers: Peer[] = [];
+  const diagnostics: string[] = [];
+  let server: HostServer | undefined;
+  let closing = false;
+  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5,
+    onEvent: session => { if (!closing) server?.onEvent(session); },
+    onSessions: () => { if (!closing) server?.onSessions(); },
+  });
+  t.after(async () => {
+    closing = true;
+    for (const peer of peers) peer.ws.terminate();
+    await server?.close();
+    for (const session of sessions.list()) sessions.stop(session.id);
+    await nextTick();
+    sessions.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
+    hostName: "test-host", version: "test-version", recentCli: async () => [], log: line => diagnostics.push(line),
+  });
+  await server.listen();
+  const port = server.address().port;
+  const connect = async () => {
+    const peer = new Peer(`ws://127.0.0.1:${port}/ws`);
+    peers.push(peer);
+    await peer.open();
+    return peer;
+  };
+  const auth = async () => {
+    const peer = await connect();
+    peer.send({ t: "hello", token, clientId: "test-client" });
+    await peer.take("ready");
+    return peer;
+  };
+  const create = async (clientMsgId = "create-1") => {
+    const id = await sessions.create({ clientMsgId, cwd, model: "claude-test", effort: "high", text: "ping" });
+    await waitFor(() => sessions.list().find(session => session.id === id)?.state === "idle");
+    return id;
+  };
+  return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
+}
+
+function get(port: number, target: string): Promise<{ status: number; type: string; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ hostname: "127.0.0.1", port, path: target, agent: false }, res => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("error", reject);
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, type: res.headers["content-type"] ?? "", body: Buffer.concat(chunks).toString() }));
+    });
+    req.on("error", reject);
+    req.setTimeout(2000, () => req.destroy(new Error("HTTP test request timed out")));
+  });
+}
+
+function readAll(sessions: Sessions, id: string): SessionEvent[] {
+  const log = sessions.log(id);
+  const events: SessionEvent[] = [];
+  let cursor = 0;
+  for (;;) {
+    const page = log.readAfter(cursor);
+    events.push(...page.events);
+    if (!page.more) return events;
+    assert.ok(page.events.length > 0);
+    cursor = page.events.at(-1)!.seq;
+  }
+}
+
+function seedLargeLog(sessions: Sessions, id: string): SessionEvent[] {
+  const log = sessions.log(id);
+  let bytes = 0;
+  for (let i = 0; i < 120; i++) {
+    const event = log.append({ kind: "tool_result", toolUseId: `tool-${i}`, ok: true, text: `${i}:` + "x".repeat(20 * 1024) });
+    bytes += Buffer.byteLength(JSON.stringify(event)) + 1;
+  }
+  assert.ok(bytes >= 2 * 1024 * 1024, "Fixture must actually contain at least 2 MiB of inline events");
+  return readAll(sessions, id);
+}
+
+test("hello denies and closes a wrong token, and returns ready with sessions for the right token", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const wrong = await f.connect();
+  wrong.send({ t: "hello", token: "wrong", clientId: "wrong-client" });
+  assert.deepEqual((await wrong.take("denied")).msg, { t: "denied", reason: "token" });
+  assert.deepEqual(await wrong.closed, { code: 4003, reason: "denied" });
+  const right = await f.connect();
+  right.send({ t: "hello", token, clientId: "right-client" });
+  const ready = (await right.take("ready")).msg;
+  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true });
+  assert.deepEqual(ready.sessions, f.sessions.list());
+  assert.equal(ready.sessions[0]?.id, id);
+});
+
+test("static serves HTML, strips app TypeScript, exposes only the shared protocol and rejects traversal", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const index = await get(f.port, "/");
+  assert.equal(index.status, 200);
+  assert.match(index.type, /^text\/html/);
+  assert.match(index.body, /<!doctype html>/i);
+  const source = fs.readFileSync(path.join(webDir, "app.ts"), "utf8");
+  assert.ok(source.includes("submit(text: string): void"), "Known TypeScript signature must exist in the source");
+  const app = await get(f.port, "/app.ts");
+  assert.equal(app.status, 200);
+  assert.match(app.type, /^text\/javascript/);
+  assert.match(app.body, /submit\(text\s*\)\s*\{/);
+  assert.ok(!app.body.includes("submit(text: string): void"));
+  assert.ok(!app.body.includes(": string"));
+  const protocol = await get(f.port, "/src/protocol.ts");
+  assert.equal(protocol.status, 200);
+  assert.match(protocol.type, /^text\/javascript/);
+  assert.match(protocol.body, /export const FRAME_CAP/);
+  assert.ok(!protocol.body.includes("export interface"));
+  // node:http preserves the literal path; fetch/URL would normalize ../ before sending it.
+  for (const target of ["/../src/sessions.ts", "/src/sessions.ts", "/%2e%2e%2fsrc/sessions.ts"]) {
+    assert.equal((await get(f.port, target)).status, 404, target);
+  }
+});
+
+test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  await new Promise<void>((resolve, reject) => {
+    const req = http.request({ hostname: "127.0.0.1", port: f.port, path: "/ws", agent: false,
+      headers: { Origin: "http://evil.example", Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": Buffer.alloc(16).toString("base64") },
+    });
+    t.after(() => req.destroy());
+    req.on("upgrade", (_res, socket) => { socket.destroy(); reject(new Error("Cross-origin upgrade was accepted")); });
+    req.on("response", res => { res.resume(); reject(new Error(`Expected refused upgrade, received HTTP ${res.statusCode}`)); });
+    req.on("error", error => {
+      if ((error as NodeJS.ErrnoException).code !== "ECONNRESET") { reject(error); return; }
+      resolve();
+    });
+    req.setTimeout(2000, () => req.destroy(new Error("Upgrade test timed out")));
+    req.end();
+  });
+});
+
+test("attach tails without a cursor, replays exactly after epoch/seq, and tails for a wrong epoch", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const first = await f.auth();
+  first.send({ t: "attach", session: id });
+  const tail = (await first.take("events")).msg;
+  assert.deepEqual(tail.tail, { hasOlder: false });
+  assert.deepEqual(tail.events, readAll(f.sessions, id));
+  const afterSeq = tail.events.at(-1)!.seq;
+  f.sessions.send(id, "next-user", "second turn");
+  await waitFor(() => f.fake.users.length === 2 && f.sessions.list()[0]?.state === "idle");
+  await first.barrier();
+  const live = first.eventFrames().flatMap(frame => frame.msg.events);
+  assert.ok(live.some(event => event.kind === "user" && event.clientMsgId === "next-user"));
+  assert.equal(new Set(live.map(event => event.seq)).size, live.length);
+
+  const second = await f.auth();
+  second.send({ t: "attach", session: id, epoch: tail.epoch, afterSeq });
+  await second.barrier();
+  const replay = second.eventFrames();
+  assert.ok(replay.length > 0);
+  assert.ok(replay.every(frame => !Object.hasOwn(frame.msg, "tail")));
+  const expected = readAll(f.sessions, id).filter(event => event.seq > afterSeq);
+  assert.deepEqual(replay.flatMap(frame => frame.msg.events), expected);
+  const seqs = replay.flatMap(frame => frame.msg.events.map(event => event.seq));
+  assert.equal(new Set(seqs).size, seqs.length);
+  assert.ok(seqs.every(seq => seq > afterSeq));
+  second.send({ t: "detach", session: id });
+  second.send({ t: "attach", session: id, epoch: "wrong-epoch", afterSeq });
+  const wrongEpoch = (await second.take("events")).msg;
+  assert.equal(wrongEpoch.epoch, tail.epoch);
+  assert.deepEqual(wrongEpoch.tail, { hasOlder: false });
+  assert.deepEqual(wrongEpoch.events, readAll(f.sessions, id));
+});
+
+test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const expected = seedLargeLog(f.sessions, id);
+  const peer = await f.auth();
+  peer.send({ t: "attach", session: id });
+  const tail = await peer.take("events");
+  assert.ok(tail.bytes <= FRAME_CAP);
+  assert.ok(tail.msg.tail?.hasOlder);
+  let events = tail.msg.events;
+  let hasOlder: boolean = tail.msg.tail.hasOlder;
+  let seen = events.slice();
+  let pages = 0;
+  while (hasOlder) {
+    assert.ok(++pages < 100, "History cursor must advance");
+    assert.ok(events.length > 0);
+    const beforeSeq = events[0]!.seq;
+    const reqId = `history-${pages}`;
+    peer.send({ t: "history", session: id, beforeSeq, reqId });
+    const frame = await peer.take("history", msg => msg.reqId === reqId);
+    assert.ok(frame.bytes <= FRAME_CAP, `History frame has ${frame.bytes} bytes`);
+    assert.equal(frame.msg.session, id);
+    assert.ok(frame.msg.events.every(event => event.seq < beforeSeq));
+    events = frame.msg.events;
+    seen = [...events, ...seen];
+    hasOlder = frame.msg.hasOlder;
+  }
+  assert.ok(pages > 4);
+  assert.equal(seen[0]?.seq, 1);
+  assert.deepEqual(seen, expected);
+  assert.equal(new Set(seen.map(event => event.seq)).size, seen.length);
+  assert.ok(peer.received.every(frame => frame.bytes <= FRAME_CAP));
+  assert.deepEqual(f.diagnostics, []);
+});
+
+test("large catch-up from afterSeq=1 sends a tail rather than replaying a >=2 MiB log", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  seedLargeLog(f.sessions, id);
+  const log = f.sessions.log(id);
+  const peer = await f.auth();
+  peer.send({ t: "attach", session: id, epoch: log.epoch, afterSeq: 1 });
+  await peer.barrier();
+  const frames = peer.eventFrames();
+  assert.equal(frames.length, 1);
+  const frame = frames[0]!;
+  assert.ok(frame.bytes <= FRAME_CAP);
+  assert.deepEqual(frame.msg.tail, { hasOlder: true });
+  assert.equal(frame.msg.more, false);
+  assert.deepEqual(frame.msg.events, log.tail().events);
+  assert.ok(frame.msg.events[0]!.seq > 2);
+});
+
+test("sequential socket create retries ack the same session and start one query", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const peer = await f.auth();
+  const request: ClientMsg = { t: "create", clientMsgId: "socket-create", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping" };
+  peer.send(request);
+  const first = (await peer.take("ack")).msg;
+  peer.send(request);
+  const second = (await peer.take("ack")).msg;
+  assert.equal(first.clientMsgId, "socket-create");
+  assert.deepEqual(second, first);
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  assert.equal(f.sessions.list().length, 1);
+  assert.equal(f.fake.options.length, 1);
+});
+
+test("concurrent socket create retries ack the same session and start one query", {
+  timeout: 4500,
+}, async t => {
+  const f = await fixture(t);
+  const peer = await f.auth();
+  const request: ClientMsg = { t: "create", clientMsgId: "socket-create", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping" };
+  peer.send(request);
+  peer.send(request);
+  const first = (await peer.take("ack")).msg;
+  const second = (await peer.take("ack")).msg;
+  assert.deepEqual(second, first);
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  assert.equal(f.sessions.list().length, 1);
+  assert.equal(f.fake.options.length, 1);
+});
+
+test("a client silent after hello is terminated after STALE_MS using virtual Date and intervals", { timeout: 4500 }, async t => {
+  // Node's public timer mocks cover both Date.now() and the host's periodic reaper;
+  // network I/O and the test's promise-based deadlines still use real time.
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000_000 });
+  const f = await fixture(t);
+  const peer = await f.auth();
+  t.mock.timers.tick(STALE_MS - 1);
+  await nextTick();
+  assert.equal(peer.ws.readyState, WebSocket.OPEN);
+  t.mock.timers.tick(PING_MS + 2);
+  const closed = await peer.closed;
+  assert.equal(closed.code, 1006);
+  assert.equal(peer.ws.readyState, WebSocket.CLOSED);
+});
+
+test("blob req chunks round-trip full Unicode output with next offsets until null", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const text = "界😀\n".repeat(45_000);
+  const event = f.sessions.log(id).append({ kind: "tool_result", toolUseId: "large-output", ok: true, text });
+  assert.ok(event.kind === "tool_result" && typeof event.text !== "string");
+  const peer = await f.auth();
+  let offset: number | null = 0;
+  let combined = "";
+  let chunks = 0;
+  while (offset !== null) {
+    assert.ok(++chunks < 20, "Blob cursor must advance");
+    const reqId = `blob-${chunks}`;
+    peer.send({ t: "req", reqId, op: { op: "blob", session: id, id: event.text.blob, offset } });
+    const frame = await peer.take("res", msg => msg.reqId === reqId);
+    assert.ok(frame.bytes <= FRAME_CAP);
+    assert.equal(frame.msg.ok, true);
+    const chunk = frame.msg.data as BlobChunk;
+    assert.equal(chunk.offset, offset);
+    assert.equal(chunk.bytes, Buffer.byteLength(text));
+    assert.ok(chunk.text.length > 0);
+    combined += chunk.text;
+    if (chunk.next !== null) assert.equal(chunk.next, offset + chunk.text.length);
+    offset = chunk.next;
+  }
+  assert.ok(chunks > 1);
+  assert.equal(combined, text);
+});
+
+test("browse req lists only visible subdirectories in sorted order", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const dir = path.join(f.dir, "browse");
+  fs.mkdirSync(dir);
+  for (const name of ["zeta", "folder10", "Alpha", "folder2", ".hidden"]) fs.mkdirSync(path.join(dir, name));
+  fs.writeFileSync(path.join(dir, "not-a-directory.txt"), "file");
+  const peer = await f.auth();
+  peer.send({ t: "req", reqId: "browse", op: { op: "browse", path: dir } });
+  const response = (await peer.take("res", msg => msg.reqId === "browse")).msg;
+  assert.equal(response.ok, true);
+  const result = response.data as BrowseResult;
+  assert.equal(result.path, dir);
+  assert.equal(result.parent, f.dir);
+  assert.equal(result.truncated, false);
+  assert.deepEqual(result.entries, ["Alpha", "folder2", "folder10", "zeta"].map(name => ({ name, path: path.join(dir, name) })));
+});
