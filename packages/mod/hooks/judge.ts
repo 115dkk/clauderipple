@@ -7,7 +7,7 @@ const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 export const EFFORT_JUDGE_SYSTEM = `Choose the cheapest reasoning effort that can do this work well. This is a coding agent able to inspect files, run commands, and edit code, not merely answer a chat question.
 Assess work volume, uncertainty, and the cost of mistakes, not message length. A short choice approving a build inherits the size of that build. Corrections and steering retain at least the running effort; closing remarks need little effort. "Think hard" or thorough reasoning requires at least high; an explicit quick answer calls for low.
-Use low for simple direct tasks, medium for ordinary bounded work, high for substantial debugging or multi-step changes, xhigh for unusually difficult investigation, and max only for the hardest open-ended problems. Consider the current model's strength.
+Low and medium are only for turns that need no judgment: low for chit-chat, thanks, or a direct answer needing no inspection; medium for one fully specified, low-risk step the user spelled out (run this command, rename this). Anything that asks the agent to decide, explain why, review, verify, debug, plan, delegate, or change more than one thing needs at least high; most coding-agent turns are high. xhigh is for unusually difficult investigation, and max only for the hardest open-ended problems. Consider the current model's strength.
 Return only JSON {"effort":"low|medium|high|xhigh|max","sure":0.0,"why":"short reason"}. Confidence is between zero and one. The reason uses the user's language and at most six words.`
 
 /** A terse continuation usually carries no new scope; answers to questions are handled separately. */
