@@ -103,6 +103,8 @@ export interface SessionSummary {
   desktopBridge?: boolean;
   /** Running background workers/shells, separate from the main turn. */
   tasks?: number;
+  /** The main turn is idle but background work (subagents, shells) still runs: the app's dark blink. */
+  background?: boolean;
   /** open permission requests */
   pending: number;
   createdAt: number;

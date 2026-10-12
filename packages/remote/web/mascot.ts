@@ -47,6 +47,8 @@ export function ripple(face: Face, size: number, label = ""): string {
  * warn = needs you, ok = done, faint = paused, bad = error (the mascot's own prop rules).
  */
 export function stateRing(state: string, size = 22): string {
+  // Background work only (subagents, shells): the app's dark blinking dot.
+  if (state === "background") return `<svg class="ring ring-background" width="${size}" height="${size}" viewBox="0 0 56 56" role="img" aria-label="Background work"><circle cx="28" cy="28" r="9" fill="var(--ink)"/></svg>`;
   if (state === "unread" || state === "read") return `<svg class="ring ring-${state}" width="${size}" height="${size}" viewBox="0 0 56 56" role="img" aria-label="${state === "unread" ? "Unread activity" : "Read"}"><circle cx="28" cy="28" r="${state === "unread" ? 9 : 8}" fill="${state === "unread" ? "var(--warn)" : "none"}" stroke="var(--${state === "unread" ? "warn" : "faint"})" stroke-width="3"/></svg>`;
   const tone = state === "waiting" ? "warn" : state === "error" ? "bad" : state === "idle" ? "ok" : state === "stopped" ? "faint" : "accent";
   const dashed = state === "running" || state === "starting";

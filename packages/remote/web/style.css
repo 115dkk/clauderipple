@@ -199,6 +199,9 @@ main.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -web
 .md-table th, .md-table td { border-bottom: 1px solid var(--line); padding: 5px 10px 5px 0; text-align: left; white-space: nowrap; }
 .caret { display: inline-block; width: 8px; height: 1.05em; vertical-align: -0.15em; background: var(--accent); border-radius: 2px; margin-left: 2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+.ring-background { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .ring-background { animation: none; } }
 
 .tools { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .tool { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--line); font-size: 13.5px; width: 100%; text-align: left; color: var(--ink-2); }

@@ -177,6 +177,12 @@ export class Sessions {
   private bridge: BridgeClient;
   private bridgeStates = new Map<string, { at: number; state?: SessionState; pending?: Promise<void> }>();
 
+  /** The registry says busy (it counts background work) while the main turn itself is not running. */
+  private background(process: DesktopProcess): boolean {
+    const state = this.bridgeState(process);
+    return (process.status === "busy" || process.status === "shell") && state !== "running" && state !== "waiting";
+  }
+
   private bridgeState(process: DesktopProcess): SessionState {
     const cached = process.bridgeSessionId ? this.bridgeStates.get(process.bridgeSessionId)?.state : undefined;
     return cached ?? (process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running");
@@ -240,7 +246,7 @@ export class Sessions {
     const hostCliIds = new Set([...this.records.values()].flatMap(r => r.sdkSessionId ? [r.sdkSessionId] : []));
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
-      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true } : {}) };
+      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}) };
     })];
     return this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
   }
@@ -321,7 +327,7 @@ export class Sessions {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
     const state = process ? this.bridgeState(process) : r.desktopBridge ? "stopped" : r.state;
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: this.desktop?.backgroundTasks(r.sdkSessionId ?? r.id) ?? 0 } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: this.desktop?.backgroundTasks(r.sdkSessionId ?? r.id) ?? 0, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {

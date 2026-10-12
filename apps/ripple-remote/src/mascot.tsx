@@ -63,12 +63,19 @@ export function StateRing({ state, size = 22, spin = false }: { state: string; s
   const name = STATE_FACE[state] ?? 'calm';
   const turn = useRef(new Animated.Value(0)).current;
   const spinning = spin && name === 'going';
+  const blinking = state === 'background';
   useEffect(() => {
-    if (!spinning) return;
-    const loop = Animated.loop(Animated.timing(turn, { toValue: 1, duration: 2400, easing: Easing.linear, useNativeDriver: true }));
+    if (!spinning && !blinking) return;
+    const loop = blinking
+      ? Animated.loop(Animated.sequence([Animated.timing(turn, { toValue: 1, duration: 700, useNativeDriver: true }), Animated.timing(turn, { toValue: 0, duration: 700, useNativeDriver: true })]))
+      : Animated.loop(Animated.timing(turn, { toValue: 1, duration: 2400, easing: Easing.linear, useNativeDriver: true }));
     loop.start();
     return () => loop.stop();
-  }, [spinning, turn]);
+  }, [spinning, blinking, turn]);
+  // Background work only (subagents, shells): the app's dark blinking dot.
+  if (blinking) return <Animated.View accessibilityLabel="Background work" style={{ width: size, height: size, opacity: turn.interpolate({ inputRange: [0, 1], outputRange: [1, 0.25] }) }}>
+    <Svg width={size} height={size} viewBox="0 0 56 56"><Circle cx={28} cy={28} r={9} fill={c.ink} /></Svg>
+  </Animated.View>;
   if (state === 'unread' || state === 'read') return <Svg width={size} height={size} viewBox="0 0 56 56" accessibilityLabel={state === 'unread' ? 'Unread activity' : 'Read'}>
     <Circle cx={28} cy={28} r={state === 'unread' ? 9 : 8} fill={state === 'unread' ? c.warn : 'none'} stroke={state === 'unread' ? c.warn : c.faint} strokeWidth={3} />
   </Svg>;
