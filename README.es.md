@@ -22,16 +22,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="Recorrido por la configuración de ClaudeRipple: estado, asignación de modelos, proveedores, clientes, registro de solicitudes">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="Grabación real: GPT-6 Astra corrige un error en la pestaña Code y luego DeepSeek y GLM lo revisan como subagentes. Haz clic para ver el vídeo completo."></a><br>
+  <sub>Grabación real: GPT-6 Astra corrige un error en la pestaña Code y luego DeepSeek y GLM lo revisan como subagentes. Haz clic para ver el vídeo completo.</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Nombres reales en el selector de Claude Desktop"><br><sub>Modelos GPT con su nombre real en el selector de Claude Desktop</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna respondiendo en la pestaña Code de Claude Desktop"><br><sub>GPT-5.6 Luna respondiendo en la pestaña Code, con el esfuerzo que elegiste</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="GPT, DeepSeek, GLM y Gemini en el propio menú de modelos de Claude Desktop"><br><sub>GPT, DeepSeek, GLM y Gemini en el propio menú de modelos de Claude Desktop</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="GPT-6 Astra trabajando en la pestaña Code, con cada solicitud registrada a la derecha"><br><sub>GPT-6 Astra trabajando en la pestaña Code, con cada solicitud registrada a la derecha</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagentes con GPT-5.6 Terra y Sol, identificados en el panel de tareas en segundo plano"><br><sub>Subagentes con GPT-5.6 Terra y Sol, identificados en el panel de tareas en segundo plano</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagentes con DeepSeek y GLM, identificados en el panel de tareas"><br><sub>Subagentes con DeepSeek y GLM, identificados en el panel de tareas</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="El mod ripple: esfuerzo, contexto, temporizador de caché y qué modelo respondió, con su acierto de caché"><br><sub>El mod ripple: esfuerzo, contexto, temporizador de caché y qué modelo respondió, con su acierto de caché</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="Avisos cuando la caché se enfría o un límite está cerca, y traspaso a un chat nuevo"><br><sub>Avisos cuando la caché se enfría o un límite está cerca, y traspaso a un chat nuevo</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="Ajustes rápidos: esfuerzo automático, el juez, modos de workers"><br><sub>Ajustes rápidos: esfuerzo automático, el juez, modos de workers</sub></td>
   </tr>
 </table>
 

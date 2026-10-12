@@ -29,16 +29,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple 설정 화면: 상태, 모델 매핑, 프로바이더, 클라이언트, 요청 로그">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다."></a><br>
+  <sub>실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다.</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktop 피커에 실제 이름으로"><br><sub>Claude Desktop 피커에 GPT 모델이 실제 이름으로</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="Code 탭에서 답하는 GPT-5.6 Luna"><br><sub>Code 탭에서 고른 추론 강도 그대로 답하는 GPT-5.6 Luna</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="Claude Desktop의 원래 모델 메뉴에 GPT·DeepSeek·GLM·Gemini"><br><sub>Claude Desktop의 원래 모델 메뉴에 GPT·DeepSeek·GLM·Gemini</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="Code 탭에서 일하는 GPT-6 Astra, 오른쪽에는 모든 요청 기록"><br><sub>Code 탭에서 일하는 GPT-6 Astra, 오른쪽에는 모든 요청 기록</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="백그라운드 작업 패널에 실제 모델 이름으로 표시된 서브에이전트"><br><sub>GPT-5.6 Terra·Sol로 도는 서브에이전트, 작업 패널에 실제 이름으로</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="DeepSeek·GLM으로 도는 서브에이전트, 작업 패널에 실제 이름으로"><br><sub>DeepSeek·GLM으로 도는 서브에이전트, 작업 패널에 실제 이름으로</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="리플 모드: 추론 강도, 컨텍스트, 캐시 타이머, 실제로 답한 모델과 캐시 적중률"><br><sub>리플 모드: 추론 강도, 컨텍스트, 캐시 타이머, 실제로 답한 모델과 캐시 적중률</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="캐시가 식거나 한도가 가까우면 경고, 새 대화로 인수인계"><br><sub>캐시가 식거나 한도가 가까우면 경고, 새 대화로 인수인계</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="빠른 설정: 자동 추론 강도, 판정 모델, 워커 모드"><br><sub>빠른 설정: 자동 추론 강도, 판정 모델, 워커 모드</sub></td>
   </tr>
 </table>
 

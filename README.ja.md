@@ -21,16 +21,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRippleの設定画面：ステータス、モデルマッピング、プロバイダー、クライアント、リクエストログ">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="実際の録画：CodeタブでGPT-6 Astraがバグを直し、DeepSeekとGLMのサブエージェントがレビューします。クリックで全編を再生。"></a><br>
+  <sub>実際の録画：CodeタブでGPT-6 Astraがバグを直し、DeepSeekとGLMのサブエージェントがレビューします。クリックで全編を再生。</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktopのピッカーに実際の名前で表示"><br><sub>Claude DesktopのピッカーにGPTモデルが実際の名前で並ぶ</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="Claude DesktopのCodeタブで応答するGPT-5.6 Luna"><br><sub>選んだ推論強度で、Codeタブから応答するGPT-5.6 Luna</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="Claude Desktop本来のモデルメニューにGPT・DeepSeek・GLM・Gemini"><br><sub>Claude Desktop本来のモデルメニューにGPT・DeepSeek・GLM・Gemini</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="Codeタブで作業するGPT-6 Astra、右側にすべてのリクエストログ"><br><sub>Codeタブで作業するGPT-6 Astra、右側にすべてのリクエストログ</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="GPT-5.6 TerraとSolで動くサブエージェント。バックグラウンドタスクパネルにモデル名が表示される"><br><sub>GPT-5.6 TerraとSolで動くサブエージェント。バックグラウンドタスクパネルにモデル名が表示される</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="DeepSeekとGLMで動くサブエージェント。タスクパネルに実際の名前で表示"><br><sub>DeepSeekとGLMで動くサブエージェント。タスクパネルに実際の名前で表示</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="rippleモッド：推論強度、コンテキスト、キャッシュタイマー、実際に応答したモデルとキャッシュヒット率"><br><sub>rippleモッド：推論強度、コンテキスト、キャッシュタイマー、実際に応答したモデルとキャッシュヒット率</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="キャッシュが冷えたり上限が近づくと警告、新しいチャットへの引き継ぎ"><br><sub>キャッシュが冷えたり上限が近づくと警告、新しいチャットへの引き継ぎ</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="クイック設定：自動推論強度、判定モデル、ワーカーモード"><br><sub>クイック設定：自動推論強度、判定モデル、ワーカーモード</sub></td>
   </tr>
 </table>
 

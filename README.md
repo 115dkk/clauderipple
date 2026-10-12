@@ -30,16 +30,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple settings tour: status, model mapping, providers, clients, request log">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="A real recording: GPT-6 Astra fixes a bug in the Code tab, then DeepSeek and GLM review it as subagents. Click for the full video."></a><br>
+  <sub>A real recording: GPT-6 Astra fixes a bug in the Code tab, then DeepSeek and GLM review it as subagents. Click for the full video.</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Real names in the Claude Desktop picker"><br><sub>GPT models under their real names in the Claude Desktop picker</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna answering in the Claude Desktop Code tab"><br><sub>GPT-5.6 Luna answering in the Code tab, at the effort you chose</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="GPT, DeepSeek, GLM and Gemini in Claude Desktop's own model menu"><br><sub>GPT, DeepSeek, GLM and Gemini in Claude Desktop's own model menu</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="GPT-6 Astra working in the Code tab, every request logged on the right"><br><sub>GPT-6 Astra working in the Code tab, every request logged on the right</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagents on GPT-5.6 Terra and Sol, named in the background-task panel"><br><sub>Subagents on GPT-5.6 Terra and Sol, named in the background-task panel</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="Subagents on DeepSeek and GLM, named in the background-task panel"><br><sub>Subagents on DeepSeek and GLM, named in the background-task panel</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="The ripple mod: effort, context, cache timer, and which model answered with its cache hit"><br><sub>The ripple mod: effort, context, cache timer, and which model answered with its cache hit</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="Warnings when the cache goes cold or a limit is near, and a handoff to a fresh chat"><br><sub>Warnings when the cache goes cold or a limit is near, and a handoff to a fresh chat</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="Quick settings: automatic effort, the judge, worker modes"><br><sub>Quick settings: automatic effort, the judge, worker modes</sub></td>
   </tr>
 </table>
 
@@ -290,12 +298,15 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   latency, status, per request, with a one-hour summary.
 - **Subagent name tags.** The background-task panel shows `Terra·high · Review`
   instead of a generic "Agent".
-- **The route, where you type.** A Claude Code mod puts one line above the prompt:
-  where your last request went, its effort, cache hit and time. `Log` (or `/ripple-log`)
-  opens the request log in a side pane, color-coded by provider and result; `×` (or
-  `/ripple-bar`) hides the line. The same mod keeps a worker on its own model when the
-  Agent call names another, and reads its `[[ripple: name@level]]` marker wherever it sits
-  in the prompt. One switch on the Clients screen, or `clauderipple mod on`.
+- **The ripple mod, above the prompt.** A band shows the reasoning effort, context, cache
+  timer, and which model answered your last request with its cache hit. A small judge
+  model (Haiku 5.5 or Jev) reads each prompt with the recent turns and sets the effort,
+  low through max. Delegated work goes to `ripple:auto`, and the judge sends each task to
+  a worker by difficulty: light work to DeepSeek or GLM, hard work to GPT or Opus. Cards
+  warn when the cache has gone cold, the context gets heavy or a plan window passes 80%,
+  and offer compact or a handoff to a fresh session in the same folder. `Log` (or
+  `/ripple-log`) opens the request log in a side pane. One switch on the Clients screen,
+  or `clauderipple mod on`.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or
   DeepSeek worker can make an image and look at it without an image tool.

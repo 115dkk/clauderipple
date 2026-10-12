@@ -22,16 +22,24 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/tour.png" width="880" alt="ClaudeRipple 设置界面一览：状态、模型映射、供应商、客户端、请求日志">
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="真实录屏：GPT-6 Astra 在 Code 标签页修复 bug，DeepSeek 和 GLM 子代理并行审查。点击观看完整视频。"></a><br>
+  <sub>真实录屏：GPT-6 Astra 在 Code 标签页修复 bug，DeepSeek 和 GLM 子代理并行审查。点击观看完整视频。</sub>
 </p>
 
 <table align="center">
   <tr>
-    <td align="center" width="34%"><img src="docs/media/picker-zoom.png" width="300" alt="Claude Desktop 模型选择器中的真实模型名称"><br><sub>GPT 模型以真实名称出现在 Claude Desktop 的模型选择器中</sub></td>
-    <td align="center" width="66%"><img src="docs/media/luna-answer.png" alt="GPT-5.6 Luna 在 Claude Desktop 的 Code 标签页中作答"><br><sub>GPT-5.6 Luna 在 Code 标签页中按你选择的推理强度作答</sub></td>
+    <td align="center" width="34%"><img src="docs/media/picker.png" width="300" alt="Claude Desktop 自带的模型菜单里出现 GPT、DeepSeek、GLM、Gemini"><br><sub>Claude Desktop 自带的模型菜单里出现 GPT、DeepSeek、GLM、Gemini</sub></td>
+    <td align="center" width="66%"><img src="docs/media/answer.png" alt="GPT-6 Astra 在 Code 标签页中工作，右侧记录每一个请求"><br><sub>GPT-6 Astra 在 Code 标签页中工作，右侧记录每一个请求</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="运行在 GPT-5.6 Terra 和 Sol 上的子代理，在后台任务面板中显示模型名称"><br><sub>运行在 GPT-5.6 Terra 和 Sol 上的子代理，在后台任务面板中显示模型名称</sub></td>
+    <td colspan="2" align="center"><img src="docs/media/subagents.png" alt="运行在 DeepSeek 和 GLM 上的子代理，在任务面板中显示真实名称"><br><sub>运行在 DeepSeek 和 GLM 上的子代理，在任务面板中显示真实名称</sub></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><img src="docs/media/mod-band.png" alt="ripple 模组：推理强度、上下文、缓存计时，以及实际作答的模型和缓存命中率"><br><sub>ripple 模组：推理强度、上下文、缓存计时，以及实际作答的模型和缓存命中率</sub></td>
+  </tr>
+  <tr>
+    <td align="center" width="50%"><img src="docs/media/mod-alerts.png" alt="缓存变冷或额度将满时提醒，并可交接到新的对话"><br><sub>缓存变冷或额度将满时提醒，并可交接到新的对话</sub></td>
+    <td align="center" width="50%"><img src="docs/media/mod-settings.png" alt="快速设置：自动推理强度、判定模型、工作者模式"><br><sub>快速设置：自动推理强度、判定模型、工作者模式</sub></td>
   </tr>
 </table>
 
