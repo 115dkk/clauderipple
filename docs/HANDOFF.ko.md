@@ -1,4 +1,71 @@
-# 인수인계 — 2026-10-11 (최신)
+# 인수인계 — 2026-10-13 (최신)
+
+## ▶ 2026-10-12~13 — 워커 판정 개편 + Ripple Remote(휴대폰) 네이티브 앱·맥 세션 연동, 커밋됨(미푸시)
+
+**상태:** 전부 커밋, **GitHub에 올리지 않음(주군 지시)**. 마지막 검증: remote 테스트 130, `npm test` 799(+3 skip),
+mod 플러그인 테스트 128, typecheck 통과. 일상 서비스 반영 완료: 라우터 설치본 교체(설정 보호 포함, 10-12 15시경),
+원격 호스트 `com.clauderipple.host` 재시작, 릴레이 웹 재배포, 아이폰 16에 개발 빌드 설치.
+`packages/cli/src/index.ts` 실행 비트 변경과 `design-drafts/`는 여전히 의도 불명이라 커밋 안 함.
+같은 기간 다른 세션이 `packages/mod`의 데스크톱 띠 그리기(`d5dd784`, `bda8e92`, `b145441`, `b6ee4c3`)를 커밋했다 — 이 세션 작업 아님.
+
+### 1. 워커 위임 (packages/mod)
+- **메인 대화는 위임 여부만 정한다.** 노출 에이전트는 `ripple:auto` 하나(`f7298de`). 등급(로우~맥스)은 판정기(제브)가 고른다.
+  실패 시 `ripple:auto`로 한 번 재위임하며 실패를 적으면 판정이 한 단계 올린다. 주군 CLAUDE.md 워커 절도 이에 맞춰 고침.
+- **판정 규칙(`ladder.ts rungOf`):** 실행(do)은 level로 로우/미디움/하이. **기획(plan, 결과물이 결정·설계·전략·검토 결론)은 standard부터 맥스**
+  (`4a998a3`), light plan만 로우. 판정 프롬프트는 "결과물이 코드·파일·빌드면 설계 문서를 읽어도 do"(`da181e0`).
+- **판정 기록:** 모든 위임이 `~/.clauderipple/logs/worker-picks.jsonl`에 남는다(최근 300줄, 판정 원문·확신·사유·실패 포함, `55b2798`).
+  배정이 이상하면 이 파일부터 본다 — 10-12 사주리플 전략이 미디움으로 간 원인(standard plan)을 이걸로 찾았다.
+- **메인 대화 강도 판정:** 낮음·중간은 "판단이 필요 없는 턴"(잡담, 사용자가 지정한 단일 단계)에만. 결정·검토·디버깅·계획·위임은 최소 높음(`51ee68d`).
+  주군 체감: 자동 강도로 Opus가 낮음·중간을 받아 "멍청해짐". 하한 설정(주군 값: 낮음~맥스)은 바꾸지 않았다 — 결정 대기.
+- **설정 덮어쓰기 사고(10-12 15:22, 11:40·12:22도 같은 원인 추정):** 옛 모드 코드가 새 형식(칸=순서형 목록)을 빈 값으로 읽고
+  기본값을 채워 전체 PUT → 주군 칸 목록·모드 "1" 소실 → 맥스=Opus 기본값으로 큰 작업이 Opus로 감. 복구 후 방지(`02a6856`):
+  PUT에 `schemaVersion` 필수(옛 코드 426 거절), 모드는 사용자 변경만 라우터 최신본에 재적용, 저장마다 `mod-settings.json.bak-<rev>` 10개 보관.
+  ⚠ 모드 코드를 바꾸면 **각 세션에서 `/reload-plugins`** 해야 새 코드가 돈다(안 하면 옛 코드가 계속 돈다 — 오늘 Opus 오배정의 첫 원인).
+- 현재 주군 칸: 로우 deepseek-v4.1-flash·높음 → glm-5.3-flash·높음 / 미디움 deepseek-v4.1-flash·최대 → Luna·높음 /
+  하이 Sol·중간 → Sonnet·높음 / 맥스 Astra·중간 → Opus·높음 → Fable·중간. 모드 "1"(적극 위임, ChatGPT 한도 초기화 때 종료).
+
+### 2. Ripple Remote (packages/remote, apps/ripple-remote)
+- **구조:** 맥 상주 호스트(launchd `com.clauderipple.host`, `packages/remote/src/main.ts`) ↔ Cloudflare 릴레이
+  `https://ripple-relay.clauderipple.workers.dev`(E2EE, 릴레이는 내용 못 봄) ↔ 휴대폰. 네트워크 무관(파세오와 같은 구조).
+  호스트 재시작 `launchctl kickstart -k gui/$(id -u)/com.clauderipple.host`, 릴레이 배포 `npm run relay:deploy`, 페어링 `npm run remote -- pair`.
+- **네이티브 iOS 앱** `apps/ripple-remote`(Expo SDK 56, 워크스페이스 밖, `com.clauderipple.remote`). 프로토콜·연결·E2EE·타임라인·i18n은
+  `packages/remote`에서 import(복사 아님). 디자인은 웹앱을 Sonnet이 이식. **설치:** TestFlight 없이 개발 빌드로 직접
+  (`ios/`에서 `xcodebuild … -configuration Release -destination 'id=00008140-00126C663403801C' DEVELOPMENT_TEAM=QL9967JLCR` →
+  `xcrun devicectl device install app`). 아이폰 화면 확인: `xcrun devicectl device capture screenshot --device <id> --destination x.png`(잠금 시 검은 화면).
+  홈 화면 웹앱은 Safari와 저장소가 분리돼 링크 붙여넣기 페어링 추가(`52d9eec`).
+- **맥 세션 이어 쓰기:** 맥 앱에 열린 세션 → **Remote Control 클라이언트 API**로 진짜 사용자 입력(`2b168d5` 이후 수정 다수).
+  `POST https://api.anthropic.com/v1/code/sessions/{bridgeSessionId}/events`, 토큰은 키체인 `Claude Code-credentials`(호스트 메모리에만, 만료 5분 전·401 때 재읽기).
+  함정(모두 실측): ① `anthropic-client-platform`이 `claude_code_*`면 맥이 "다른 세션의 메시지"로 강등 — 사람 플랫폼(`ios`)이어야 함(`dc9775a`);
+  ② 이벤트 uuid는 UUID만(휴대폰 id에서 파생, `4020f4d`); ③ SSE `sequence_num`은 **문자열**, 스트림은 최신부터(`e632564`).
+  맥 앱에 안 열린 세션은 SDK `resume`으로 같은 ID 이어감. 열려 있는데 bridge 없으면 입력 차단(두 번째 writer 금지).
+  약관: 공식 문서 "인증·자격증명" 절은 제3자 개발자가 사용자 대신 구독으로 요청하거나 자격증명을 중개하는 것을 금지. 주군 판단: 개인 사용 문제없음, 기본 켜짐.
+- **휴대폰에서 시작한 세션 → 맥 앱 자동 등록:** 첫 턴 후 한 번 `claude --desktop --resume <id>`를 pty(`script`)로 실행(`ab3f2e9`).
+  맥 앱은 `entrypoint: sdk-ts` 세션을 목록 스캔에서 빼지만 UUID 직접 지정은 받는다.
+- **목록 = 맥 사이드바(`a0d7f68` 이후):** 묶음·순서 `claude_desktop_config.json` `preferences.epitaxyPrefs`(dframe-code-sections, dframe-group-scopes),
+  제목·보관 `claude-code-sessions/<acct>/<org>/local_*.json`, 안 읽음 Local Storage `epitaxy-unread-v1`(읽기 전용 LevelDB 파서, 맥 앱 파일에 절대 쓰지 않음).
+  맨 위 "최근"(작업 중·대기·안 읽음·1시간 내). **표시 규칙(실측 대조):** 대기 > 안 읽음(노란 점) > 작업 중(도는 리플, 메인 턴·서브에이전트 구분 없음) > 빈 원.
+  안 읽음 목록은 맥 앱이 늦게 저장하므로 `lastFocusedAt ≥ lastActivityAt`면 읽음(`04952d6`).
+  작업 중 판정: Remote Control `worker_status`(메인 턴) + 레지스트리 `~/.claude/sessions/<pid>.json`의 `status` busy/shell(백그라운드 포함).
+  대화 파일의 "실행 중 작업 수"는 끝 기록 없는 옛 작업이 남아 부정확 — 레지스트리 busy일 때만 셈(`a37ac41`).
+- **안정성:** 호스트가 요청마다 키체인·`ps`를 동기 호출해 이벤트 루프가 멈추고 연결이 끊겼음(CPU 28%) → 캐시로 해결(`b683efc`, `1cac96f`, 이후 CPU ~1%).
+- 그 밖: 이미지 실표시(Claude 캐시 폴더만, realpath·inode 검사), 도구 연속 사용 한 줄 접기, 최신 메시지에서 열기·줄바꿈 보존,
+  키보드 가림 수정, 리플 얼굴 표시, "Mac" 하드코딩 제거(호스트 이름/"컴퓨터", 데스크톱은 "Claude 앱").
+
+### 미결 / 다음
+- **🔴 가장 먼저 — 맥과 휴대폰의 모든 표시를 똑같이 맞추기 (주군 지시 2026-10-13).**
+  증상: 클로드리플2 세션이 휴대폰은 "2분 동안 작업 중", 맥 앱은 "40분 이상 작업 중". 목록 점·작업 중·안 읽음·작업 수·제목·순서도
+  여러 번 어긋났다. **방법:** 맥 앱은 computer-use로, 휴대폰은 iOS 시뮬레이터(같은 호스트에 붙어 있음)와 아이폰 스크린샷으로
+  **직접 오가며 같은 순간의 화면을 나란히 대조**하고, 어긋나는 항목마다 원천 데이터(transcript, `~/.claude/sessions`, Remote Control
+  `worker_status`, 사이드바 저장소)를 뽑아 원인을 확정한 뒤 고친다. 짐작으로 규칙을 정하지 않는다.
+  작업 시간 가설(미검증): 맥은 사용자 메시지(턴 시작)부터 재고, 휴대폰은 맥에서 시작된 턴에 `turn` 이벤트가 없어
+  호스트 폴링이 붙인 `state running` 시각부터 잰다(`web/timeline.ts` turnStartedAt) — transcript의 사용자 메시지 시각을 턴 시작으로 써야 할 것.
+- **윈도우 호스트:** 맥 전용 4곳(launchd, 키체인, `script` pty, `ps`) — `docs/specs/2026-10-12-ripple-remote-native.md` 표. 윈도우 작업 때 진행(주군 결정).
+- **앱 푸시:** 개발 빌드는 알림 없음. EAS 프로젝트(`eas init`, rippleworks) 필요 — 외부 계정 작업이라 주군 확인 후. 의존성 audit high 19건 미검토.
+- **메인 대화 강도 하한:** 권장은 하한 "중간" 이상 — 주군 결정 대기.
+- **사주리플 전략 기획:** 미디움(deepseek)으로 돌았던 건, 맥스로 재위임할지 주군 답 대기.
+- 미검증: 이미지 전체화면·핀치, 바쁜 세션에 원격 입력 시 대기열 동작, 휴대폰 승인 카드(Remote Control control_response) 실사용.
+- 의사결정 기록: 판정 기준을 짐작으로 짜서 여러 번 틀렸다 — 화면 규칙은 **실제 세션 데이터와 맥 화면을 먼저 대조**하고 바꾼다.
+
 
 ## ▶ 2026-10-11 — 리플 모드(`packages/mod`) 띠 재설계 + 설정 대시보드 이전, 커밋됨(미푸시)
 
