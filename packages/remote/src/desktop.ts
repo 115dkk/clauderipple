@@ -17,9 +17,20 @@ interface Source { file: string; size: number; mtime: number; unfinished: boolea
 interface Imported { size: number; mtime: number; log: EventLog; dir: string }
 export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string }
 
-/** Registry identity is authoritative; ps flags remain a legacy fallback only. */
-export function liveDesktopProcesses(dir: string): Map<string, DesktopProcess> {
+/**
+ * pid → the start time `ps` reported for it. A pid's start time never changes while it lives, and
+ * a recycled pid gets a new registry procStart, so one synchronous `ps` per process is enough;
+ * running it for every registry entry on every poll blocked the host (2026-10-12).
+ */
+const verifiedStarts = new Map<number, string>();
+let snapshot: { dir: string; at: number; result: Map<string, DesktopProcess> } | null = null;
+
+/** Registry identity is authoritative; ps flags remain a legacy fallback only. Cached for 1 s. */
+export function liveDesktopProcesses(dir: string, maxAgeMs = 1000): Map<string, DesktopProcess> {
+  const now = Date.now();
+  if (snapshot && snapshot.dir === dir && now - snapshot.at < maxAgeMs) return snapshot.result;
   const result = new Map<string, DesktopProcess>();
+  snapshot = { dir, at: now, result };
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
   catch (error) { if (missing(error)) return result; throw error; }
@@ -33,9 +44,10 @@ export function liveDesktopProcesses(dir: string): Map<string, DesktopProcess> {
     if (!["busy", "shell", "idle", "waiting"].includes(str(value.status))) continue;
     try {
       process.kill(pid, 0);
-      if (typeof value.procStart === "string") {
+      if (typeof value.procStart === "string" && verifiedStarts.get(pid) !== value.procStart) {
         const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
         if (started !== value.procStart) continue;
+        verifiedStarts.set(pid, started);
       }
     } catch { continue; } // Dead or recycled process, not a live desktop writer.
     const status = value.status as DesktopProcess["status"];

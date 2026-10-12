@@ -89,10 +89,10 @@ test("live registry verifies pid and procStart and ignores stale/non-desktop ent
   const file = path.join(root, `${process.pid}.json`);
   const value = { sessionId: id, pid: process.pid, entrypoint: "claude-desktop", status: "idle", bridgeSessionId: "bridge" };
   fs.writeFileSync(file, JSON.stringify(value));
-  assert.equal(liveDesktopProcesses(root).get(id)?.bridgeSessionId, "bridge");
+  assert.equal(liveDesktopProcesses(root, 0).get(id)?.bridgeSessionId, "bridge");
   for (const override of [{ procStart: "wrong identity" }, { entrypoint: "sdk-cli" }, { pid: 1 }, { status: "unknown" }]) {
     fs.writeFileSync(file, JSON.stringify({ ...value, ...override }));
-    assert.equal(liveDesktopProcesses(root).size, 0);
+    assert.equal(liveDesktopProcesses(root, 0).size, 0);
   }
 });
 
