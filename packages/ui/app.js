@@ -2363,8 +2363,8 @@ const MOD_PARTS = ["timer", "reason", "route", "limits"];
 const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"]];
 // Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
 // first, and their current model ids (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
-const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus"];
-const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
+const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus", "fable"];
+const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
 // The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
 const modClaude = (model, effort) => ({ target: { agent: "general-purpose", model }, effort });
