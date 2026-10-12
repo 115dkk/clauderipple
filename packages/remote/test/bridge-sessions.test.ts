@@ -59,6 +59,8 @@ test("bridge prompts, transcript echo, permission allow/cancel and interrupt nev
   assert.equal(f.sessions.list()[0]?.state, "idle");
   await Promise.all([f.sessions.send(id, "phone-uuid", "hello"), f.sessions.send(id, "phone-uuid", "hello")]);
   assert.equal(f.posts.length, 1);
+  // The API rejects (400) any event uuid that is not a UUID; phones send short random ids.
+  assert.match(String((f.posts[0] as { events: { payload: { uuid: string } }[] }).events[0]!.payload.uuid), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(f.queries(), 0);
   fs.appendFileSync(f.file, line({ type: "user", uuid: "phone-uuid", message: { content: "hello" } }) + line({ type: "assistant", uuid: "reply", message: { model: "model", content: [{ type: "text", text: "reply" }] } }));
   f.sessions.pollDesktop();

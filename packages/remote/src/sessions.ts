@@ -3,7 +3,7 @@
 // §1: HTTPS_PROXY + NODE_EXTRA_CA_CERTS — not ANTHROPIC_BASE_URL, which the router's proxy port
 // answers 405; measured 2026-10-11, docs/specs/2026-10-11-ripple-remote-ux.md). Everything a
 // phone may need later goes into the session's event log before it goes to any socket.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
@@ -147,6 +147,13 @@ export function permissionDetail(tool: string, input: Record<string, unknown>, c
   return JSON.stringify(input, null, 2);
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A stable v4-shaped UUID for a phone message id. */
+function uuidFrom(text: string): string {
+  const h = createHash("sha256").update(text).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
 function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return content === undefined ? "" : JSON.stringify(content);
@@ -170,6 +177,8 @@ export class Sessions {
   private bridge: BridgeClient;
   private bridges = new Map<string, { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }>();
   private bridgeSends = new Map<string, Promise<string>>();
+  /** uuids of prompts sent over Remote Control, so their transcript echo is not shown twice. */
+  private bridgeEchoes = new Set<string>();
   private bridgeDecisions = new Map<string, Promise<boolean>>();
 
   constructor(opts: SessionsOptions) {
@@ -217,7 +226,7 @@ export class Sessions {
       if (!r.desktopBridge) continue;
       try {
         r.transcriptOffset = this.desktop.tail(r.id, r.transcriptOffset ?? 0, body => {
-          if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) this.append(r.id, body);
+          if (body.kind !== "user" || !(this.seen(r.id, body.clientMsgId) || this.bridgeEchoes.has(body.clientMsgId))) this.append(r.id, body);
         });
         this.save();
         const process = this.desktop.liveProcess(r.id);
@@ -382,7 +391,11 @@ export class Sessions {
     if (this.seen(id, clientMsgId)) return id;
     // The stream only carries permission prompts; sending does not depend on it.
     this.ensureBridge(id, bridgeId);
-    try { await this.bridge.send(bridgeId, clientMsgId, text); }
+    // The API takes only a UUID; phones send short random ids. Derived, not random, so a retry of
+    // the same message is the same event; the transcript echoes it under this uuid.
+    const uuid = UUID_RE.test(clientMsgId) ? clientMsgId : uuidFrom(clientMsgId);
+    this.bridgeEchoes.add(uuid);
+    try { await this.bridge.send(bridgeId, uuid, text); }
     catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
     this.append(id, { kind: "user", text, clientMsgId });
