@@ -50,6 +50,10 @@ const WARN = 'warning'
 const BAD = 'error'
 /** Cells between facts, and between controls. */
 const GAP = 2
+/** Desktop: the air between facts, in ch (the host takes fractions of a cell). */
+const DRAWN_GAP = 1.5
+/** Desktop: a control's air either side, in ch: its hover box. */
+const CONTROL_PAD = 0.75
 const CTRL_GAP = 1
 /** The least room a route is drawn in; on the desktop the host cuts the name to what is left. */
 const ROUTE_MIN = 14
@@ -516,7 +520,7 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   const tip = routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ')
   return (
-    <Box key="fact-route" flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={0} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
+    <Box key="fact-route" flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={ROUTE_ROOM} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
       <Box flexShrink={0}>
         {r.ok ? <Text dimColor>{r.resent ? '↻' : '→'}</Text> : <Text color={BAD}>✕</Text>}
       </Box>
@@ -542,7 +546,7 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   const L = frame.lang
   const violet = tintText('violet', A)
   const out: DrawnControl[] = []
-  const sized = (key: string, artPx: number, label?: string, extraCells = 0) => 2 + Math.ceil(artPx / CELL_PX) + (label ? 1 + Math.ceil(chOf(label)) : 0) + extraCells
+  const sized = (key: string, artPx: number, label?: string, extraCells = 0) => 2 * CONTROL_PAD + Math.ceil(artPx / CELL_PX) + (label ? 1 + Math.ceil(chOf(label)) : 0) + extraCells
   if (view.handoff !== 'off') {
     const advised = view.handoff === 'advised'
     const label = t(L, 'band.handoff')
@@ -553,13 +557,13 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   out.push({
     key: 'auto',
     cells: sized('auto', SWITCH_W, autoLabel),
-    node: control(el, { key: 'auto', source: switchArt(view.auto, A, view.effort.mode === 'deciding'), alt: autoLabel, width: SWITCH_W, height: SWITCH_H, label: autoLabel, dim: !view.auto, onPress: actions.toggleAuto }),
+    node: control(el, { key: 'auto', source: switchArt(view.auto, A, view.effort.mode === 'deciding'), alt: autoLabel, width: SWITCH_W, height: SWITCH_H, label: autoLabel, dim: !view.auto, onPress: actions.toggleAuto, pad: CONTROL_PAD }),
   })
   const warmLabel = t(L, 'band.warm')
   out.push({
     key: 'warm',
     cells: sized('warm', ICON_PX, words ? warmLabel : undefined),
-    node: control(el, { key: 'warm', source: iconArt('flame', view.warm.on, A), alt: warmLabel, width: ICON_PX, height: ICON_PX, ...(words ? { label: warmLabel } : {}), ...(view.warm.on ? { labelColor: violet } : { dim: true }), onPress: actions.toggleWarm }),
+    node: control(el, { key: 'warm', source: iconArt('flame', view.warm.on, A), alt: warmLabel, width: ICON_PX, height: ICON_PX, ...(words ? { label: warmLabel } : {}), ...(view.warm.on ? { labelColor: violet } : { dim: true }), onPress: actions.toggleWarm, pad: CONTROL_PAD }),
   })
   const agentsLabel = t(L, 'band.agents')
   const live = view.agents.live
@@ -569,11 +573,11 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
     cells: sized('agents', AGENTS_W, words ? agentsLabel : undefined),
     node: control(el, {
       key: 'agents', source: agentsArt(live, view.agentsOpen || live > 0, A), alt: live > 0 ? agentsLabel + ' ' + live : agentsLabel, width: AGENTS_W, height: 16,
-      ...(words ? { label: agentsLabel } : {}), ...(view.agentsOpen ? { labelColor: violet } : { dim: true }), onPress: actions.toggleAgents,
+      ...(words ? { label: agentsLabel } : {}), ...(view.agentsOpen ? { labelColor: violet } : { dim: true }), onPress: actions.toggleAgents, pad: CONTROL_PAD,
     }),
   })
   const settingsLabel = t(L, 'band.settings')
-  out.push({ key: 'settings', cells: sized('settings', ICON_PX), node: control(el, { key: 'settings', source: iconArt('gear', false, A), alt: settingsLabel, width: ICON_PX, height: ICON_PX, onPress: actions.openSettings }) })
+  out.push({ key: 'settings', cells: sized('settings', ICON_PX), node: control(el, { key: 'settings', source: iconArt('gear', false, A), alt: settingsLabel, width: ICON_PX, height: ICON_PX, onPress: actions.openSettings, pad: CONTROL_PAD }) })
   return out
 }
 
@@ -612,7 +616,8 @@ function whyDrawn(el: Els, frame: Frame, view: DashboardView, tips: { key: strin
 
 function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   const { Box, Button } = el
-  const cols = Math.max(30, frame.columns)
+  // The band's own padding (a cell each side) and border take their share of the frame.
+  const cols = Math.max(30, frame.columns) - 3
   const mood = bandMood(frame, view)
   const look = bandLook(mood, view)
   // The row's budget, widths alone (never values): the mascot, the facts at their slots, a route
@@ -627,15 +632,17 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const counted = (w: boolean) => controlsDrawn(el, frame, { ...view, handoff: 'advised' }, actions, w).reduce((n, c) => n + c.cells, 0)
   let controlCells = counted(words)
   let route = view.hide.includes('route') ? 0 : ROUTE_ROOM
-  const span = (facts: DrawnFact[]) => facts.reduce((n, f) => n + f.cells + GAP, 0)
-  const need = (facts: DrawnFact[]) => MARK_CELLS + effort.cells + GAP + span(facts) + route + controlCells + close + 1
+  const span = (facts: DrawnFact[]) => facts.reduce((n, f) => n + f.cells + DRAWN_GAP, 0)
+  // Each fact and the route are followed by a gap (the last one before the reason).
+  const need = (facts: DrawnFact[]) => MARK_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
   let facts = optional
   if (need(facts) > cols) {
     words = false
     controlCells = counted(words)
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
-  for (const drop of ['limit', 'context', 'mode', 'route', 'cache']) {
+  // A changing figure (context) outlasts a standing state (the mode, named in quick settings too).
+  for (const drop of ['limit', 'mode', 'context', 'route', 'cache']) {
     if (need(facts) <= cols) break
     if (drop === 'route') route = 0
     else facts = facts.filter(f => f.key !== drop)
@@ -650,7 +657,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   ) : ''
   const row = (
     <Box key="band-row" flexDirection="row" alignItems="center" width="100%" minWidth={0}>
-      <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
+      <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
         {mascot}
         {effort.node}
         {facts.map(f => f.node)}
