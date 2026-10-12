@@ -84,6 +84,8 @@ export interface Figures {
 
 export interface SessionSummary {
   id: string;
+  origin?: "host" | "desktop";
+  readOnly?: boolean;
   title: string;
   cwd: string;
   model: string;
@@ -132,7 +134,10 @@ export type ReqOp =
   /** The host's VAPID public key (base64url), for PushManager.subscribe's applicationServerKey. */
   | { op: "push_key" }
   | { op: "push_subscribe"; subscription: PushSubscriptionJSON; lang: "ko" | "en" }
-  | { op: "push_unsubscribe" };
+  | { op: "push_unsubscribe" }
+  /** Native push carries only fixed status copy and a session id, never conversation text. */
+  | { op: "expo_push_subscribe"; token: string; lang: "ko" | "en" }
+  | { op: "expo_push_unsubscribe" };
 
 /** PushSubscription.toJSON() as the browser gives it. */
 export interface PushSubscriptionJSON { endpoint: string; expirationTime?: number | null; keys: { p256dh: string; auth: string } }

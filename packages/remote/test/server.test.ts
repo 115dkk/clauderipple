@@ -113,7 +113,7 @@ class Peer {
   }
 }
 
-async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}) {
+async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, desktopProjects?: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-server-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -123,7 +123,7 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}) {
   const diagnostics: string[] = [];
   let server: HostServer | undefined;
   let closing = false;
-  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5,
+  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, ...(desktopProjects ? { desktopProjects } : {}),
     onEvent: session => { if (!closing) server?.onEvent(session); },
     onSessions: () => { if (!closing) server?.onSessions(); },
   });
@@ -160,6 +160,49 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}) {
   };
   return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
 }
+
+test("desktop sessions use ready, attach, paged history and blob requests, rejecting writes", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-wire-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const lines = [{ type: "user", cwd: "/synthetic", uuid: "u1", message: { content: "Wire prompt" } }];
+  let data = lines.map(r => JSON.stringify(r) + "\n").join("");
+  for (let i = 0; i < 30; i++) data += JSON.stringify({ type: "assistant", uuid: `a${i}`, message: { model: "test", content: [{ type: "text", text: "a".repeat(20_000) }] } }) + "\n";
+  data += JSON.stringify({ type: "assistant", uuid: "large", message: { model: "test", content: [{ type: "text", text: "z".repeat(100_000) }] } }) + "\n";
+  fs.writeFileSync(path.join(project, `${id}.jsonl`), data);
+  const f = await fixture(t, {}, root);
+  const peer = await f.connect();
+  peer.send({ t: "hello", token, clientId: "desktop-reader" });
+  const ready = await peer.take("ready");
+  assert.equal(ready.msg.sessions[0]?.readOnly, true);
+  peer.send({ t: "attach", session: id });
+  const tail = await peer.take("events");
+  assert.equal(tail.msg.tail?.hasOlder, true);
+  assert.ok(tail.bytes <= FRAME_CAP);
+  peer.send({ t: "history", session: id, beforeSeq: tail.msg.events[0]!.seq, reqId: "older" });
+  const history = await peer.take("history");
+  assert.ok(history.msg.events.at(-1)!.seq < tail.msg.events[0]!.seq);
+  assert.ok(history.bytes <= FRAME_CAP);
+  const large = tail.msg.events.at(-1)!;
+  assert.ok(large.kind === "assistant" && typeof large.text !== "string");
+  peer.send({ t: "req", reqId: "blob", op: { op: "blob", session: id, id: large.text.blob } });
+  const blob = await peer.take("res");
+  assert.equal(blob.msg.ok && (blob.msg.data as BlobChunk).text, "z".repeat(60_000));
+  for (const msg of [
+    { t: "send", session: id, clientMsgId: "no-write", text: "no" },
+    { t: "set_model", session: id, model: "no", effort: null },
+    { t: "interrupt", session: id },
+    { t: "decide", session: id, id: "none", decision: "allow" },
+  ] satisfies ClientMsg[]) {
+    peer.send(msg);
+    const error = await peer.take("error");
+    assert.match(error.msg.message, /read-only/);
+  }
+  assert.equal(f.fake.options.length, 0);
+  assert.equal(fs.readFileSync(path.join(project, `${id}.jsonl`), "utf8"), data);
+});
 
 function get(port: number, target: string): Promise<{ status: number; type: string; body: string }> {
   return new Promise((resolve, reject) => {
@@ -251,9 +294,12 @@ test("presence: a phone that reported visible within 30 s counts as looking; hid
   let now = 1_000_000;
   const subscribed: { clientId: string; endpoint: string; lang: string }[] = [];
   const unsubscribed: string[] = [];
+  const native: { clientId: string; token: string; lang: string }[] = [];
+  const nativeRemoved: string[] = [];
   const f = await fixture(t, {
     now: () => now,
     push: { publicKey: "BPUBLICKEY", subscribe: (clientId, sub, lang) => { subscribed.push({ clientId, endpoint: sub.endpoint, lang }); }, unsubscribe: (id) => { unsubscribed.push(id); } },
+    expoPush: { subscribe: (clientId, token, lang) => { native.push({ clientId, token, lang }); }, unsubscribe: id => { nativeRemoved.push(id); } },
   });
   const looking = (): boolean => f.server.someoneLooking();
   const peer = await f.auth();
@@ -281,6 +327,12 @@ test("presence: a phone that reported visible within 30 s counts as looking; hid
   peer.send({ t: "req", reqId: "u", op: { op: "push_unsubscribe" } });
   await peer.take("res", m => m.reqId === "u");
   assert.deepEqual(unsubscribed, ["test-client"]);
+  peer.send({ t: "req", reqId: "native", op: { op: "expo_push_subscribe", token: "ExpoPushToken[test]", lang: "en" } });
+  assert.equal((await peer.take("res", m => m.reqId === "native")).msg.ok, true);
+  assert.deepEqual(native, [{ clientId: "test-client", token: "ExpoPushToken[test]", lang: "en" }]);
+  peer.send({ t: "req", reqId: "native-off", op: { op: "expo_push_unsubscribe" } });
+  await peer.take("res", m => m.reqId === "native-off");
+  assert.deepEqual(nativeRemoved, ["test-client"]);
   peer.ws.close();
   await waitFor(() => !looking());
 });

@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "Ripple Remote",
+    "slug": "ripple-remote",
+    "owner": "rippleworks",
+    "version": "0.1.0",
+    "scheme": "ripple-remote",
+    "platforms": ["ios"],
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": { "bundleIdentifier": "com.clauderipple.remote", "supportsTablet": true },
+    "plugins": [
+      "expo-router", "expo-secure-store", "expo-notifications", "expo-localization", "./plugins/withPodTarget", "./plugins/withSceneLifecycle",
+      ["expo-camera", { "cameraPermission": "Mac 연결 QR 코드를 스캔하기 위해 카메라를 사용합니다.", "recordAudioAndroid": false }]
+    ]
+  }
+}

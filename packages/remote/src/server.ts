@@ -48,6 +48,7 @@ export interface ServerOptions {
   recentCli: () => Promise<RecentSource[]>;
   log?: (line: string) => void;
   push?: Pick<Notifier, "subscribe" | "unsubscribe"> & { publicKey: string };
+  expoPush?: { subscribe(clientId: string, token: string, lang: "ko" | "en"): void; unsubscribe(clientId: string): void };
   now?: () => number;
 }
 
@@ -314,6 +315,14 @@ export class HostServer {
         if (!log) throw new Error("no such subagent");
         return log.readAfter(op.afterSeq ?? 0);
       }
+      case "expo_push_subscribe":
+        if (!this.opts.expoPush) throw new Error("native push is off on this host");
+        if (!c.clientId) throw new Error("no device id");
+        this.opts.expoPush.subscribe(c.clientId, op.token, op.lang);
+        return { ok: true };
+      case "expo_push_unsubscribe":
+        if (c.clientId) this.opts.expoPush?.unsubscribe(c.clientId);
+        return { ok: true };
       case "push_key":
         if (!this.opts.push) throw new Error("push is off on this host");
         return { publicKey: this.opts.push.publicKey };

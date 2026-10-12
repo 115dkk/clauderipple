@@ -23,6 +23,7 @@ import { toB64u } from "./e2ee.ts";
 import { PermissionQueue } from "./permissions.ts";
 import { PowerHold } from "./power.ts";
 import { Notifier, loadVapid, webPushSender } from "./push.ts";
+import { ExpoNotifier, expoSender } from "./expo-push.ts";
 import { RelayHost, loadHostKey } from "./relay.ts";
 import type { WsLike } from "./relay.ts";
 import { RouterClient } from "./router.ts";
@@ -109,11 +110,13 @@ async function runHost(): Promise<void> {
     someoneLooking: () => server?.someoneLooking() ?? false,
     summary: (id) => sessions?.summaryOf(id),
   });
+  const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log, someoneLooking: () => server?.someoneLooking() ?? false });
   sessions = new Sessions({
     dir, router, permissions,
+    desktopProjects: path.join(os.homedir(), ".claude", "projects"),
     queryFn: query as unknown as QueryFn,
     ...(claudePath ? { claudePath } : {}),
-    onEvent: (id, event) => { server?.onEvent(id); void notifier.onEvent(id, event); },
+    onEvent: (id, event) => { server?.onEvent(id); void notifier.onEvent(id, event); void expoNotifier.onEvent(id, event); },
     onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },
   });
   sessions.recover();
@@ -124,6 +127,7 @@ async function runHost(): Promise<void> {
     recentCli: async () => (await listSessions({ limit: 300, includeProgrammatic: false })).flatMap((s) => (s.cwd ? [{ path: s.cwd, lastUsed: s.lastModified }] : [])),
     log,
     push: { publicKey: vapid.publicKey, subscribe: (id, sub, lang) => notifier.subscribe(id, sub, lang), unsubscribe: (id) => notifier.unsubscribe(id) },
+    expoPush: expoNotifier,
   });
   server = host;
   await host.listen();
