@@ -4,6 +4,7 @@
 // answers 405; measured 2026-10-11, docs/specs/2026-10-11-ripple-remote-ux.md). Everything a
 // phone may need later goes into the session's event log before it goes to any socket.
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
@@ -205,7 +206,12 @@ export class Sessions {
   pollDesktop(): void {
     if (this.desktop?.poll()) this.opts.onSessions();
     for (const r of this.records.values()) {
-      if (!r.desktopBridge || !this.desktop) continue;
+      if (!this.desktop) continue;
+      // A record the host once resumed, now open in the desktop app with Remote Control.
+      if (!r.desktopBridge && !this.live.has(r.id) && r.sdkSessionId && this.desktop.has(r.sdkSessionId) && this.desktop.liveProcess(r.sdkSessionId)?.bridgeSessionId) {
+        try { this.rebaseDesktop(r); } catch (error) { this.bridgeFailure(r.id, error); continue; }
+      }
+      if (!r.desktopBridge) continue;
       try {
         r.transcriptOffset = this.desktop.tail(r.id, r.transcriptOffset ?? 0, body => {
           if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) this.append(r.id, body);
@@ -369,11 +375,7 @@ export class Sessions {
 
   private async sendBridge(id: string, clientMsgId: string, text: string, bridgeId: string): Promise<string> {
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId, true);
-    if (!r.desktopBridge) {
-      r.desktopBridge = true;
-      r.transcriptOffset = this.desktop?.transcriptSize(r.sdkSessionId ?? id) ?? 0;
-      this.save();
-    }
+    if (!r.desktopBridge) this.rebaseDesktop(r);
     if (this.seen(id, clientMsgId)) return id;
     // The stream only carries permission prompts; sending does not depend on it.
     this.ensureBridge(id, bridgeId);
@@ -381,8 +383,29 @@ export class Sessions {
     catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
     this.append(id, { kind: "user", text, clientMsgId });
+    // A turn the desktop app finished while no phone was polling left the record "running";
+    // without a fresh state event the phone would time this turn from that old one.
+    if (r.state === "running" || r.state === "waiting") this.setState(r, "idle");
     this.setState(r, "running");
     return id;
+  }
+
+  /**
+   * A record the host once drove (resume) becomes a Remote Control one: its log stops where the
+   * host stopped, so it is rebuilt from the transcript instead of tailing from "now" and
+   * skipping everything the desktop app said in between. The new epoch makes phones refetch.
+   */
+  private rebaseDesktop(r: SessionRecord): void {
+    if (!this.desktop) return;
+    const dir = path.join(this.opts.dir, "sessions", r.id);
+    this.logs.get(r.id)?.close();
+    this.logs.delete(r.id);
+    fs.rmSync(dir, { recursive: true, force: true });
+    this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
+    r.desktopBridge = true;
+    r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
+    this.save();
+    this.opts.onSessions();
   }
 
   private ensureBridge(id: string, bridgeId: string) {
