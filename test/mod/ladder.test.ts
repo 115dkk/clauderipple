@@ -12,22 +12,22 @@ const { resolveWorker } = await import('../../packages/mod/hooks/workers.ts')
 
 const v = (level: WorkerVerdict['level'], more: Partial<WorkerVerdict> = {}): WorkerVerdict => ({ domain: 'general', level, effort: 'medium', why: '', ...more })
 
-test('levels land on light, standard and hard; a plan at standard or deep goes to Plan', () => {
+test('levels land on light, standard and hard regardless of planning kind', () => {
   assert.equal(rungOf(v('light')), 'light')
   assert.equal(rungOf(v('standard')), 'standard')
   assert.equal(rungOf(v('deep')), 'hard')
-  assert.equal(rungOf(v('standard', { kind: 'plan' })), 'plan')
-  assert.equal(rungOf(v('deep', { kind: 'plan' })), 'plan')
+  assert.equal(rungOf(v('standard', { kind: 'plan' })), 'standard')
+  assert.equal(rungOf(v('deep', { kind: 'plan' })), 'hard')
   // A light plan (rename a section of the spec) is still light work.
   assert.equal(rungOf(v('light', { kind: 'plan' })), 'light')
   assert.equal(rungOf(v('deep', { kind: 'do' })), 'hard')
 })
 
-test('an unsure verdict takes the next rung up; Hard and Plan stay', () => {
+test('an unsure verdict takes the next rung up, stopping at hard even for planning', () => {
   assert.equal(rungOf(v('light', { sure: 0.49 })), 'standard')
   assert.equal(rungOf(v('standard', { sure: 0.3 })), 'hard')
   assert.equal(rungOf(v('deep', { sure: 0.1 })), 'hard')
-  assert.equal(rungOf(v('deep', { kind: 'plan', sure: 0.1 })), 'plan')
+  assert.equal(rungOf(v('deep', { kind: 'plan', sure: 0.1 })), 'hard')
   assert.equal(rungOf(v('light', { sure: 0.5 })), 'light')
   assert.equal(rungOf(v('light')), 'light')
 })
@@ -46,7 +46,7 @@ test('the default ladder runs each rung at its own effort, whatever effort the j
   assert.deepEqual(pick(DEFAULTS, v('light', { effort: 'low' })), { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max', rung: 'light' })
   assert.deepEqual(pick(DEFAULTS, v('standard', { effort: 'high' })), { target: { agent: 'gpt-6-1-sol' }, effort: 'medium', rung: 'standard' })
   assert.deepEqual(pick(DEFAULTS, v('deep')), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard' })
-  assert.deepEqual(pick(DEFAULTS, v('deep', { kind: 'plan' })), { target: { agent: 'general-purpose', model: 'opus' }, effort: 'high', rung: 'plan' })
+  assert.deepEqual(pick(DEFAULTS, v('deep', { kind: 'plan' })), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard' })
   // Design has its own ladder on Claude.
   assert.deepEqual(pick(DEFAULTS, v('standard', { domain: 'design' })).target, { agent: 'general-purpose', model: 'sonnet' })
 })
@@ -75,7 +75,7 @@ test('unavailable: the rung\'s backup, else one rung up, else the session model;
   // An empty rung says so and moves up.
   const empty = pick(ladder({ standard: { target: sol, effort: 'medium' } }), v('light'))
   assert.deepEqual([empty.target, empty.rung], [sol, 'standard'])
-  assert.match(empty.fallbackReason ?? '', /Light work has no model set/)
+  assert.match(empty.fallbackReason ?? '', /Low worker has no model set/)
 })
 
 test('pins and Auto migrate: Auto stays Auto, pins become ladders with Plan one effort above Hard', () => {
@@ -172,4 +172,16 @@ test('a preset model that is not connected leaves the rung on its nearest choice
   const unmeasured: LadderChoice = { target: { agent: 'mystery' }, model: 'mystery', provider: 'x', billing: 'payg', efforts: [] }
   assert.equal(cheapest([unmeasured, ...LIVE, free])?.target.agent, 'qwen-free')
   assert.equal(cheapest([unmeasured, ...LIVE])?.target.agent, 'deepseek-flash')
+})
+
+test('spawn titles name the model that runs, replacing a guessed prefix', async () => {
+  const { spawnTitle, titleName } = await import('../../packages/mod/hooks/workers.ts')
+  const models = [{ value: 'gpt-6.1-sol', label: 'gpt-6.1-sol · chatgpt', provider: 'chatgpt', name: 'GPT-6.1 Sol' }]
+  assert.equal(titleName('gpt-6.1-sol@medium', models), 'Sol')
+  assert.equal(titleName('gpt-6-astra@high'), 'Astra')
+  assert.equal(titleName('claude-opus-5-5'), 'Opus5.5')
+  assert.equal(titleName('opus'), 'Opus')
+  assert.equal(titleName('deepseek-v4.1-flash@max'), 'deepseek-v4.1-flash')
+  assert.equal(spawnTitle('Opus5.5·high · Fix routing', 'gpt-6.1-sol@medium', 'medium', models), 'Sol·medium · Fix routing')
+  assert.equal(spawnTitle('Fix routing', 'claude-opus-5-5', undefined), 'Opus5.5 · Fix routing')
 })

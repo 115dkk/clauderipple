@@ -74,7 +74,7 @@ export type Level = 'light' | 'standard' | 'deep'
 export type Kind = 'plan' | 'do'
 /**
  * The worker ladder's rungs (docs/specs/2026-10-11-worker-ladder.md): the judge's level picks
- * light, standard or hard; a plan at standard or deep goes to plan.
+ * light, standard or hard regardless of kind; only an explicit max tier selects plan.
  */
 export type Rung = 'light' | 'standard' | 'hard' | 'plan'
 /** One rung: what runs there and how hard it thinks, and what runs when it cannot. */
@@ -105,7 +105,7 @@ export type PresetId = 'claude' | 'claudeGpt' | 'gpt' | 'cheap'
 /** A preset as computed from what is connected: the rungs, and the ones it had to fill otherwise. */
 export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
 export type LadderOptions = { until: number; choices: LadderChoice[]; presets: Partial<Record<PresetId, Preset>> }
-export type RouterModel = { value: string; label: string; provider: string }
+export type RouterModel = { value: string; label: string; provider: string; name?: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
 export type AaScore = { intelligence: number; costPerTask: number }
 export type ModelScore = { model: string; provider: string; variants: { effort: Effort | null; intelligence: number | null; costPerTask: number | null }[] }
@@ -180,7 +180,7 @@ export type WorkerPick = WorkerVerdict & {
   /** The ladder rung that ran it (absent for Auto and explicit choices). */
   rung?: Rung
   target: TierTarget
-  by: JudgeKind | 'marker' | 'default'
+  by: JudgeKind | 'marker' | 'default' | 'tier'
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string

@@ -21,7 +21,7 @@ import { textTone } from './theme'
 import type { AgentsActions, AgentsView, Frame } from './view'
 import { compactNumber, effortLabel, elapsed, isRich, modelName, targetLabel } from './view'
 
-const BY = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', marker: 'agents.marker', default: 'agents.default' } as const
+const BY = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', marker: 'agents.marker', default: 'agents.default', tier: 'toasts.yourPick' } as const
 
 function who(agent: AgentRec, lang: Frame['lang']): string {
   const pick = agent.pick

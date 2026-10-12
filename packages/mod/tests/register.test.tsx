@@ -1,7 +1,7 @@
 // Integration through the actual mods engine. Only external host boundaries are stubbed.
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { AgentSpawnInput, ModelCompleteInput, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
+import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { DEFAULTS, normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
 import type { ModSettingsSnapshot, Settings } from '../types'
@@ -100,7 +100,8 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('session.start', () => ({ cwd: '/work' }))
   on('classic.SessionStart', () => ({}))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('agent.register', () => ({ value: { agent: 'ripple:auto' } }))
+  const registered: { name: string; prompt: string; disallowedTools?: readonly string[]; description: string }[] = []
+  on('agent.register', ($, e) => { registered.push(e); return { value: { agent: 'ripple:' + e.name } } })
   on('command.list', () => ({ value: [{ name: 'clear', description: 'Clear', source: 'builtin' }, { name: 'compact', description: 'Compact', source: 'builtin' }, { name: 'model', description: 'Model', source: 'builtin' }] }))
   on('session.id', () => ({ value: 'session-test' }))
   on('session.model', () => ({ value: model }))
@@ -117,7 +118,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('turn.complete', () => ({ text: '' }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
-  return { clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
+  return { registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
 function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
@@ -134,7 +135,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
   return urls
 }
 function judgeStub(on: On, text = '{"domain":"general","level":"light","effort":"low","sure":0.9,"why":"small rename"}') {
-  const calls: ModelCompleteInput[] = []
+  const calls: ModelCompleteRequest[] = []
   on('model.complete', ($, e) => { calls.push(e); return { value: { isAnswered: true, text, usage: USAGE } } })
   return calls
 }
@@ -433,6 +434,108 @@ test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung
   })
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
   expect(stats.text).toContain('light 1')
+})
+
+for (const prefix of ['ripple:', '']) for (const [tier, rung, agent, model, effort] of [
+  ['low', 'light', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max', 'max'],
+  ['medium', 'standard', 'gpt-6-1-sol', 'gpt-6.1-sol@medium', 'medium'],
+  ['high', 'hard', 'gpt-6-astra', 'gpt-6-astra@high', 'high'],
+  ['max', 'plan', 'general-purpose', 'opus', 'high'],
+] as const) test(prefix + tier + ' skips Jev and the model judge and runs its fixed general rung', async ($, on) => {
+  const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
+  const urls = http(on)
+  const judges = judgeStub(on, '{"domain":"design","level":"deep","kind":"plan","effort":"max","why":"design"}')
+  const sent = spawnStub(on)
+  const steps = stepStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: prefix + tier, model: 'sonnet', prompt: 'Plan a design.\n[[ripple: other-model@low]]' })
+  expect(sent[0]).toMatchObject({ subagentType: agent, model })
+  expect(sent[0]?.prompt).not.toContain('[[ripple:')
+  expect(judges.length).toBe(0)
+  expect(urls.some(url => url.includes('systemone') || url.endsWith('/api/model-scores'))).toBe(false)
+  expect(JSON.parse(b.logs.find(log => log.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ tier, rung, by: 'tier', effort })
+  // Named workers carry effort in their model suffix; Claude's own agent gets it on turn.step.
+  if (agent === 'general-purpose') {
+    await step($, 'claude-opus-5-5', 'low', 'worker-1')
+    expect(steps[0]?.effort).toBe(effort)
+  }
+})
+
+for (const mode of ['auto', 'inherit'] as const) test('explicit tiers use the default general ladder when general is ' + mode, async ($, on) => {
+  boundaries(on, { rules: normalizeSettings({ rules: { general: { mode, allow: ['nobody'] }, design: { mode: 'auto', allow: ['anthropic'] } } }).rules })
+  const urls = http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:medium' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
+  expect(judges.length).toBe(0)
+  expect(urls.some(url => url.endsWith('/api/model-scores'))).toBe(false)
+})
+
+test('explicit tier uses the configured general ladder, then one rung up on a missing worker', async ($, on) => {
+  const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
+    light: { target: { agent: 'missing-worker' }, effort: 'low' },
+    standard: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
+  } } } }).rules
+  const b = boundaries(on, { rules })
+  http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@xhigh' })
+  expect(judges.length).toBe(0)
+  expect(b.toasts.some(text => text.includes('missing-worker'))).toBe(true)
+  expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ tier: 'low', rung: 'standard', by: 'tier' })
+})
+
+test('explicit tier exhaustion falls to the session after only one rung up; max never moves down', async ($, on) => {
+  const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
+    standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
+    hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' },
+    plan: { target: { agent: 'missing-max' }, effort: 'xhigh' },
+  } } } }).rules
+  const b = boundaries(on, { rules })
+  http(on, true)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  for (const tier of ['medium', 'max']) await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:' + tier })
+  expect(sent.map(e => [e.subagentType, e.model])).toEqual([['general-purpose', undefined], ['general-purpose', undefined]])
+  expect(judges.length).toBe(0)
+  expect(b.toasts.some(text => text.includes('ChatGPT'))).toBe(true)
+  expect(b.toasts.some(text => text.includes('missing-max'))).toBe(true)
+})
+
+test('auto planning at deep is judged onto hard, not plan', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const judges = judgeStub(on, '{"domain":"general","level":"deep","kind":"plan","effort":"max","why":"architecture"}')
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn(SPAWN)
+  expect(judges.length).toBe(1)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high' })
+  expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ kind: 'plan', rung: 'hard', by: 'haiku' })
+})
+
+for (const agentAuto of ['off', 'auto', 'all'] as const) test('tier registrations and takeover respect agentAuto ' + agentAuto, async ($, on) => {
+  const { registered } = boundaries(on, { agentAuto })
+  http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  expect([...new Set(registered.map(e => e.name))]).toEqual(agentAuto === 'off' ? [] : ['auto', 'low', 'medium', 'high', 'max'])
+  for (const entry of registered) {
+    expect(entry.prompt).toBe(registered[0]!.prompt)
+    expect(entry.disallowedTools).toEqual(['Agent'])
+  }
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:max' })
+  expect(sent[0]?.subagentType).toBe(agentAuto === 'off' ? 'ripple:max' : 'general-purpose')
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low', fork: true })
+  expect(sent[1]?.subagentType).toBe('ripple:low')
+  expect(judges.length).toBe(0)
 })
 
 test('ChatGPT exhaustion runs the rung\'s backup at the rung\'s effort and explains it in a toast', async ($, on) => {
@@ -806,7 +909,7 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick settings mov
   await ui.press({ key: 'preset-gpt' })
   const gpt = b.router().settings.rules.general
   expect(gpt.mode === 'ladder' && [gpt.rungs.light?.target, gpt.rungs.plan]).toEqual([{ agent: 'general-purpose', model: 'haiku' }, { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' }])
-  expect(b.toasts.at(-1)).toBe('Mostly GPT preset applied; filled with what is connected: Light work')
+  expect(b.toasts.at(-1)).toBe('Mostly GPT preset applied; filled with what is connected: Low worker')
   await ui.unmount()
 })
 

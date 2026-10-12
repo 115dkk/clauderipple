@@ -3,11 +3,11 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, PresetId, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
-import { RUNGS, RUNG_EFFORT, applySettingsChanges, foldExceptions, normalizeSettings, settingsChanges } from './settings'
+import { DEFAULTS, RUNGS, RUNG_EFFORT, applySettingsChanges, foldExceptions, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, takesOver, workerCandidates, workerJudgeInput, zenJev } from './workers'
+import { WORKER_JUDGE_SYSTEM, WORKER_TIERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, spawnTitle, takesOver, tierOf, workerCandidates, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
@@ -199,7 +199,10 @@ async function resolveLanguage($: EngineInterface, s: Settings): Promise<Lang> {
 }
 async function registerAuto($: EngineInterface, s: Settings): Promise<void> {
   if (s.agentAuto === 'off') return
-  await $.agent.register({ name: 'auto', description: 'Delegate any task here; ClaudeRipple picks the model and reasoning effort for it.', prompt: EXECUTOR, disallowedTools: ['Agent'] })
+  await $.agent.register({ name: 'auto', description: 'Delegate here when unsure of the tier; ClaudeRipple judges low/medium/high and picks the model. Prefer ripple:low/medium/high/max when you know how hard the task is.', prompt: EXECUTOR, disallowedTools: ['Agent'] })
+  for (const [name, tier] of Object.entries(WORKER_TIERS)) {
+    await $.agent.register({ name, description: tier.description, prompt: EXECUTOR, disallowedTools: ['Agent'] })
+  }
 }
 async function installSettings($: EngineInterface, s: Settings): Promise<void> {
   const previous = await currentSettings($)
@@ -612,13 +615,18 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const candidates = [...workerCandidates(files, await read($, routerModels)), ...claudeCandidates()]
   const pinnedCandidates = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
+  const tier = tierOf(e.subagentType)
+  const forced = tier ? WORKER_TIERS[tier] : undefined
   const marker = readMarker(e.prompt)
-  const explicit = marker && !['auto', 'ripple'].includes(marker.name) ? marker : null
+  const explicit = !forced && marker && !['auto', 'ripple'].includes(marker.name) ? marker : null
   let verdict: WorkerVerdict = { domain: 'general', level: 'standard', effort: 'high', why: t(language, 'toasts.judgeUnavailable') }
   let by: WorkerPick['by'] = 'default'
   let ms = 0
   let target: TierTarget | undefined
-  if (explicit) {
+  if (forced) {
+    verdict = { domain: 'general', level: forced.level, kind: tier === 'max' ? 'plan' : 'do', effort: RUNG_EFFORT[forced.rung], why: t(language, 'workers.rung.' + forced.rung) }
+    by = 'tier'
+  } else if (explicit) {
     // Agent names and their file-model ids are both valid explicit routing notes.
     const name = files.has(explicit.name) ? explicit.name : [...files].find(([, f]) => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === explicit.name)?.[0]
     target = name ? { agent: name } : { agent: 'general-purpose', model: explicit.name }
@@ -631,9 +639,12 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   }
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model)?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
-  const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable)
-    ? { target: target!, effort: verdict.effort }
-    : resolveWorker(verdict, s, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
+  const general = s.rules.general.mode === 'ladder' ? s.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
+  const resolved = forced
+    ? ladderPick(verdict, general, s, pinnedCandidates, usable, language, [], forced.rung)
+    : explicitCandidate && candidateUsable(explicitCandidate, s, usable)
+      ? { target: target!, effort: verdict.effort }
+      : resolveWorker(verdict, s, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -644,7 +655,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(resolved.aa ? { aa: resolved.aa } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
+  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, ...(tier ? { tier } : {}), rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(resolved.aa ? { aa: resolved.aa } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
@@ -1227,14 +1238,16 @@ export const register: Register = on => {
       // Only the main chat delegates. A worker that starts its own worker waits on it idle, and a
       // Claude worker's 5-minute cache lapses meanwhile: 324k tokens rewritten in one request after
       // an 8.5-minute wait on 2026-10-11. Forks, workflows and teammates are the engine's, not this.
-      if (e.parentAgentId && !e.fork && !e.workflow && !e.isTeammate) return { deny: t(await read($, lang), 'workers.nested') }
+      const workflow = 'workflow' in e && !!e.workflow
+      const teammate = 'isTeammate' in e && !!e.isTeammate
+      if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
-      if (!e.workflow && !e.isTeammate && takesOver(e, s)) {
+      if (!workflow && !teammate && takesOver(e, s)) {
         const routed = await requestPick($, e, s)
         if ('deny' in routed) return routed
         input = routed.input
         chosen = routed.pick
-      } else if (!e.fork && !e.workflow) {
+      } else if (!e.fork && !workflow) {
         const files = await workerFiles($)
         try { await refreshModels($) } catch (error) { await report($, 'explicit worker catalogue', error) }
         const file = files.get(e.subagentType)
@@ -1253,6 +1266,15 @@ export const register: Register = on => {
         }
       }
     } catch (error) { input = e; await report($, 'agent.spawn prepare', error) }
+    try {
+      // The title names what really runs: the model set above, else the worker file's, else the parent's.
+      if (!e.fork && input.description?.trim()) {
+        const file = (await workerFiles($)).get(input.subagentType)
+        const model = input.model ?? (file ? agentModel(file) : undefined) ?? e.parentModel
+        const effort = chosen?.effort ?? /@([a-z]+)$/.exec(model)?.[1]
+        input = { ...input, description: spawnTitle(input.description, model, effort, await read($, routerModels)) }
+      }
+    } catch (error) { await report($, 'agent.spawn title', error) }
     const result = await next(input)
     try {
       if (result.agentId) {

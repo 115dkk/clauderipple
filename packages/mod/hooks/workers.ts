@@ -6,6 +6,18 @@ import type { Lang } from './i18n'
 import { bounded, kindOf, parseEffortVerdict, verdictObject } from './judge'
 import { claudeChoices, presets, rungAbove, rungOf } from './ladder'
 
+export const WORKER_TIERS = {
+  low: { rung: 'light', level: 'light', description: "Low worker: quick lookups, finding files, skimming logs, mechanical edits. ClaudeRipple runs it on the user's low-tier model. If it fails or returns nothing usable, retry once on ripple:medium." },
+  medium: { rung: 'standard', level: 'standard', description: "Medium worker: specified implementation, refactors, summaries, drafts. ClaudeRipple runs it on the user's medium-tier model. If it fails, retry once on ripple:high." },
+  high: { rung: 'hard', level: 'deep', description: "High worker: hard debugging, multi-file changes, independent review and rebuttal. ClaudeRipple runs it on the user's high-tier model. If it fails, retry once on ripple:max." },
+  max: { rung: 'plan', level: 'deep', description: "Max worker: the best result available — planning, design, architecture, opinions. ClaudeRipple runs it on the user's max-tier model. If it fails, report to the user instead of retrying." },
+} as const satisfies Record<string, { rung: Rung; level: Level; description: string }>
+
+export function tierOf(subagentType: string): keyof typeof WORKER_TIERS | undefined {
+  const name = subagentType.replace(/^ripple:/, '')
+  return Object.hasOwn(WORKER_TIERS, name) ? name as keyof typeof WORKER_TIERS : undefined
+}
+
 export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level, kind of work and the cheapest effort that still does this delegated task well. Evaluate actual scope and risk, not prompt length.
 Domains: design (visual taste, composition, brand), frontend (UI implementation), backend (APIs and server logic), infra (deployment and operations), data (queries and processing), test (verification), docs (writing), research (investigation), general (other or cross-domain).
 Levels are independent of domain: light (chores, mechanical work, simple lookups), standard (designed implementation, ordinary research and review), deep (careful high-stakes reasoning, subtle bugs, architecture, security).
@@ -59,8 +71,8 @@ export function routerModelOptions(config: unknown): RouterModel[] {
   const out: RouterModel[] = []
   for (const [provider, value] of Object.entries(record(record(config).providers))) {
     for (const model of list(record(value).models)) {
-      const id = record(model).id
-      if (typeof id === 'string' && id) out.push({ value: id, label: `${id} · ${provider}`, provider })
+      const { id, name } = record(model)
+      if (typeof id === 'string' && id) out.push({ value: id, label: `${id} · ${provider}`, provider, ...(typeof name === 'string' && name.trim() ? { name } : {}) })
     }
   }
   return out
@@ -185,8 +197,8 @@ export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
  * The ladder: the verdict's rung, else its backup, else one rung up (its model, then its backup),
  * else the session model, never down. Whatever ran instead says why (the fallback toast).
  */
-export function ladderPick(verdict: WorkerVerdict, rule: Extract<Rule, { mode: 'ladder' }>, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = []): Resolution {
-  const wanted = rungOf(verdict)
+export function ladderPick(verdict: WorkerVerdict, rule: Extract<Rule, { mode: 'ladder' }>, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], forcedRung?: Rung): Resolution {
+  const wanted = forcedRung ?? rungOf(verdict)
   let reason: string | undefined
   for (const rung of [wanted, rungAbove(wanted)]) {
     if (!rung) continue
@@ -256,7 +268,36 @@ export function resolveWorker(verdict: WorkerVerdict, settings: Settings, candid
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {
   return fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model
 }
+/** A prefix this mod (or the retired agent-title hook) put on a title: "Sol·high · ". */
+const TITLE_PREFIX = /^[^\s·]+(?:·[a-z]+)? · /
+
+/**
+ * The model a title names: a Claude id or alias as its family and version ("Opus5.5"), a routed id
+ * as its configured name's last word ("GPT-6.1 Sol" → "Sol"), else a gpt-* id's last part, else
+ * the id.
+ */
+export function titleName(model: string, models: readonly RouterModel[] = []): string {
+  const id = baseModel(model).replace(/\[.*?\]/g, '')
+  const claude = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d+)(?:-(\d{1,2}))?)?/i.exec(id)
+  if (claude) return claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase() + (claude[2] ? claude[2] + (claude[3] ? '.' + claude[3] : '') : '')
+  const named = models.find(m => m.value.toLowerCase() === id.toLowerCase())?.name
+  if (named) return named.trim().split(/\s+/).pop()!
+  const gpt = /^gpt-[\d.]+-([a-z]+)$/i.exec(id)
+  return gpt ? gpt[1]!.charAt(0).toUpperCase() + gpt[1]!.slice(1) : id
+}
+
+/**
+ * The background-task title with the model that really runs it in front: "Sol·medium · Fix X".
+ * The app names only Claude models, and for a routed one shows the parent's; the mod is the one
+ * that knows, since it picks. A prefix already there (the parent's guess) is replaced.
+ */
+export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = []): string {
+  const tag = titleName(model, models) + (effort ? '·' + effort : '')
+  const bare = description.replace(TITLE_PREFIX, '')
+  return `${tag} · ${bare.trim() ? bare : description}`
+}
+
 export function takesOver(spawn: { subagentType: string; model?: string; fork: boolean }, settings: Settings): boolean {
   if (spawn.fork || settings.agentAuto === 'off') return false
-  return ['ripple:auto', 'auto'].includes(spawn.subagentType) || (settings.agentAuto === 'all' && spawn.subagentType === 'general-purpose' && spawn.model === undefined)
+  return tierOf(spawn.subagentType) !== undefined || ['ripple:auto', 'auto'].includes(spawn.subagentType) || (settings.agentAuto === 'all' && spawn.subagentType === 'general-purpose' && spawn.model === undefined)
 }
