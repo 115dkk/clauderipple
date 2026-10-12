@@ -279,6 +279,9 @@ main.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -web
 .pair li { display: flex; gap: 12px; align-items: flex-start; font-size: 15.5px; counter-increment: s; }
 .pair li::before { content: counter(s); flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 14px; display: grid; place-items: center; }
 .pair code { display: block; margin-top: 6px; font-family: var(--mono); font-size: 13px; white-space: nowrap; overflow-x: auto; background: var(--surface); border: 1px solid var(--line); padding: 8px 12px; border-radius: 10px; }
+.pair .paste { margin-top: 24px; width: 100%; text-align: left; font-size: 14px; color: var(--muted); }
+.pair .paste .row { display: flex; gap: 8px; margin-top: 8px; }
+.pair .paste input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-family: var(--mono); font-size: 16px; }
 .pair .note { margin-top: 26px; font-size: 13.5px; color: var(--muted); }
 
 .toast { position: absolute; left: 16px; right: 16px; bottom: calc(var(--safe-b) + 140px); z-index: 20; background: var(--ink); color: var(--bg); border-radius: 14px; padding: 12px 14px; font-size: 14.5px; box-shadow: var(--shadow); }

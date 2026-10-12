@@ -29,6 +29,19 @@ const store = {
   },
 };
 
+/** Keep the pairing a link's fragment carries ("#pair=…"); false when it carries none. */
+function savePairing(fragment: string): boolean {
+  if (!fragment.startsWith("#")) return false;
+  const hash = new URLSearchParams(fragment.slice(1));
+  const paired = hash.get("pair");
+  if (!paired) return false;
+  store.set("rr.token", paired);
+  // A relay pairing names the host (server id) and its key; a direct one does not, and replaces any relay pairing.
+  const server = hash.get("server"), hpk = hash.get("hpk");
+  store.set("rr.relay", server && hpk ? ({ url: location.origin, server, hpk } satisfies RelayPairing) : null);
+  return true;
+}
+
 const uid = (): string => crypto.randomUUID();
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T;
 
@@ -58,15 +71,7 @@ export class App {
   // ---- boot --------------------------------------------------------------------------------
 
   start(): void {
-    const hash = new URLSearchParams(location.hash.slice(1));
-    const paired = hash.get("pair");
-    if (paired) {
-      store.set("rr.token", paired);
-      // A relay pairing names the host (server id) and its key; a direct one does not, and replaces any relay pairing.
-      const server = hash.get("server"), hpk = hash.get("hpk");
-      store.set("rr.relay", server && hpk ? ({ url: location.origin, server, hpk } satisfies RelayPairing) : null);
-      history.replaceState(null, "", location.pathname);
-    }
+    if (savePairing(location.hash)) history.replaceState(null, "", location.pathname);
     const token = store.get<string | null>("rr.token", null);
     if (!token) { this.screen = { name: "pair" }; this.render(); return; }
     this.screen = this.routeFromHash();
@@ -513,6 +518,14 @@ export class App {
     const session = this.screen.name === "session" ? this.screen.id : "";
     switch (act) {
       case "retry": this.link?.nudge(); break;
+      case "pair-link": {
+        // A Home Screen app keeps its own storage, apart from Safari's: the pairing a scanned QR
+        // left in Safari never reaches it, so the link is pasted here instead.
+        const value = (document.getElementById("pair-link") as HTMLInputElement | null)?.value ?? "";
+        if (savePairing(value.slice(value.indexOf("#")))) location.reload();
+        else this.toast(t("pair.badLink"));
+        break;
+      }
       case "home": this.go({ name: "home" }); break;
       case "open": this.go({ name: "session", id }); break;
       case "send": {
