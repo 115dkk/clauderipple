@@ -85,7 +85,12 @@ export class DesktopSidebar {
       if (!v || !UUID.test(string(v.cliSessionId))) continue;
       const sessionId = string(v.sessionId) || name.slice(0, -5), group = string(assignments?.[`code:${sessionId}`]);
       const routine = typeof v.scheduledTaskId === "string" && v.scheduledTaskId.length > 0;
-      rows.push({ cliSessionId: string(v.cliSessionId), sessionId, title: string(v.title), unread: unread.has(sessionId),
+      // The app persists its unread set to Local Storage late; a session focused in the app after
+      // its last activity is read even while the stored set still lists it (2026-10-13: 데이리플
+      // showed yellow on the phone while the Mac, which had it open, showed it working).
+      const focused = number(v.lastFocusedAt), active = number(v.lastActivityAt);
+      const seen = focused > 0 && active > 0 && focused >= active;
+      rows.push({ cliSessionId: string(v.cliSessionId), sessionId, title: string(v.title), unread: unread.has(sessionId) && !seen,
         archived: v.isArchived === true || archived.has(sessionId), group: routine ? "routines" : manual.some(g => g?.id === group) ? group : "sessions",
         order: 0, activity: number(v.lastActivityAt) || number(v.createdAt), created: number(v.createdAt) });
     }

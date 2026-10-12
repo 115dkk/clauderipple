@@ -34,19 +34,23 @@ function fixture(t: import("node:test").TestContext) {
     "dframe-code-sections": { [scope]: { sections: [{ id: "sessions", kind: "sessions", order: 2 }, { id: "g", kind: "manual", name: "사용자 그룹", order: 1, sortBy: "recency" }] } },
   } } };
   write("claude_desktop_config.json", config);
-  const session = (cli: string, activity: number, extra = {}) => write(`claude-code-sessions/${scope}/local_${cli}.json`, { sessionId: `local_${cli}`, cliSessionId: cli, title: `앱 제목 ${cli[0]}`, lastActivityAt: activity, lastFocusedAt: 999999, ...extra });
+  const session = (cli: string, activity: number, extra = {}) => write(`claude-code-sessions/${scope}/local_${cli}.json`, { sessionId: `local_${cli}`, cliSessionId: cli, title: `앱 제목 ${cli[0]}`, lastActivityAt: activity, lastFocusedAt: 1, ...extra });
   session(id, 100); session(other, 200);
   fs.writeFileSync(path.join(storage, "000001.log"), wal({ state: { unreadIds: [`local_${id}`] } }));
   let now = 0;
   return { root, dir, storage, config, write, session, sidebar: new DesktopSidebar({ root, now: () => now }), advance: () => { now += 3001; } };
 }
-test("app group order, recency, exact titles and unread IDs win over transcript/focus timestamps", t => {
+test("app group order, recency, exact titles and unread IDs (unless focused since the last activity)", t => {
   const f = fixture(t), snapshot = f.sidebar.read();
   assert.deepEqual(snapshot.groups.map(g => g.name), ["사용자 그룹", UNGROUPED]);
   assert.deepEqual(snapshot.groups[0]?.sessions, [other, id]);
   const joined = f.sidebar.join([summary(id), summary(other), summary("phone", "host")], s => s);
   assert.equal(joined[0]?.title, "앱 제목 c"); assert.equal(joined[0]?.unread, true);
   assert.equal(joined[1]?.unread, false); assert.equal(joined[2]?.group, PHONE_GROUP);
+  // Focused in the app after its last activity: read, though the stored set (saved late) lists it.
+  f.session(id, 100, { lastFocusedAt: 150 }); f.advance(); f.sidebar.read();
+  assert.equal(f.sidebar.join([summary(id)], s => s)[0]?.unread, false);
+  f.session(id, 100); f.advance(); f.sidebar.read();
   // Long after the last activity: only the unread one is "recent", lifted out of its group.
   const later = sidebarSections(joined, snapshot.groups.map(g => g.name), Number.MAX_SAFE_INTEGER);
   assert.deepEqual(later.map(g => g.name), ["최근", "사용자 그룹", "휴대폰에서 시작"]);
