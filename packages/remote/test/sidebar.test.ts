@@ -56,11 +56,13 @@ test("app group order, recency, exact titles and unread IDs win over transcript/
   const now = Math.max(...joined.map(s => s.updatedAt)) + 1;
   assert.equal(sidebarSections(joined, snapshot.groups.map(g => g.name), now)[0]?.sessions.length, 3);
   assert.equal(sidebarState(joined[0]!), "unread"); assert.equal(sidebarState(joined[1]!), "read");
-  assert.equal(sidebarState({ ...joined[0]!, state: "running" }), "running");
+  assert.equal(sidebarState({ ...joined[1]!, state: "running" }), "running");
   assert.equal(sidebarState({ ...joined[0]!, state: "error" }), "error");
-  // Subagents still running behind an idle main turn: the app's dark blink, not the yellow dot.
-  assert.equal(sidebarState({ ...joined[0]!, state: "idle", background: true }), "background");
-  assert.equal(sidebarState({ ...joined[0]!, state: "idle", tasks: 2 }), "background");
+  // The app's rule, checked on live sessions: unread outranks working; subagent-only work is
+  // working; a stale transcript task count alone is not.
+  assert.equal(sidebarState({ ...joined[0]!, state: "running" }), "unread");
+  assert.equal(sidebarState({ ...joined[1]!, state: "idle", background: true }), "running");
+  assert.equal(sidebarState({ ...joined[1]!, state: "idle", tasks: 2 }), "read");
 });
 test("mtime cache obeys three-second gate; archive index hides rows and SDK IDs join phone handoffs", t => {
   const f = fixture(t); f.sidebar.read();

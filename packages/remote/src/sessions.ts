@@ -327,7 +327,10 @@ export class Sessions {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
     const state = process ? this.bridgeState(process) : r.desktopBridge ? "stopped" : r.state;
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: this.desktop?.backgroundTasks(r.sdkSessionId ?? r.id) ?? 0, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    // The transcript keeps tasks whose end was never recorded; only a process the registry calls
+    // busy can have any running, so an idle one reports none.
+    const working = process?.status === "busy" || process?.status === "shell";
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: working ? this.desktop?.backgroundTasks(r.sdkSessionId ?? r.id) ?? 0 : 0, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {

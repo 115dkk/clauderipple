@@ -255,7 +255,9 @@ export class DesktopSessions {
     this.updateLive();
     const excluded = this.opts.excluded();
     return Array.from(this.sources.values()).filter(s => !excluded.has(s.summary.id)).map(s => {
-      if (this.liveProcess(s.summary.id)?.bridgeSessionId) s.summary = { ...s.summary, tasks: this.backgroundTasks(s.summary.id) };
+      // Unfinished-looking tasks linger in old transcripts; only a busy process can have any running.
+      const live = this.liveProcess(s.summary.id);
+      if (live?.bridgeSessionId) s.summary = { ...s.summary, tasks: live.status === "busy" || live.status === "shell" ? this.backgroundTasks(s.summary.id) : 0 };
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
         ? { ...s.summary, lastSeq: cached.log.lastSeq, epoch: cached.log.epoch } : s.summary;

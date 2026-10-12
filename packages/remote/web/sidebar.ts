@@ -30,12 +30,15 @@ export function sidebarSections(sessions: SessionSummary[], groups?: string[], n
     .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER) || b.updatedAt - a.updatedAt) }))].filter(g => g.sessions.length > 0);
 }
 /**
- * Opening the phone never changes Claude's read state. Keep the desktop's unread flag intact.
- * Background work outranks unread, as in the app (a dark blink, not the yellow dot).
+ * The app sidebar's rule (checked against live sessions 2026-10-12): unread outranks working,
+ * and working is one state whether the main turn or only subagents run. Opening the phone never
+ * changes Claude's read state. The transcript task count is not used here: tasks whose end was
+ * never recorded linger in it, which made long-idle sessions blink.
  */
 export function sidebarState(s: SessionSummary): string {
   if (s.pending > 0 || s.state === "waiting") return "waiting";
-  if (s.state === "running" || s.state === "starting" || s.state === "error") return s.state;
-  if (s.background || (s.tasks ?? 0) > 0) return "background";
-  return s.unread ? "unread" : "read";
+  if (s.state === "error") return "error";
+  if (s.unread) return "unread";
+  if (s.state === "running" || s.state === "starting" || s.background) return "running";
+  return "read";
 }

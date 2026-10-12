@@ -69,6 +69,8 @@ test("bridge worker state overrides busy registry for listed and opened sessions
 
 test("background counts reach listed and opened bridge summaries independently of the main state", async t => {
   const f = fixture(t);
+  // Only a process the registry calls busy can have background work running.
+  f.registry.set(id, { ...f.registry.get(id)!, status: "busy" });
   fs.appendFileSync(f.file, line({ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Agent", input: {} }] } }) +
     line({ type: "user", toolUseResult: { isAsync: true, agentId: "worker" }, message: { content: [{ type: "tool_result", tool_use_id: "a", content: "async" }] } }));
   await f.sessions.pollDesktop();
