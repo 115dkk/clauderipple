@@ -78,7 +78,6 @@ const settingsDraft = atom({ plugin: 'ripple', key: 'settingsDraft' } as const, 
 const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
-const settingsSection = atom({ plugin: 'ripple', key: 'settingsSection' } as const, 'effort')
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
@@ -1002,7 +1001,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
-  return { settings: await currentSettings($), jev: await read($, jev), ladder: await read($, ladderOptions), section: await read($, settingsSection) }
+  return { settings: await currentSettings($), jev: await read($, jev), ladder: await read($, ladderOptions) }
 }
 async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)
@@ -1063,7 +1062,7 @@ function settingsActions($: EngineInterface): SettingsActions {
       if (!saved) await $.ui.toast(t(await read($, lang), 'band.routerDown'))
     },
     jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
-    setMode: id => setMode($, id), openSection: section => update($, settingsSection, () => section),
+    setMode: id => setMode($, id),
     openAllSettings: () => openAllSettings($), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {

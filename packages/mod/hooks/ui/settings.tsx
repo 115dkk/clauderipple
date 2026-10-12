@@ -1,21 +1,23 @@
 // Quick settings in the band. Each control applies immediately; the router dashboard owns
-// the full settings page. Setup reuses the judge and keep-warm rows below.
+// the full settings page. Setup reuses the judge and keep-warm controls below.
 //
-// 리플이 holds the panel as it holds a card (parts.tsx `speak`): the panel's name beside its face,
-// then one row per setting, a name, its options as ●/○ words, a quiet hint, then the one way out
-// to the dashboard. No pictures but the face: every option is a native button.
+// The terminal draws 리플이's column (parts.tsx `speak`): one row per setting, its options as ●/○
+// words, then the way out to the dashboard. The desktop draws a capsule of the deep (kit.tsx): 리플이
+// at the head saying in one line what the settings do right now, the two ways out (all settings,
+// close) as drawn buttons at the top right, and four tiles, each a setting with its own picture of
+// how it stands and its control right there, so nothing is a tab away.
 
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { Settings } from '../../types'
-import { CELL_PX, ICON_PX, SWITCH_H, SWITCH_W, iconArt, switchArt, tintText } from './art'
-import type { Icon } from './art'
-import { EDGE, blank, control, pic, segments, stops, surface } from './kit'
-import { action, actions, canDraw, dismiss, mascot, segmented, speak, toggle } from './parts'
+import { CELL_PX, INK, MUTE, SUB, TILE_PX, TONE, tileArt } from './art'
+import type { TileArt } from './art'
+import { capsule, pill, pic, ripple, segmented, slider, toggle, well } from './kit'
+import { action, actions, canDraw, dismiss, segmented as textSegmented, speak, toggle as textToggle } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, textTone } from './theme'
-import type { Frame, SettingsActions, SettingsSection, SettingsView } from './view'
+import type { Frame, SettingsActions, SettingsView } from './view'
 import { isRich } from './view'
 
 /** Every name a row of quick settings or setup shows: the name column is the widest of them. */
@@ -46,14 +48,11 @@ export function row(el: Els, frame: Frame, key: string, label: string, control: 
 
 const BIAS: readonly Settings['bias'][] = [-2, -1, 0, 1, 2]
 
-/**
- * Cheaper ○ ○ ● ○ ○ Smarter on the desktop: each stop a button whose ring is filled when chosen,
- * the ripple rings of the mascot read as a slider. The terminal names them (−2 … +2).
- */
+/** Cheaper ○ ○ ● ○ ○ Smarter on the editor; the terminal names the stops (−2 … +2). */
 function biasStops(el: Els, frame: Frame, bias: Settings['bias'], onPick: (bias: Settings['bias']) => void): RenderNode {
   const { Box, Button, Text } = el
   const name = (b: number) => (b > 0 ? '+' + b : b < 0 ? '−' + -b : '0')
-  if (!isRich(frame)) return segmented(el, frame, 'bias', BIAS.map(b => ({ value: String(b), label: name(b) })), String(bias), picked => onPick(Number(picked) as Settings['bias']))
+  if (!isRich(frame)) return textSegmented(el, frame, 'bias', BIAS.map(b => ({ value: String(b), label: name(b) })), String(bias), picked => onPick(Number(picked) as Settings['bias']))
   return (
     <Box flexDirection="row" alignItems="center" columnGap={1}>
       <Text dimColor>{t(frame.lang, 'settings.cheaper')}</Text>
@@ -65,12 +64,17 @@ function biasStops(el: Els, frame: Frame, bias: Settings['bias'], onPick: (bias:
   )
 }
 
-// ---- Shared quick controls ---------------------------------------------------------------------
+// ---- The terminal's rows (setup on the terminal lends them too) ---------------------------------
 
 export function effortRows(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode[] {
-  const out = [row(el, frame, 'auto', t(frame.lang, 'settings.effortAuto'), toggle(el, frame, 'set-auto', d.effortAuto ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.effortAuto, () => a.patch({ effortAuto: !d.effortAuto })), t(frame.lang, 'settings.autoHint'))]
+  const out = [row(el, frame, 'auto', t(frame.lang, 'settings.effortAuto'), textToggle(el, frame, 'set-auto', d.effortAuto ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.effortAuto, () => a.patch({ effortAuto: !d.effortAuto })), t(frame.lang, 'settings.autoHint'))]
   if (d.effortAuto) out.push(row(el, frame, 'bias', t(frame.lang, 'settings.lean'), biasStops(el, frame, d.bias, bias => a.patch({ bias })), t(frame.lang, 'settings.leanHint')))
   return out
+}
+
+/** The Jev key field and its test, when TypeSafe's Jev judges and no key is known. */
+function needsKey(view: SettingsView): boolean {
+  return view.settings.judge === 'jev' && view.settings.jevSource === 'typesafe' && !['env', 'file', 'pasted'].includes(view.jev.source ?? '')
 }
 
 export function judgeRows(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode[] {
@@ -83,7 +87,7 @@ export function judgeRows(el: Els, frame: Frame, view: SettingsView, a: Settings
       frame,
       'judge',
       t(frame.lang, 'settings.judge'),
-      segmented(
+      textSegmented(
         el,
         frame,
         'judge',
@@ -97,7 +101,7 @@ export function judgeRows(el: Els, frame: Frame, view: SettingsView, a: Settings
       ),
     ),
   ]
-  if (d.judge === 'jev' && d.jevSource === 'typesafe' && !['env', 'file', 'pasted'].includes(view.jev.source ?? '')) {
+  if (needsKey(view)) {
     const jev = view.jev
     const placeholder = t(frame.lang, 'settings.keyPaste')
     const field = 'Input' in el ? (
@@ -135,7 +139,7 @@ export function judgeRows(el: Els, frame: Frame, view: SettingsView, a: Settings
  */
 export function modeRows(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode[] {
   const { Text } = el
-  const items = [{ value: '', label: t(frame.lang, 'settings.modeNone') }, ...d.modes.map(m => ({ value: m.id, label: m.name }))]
+  const items = modeItems(frame, d)
   const current = d.activeMode ?? ''
   const control = 'Select' in el && a.setMode
     ? <el.Select key="mode" options={items} value={current} onSelect={(value: string) => a.setMode!(value)} />
@@ -144,166 +148,205 @@ export function modeRows(el: Els, frame: Frame, d: Settings, a: SettingsActions)
 }
 
 export function keepWarmRow(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode {
-  return row(el, frame, 'warm', t(frame.lang, 'settings.keepWarm'), toggle(el, frame, 'set-warm', d.keepWarm ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.keepWarm, () => a.patch({ keepWarm: !d.keepWarm })), t(frame.lang, 'settings.keepWarmHint'))
+  return row(el, frame, 'warm', t(frame.lang, 'settings.keepWarm'), textToggle(el, frame, 'set-warm', d.keepWarm ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.keepWarm, () => a.patch({ keepWarm: !d.keepWarm })), t(frame.lang, 'settings.keepWarmHint'))
 }
 
-// ---- Desktop: cards, and the open card's controls ------------------------------------------------
+function modeItems(frame: Frame, d: Settings): { value: string; label: string }[] {
+  return [{ value: '', label: t(frame.lang, 'settings.modeNone') }, ...d.modes.map(m => ({ value: m.id, label: m.name }))]
+}
+
+function judgeName(frame: Frame, judge: Settings['judge']): string {
+  return t(frame.lang, judge === 'haiku' ? 'settings.haiku' : judge === 'jev' ? 'settings.jev' : 'settings.routerModel')
+}
+
+// ---- Desktop: the deep's tiles -------------------------------------------------------------------
 //
-// A drawn surface (kit.tsx): a header with 리플이, the brand and the way out to the full settings;
-// a row of cards, each a setting's name and what it is set to now, the open one lit; under them the
-// open card's controls, drawn large (switches, chips, a slider) with a line on what they do. Every
-// press applies and saves at once, as before.
+// A tile is a setting: its picture (art.ts `tileArt`, how the setting stands, alive while on), its
+// name in bright ink with its switch at the right when it has one, one line on what it does, then
+// its control. The pictures replace the old line icons, which said nothing at 15 px.
 
-type Card = { id: SettingsSection; icon: Icon; title: string; summary: string }
+/** A tile's edge and glass: light on the water, brighter under the pointer. */
+const TILE_EDGE = 'rgba(255,255,255,0.1)'
+const TILE_EDGE_HOT = 'rgba(255,255,255,0.26)'
+const TILE_GLASS = 'rgba(255,255,255,0.045)'
+const TILE_GLASS_HOT = 'rgba(255,255,255,0.075)'
+/** The least a tile takes, in cells: two side by side from about 84 cells, one a row below. */
+const TILE_MIN = 40
 
-function cardsOf(frame: Frame, view: SettingsView): Card[] {
-  const L = frame.lang
-  const d = view.settings
-  const onOff = (on: boolean) => t(L, on ? 'band.on' : 'band.off')
-  const lean = d.bias === 0 ? '' : ' · ' + t(L, d.bias < 0 ? 'settings.cheaper' : 'settings.smarter') + ' ' + (d.bias < 0 ? '−' + -d.bias : '+' + d.bias)
-  const judge = d.judge === 'haiku' ? t(L, 'settings.haiku') : d.judge === 'jev' ? t(L, 'settings.jev') : t(L, 'settings.routerModel')
-  const judgeModel = d.judge === 'model' && d.judgeModel ? ' · ' + d.judgeModel : ''
-  const mode = d.modes.find(m => m.id === d.activeMode)?.name ?? t(L, 'settings.modeNone')
-  return [
-    { id: 'effort', icon: 'gauge', title: t(L, 'band.effort'), summary: onOff(d.effortAuto) + (d.effortAuto ? lean : '') },
-    { id: 'judge', icon: 'judge', title: t(L, 'settings.judge'), summary: judge + judgeModel },
-    { id: 'mode', icon: 'layers', title: t(L, 'settings.mode'), summary: mode },
-    { id: 'warm', icon: 'flame', title: t(L, 'settings.keepWarm'), summary: onOff(d.keepWarm) },
-  ]
+/** Tiles side by side: two when the frame holds two at their least, else one a row. */
+function tilesAcross(frame: Frame): 1 | 2 {
+  return frame.columns >= 2 * TILE_MIN + 6 ? 2 : 1
 }
 
-/** Card edges: lit for the open one, quiet otherwise; both read on light and dark. */
-const CARD_EDGE = 'rgba(128,124,150,0.30)'
-const CARD_WASH = 'rgba(129,112,232,0.10)'
+/** Cells a tile's words and controls have beside its picture, about. */
+function tileInner(frame: Frame): number {
+  const tile = tilesAcross(frame) === 2 ? Math.floor((frame.columns - 5) / 2) : frame.columns - 4
+  return Math.max(18, tile - 3 - Math.ceil(TILE_PX / CELL_PX) - 3)
+}
 
-function cardDrawn(el: Els, frame: Frame, card: Card, open: boolean, cardCells: number, onPress: () => void): RenderNode {
-  const { Box, Button, Text } = el
-  const px = cardCells * CELL_PX
+type Tile = { id: string; art: TileArt; title: string; head?: RenderNode; line: string; body: RenderNode[] }
+
+function tile(el: Els, x: Tile): RenderNode {
+  const { Box, Text } = el
   return (
-    <Box key={'card-' + card.id} position="relative" flexDirection="column" flexGrow={1} width={0} minWidth={18} paddingX={1} borderStyle="round" borderColor={open ? EDGE.violet : CARD_EDGE} {...(open ? { backgroundColor: CARD_WASH } : {})} hover={{ borderColor: EDGE.violet }}>
-      <Box flexDirection="row" alignItems="center" columnGap={1}>
-        {pic(el, 'card-icon-' + card.id, iconArt(card.icon, open, frame.appearance), card.title, ICON_PX, ICON_PX)}
-        <Text bold color={open ? tintText('violet', frame.appearance) : undefined} wrap="wrap">{card.title}</Text>
-      </Box>
-      <Text dimColor wrap="wrap">{card.summary}</Text>
-      {/* Two blank presses stacked: one host button is a line high, the card two. */}
-      <Box position="absolute" top={0} bottom={0} left={0} right={0} flexDirection="column" justifyContent="space-around" alignItems="center" overflow="hidden">
-        <Button key={'settings-card-' + card.id} plain label={blank(px)} onPress={() => onPress()} />
-        <Button key={'settings-card-' + card.id + '-2'} plain label={blank(px)} onPress={() => onPress()} />
+    <Box key={'tile-' + x.id} position="relative" flexDirection="row" alignItems="flex-start" columnGap={2} flexGrow={1} width={0} minWidth={TILE_MIN} paddingX={1.5} paddingY={1} borderStyle="round" borderColor={TILE_EDGE} backgroundColor={TILE_GLASS} hover={{ borderColor: TILE_EDGE_HOT, backgroundColor: TILE_GLASS_HOT }}>
+      {pic(el, 'tile-art-' + x.id, tileArt(x.art), x.title, TILE_PX, TILE_PX)}
+      <Box key={'tile-body-' + x.id} flexDirection="column" rowGap={1} flexGrow={1} flexShrink={1} minWidth={0}>
+        <Box flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text bold color={INK} wrap="wrap">{x.title}</Text>
+          </Box>
+          {x.head ?? null}
+        </Box>
+        <Text color={SUB} wrap="wrap">{x.line}</Text>
+        {x.body}
       </Box>
     </Box>
   )
 }
 
-/** A named row of the open card: the name, the control, a quiet line on what it does. */
-function rowDrawn(el: Els, key: string, name: string, nameCells: number, control: RenderNode, hint?: string): RenderNode {
-  const { Box, Text } = el
-  return (
-    <Box key={'row-' + key} flexDirection="row" alignItems="center" columnGap={2} flexWrap="wrap" rowGap={1}>
-      <Box width={nameCells} flexShrink={0}>
-        <Text dimColor>{name}</Text>
-      </Box>
-      {control}
-      {hint ? <Text dimColor wrap="wrap">{hint}</Text> : null}
-    </Box>
-  )
+/** A quiet line under a control. */
+function note(el: Els, key: string, text: string, color = MUTE): RenderNode {
+  const { Text } = el
+  return <Text key={key} color={color} wrap="wrap">{text}</Text>
 }
 
-function switchDrawn(el: Els, frame: Frame, key: string, on: boolean, onPress: () => void): RenderNode {
-  const label = t(frame.lang, on ? 'band.on' : 'band.off')
-  return control(el, { key, source: switchArt(on, frame.appearance), alt: label, width: SWITCH_W, height: SWITCH_H, label, ...(on ? { labelColor: tintText('violet', frame.appearance) } : { dim: true }), bold: on, onPress, pad: 0 })
-}
-
-/** The drawn controls of one card (setup lends them too). */
-export function drawnRows(el: Els, frame: Frame, view: SettingsView, a: SettingsActions, section: SettingsSection): RenderNode[] {
+/** Automatic effort: its switch, and while on the lean between cheaper and smarter. */
+export function effortTile(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
   const { Box, Text } = el
   const L = frame.lang
   const d = view.settings
-  const violet = tintText('violet', frame.appearance)
-  const nameCells = Math.ceil(Math.max(...[t(L, 'settings.effortAuto'), t(L, 'settings.lean'), t(L, 'settings.judge'), t(L, 'settings.key'), t(L, 'settings.mode'), t(L, 'settings.keepWarm')].map(chOf))) + 1
-  if (section === 'effort') {
-    const out = [rowDrawn(el, 'auto', t(L, 'settings.effortAuto'), nameCells, switchDrawn(el, frame, 'set-auto', d.effortAuto, () => a.patch({ effortAuto: !d.effortAuto })), t(L, 'settings.autoHint'))]
-    if (d.effortAuto) {
-      out.push(
-        rowDrawn(
-          el,
-          'bias',
-          t(L, 'settings.lean'),
-          nameCells,
-          <Box key="bias" flexDirection="row" alignItems="center" columnGap={1}>
-            <Text dimColor>{t(L, 'settings.cheaper')}</Text>
-            {stops(el, frame, 'bias', BIAS, d.bias, bias => a.patch({ bias }))}
-            <Text dimColor>{t(L, 'settings.smarter')}</Text>
-          </Box>,
-          t(L, 'settings.leanHint'),
-        ),
-      )
-    }
-    return out
-  }
-  if (section === 'judge') {
-    const out = [
-      rowDrawn(
-        el,
-        'judge',
-        t(L, 'settings.judge'),
-        nameCells,
-        segments(el, frame, 'judge', [
-          { value: 'haiku', label: t(L, 'settings.haiku') },
-          { value: 'jev', label: t(L, 'settings.jev') },
-          { value: 'model', label: t(L, 'settings.routerModel') },
-        ] as const, d.judge, judge => a.patch({ judge }), 'violet', violet),
-        t(L, 'settings.judgeBlurb'),
-      ),
-    ]
-    // The key field when Jev needs one: the terminal's row, which is native controls already.
-    const key = judgeRows(el, frame, view, a).slice(1)
-    return [...out, ...key]
-  }
-  if (section === 'mode') {
-    const items = [{ value: '', label: t(L, 'settings.modeNone') }, ...d.modes.map(m => ({ value: m.id, label: m.name }))]
-    const current = d.activeMode ?? ''
-    const control = items.length <= 6 || !('Select' in el)
-      ? segments(el, frame, 'mode', items, current, id => a.setMode?.(id), 'violet', violet)
-      : <el.Select key="mode" options={items} value={current} onSelect={(value: string) => a.setMode?.(value)} />
-    return [rowDrawn(el, 'mode', t(L, 'settings.mode'), nameCells, control, t(L, 'settings.workersBlurb'))]
-  }
-  return [
-    rowDrawn(el, 'warm', t(L, 'settings.keepWarm'), nameCells, switchDrawn(el, frame, 'set-warm', d.keepWarm, () => a.patch({ keepWarm: !d.keepWarm })), t(L, 'settings.keepWarmHint')),
-    <Box key="warm-cost" paddingLeft={nameCells + 2}>
-      <Text dimColor wrap="wrap">{t(L, 'settings.warmCost')}</Text>
-    </Box>,
+  const body = d.effortAuto
+    ? [
+        <Box key="lean" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+          <Text color={MUTE}>{t(L, 'settings.cheaper')}</Text>
+          {slider(el, 'bias', BIAS, d.bias, bias => a.patch({ bias }), 3)}
+          <Text color={MUTE}>{t(L, 'settings.smarter')}</Text>
+        </Box>,
+        note(el, 'lean-note', t(L, 'settings.leanHint')),
+      ]
+    : [note(el, 'auto-off', t(L, 'settings.autoOffNote'))]
+  return tile(el, {
+    id: 'effort',
+    art: { kind: 'effort', on: d.effortAuto },
+    title: t(L, 'settings.effortAuto'),
+    head: toggle(el, 'set-auto', d.effortAuto, t(L, d.effortAuto ? 'band.on' : 'band.off'), () => a.patch({ effortAuto: !d.effortAuto })),
+    line: t(L, 'settings.autoLine'),
+    body,
+  })
+}
+
+/** Who judges: Haiku, Jev or a router model; Jev's key field when it needs one. */
+export function judgeTile(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
+  const { Box, Text } = el
+  const L = frame.lang
+  const d = view.settings
+  const body: RenderNode[] = [
+    segmented(el, 'judge', [
+      { value: 'haiku', label: t(L, 'settings.haiku') },
+      { value: 'jev', label: t(L, 'settings.jev') },
+      { value: 'model', label: t(L, 'settings.routerModel') },
+    ] as const, d.judge, judge => a.patch({ judge }), 'teal'),
   ]
+  if (d.judge === 'model' && d.judgeModel) body.push(note(el, 'judge-model-name', t(L, 'settings.routerModel') + ' · ' + d.judgeModel))
+  if (needsKey(view)) {
+    const jev = view.jev
+    const placeholder = t(L, 'settings.keyPaste')
+    const field = 'Input' in el
+      ? well(el, 'jev-key', tileInner(frame), <el.Input key="jev-key" placeholder={placeholder} value="" submitLabel={t(L, 'settings.saveKey')} onSubmit={(key: string) => a.jevKey(key)} />, placeholder)
+      : <Text color={MUTE}>{placeholder}</Text>
+    const result =
+      jev.test.state === 'testing' ? <Text color={SUB}>{t(L, 'settings.testing')}</Text>
+        : jev.test.state === 'ok' ? <Text color={TONE.green.text} wrap="wrap">{'✓ ' + (jev.test.message ?? t(L, 'settings.keyWorks'))}</Text>
+          : jev.test.state === 'fail' ? <Text color={TONE.red.text} wrap="wrap">{'✕ ' + (jev.test.message ?? t(L, 'settings.keyRejected'))}</Text>
+            : null
+    body.push(
+      field,
+      <Box key="jev-row" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} rowGap={1}>
+        {pill(el, 'jev-test', t(L, 'settings.test'), 'ghost', a.testJev, 'teal')}
+        {result}
+      </Box>,
+    )
+  }
+  return tile(el, { id: 'judge', art: { kind: 'judge', judge: d.judge }, title: t(L, 'settings.judge'), line: t(L, 'settings.judgeLine'), body })
+}
+
+/** The worker set that is on: Base or a named mode. */
+export function modeTile(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
+  const L = frame.lang
+  const d = view.settings
+  const items = modeItems(frame, d)
+  const current = d.activeMode ?? ''
+  const control = items.length <= 5 || !('Select' in el)
+    ? segmented(el, 'mode', items, current, id => a.setMode?.(id), 'amber')
+    : <el.Select key="mode" options={items} value={current} onSelect={(value: string) => a.setMode?.(value)} />
+  return tile(el, { id: 'mode', art: { kind: 'mode', on: current !== '' }, title: t(L, 'settings.mode'), line: t(L, 'settings.modeLine'), body: [control] })
+}
+
+/** Keep warm: its switch, and what each ping costs. */
+export function warmTile(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
+  const L = frame.lang
+  const d = view.settings
+  return tile(el, {
+    id: 'warm',
+    art: { kind: 'warm', on: d.keepWarm },
+    title: t(L, 'settings.keepWarm'),
+    head: toggle(el, 'set-warm', d.keepWarm, t(L, d.keepWarm ? 'band.on' : 'band.off'), () => a.patch({ keepWarm: !d.keepWarm })),
+    line: t(L, 'settings.warmLine'),
+    body: [note(el, 'warm-cost', t(L, 'settings.warmCostShort'))],
+  })
+}
+
+/** What 리플이 says the settings do right now, in a sentence or two. */
+export function settingsSay(frame: Frame, d: Settings): string {
+  const L = frame.lang
+  const effort = d.effortAuto ? t(L, 'settings.sayAuto', { judge: judgeName(frame, d.judge) }) : t(L, 'settings.sayManual')
+  return d.keepWarm ? effort + ' ' + t(L, 'settings.sayWarm') : effort
+}
+
+/** Rows the quick settings take on the desktop, about: for the sea's height. */
+function panelRows(frame: Frame, view: SettingsView): number {
+  return (tilesAcross(frame) === 2 ? 20 : 36) + (needsKey(view) ? 4 : 0)
 }
 
 function settingsDrawn(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
-  const { Box, Button, Text } = el
+  const { Box, Text } = el
   const L = frame.lang
-  const section = view.section ?? 'effort'
-  const cards = cardsOf(frame, view)
-  const cardCells = Math.max(18, Math.floor((frame.columns - 4 - (cards.length - 1)) / cards.length) - 2)
-  const openLabel = t(L, 'settings.openAll')
-  const header = (
-    <Box key="settings-head" flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0}>
-      {mascot(el, frame, 'settings', 'calm', t(L, 'band.brand'), 22)}
-      <Text bold>{t(L, 'band.brand')}</Text>
-      <Text dimColor>{t(L, 'settings.quick')}</Text>
-      <Box flexGrow={1} />
-      {control(el, { key: 'all-settings', source: iconArt('open', false, frame.appearance), alt: openLabel, width: ICON_PX, height: ICON_PX, label: openLabel, dim: true, onPress: a.openAllSettings })}
-      <Button key="close" plain role="dismiss" label={t(L, 'settings.close')} onPress={() => a.close()} />
+  const d = view.settings
+  const face = 48
+  const head = (
+    <Box key="settings-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
+      {ripple(el, 'settings', d.effortAuto ? 'calm' : 'drowsy', t(L, 'band.brand'), face)}
+      <Box key="settings-say" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Box flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+          <Text bold color={INK}>{t(L, 'settings.quick')}</Text>
+          <Text color={MUTE}>{t(L, 'band.brand')}</Text>
+        </Box>
+        <Text color={SUB} wrap="wrap">{settingsSay(frame, d)}</Text>
+      </Box>
+      <Box key="settings-exits" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+        {pill(el, 'all-settings', t(L, 'settings.openAll'), 'ghost', a.openAllSettings, 'violet', 'open')}
+        {pill(el, 'close', t(L, 'settings.close'), 'ghost', a.close, 'violet', 'close')}
+      </Box>
     </Box>
   )
-  const grid = (
-    <Box key="settings-cards" flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1} width="100%">
-      {cards.map(card => cardDrawn(el, frame, card, card.id === section, cardCells, () => a.openSection?.(card.id)))}
+  const tiles = (
+    <Box key="settings-tiles" flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1} width="100%" minWidth={0}>
+      {effortTile(el, frame, view, a)}
+      {judgeTile(el, frame, view, a)}
+      {modeTile(el, frame, view, a)}
+      {warmTile(el, frame, view, a)}
     </Box>
   )
-  const detail = (
-    <Box key="settings-detail" flexDirection="column" rowGap={1} paddingX={1} width="100%" minWidth={0}>
-      {drawnRows(el, frame, view, a, section)}
-    </Box>
-  )
-  return surface(el, frame, { key: 'settings', tint: 'violet', motion: { ripples: 'slow' }, rows: 8, column: true, gap: 1, children: [header, grid, detail] })
+  return capsule(el, frame, {
+    key: 'settings',
+    // 리플이 floats on the surface: the wave runs just under the head, the tiles below it.
+    sea: { tone: 'violet', ripples: 'calm', reach: 170, motes: true, wave: 19 * 0.5 + face + 9, at: { x: 1.5 * CELL_PX + face / 2, y: 19 * 0.5 + face / 2 } },
+    rows: panelRows(frame, view),
+    paddingY: 1,
+    gap: 1,
+    children: [head, tiles],
+  })
 }
 
 // ---- The panel ---------------------------------------------------------------------------------

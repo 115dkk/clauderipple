@@ -1,37 +1,58 @@
-// The desktop's drawn controls, put together: a picture from art.ts, the host's text beside it, and
-// a blank native button laid over both to take the press. Desktop and the editor only (an Svg in the
-// table); the terminal keeps the text controls of parts.tsx.
+// The desktop's capsules and drawn controls, put together: a picture from art.ts, the host's text in
+// our own colours beside it, and a blank native button laid over both to take the press. Desktop and
+// the editor only (an Svg in the table); the terminal keeps the text controls of parts.tsx.
 //
-// The blank button (host facts, 2026-10):
-// - Its label is no-break spaces (U+00A0): the host sets a button's label `white-space: nowrap`,
-//   which would fold ordinary spaces into one and leave a button nothing wide.
-// - A plain Button is drawn at 12 px with no chrome; under the pointer it takes the host's ghost fill
-//   over the picture, which is the hover. Too long a label is cut with an ellipsis that shows, so the
-//   count is taken a little short of the box (the press area is then a few px narrower than the
-//   drawing, never wider).
-// - It sits in a Box laid over the control (absolute, all four edges at 0, centred), after the
-//   picture and the text, so it is painted over them and takes the pointer.
+// Host facts this is built on (2026-10):
+// - A Box drawn `position: "absolute"` is painted over every sibling that is not itself positioned,
+//   whatever comes after it in the tree (CSS stacking). The 2026-10-12 surfaces put their backdrop in
+//   such a Box and their words in plain ones: in the app the backdrop hid the panel's title, its ×
+//   and every row's name, and only the `relative` controls showed. So a capsule paints its sea
+//   first, absolute, and holds everything else in one `relative` layer after it; every control that
+//   lays a press over a picture is `relative` too.
+// - A blank button's label is no-break spaces (U+00A0): the host sets a button's label
+//   `white-space: nowrap`, which would fold ordinary spaces into one. It is sized a little short of
+//   the drawing (an ellipsis would show) and sits in an absolute Box over the control, clipped to it.
+// - A plain Button's label takes the host's ink, which a dark capsule would swallow; nothing on a
+//   capsule is a labelled host Button. A keyed Box's `hover` lights a control on our own terms.
 
 import type { RenderNode } from 'claude-code'
 
+import { rippleSource } from './parts'
 import type { Els } from './parts'
+import type { Face } from './ripple'
 import type { Frame } from './view'
-import { CELL_PX, ROW_PX, backdrop, pillArt, segmentArt, sliderArt, textPx } from './art'
-import type { Motion, PillLook, Tint } from './art'
+import { CELL_PX, CLOSE_PX, INK, ROW_PX, SUB, SWITCH_H, SWITCH_W, WELL_PX, closeArt, labelPx, pillArt, seaArt, segmentedArt, sliderArt, switchArt, wellArt } from './art'
+import type { Glyph, PillLook, Sea, Tone } from './art'
+import { chOf } from './theme'
 
 /** Width of one U+00A0 in the host's 12 px button font, px, taken a little wide. */
 const NBSP_PX = 3.6
 /** The host's padding either side of a plain Button's label, px. */
 const BUTTON_PAD = 6
+/** The capsule's edge: a warm grey that reads against a light page and a dark one alike. */
+const EDGE = 'rgba(128,124,116,0.55)'
+/** A control under the pointer: a soft light on the water. */
+const HOVER = 'rgba(255,255,255,0.09)'
+const HOVER_EDGE = 'rgba(255,255,255,0.16)'
+/** A drawn control's height, px: pills, segments. */
+const CONTROL_PX = 26
 
 /** Cells a run of px takes, rounded up. */
-export function cellsOf(px: number): number {
+function cellsOf(px: number): number {
   return Math.ceil(px / CELL_PX)
 }
 
+/** Rows a run of px takes, unrounded (the host takes fractions of a row). */
+export function rowsOf(px: number): number {
+  return Math.round((px / ROW_PX) * 1000) / 1000
+}
+
+/** A no-break space, spelled by its code: the bare character is invisible in source and was once lost. */
+const NBSP = String.fromCharCode(0xa0)
+
 /** A blank label as wide as a button over `px` should be. */
 export function blank(px: number): string {
-  return ' '.repeat(Math.max(1, Math.floor((px - BUTTON_PAD * 2) / NBSP_PX)))
+  return NBSP.repeat(Math.max(1, Math.floor((px - BUTTON_PAD * 2) / NBSP_PX)))
 }
 
 /** The blank button over a control `px` wide: last child of a `position: relative` Box. */
@@ -56,123 +77,168 @@ export function pic(el: Els, key: string, source: string, alt: string, width: nu
 }
 
 /**
- * A control: a picture, then optionally a word in the host's text, the whole pressable. `pad`
- * cells either side give it a hover box with air around what it shows.
+ * 리플이 on a capsule: its face drawn for the deep (the dark palette: light ink, lavender tone), a
+ * plain image in a Box of its own that never shrinks. `percent` fills a gauge face's ring.
  */
-export function control(
-  el: Els,
-  c: { key: string; source: string; alt: string; width: number; height: number; label?: string; labelColor?: string; dim?: boolean; bold?: boolean; onPress: () => void; pad?: number; after?: RenderNode; afterPx?: number },
-): RenderNode {
-  const { Box, Text } = el
-  const pad = c.pad ?? 1
-  const px = pad * 2 * CELL_PX + c.width + (c.label ? CELL_PX + textPx(c.label) : 0) + (c.afterPx ? CELL_PX + c.afterPx : 0)
+export function ripple(el: Els, key: string, face: Face, alt: string, size: number, percent?: number, dim = false): RenderNode {
+  if (!('Svg' in el)) return ''
+  const { Box, Svg } = el
   return (
-    <Box key={'ctl-' + c.key} position="relative" flexDirection="row" alignItems="center" columnGap={1} paddingX={pad} flexShrink={0}>
-      {pic(el, c.key, c.source, c.alt, c.width, c.height)}
-      {c.label ? (
-        <Text color={c.labelColor} dimColor={c.dim} bold={c.bold}>
-          {c.label}
-        </Text>
-      ) : null}
-      {c.after ?? null}
-      {press(el, c.key, px, c.onPress)}
-    </Box>
-  )
-}
-
-/** A pill with its label drawn in, pressable: a card's main action, a lit Handoff. */
-export function pill(el: Els, frame: Frame, key: string, label: string, look: PillLook, onPress: () => void, tint: Tint = 'violet', glow = 0): RenderNode {
-  const { Box } = el
-  const art = pillArt(label, look, frame.appearance, tint, 24, glow)
-  const halo = glow > 0 ? 8 : 0
-  return (
-    <Box key={'pill-' + key} position="relative" flexShrink={0} alignItems="center" justifyContent="center" width={cellsOf(art.width - halo * 2)} height={1.3}>
-      <Box position="absolute" top={-1} bottom={-1} left={-1} right={-1} alignItems="center" justifyContent="center">
-        {pic(el, key, art.source, label, art.width, 24 + halo * 2)}
-      </Box>
-      {press(el, key, art.width - halo * 2, onPress)}
-    </Box>
-  )
-}
-
-export type SegmentOption<T extends string> = { value: T; label: string; hint?: string }
-
-/**
- * A segmented control: one chip per option, the chosen one lit in the tint, each its own press. A
- * chip is as wide as its label (in whole cells, so the drawing and the text share a grid).
- */
-export function segments<T extends string>(el: Els, frame: Frame, key: string, options: readonly SegmentOption<T>[], value: T | null, onPick: (value: T) => void, tint: Tint = 'violet', textColor?: string): RenderNode {
-  const { Box, Text } = el
-  return (
-    <Box key={'seg-' + key} flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1} alignItems="center">
-      {options.map(o => {
-        const lit = o.value === value
-        const width = Math.max(4, cellsOf(textPx(o.label) * 1.04 + 22))
-        const px = width * CELL_PX
-        const height = 1.35
-        return (
-          <Box key={'chip-' + key + '-' + o.value} position="relative" width={width} height={height} alignItems="center" justifyContent="center" flexShrink={0}>
-            <Box position="absolute" top={0} left={0} right={0} bottom={0} alignItems="center" justifyContent="center">
-              {pic(el, key + '-' + o.value, segmentArt(px, height * ROW_PX, lit, frame.appearance, tint), o.label, px, height * ROW_PX)}
-            </Box>
-            <Text color={lit ? textColor : undefined} dimColor={!lit} bold={lit}>
-              {o.label}
-            </Text>
-            {press(el, key + '-' + o.value, px, () => onPick(o.value))}
-          </Box>
-        )
-      })}
+    <Box key={'ripple-' + key} flexShrink={0}>
+      <Svg source={rippleSource(face, size, 'dark', percent, dim)} alt={alt} width={size} height={size} />
     </Box>
   )
 }
 
 /**
- * A stepped slider: `values` as stops on one drawn track, the chosen one lit, each stop the press
- * of an equal part of the track (`cellsPerStop` cells wide).
+ * A control that lights under the pointer: a keyed, positioned Box with a soft rounded light as its
+ * hover, holding what it shows and, last, its press. `scope` joins a hover group, so pointing at the
+ * control also shows what it does elsewhere (the band's tip).
  */
-export function stops<T extends string | number>(el: Els, frame: Frame, key: string, values: readonly T[], value: T, onPick: (value: T) => void, cellsPerStop = 4): RenderNode {
+export function lit(el: Els, key: string, cells: number, children: RenderNode[], paddingX = 0.5, scope?: string): RenderNode {
   const { Box } = el
-  const width = values.length * cellsPerStop
-  const px = width * CELL_PX
-  const chosen = Math.max(0, values.indexOf(value))
   return (
-    <Box key={'stops-' + key} position="relative" flexDirection="row" width={width} height={1.3} flexShrink={0}>
-      <Box position="absolute" top={0} bottom={0} left={0} right={0} alignItems="center">
-        {pic(el, key, sliderArt(px, values.length, chosen, frame.appearance), String(value), px, 22)}
+    <Box key={'hv-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={1} paddingX={paddingX} paddingY={0} width={cells} flexShrink={0} borderStyle="round" borderColor="rgba(0,0,0,0)" hover={{ backgroundColor: HOVER, borderColor: HOVER_EDGE, ...(scope ? { scope } : {}) }}>
+      {children}
+    </Box>
+  )
+}
+
+/**
+ * A capsule: a rounded Box edged in violet light, the deep (art.ts `seaArt`) painted behind it from
+ * its top left, and everything it holds in one positioned layer above the sea. `rows` is about how
+ * tall it draws; the sea is taken taller and wider than that, and the capsule clips it.
+ */
+export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 'at'> & { at?: Sea['at'] }; rows: number; paddingX?: number; paddingY?: number; gap?: number; children: RenderNode[] }): RenderNode {
+  const { Box } = el
+  const padX = c.paddingX ?? 1.5
+  const padY = c.paddingY ?? 0.5
+  const width = Math.max(40, frame.columns) * CELL_PX + 48
+  // Taken well past the estimate: a capsule taller than its sea would show the page beneath.
+  const visible = Math.round(c.rows * ROW_PX)
+  const height = visible + 220
+  const at = c.sea.at ?? { x: padX * CELL_PX + 12, y: padY * ROW_PX * 0.5 + 13 }
+  return (
+    <Box key={c.key} position="relative" flexDirection="column" borderStyle="round" borderColor={EDGE} paddingX={0} paddingY={0} overflow="hidden" width="100%" minWidth={0}>
+      <Box key={c.key + '-sea'} position="absolute" top={0} left={0}>
+        {pic(el, c.key + '-sea', seaArt(width, height, { ...c.sea, at, visible }), 'ClaudeRipple', width, height)}
       </Box>
-      {values.map(v => (
-        <Box key={'stop-' + key + '-' + v} position="relative" width={cellsPerStop} height={1.3} flexShrink={0}>
-          {press(el, key + '-' + v, cellsPerStop * CELL_PX, () => onPick(v))}
+      <Box key={c.key + '-layer'} position="relative" flexDirection="column" rowGap={c.gap ?? 0} paddingX={padX} paddingY={padY} width="100%" minWidth={0}>
+        {c.children}
+      </Box>
+    </Box>
+  )
+}
+
+/**
+ * A drawn button with its label in it: `primary` the one thing to press, `ghost` a quiet one. Its
+ * Box key starts `pill-` or `ghost-`, its press is `key`.
+ */
+export function pill(el: Els, key: string, label: string, look: PillLook, onPress: () => void, tone: Tone = 'violet', glyph?: Glyph): RenderNode {
+  const { Box } = el
+  const art = pillArt(label, look, tone, glyph)
+  return (
+    <Box key={(look === 'primary' ? 'pill-' : 'ghost-') + key} position="relative" width={art.cells} height={rowsOf(CONTROL_PX)} flexShrink={0} alignItems="center" justifyContent="center">
+      {pic(el, key, art.source, label, art.cells * CELL_PX, CONTROL_PX)}
+      {press(el, key, art.cells * CELL_PX, onPress)}
+    </Box>
+  )
+}
+
+/** Cells the way out takes. */
+export const CLOSE_CELLS = cellsOf(CLOSE_PX + 4)
+
+/** The way out: a soft disc with a ×, `label` its name for a reader that cannot see it. */
+export function closeButton(el: Els, key: string, label: string, onPress: () => void, scope?: string): RenderNode {
+  return lit(el, key, CLOSE_CELLS, [pic(el, key, closeArt(), label, CLOSE_PX, CLOSE_PX), press(el, key, CLOSE_CELLS * CELL_PX, onPress)], 0.25, scope)
+}
+
+/** Cells a switch and its word take, their hover's air included. */
+export function toggleCells(label: string): number {
+  return Math.ceil((SWITCH_W + CELL_PX + chOf(label) * CELL_PX * 1.1) / CELL_PX) + 1
+}
+
+/** A switch and its word (On / Off), the whole pressable; lit while on. */
+export function toggle(el: Els, key: string, on: boolean, label: string, onPress: () => void, busy = false, scope?: string): RenderNode {
+  const { Text } = el
+  const cells = toggleCells(label)
+  return lit(el, key, cells, [
+    pic(el, key, switchArt(on, busy), label, SWITCH_W, SWITCH_H),
+    <Text key={key + '-word'} color={on ? INK : SUB} bold={on}>{label}</Text>,
+    press(el, key, cells * CELL_PX, onPress),
+  ], 0.5, scope)
+}
+
+/**
+ * A field's well: a native field (Input) on a plate of the app's own page colour, light or dark as
+ * the app is (art.ts `wellArt`), so the host's own text colour reads in it on either theme. The
+ * field sits in a positioned layer above the plate.
+ */
+export function well(el: Els, key: string, cells: number, field: RenderNode, alt: string): RenderNode {
+  const { Box } = el
+  const w = cells * CELL_PX
+  return (
+    <Box key={'well-' + key} position="relative" flexDirection="row" alignItems="center" width={cells} flexShrink={1} minWidth={16} height={rowsOf(WELL_PX)} paddingX={1} overflow="hidden">
+      <Box position="absolute" top={0} left={0}>
+        {pic(el, 'well-' + key, wellArt(w, WELL_PX), alt, w, WELL_PX)}
+      </Box>
+      <Box key={'well-field-' + key} position="relative" flexGrow={1} flexShrink={1} minWidth={0}>
+        {field}
+      </Box>
+    </Box>
+  )
+}
+
+export type SegmentOption<T extends string> = { value: T; label: string }
+
+/** Each segment's cells: its label drawn at 12 px with air either side, at least five cells. */
+function segmentCells(labels: readonly string[]): number[] {
+  return labels.map(label => Math.max(5, Math.ceil((labelPx(label, 12) + 26) / CELL_PX)))
+}
+
+/**
+ * A segmented control drawn whole (art.ts), the chosen segment lit, each segment the press of its
+ * own option (`key-value`). `colors` lights the chosen one in its own colour (the efforts' depths).
+ */
+export function segmented<T extends string>(el: Els, key: string, options: readonly SegmentOption<T>[], value: T | null, onPick: (value: T) => void, tone: Tone = 'violet', colors?: readonly string[]): RenderNode {
+  const { Box } = el
+  const labels = options.map(o => o.label)
+  const cells = segmentCells(labels)
+  const total = cells.reduce((n, c) => n + c, 0)
+  const chosen = options.findIndex(o => o.value === value)
+  const alt = labels.map((label, i) => (i === chosen ? '[' + label + ']' : label)).join(' · ')
+  return (
+    <Box key={'seg-' + key} position="relative" flexDirection="row" width={total} height={rowsOf(CONTROL_PX)} flexShrink={0}>
+      <Box position="absolute" top={0} left={0}>
+        {pic(el, 'seg-' + key, segmentedArt(labels, cells, chosen, tone, colors), alt, total * CELL_PX, CONTROL_PX)}
+      </Box>
+      {options.map((o, i) => (
+        <Box key={'sg-' + key + '-' + o.value} position="relative" width={cells[i]} height={rowsOf(CONTROL_PX)} flexShrink={0}>
+          {press(el, key + '-' + o.value, cells[i]! * CELL_PX, () => onPick(o.value))}
         </Box>
       ))}
     </Box>
   )
 }
 
-/** The border every drawn surface takes: the tint at a strength that reads on light and dark. */
-export const EDGE: Record<Tint, string> = {
-  violet: 'rgba(129,112,232,0.42)',
-  ice: 'rgba(80,160,220,0.45)',
-  amber: 'rgba(205,145,30,0.45)',
-  ember: 'rgba(226,103,46,0.48)',
-  red: 'rgba(220,74,74,0.48)',
-  green: 'rgba(34,163,94,0.45)',
-}
-
 /**
- * A drawn surface: a rounded, bordered Box with the backdrop behind its content, `rows` its usual
- * height in rows (the picture is taken taller than that and centred, so it always covers).
+ * A stepped slider: `values` as stops on one drawn track, the chosen one lit, each stop the press of
+ * an equal part of the track (`key-value`).
  */
-export function surface(el: Els, frame: Frame, s: { key: string; tint: Tint; motion?: Motion; rows: number; column?: boolean; paddingX?: number; gap?: number; children: RenderNode[] }): RenderNode {
+export function slider<T extends string | number>(el: Els, key: string, values: readonly T[], value: T, onPick: (value: T) => void, cellsPerStop = 4): RenderNode {
   const { Box } = el
-  const width = Math.max(40, frame.columns) * CELL_PX + 80
-  const height = Math.round(s.rows * ROW_PX + 16 + 2 * ROW_PX + 8)
+  const chosen = Math.max(0, values.indexOf(value))
+  const total = values.length * cellsPerStop
   return (
-    <Box key={s.key} position="relative" flexDirection={s.column ? 'column' : 'row'} alignItems={s.column ? undefined : 'center'} rowGap={s.gap ?? 0} paddingX={s.paddingX ?? 1} overflow="hidden" borderStyle="round" borderColor={EDGE[s.tint]} width="100%" minWidth={0}>
-      <Box key={s.key + '-art'} position="absolute" top={-1} bottom={-1} right={0} alignItems="center">
-        {pic(el, s.key + '-art', backdrop(width, height, frame.appearance, s.tint, s.motion), 'ClaudeRipple', width, height)}
+    <Box key={'sl-' + key} position="relative" flexDirection="row" width={total} height={rowsOf(CONTROL_PX)} flexShrink={0} alignItems="center">
+      <Box position="absolute" top={0} bottom={0} left={0} alignItems="center" justifyContent="center">
+        {pic(el, 'sl-' + key, sliderArt(values.length, cellsPerStop, chosen), String(value), total * CELL_PX, 22)}
       </Box>
-      {s.children}
+      {values.map(v => (
+        <Box key={'st-' + key + '-' + v} position="relative" width={cellsPerStop} height={rowsOf(CONTROL_PX)} flexShrink={0}>
+          {press(el, key + '-' + v, cellsPerStop * CELL_PX, () => onPick(v))}
+        </Box>
+      ))}
     </Box>
   )
 }

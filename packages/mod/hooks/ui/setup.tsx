@@ -1,19 +1,21 @@
 // First run: three short steps (who judges, workers on the dashboard, keep warm) and a
 // done card. Shown once, in the band; detailed settings live on the router dashboard.
 //
-// 리플이 asks each step as a card asks (parts.tsx `speak`): the step's question is the title, the
-// step count quiet beside it, one line of why, the step's control, then Next and the quiet ways
-// back or out. It asks who should judge, waits calmly, and is pleased when all is set.
+// 리플이 asks each step as a card asks: the step's question is the title, the steps beside it, one
+// line of why, the step's control, then Next and the quiet ways back or out. It asks who should
+// judge, waits calmly, and is pleased when all is set. The terminal draws 리플이's column (parts.tsx
+// `speak`); the desktop a capsule of the deep, its controls the quick settings' own tiles.
 
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 import { RUNGS } from '../settings'
 
-import { tintText } from './art'
-import { pill, surface } from './kit'
-import { GREET_SIZE, action, actions, canDraw, mascot, speak } from './parts'
+import { CELL_PX, INK, MUTE, SUB, TONE, beadsArt } from './art'
+import { capsule, pic, pill, ripple } from './kit'
+import { GREET_SIZE, action, actions, canDraw, speak } from './parts'
 import type { Els } from './parts'
-import { drawnRows, judgeRows, keepWarmRow, row } from './settings'
+import { judgeRows, judgeTile, keepWarmRow, row, warmTile } from './settings'
+import { chOf } from './theme'
 import type { Frame, SettingsActions, SettingsView, SetupActions, SetupView } from './view'
 import { targetLabel } from './view'
 
@@ -68,39 +70,60 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
   const title = done ? t(frame.lang, 'setup.ready') : view.step === 1 ? t(frame.lang, 'setup.welcome') : t(frame.lang, step!.title)
   const line = done ? t(frame.lang, 'setup.changeDashboard') : t(frame.lang, step!.blurb)
   if (canDraw(el, frame)) {
-    // The desktop: a drawn surface, its controls the quick settings' own (judge chips, the keep-warm
-    // switch), Next a filled pill and the rest quiet.
-    const rows = done ? body : view.step === 1 ? drawnRows(el, frame, asSettings, asActions, 'judge') : view.step === 3 ? drawnRows(el, frame, asSettings, asActions, 'warm') : []
-    const quiet = (key: string, label: string, onPress: () => void) => <el.Button key={key} plain dimColor label={label} onPress={() => onPress()} />
-    const next = done ? pill(el, frame, 'finish', t(frame.lang, 'setup.start'), 'fill', a.finish, 'green') : pill(el, frame, 'next', view.step === 3 ? t(frame.lang, 'setup.finish') : t(frame.lang, 'setup.next'), 'fill', a.next)
-    return surface(el, frame, {
+    // The desktop: a capsule of the deep, the step's control the quick settings' own tile (who
+    // judges, keep warm), what was chosen when done, Next lit and the rest ghost buttons.
+    const L = frame.lang
+    const beads = beadsArt(view.step, 3)
+    const summary = done
+      ? [
+          [t(L, 'band.effort'), t(L, 'setup.effortSummary', { state: t(L, d.effortAuto ? 'band.on' : 'band.off').toLowerCase(), judge: d.judge === 'haiku' ? t(L, 'settings.haiku') : d.judge === 'jev' ? t(L, 'settings.jev') : d.judgeModel })],
+          [t(L, 'settings.workers'), workersSummary(L, d)],
+          [t(L, 'band.cache'), d.keepWarm ? t(L, 'setup.cacheSummary', { hours: d.keepWarmHours }) : t(L, 'setup.cacheOff')],
+        ]
+      : []
+    const nameCells = Math.ceil(Math.max(0, ...summary.map(([name]) => chOf(name!)))) + 1
+    const content = done
+      ? [
+          <Box key="summary" flexDirection="column" rowGap={1} paddingLeft={Math.ceil(GREET_SIZE / CELL_PX) + 2}>
+            {summary.map(([name, value], i) => (
+              <Box key={'sum-' + i} flexDirection="row" columnGap={2} alignItems="flex-start">
+                <Box width={nameCells} flexShrink={0}><Text color={MUTE}>{name}</Text></Box>
+                <Text color={INK} wrap="wrap">{value}</Text>
+              </Box>
+            ))}
+          </Box>,
+        ]
+      : view.step === 1 || view.step === 3
+        ? [
+            <Box key="step-tile" flexDirection="row" width="100%" minWidth={0}>
+              {view.step === 1 ? judgeTile(el, frame, asSettings, asActions) : warmTile(el, frame, asSettings, asActions)}
+            </Box>,
+          ]
+        : []
+    const next = done ? pill(el, 'finish', t(L, 'setup.start'), 'primary', a.finish, 'green', 'next') : pill(el, 'next', view.step === 3 ? t(L, 'setup.finish') : t(L, 'setup.next'), 'primary', a.next, 'violet', 'next')
+    return capsule(el, frame, {
       key: 'setup',
-      tint: done ? 'green' : 'violet',
-      motion: done ? { tick: true, weather: 'sparkles' } : { weather: 'sparkles', ripples: 'slow' },
-      rows: 6 + rows.length,
-      column: true,
+      sea: { tone: done ? 'green' : 'violet', ripples: 'calm', reach: 170, motes: true, wave: 19 * 0.5 + GREET_SIZE + 9, ...(done ? { tick: true, weather: 'sparkles' as const } : {}), at: { x: 1.5 * CELL_PX + GREET_SIZE / 2, y: 19 * 0.5 + GREET_SIZE / 2 } },
+      rows: 8 + (done ? 6 : view.step === 1 ? 12 : view.step === 3 ? 8 : 0) + (frame.columns < 70 ? 4 : 0),
+      paddingY: 1,
       gap: 1,
       children: [
         <Box key="setup-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
-          {mascot(el, frame, 'setup', face, title, GREET_SIZE)}
+          {ripple(el, 'setup', face, title, GREET_SIZE)}
           <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
-            <Box flexDirection="row" columnGap={2} flexWrap="wrap">
-              <Text bold color={tintText(done ? 'green' : 'violet', frame.appearance)} wrap="wrap">{title}</Text>
-              {done ? null : <Text dimColor>{dots(view.step)}</Text>}
+            <Box flexDirection="row" alignItems="center" columnGap={2} flexWrap="wrap">
+              <Text bold color={done ? TONE.green.text : INK} wrap="wrap">{title}</Text>
+              {done ? null : pic(el, 'setup-beads', beads.source, view.step + ' / 3', beads.width, 16)}
             </Box>
-            <Text dimColor wrap="wrap">{line}</Text>
+            <Text color={SUB} wrap="wrap">{line}</Text>
           </Box>
         </Box>,
-        rows.length ? (
-          <Box key="body" flexDirection="column" rowGap={1} paddingX={1}>
-            {rows}
-          </Box>
-        ) : '',
-        <Box key="actions" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+        ...content,
+        <Box key="actions" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap" rowGap={1}>
           {next}
-          {!done && view.step === 2 ? quiet('all-settings', t(frame.lang, 'settings.openAll'), a.openAllSettings) : null}
-          {done || view.step > 1 ? quiet('back', t(frame.lang, 'setup.back'), a.back) : null}
-          {done ? null : quiet('skip', t(frame.lang, 'setup.skip'), a.skip)}
+          {!done && view.step === 2 ? pill(el, 'all-settings', t(L, 'settings.openAll'), 'ghost', a.openAllSettings, 'violet', 'open') : null}
+          {done || view.step > 1 ? pill(el, 'back', t(L, 'setup.back'), 'ghost', a.back, 'violet', 'back') : null}
+          {done ? null : pill(el, 'skip', t(L, 'setup.skip'), 'ghost', a.skip)}
         </Box>,
       ],
     })

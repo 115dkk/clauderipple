@@ -1027,11 +1027,12 @@ test('a mode ends at its time and says so once; quick settings turn one on and o
   expect(b.toasts.filter(text => text === 'The One minute mode has ended.').length).toBe(1)
   await b.clock.advance(9000)
   expect(b.toasts.filter(text => text === 'The One minute mode has ended.').length).toBe(1)
-  // The quick settings' one mode control (the desktop's Mode card): none, then each mode.
+  // The quick settings' one mode control (the desktop's Mode tile, a drawn segment each): none,
+  // then each mode.
   await command($, 'settings')
   const ui = await band($, 'desktop')
-  await ui.press({ key: 'settings-card-mode' })
-  for (const label of ['Base', 'One minute', 'Burn GPT']) expect(await ui.find({ type: 'Text', text: label }), label).toBeDefined()
+  const drawn = String((await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt).find(alt => String(alt).includes('Burn GPT')))
+  for (const label of ['Base', 'One minute', 'Burn GPT']) expect(drawn, label).toContain(label)
   await ui.press({ key: 'mode-burn' })
   expect([b.router().settings.activeMode, b.router().settings.activeSince]).toEqual(['burn', NOW + 79_000])
   await ui.press({ key: 'mode-' })
@@ -1109,14 +1110,11 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick controls sav
   await ui.press({ key: 'set-auto' })
   expect(b.router().settings.effortAuto).toBe(true)
   expect(puts()).toBe(++count)
-  // The desktop shows one card's controls at a time.
-  if (surface === 'desktop') await ui.press({ key: 'settings-card-judge' })
   for (const judge of ['jev', 'model', 'haiku'] as const) {
     await ui.press({ key: 'judge-' + judge })
     expect(b.router().settings.judge).toBe(judge)
     expect(puts()).toBe(++count)
   }
-  if (surface === 'desktop') await ui.press({ key: 'settings-card-warm' })
   await ui.press({ key: 'set-warm' })
   expect(b.router().settings.keepWarm).toBe(true)
   expect(puts()).toBe(++count)
@@ -1138,10 +1136,11 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick settings sel
   await start($)
   const ui = await band($, surface)
   await ui.press({ key: 'settings' })
-  // The terminal's Select; the desktop's Mode card, a chip per mode.
+  // The terminal's Select; the desktop's Mode tile, a drawn segment per mode.
   if (surface === 'desktop') {
-    await ui.press({ key: 'settings-card-mode' })
-    for (const label of ['Base', 'Burn GPT']) expect(await ui.find({ type: 'Text', text: label }), label).toBeDefined()
+    const modes = String((await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt).find(alt => String(alt).includes('Burn GPT')))
+    for (const label of ['Base', 'Burn GPT']) expect(modes, label).toContain(label)
+    for (const value of ['', 'burn']) expect(await ui.find({ type: 'Button', key: 'mode-' + value }), value).toBeDefined()
   } else {
     const control = await ui.find({ key: 'mode' })
     expect(control?.type).toBe('Select')
@@ -1654,21 +1653,21 @@ test('a judge failing for the same reason is said once in a session', async ($, 
 
 // 2026-10-11: on the desktop a toggle was told only by dimness, which the host's hover undoes, so a
 // click showed nothing. Each control must change what is drawn next, and a toggle's state must be in
-// the drawing itself (a primary Button on the desktop, ● / ○ on the terminal).
+// the drawing itself (the picture's own `on` / `off` on the desktop, ● / ○ on the terminal).
 test('every band control changes the next drawing, and a toggle says its state outright', async ($, on) => {
   const b = boundaries(on)
   on('http.fetch', { url: /\/api\/requests/ }, () => ({ value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ requests: [{ at: '2026-10-10T13:19:10', source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, session: 'session-test' }] }) } }))
   http(on)
   await start($)
   await b.clock.advance(3000)
-  // The terminal says it in the label (● / ○); the desktop in the control's drawing: a switch's
-  // tinted track, an icon lit in the tint, or else the faint track and the muted icon.
+  // The terminal says it in the label (● / ○); the desktop in the control's drawing: a switch's lit
+  // track, a lit icon, each picture marked `on` or `off` at its root.
   const desktopState = (n: unknown) => {
     const drawing = JSON.stringify(n ?? '')
-    return /url\(#on\)|stroke=\\"var\(--tint\)\\"/.test(drawing) ? 'on' : /var\(--faint\)|stroke=\\"var\(--muted\)\\"/.test(drawing) ? 'off' : 'other'
+    return /<svg[^>]* class=\\"on\\"/.test(drawing) ? 'on' : /<svg[^>]* class=\\"off\\"/.test(drawing) ? 'off' : 'other'
   }
   const state = async (ui: Awaited<ReturnType<typeof band>>, key: string, surface: string) =>
-    surface === 'desktop' ? desktopState(await ui.find({ type: 'Box', key: 'ctl-' + key })) : (n => /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other')(await ui.find({ type: 'Button', key }))
+    surface === 'desktop' ? desktopState(await ui.find({ type: 'Box', key: 'hv-' + key })) : (n => /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other')(await ui.find({ type: 'Button', key }))
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await band($, surface)
     const drawn = async () => JSON.stringify(await ui.drawn()).replace(/"handle":\d+/g, '')
@@ -1690,7 +1689,7 @@ test('every band control changes the next drawing, and a toggle says its state o
     expect(await ui.find({ key: 'pick-low' })).toBeUndefined()
     if (surface === 'desktop') {
       // The route opens the log, shown as on at once.
-      expect((await ui.find({ type: 'Button', key: 'route' }))?.props.label).toBe('gpt-6.1-sol (gpt-6-1-sol)')
+      expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol (gpt-6-1-sol)' })).toBeDefined()
       await ui.press({ key: 'route' })
       expect(b.panes.has('ripple-log')).toBe(true)
       await ui.press({ key: 'route' })

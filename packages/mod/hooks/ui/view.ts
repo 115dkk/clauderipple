@@ -149,16 +149,11 @@ export type JevState = {
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
 }
 
-/** The quick settings' cards; the open one shows its controls under them (desktop). */
-export type SettingsSection = 'effort' | 'judge' | 'mode' | 'warm'
-
 export type SettingsView = {
   settings: Settings
   jev: JevState
   /** What each rung can run (the ticked models); null until the router has answered. */
   ladder?: LadderOptions | null
-  /** The open card; effort when unset. */
-  section?: SettingsSection
 }
 
 export type SettingsActions = {
@@ -171,8 +166,6 @@ export type SettingsActions = {
   testJev: () => void
   openAllSettings: () => void
   close: () => void
-  /** Opens a card of the quick settings (desktop). */
-  openSection?: (section: SettingsSection) => void
 }
 
 export type SetupStep = 1 | 2 | 3 | 4
