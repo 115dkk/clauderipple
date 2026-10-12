@@ -88,8 +88,18 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
     if (e.argv[0] === 'defaults' && options.appleFail) return { value: { exitCode: 1, stdout: '', stderr: 'locale timed out', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: options.appleLocale ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  const files = new Map<string, string>()
+  let logFailure: 'read' | 'write' | null = null
+  on('fs.exists', ($, e) => ({ value: files.has(e.path) }))
+  on('fs.write', ($, e) => {
+    if (e.path.endsWith('/worker-picks.jsonl') && logFailure === 'write') return { deny: 'worker log write denied' }
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
   on('fs.read', ($, e) => {
     options.paths?.push(e.path)
+    if (e.path.endsWith('/worker-picks.jsonl') && logFailure === 'read') return { deny: 'worker log read denied' }
+    if (files.has(e.path)) return { value: files.get(e.path)! }
     if (e.path.endsWith('generated-agents.json')) return { value: JSON.stringify({ agents: [...Object.keys(FILES), 'claude-sonnet-5-5'] }) }
     if (e.path.endsWith('/claude-sonnet-5-5.md')) return { value: '---\nname: claude-sonnet-5-5\ndescription: Execute via anthropic.\nmodel: claude-sonnet-5-5@high\n---\nExecute.' }
     if (e.path.endsWith('config.json')) return { value: JSON.stringify(options.config ?? CONFIG) }
@@ -120,7 +130,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('turn.complete', () => ({ text: '' }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
-  return { registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, contexts, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
+  return { files, failWorkerLog: (value: 'read' | 'write' | null) => { logFailure = value }, registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, contexts, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
 function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
@@ -486,8 +496,71 @@ test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung
     task: 'Rename variable', domain: 'general', level: 'light', kind: 'do', sure: 0.9, rung: 'light', position: 1, skipped: [],
     target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash@max', effort: 'max', by: 'haiku',
   })
+  const persisted = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!
+  expect(persisted.endsWith('\n')).toBe(true)
+  expect(persisted.trim().split('\n').length).toBe(1)
+  expect(JSON.parse(persisted)).toEqual({
+    ...JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length)),
+    at: new Date(NOW).toISOString(), by: 'judge', judge: 'haiku', ms: 0,
+    verdict: { domain: 'general', level: 'light', kind: 'do', effort: 'low', sure: 0.9, why: 'small rename' },
+  })
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
   expect(stats.text).toContain('light 1')
+})
+
+test('worker pick persistence keeps the last 300 lines and concurrent marker picks, never the prompt', async ($, on) => {
+  const b = boundaries(on, {}, { env: { CLAUDERIPPLE_HOME: '/custom/ripple' } })
+  http(on)
+  const judges = judgeStub(on)
+  spawnStub(on)
+  const path = '/custom/ripple/logs/worker-picks.jsonl'
+  b.files.set(path, Array.from({ length: 305 }, (_, n) => JSON.stringify({ old: n })).join('\n') + '\n')
+  await start($)
+  await Promise.all(['first', 'second'].map(label => $.agent.spawn({ ...SPAWN, description: label + 'x'.repeat(220), prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nPRIVATE_TASK_PROMPT' })))
+  const text = b.files.get(path)!
+  const rows = text.trim().split('\n').map(line => JSON.parse(line))
+  expect(rows.length).toBe(300)
+  expect(rows[0]).toEqual({ old: 7 })
+  expect(rows.slice(-2).map(row => row.task).sort()).toEqual(['first' + 'x'.repeat(195), 'second' + 'x'.repeat(194)])
+  for (const row of rows.slice(-2)) expect(row).toMatchObject({ by: 'marker', verdict: null, judge: null, ms: 0, model: 'gpt-6.1-sol@xhigh', effort: 'xhigh' })
+  expect(text).not.toContain('PRIVATE_TASK_PROMPT')
+  expect(b.logs.join('\n')).not.toContain('PRIVATE_TASK_PROMPT')
+  expect(judges.length).toBe(0)
+})
+
+for (const failure of ['read', 'write'] as const) test(`worker log ${failure} failure reports without changing the spawn and later recovers`, async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  const sent = spawnStub(on)
+  const path = '/home/test/.clauderipple/logs/worker-picks.jsonl'
+  const previous = JSON.stringify({ previous: true }) + '\n'
+  b.files.set(path, previous)
+  b.failWorkerLog(failure)
+  await start($)
+  expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
+  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max' })
+  expect(b.logs.some(log => log.includes('worker pick log') && log.includes(`worker log ${failure} denied`))).toBe(true)
+  expect(b.files.get(path)).toBe(previous)
+  b.failWorkerLog(null)
+  await $.agent.spawn(SPAWN)
+  expect(b.files.get(path)!.trim().split('\n').length).toBe(2)
+})
+
+for (const error of ['api-error: overloaded (503)', 'aborted'] as const) test(`failed worker judge persists defaults with ${error}`, async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  on('model.complete', async ($, e) => {
+    expect(e.timeoutMs).toBe(6000)
+    if (error === 'aborted') await b.clock.advance(6000)
+    return { value: error === 'aborted' ? { isAnswered: false, reason: 'aborted', usage: USAGE } : { isAnswered: false, reason: 'api-error', status: 503, error: 'overloaded', usage: USAGE } }
+  })
+  const sent = spawnStub(on)
+  await start($)
+  expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(row).toMatchObject({ by: 'default', verdict: null, judge: null, error, ms: error === 'aborted' ? 12000 : 0, rung: 'standard', model: 'gpt-6.1-sol@medium', effort: 'medium', position: 1, skipped: [] })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
 })
 
 // The main chat only delegates; the judge picks among all four workers (2026-10-12 revision).
@@ -539,6 +612,10 @@ test('a judged spawn uses the configured general ladder, then one rung up on a m
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@xhigh' })
   expect(b.toasts.some(text => text.includes('missing-worker'))).toBe(true)
   expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level: 'light', rung: 'standard', by: 'haiku' })
+  const persisted = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(persisted).toMatchObject({ verdict: { level: 'light', effort: 'low' }, rung: 'standard', model: 'gpt-6-astra@xhigh', effort: 'xhigh', by: 'judge' })
+  expect(persisted.skipped.length).toBeGreaterThan(0)
+  expect(persisted.fallbackReason).toContain('missing-worker')
 })
 
 test('exhaustion falls to the session after only one rung up; a plan verdict never moves down', async ($, on) => {
@@ -1256,9 +1333,7 @@ test('Jev key input preserves other env lines and chmods the file 600', async ($
   let readingForSave = false
   const b = boundaries(on, { judge: 'jev' }, { envFile: () => readingForSave ? 'OTHER=keep\nTYPESAFE_API_KEY=old\nTAIL=yes\n' : '' })
   http(on)
-  let written = ''
-  let path = ''
-  on('fs.write', ($, e) => { written = e.text; path = e.path; return { value: undefined } })
+  const path = '/home/test/.config/jev/.env'
   await start($)
   await command($, 'settings')
   const ui = await band($)
@@ -1266,8 +1341,7 @@ test('Jev key input preserves other env lines and chmods the file 600', async ($
   await ui.input({ key: 'jev-key', text: 'new-$&-$$-key' })
   expect(await ui.find({ key: 'jev-key' })).toBeUndefined()
   expect(await ui.find({ key: 'jev-test' })).toBeUndefined()
-  expect(written).toBe('OTHER=keep\nTYPESAFE_API_KEY=new-$&-$$-key\nTAIL=yes\n')
-  expect(path).toBe('/home/test/.config/jev/.env')
+  expect(b.files.get(path)).toBe('OTHER=keep\nTYPESAFE_API_KEY=new-$&-$$-key\nTAIL=yes\n')
   expect(b.processes.at(-1)?.argv).toEqual(['chmod', '600', path])
 })
 

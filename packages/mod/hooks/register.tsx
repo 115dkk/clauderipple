@@ -140,6 +140,21 @@ async function userHome($: EngineInterface): Promise<string> {
 async function rippleHome($: EngineInterface): Promise<string> {
   return (await $.env.get('CLAUDERIPPLE_HOME')) ?? `${await userHome($)}/.clauderipple`
 }
+// The fs API has no append: serialize read/write pairs so concurrent picks in this mod survive.
+let workerLogWork: Promise<void> = Promise.resolve()
+async function persistWorkerPick($: EngineInterface, entry: Record<string, unknown>): Promise<void> {
+  const work = workerLogWork.then(async () => {
+    try {
+      const path = `${await rippleHome($)}/logs/worker-picks.jsonl`
+      const old = await $.fs.exists(path) ? await $.fs.read(path) : ''
+      const lines = old.split('\n').filter(line => line.trim()).slice(-299)
+      await $.fs.write(path, [...lines, JSON.stringify(entry)].join('\n') + '\n')
+    } catch (error) { await report($, 'worker pick log', error) }
+  })
+  // A reporting failure must not poison the queue or undo the selected spawn either.
+  workerLogWork = work.catch(() => undefined)
+  await workerLogWork
+}
 async function claudeHome($: EngineInterface): Promise<string> {
   return (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await userHome($)}/.claude`
 }
@@ -530,6 +545,10 @@ async function down($: EngineInterface, message: string, network = false): Promi
 }
 
 type Judged = { verdict: Verdict | WorkerVerdict | undefined; by: JudgeKind; ms: number; error?: string }
+function judgeFailure(answer: ModelCompleteResult): string | undefined {
+  if (answer.isAnswered) return undefined
+  return answer.reason === 'api-error' ? `${answer.reason}: ${answer.error} (${answer.status ?? 'no response'})` : answer.reason
+}
 async function completeJudge($: EngineInterface, model: string, system: string, prompt: string): Promise<ModelCompleteResult> {
   return $.model.complete({ model, system, prompt, maxTokens: 160, timeoutMs: 6000, effort: 'low' })
 }
@@ -581,7 +600,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
       const answer = await completeJudge($, s.judgeModel, system, prompt)
       await update($, stats, value => addJudge(value, 'model', 0, answer.usage.input_tokens + answer.usage.output_tokens))
       verdict = answer.isAnswered ? (worker ? parseWorkerVerdict(answer.text) : parseEffortVerdict(answer.text)) : undefined
-      if (!verdict) failure = t(language, 'toasts.routerNoVerdict')
+      if (!verdict) failure = judgeFailure(answer) ?? t(language, 'toasts.routerNoVerdict')
     } catch (error) { failure = reason(error) }
   }
   if (!verdict) {
@@ -590,6 +609,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
       let answer = await completeJudge($, HAIKU, system, prompt)
       await update($, stats, value => addJudge(value, 'haiku', 0, answer.usage.input_tokens + answer.usage.output_tokens))
       if (!answer.isAnswered) {
+        failure ??= judgeFailure(answer)
         answer = await completeJudge($, 'haiku', system, prompt)
         await update($, stats, value => addJudge(value, 'haiku', 0, answer.usage.input_tokens + answer.usage.output_tokens))
       }
@@ -635,6 +655,8 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   let verdict: WorkerVerdict = { domain: 'general', level: 'standard', effort: 'high', why: t(language, 'toasts.judgeUnavailable') }
   let by: WorkerPick['by'] = 'default'
   let ms = 0
+  let rawVerdict: WorkerVerdict | null = null
+  let judgeError: string | undefined
   let target: TierTarget | undefined
   if (explicit) {
     // Agent names and their file-model ids are both valid explicit routing notes.
@@ -644,8 +666,9 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
     by = 'marker'
   } else {
     const judged = await judge($, s, { description: e.description, prompt: e.prompt }, true)
-    if (judged.verdict && 'domain' in judged.verdict) { verdict = judged.verdict; by = judged.by }
+    if (judged.verdict && 'domain' in judged.verdict) { rawVerdict = judged.verdict; verdict = judged.verdict; by = judged.by }
     ms = judged.ms
+    judgeError = judged.error
   }
   // Availability is request-time state, not the ten-minute panel catalogue. Refresh after the
   // judge (which may itself take a while), before every pick, even when no mode is active.
@@ -671,7 +694,9 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
+  await persistWorkerPick($, { ...entry, at: new Date(now).toISOString(), verdict: rawVerdict, by: by === 'marker' || by === 'default' ? by : 'judge', judge: by === 'marker' || by === 'default' ? null : by, ms, ...(judgeError ? { error: judgeError } : {}) })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
