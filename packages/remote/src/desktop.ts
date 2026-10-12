@@ -14,12 +14,41 @@ type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string }
+export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string }
+
+/** Registry identity is authoritative; ps flags remain a legacy fallback only. */
+export function liveDesktopProcesses(dir: string): Map<string, DesktopProcess> {
+  const result = new Map<string, DesktopProcess>();
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+  catch (error) { if (missing(error)) return result; throw error; }
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^\d+\.json$/.test(entry.name)) continue;
+    const pid = Number(entry.name.slice(0, -5));
+    let value: RecordValue | null;
+    try { value = record(fs.readFileSync(path.join(dir, entry.name), "utf8")); }
+    catch (error) { if (missing(error)) continue; throw error; }
+    if (!value || value.entrypoint !== "claude-desktop" || typeof value.sessionId !== "string" || !UUID.test(value.sessionId) || pid <= 1 || (value.pid !== undefined && value.pid !== pid)) continue;
+    if (!["busy", "shell", "idle", "waiting"].includes(str(value.status))) continue;
+    try {
+      process.kill(pid, 0);
+      if (typeof value.procStart === "string") {
+        const started = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
+        if (started !== value.procStart) continue;
+      }
+    } catch { continue; } // Dead or recycled process, not a live desktop writer.
+    const status = value.status as DesktopProcess["status"];
+    result.set(value.sessionId, { sessionId: value.sessionId, pid, status, ...(typeof value.bridgeSessionId === "string" ? { bridgeSessionId: value.bridgeSessionId } : {}) });
+  }
+  return result;
+}
 export interface DesktopOptions {
   projects?: string;
   now?: () => number;
   summarize: Summarize;
   excluded: () => Set<string>;
   processes?: () => string;
+  registry?: () => Map<string, DesktopProcess>;
 }
 
 /** Match session flags, not UUIDs appearing in a prompt or another flag's value. */
@@ -186,6 +215,30 @@ export class DesktopSessions {
     return this.sources.has(id);
   }
 
+  liveProcess(id: string): DesktopProcess | undefined {
+    return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"))).get(id);
+  }
+
+  isOpen(id: string): boolean {
+    return !!this.liveProcess(id) || processHasSession(this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }), id);
+  }
+
+  /** Tail complete transcript lines into an existing host log; never write the transcript. */
+  tail(id: string, offset: number, visit: (body: EventBody) => void): number {
+    const source = this.sources.get(id);
+    if (!source) return offset;
+    const fd = this.open(source.file);
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (size < offset) throw new Error("Desktop transcript was truncated.");
+      return scanLines(fd, size, line => {
+        for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize).bodies) visit(body);
+      }, offset);
+    } finally { fs.closeSync(fd); }
+  }
+
+  transcriptSize(id: string): number { return this.sources.get(id)?.size ?? 0; }
+
   continuation(id: string): { summary: SessionSummary; open: boolean } {
     if (!this.has(id)) throw new Error("no such session");
     const source = this.sources.get(id)!;
@@ -194,8 +247,7 @@ export class DesktopSessions {
       const stat = fs.fstatSync(fd);
       const current = this.readSummary(id, source.file, stat);
       if (!current) throw new Error("transcript has no working folder");
-      const processes = this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-      return { summary: current.summary, open: processHasSession(processes, id) || stat.mtimeMs >= (this.opts.now ?? Date.now)() - 60_000 };
+      return { summary: current.summary, open: this.isOpen(id) };
     } finally { fs.closeSync(fd); }
   }
 
@@ -208,7 +260,7 @@ export class DesktopSessions {
     let importing = true;
     const log = EventLog.open({ dir, now: () => importing ? at : now() });
     try {
-      scanLines(fd, fs.fstatSync(fd).size, line => {
+      source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
         const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize);
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
@@ -223,6 +275,7 @@ export class DesktopSessions {
   private updateLive(): void {
     const now = (this.opts.now ?? Date.now)();
     if (now - this.checkedAt < 3000) return;
+    const registry = this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"));
     const processes = this.sources.size ? this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }) : "";
     for (const [id, previous] of this.sources) {
       let stat: fs.Stats;
@@ -232,7 +285,8 @@ export class DesktopSessions {
       const source = previous.size === stat.size && previous.mtime === stat.mtimeMs
         ? previous : this.readSummary(id, previous.file, stat);
       if (!source) { this.sources.delete(id); continue; }
-      source.summary = { ...source.summary, state: processHasSession(processes, id) &&
+      const live = registry.get(id);
+      source.summary = { ...source.summary, state: live ? live.status === "waiting" ? "waiting" : live.status === "idle" ? "idle" : "running" : processHasSession(processes, id) &&
         (now - source.mtime <= 10_000 || source.unfinished) ? "running" : "stopped" };
       this.sources.set(id, source);
     }
@@ -331,10 +385,10 @@ export class DesktopSessions {
 }
 
 // Streaming chunks, not readFileSync: no full-file buffer, even for a multi-GB transcript.
-function scanLines(fd: number, size: number, visit: (line: string) => void): void {
+function scanLines(fd: number, size: number, visit: (line: string) => void, from = 0): number {
   const buffer = Buffer.alloc(WINDOW);
   let carry = Buffer.alloc(0);
-  for (let offset = 0; offset < size;) {
+  for (let offset = from; offset < size;) {
     const n = fs.readSync(fd, buffer, 0, Math.min(buffer.length, size - offset), offset);
     if (!n) break;
     offset += n;
@@ -347,4 +401,5 @@ function scanLines(fd: number, size: number, visit: (line: string) => void): voi
     carry = Buffer.from(data.subarray(start));
   }
   // An in-flight unterminated append is ignored until the next snapshot.
+  return size - carry.length;
 }

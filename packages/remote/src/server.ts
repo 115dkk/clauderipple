@@ -277,7 +277,7 @@ export class HostServer {
       case "send":
         try {
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
-          const id = s.send(msg.session, msg.clientMsgId, msg.text);
+          const id = await s.send(msg.session, msg.clientMsgId, msg.text);
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
           if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
@@ -285,7 +285,7 @@ export class HostServer {
         }
         return;
       case "decide":
-        if (!s.decide(msg.session, msg.id, msg.decision)) this.send(c, { t: "error", code: "stale_permission", message: "already answered or expired", session: msg.session });
+        if (!await s.decide(msg.session, msg.id, msg.decision)) this.send(c, { t: "error", code: "stale_permission", message: "already answered or expired", session: msg.session });
         return;
       case "interrupt": await s.interrupt(msg.session); return;
       case "set_model": await s.setModel(msg.session, msg.model, msg.effort); return;

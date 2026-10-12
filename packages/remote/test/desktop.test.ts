@@ -8,6 +8,7 @@ import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
 import { reduce } from "../web/timeline.ts";
+import { BridgeClient } from "../src/bridge-client.ts";
 
 const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const other = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -224,6 +225,13 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   t.after(async () => { for (const s of sessions.list()) sessions.stop(s.id); await new Promise(resolve => setImmediate(resolve)); sessions.shutdown(); });
   assert.equal(sessions.list()[0]?.origin, "desktop");
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
+  if (mode === "process") {
+    await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Mac 앱/);
+    assert.throws(() => sessions.send(id, "first-phone", "continue"), /휴대폰에서 입력할 수 없습니다/);
+    assert.equal(options.length, 0);
+    assert.equal(sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "first-phone"), false);
+    return;
+  }
   await sessions.setModel(id, "chosen-model", "high");
   const host = sessions.send(id, "first-phone", "continue");
   assert.equal(sessions.send(id, "first-phone", "continue"), host);
@@ -240,7 +248,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   const events = sessions.log(host).tail().events;
   assert.deepEqual(events.slice(0, 2).map(e => e.kind), ["user", "assistant"]);
   assert.equal(events[0]?.at, Date.parse(user.timestamp));
-  assert.ok(events.some(e => e.kind === "notice" && e.code === (mode === "resume" ? "desktop_resumed" : "desktop_open")));
+  assert.ok(events.some(e => e.kind === "notice" && e.code === "desktop_resumed"));
   assert.equal(fs.readFileSync(file, "utf8"), original);
   sessions.stop(host);
   await new Promise(resolve => setImmediate(resolve));

@@ -63,7 +63,7 @@ export type EventBody =
   | { kind: "figures"; figures: Figures }
   | { kind: "notice"; code: NoticeCode; text?: string };
 
-export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed";
+export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked";
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 

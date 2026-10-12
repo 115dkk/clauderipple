@@ -6,7 +6,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
-import { DesktopSessions } from "./desktop.ts";
+import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
+import { BridgeClient, DESKTOP_BLOCKED, object, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -42,6 +43,8 @@ interface SessionRecord {
   contextWindow: number | null;
   /** Missing on older host records; desktop continuations are explicitly excluded. */
   desktopHandoff?: "pending" | "attempted" | "excluded";
+  desktopBridge?: boolean;
+  transcriptOffset?: number;
 }
 
 interface Live {
@@ -77,6 +80,8 @@ export interface SessionsOptions {
   /** Enabled by main; tests can use an isolated synthetic projects directory. */
   desktopProjects?: string;
   desktopProcesses?: () => string;
+  desktopRegistry?: () => Map<string, DesktopProcess>;
+  bridgeClient?: BridgeClient;
 }
 
 /** An async iterable the SDK reads user messages from; a session's query lives as long as it. */
@@ -161,15 +166,21 @@ export class Sessions {
   private now: () => number;
   private desktop: DesktopSessions | null;
   private desktopModels = new Map<string, { model: string; effort: Effort | null }>();
+  private bridge: BridgeClient;
+  private bridges = new Map<string, { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }>();
+  private bridgeSends = new Map<string, Promise<string>>();
+  private bridgeDecisions = new Map<string, Promise<boolean>>();
 
   constructor(opts: SessionsOptions) {
     this.opts = opts;
+    this.bridge = opts.bridgeClient ?? new BridgeClient();
     this.now = opts.now ?? Date.now;
     this.file = path.join(opts.dir, "sessions.json");
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       projects: opts.desktopProjects, now: this.now, summarize, ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
-      excluded: () => new Set(Array.from(this.records.values()).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
+      ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
+      excluded: () => new Set(Array.from(this.records.values()).filter(r => !r.desktopBridge).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
     });
   }
 
@@ -188,26 +199,41 @@ export class Sessions {
 
   list(): SessionSummary[] {
     const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
-    return [...host, ...(this.desktop?.list() ?? []).map(s => ({ ...s, ...this.desktopModels.get(s.id) }))];
+    return [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id)).map(s => ({ ...s, ...this.desktopModels.get(s.id) }))];
   }
 
   pollDesktop(): void {
     if (this.desktop?.poll()) this.opts.onSessions();
+    for (const r of this.records.values()) {
+      if (!r.desktopBridge || !this.desktop) continue;
+      try {
+        r.transcriptOffset = this.desktop.tail(r.id, r.transcriptOffset ?? 0, body => {
+          if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) this.append(r.id, body);
+        });
+        this.save();
+        const process = this.desktop.liveProcess(r.id);
+        this.setState(r, process ? process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running" : "stopped");
+        if (process?.bridgeSessionId) this.ensureBridge(r.id, process.bridgeSessionId);
+        else this.closeBridge(r.id);
+      } catch (error) { this.bridgeFailure(r.id, error); }
+    }
   }
 
   has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
 
-  private continueDesktop(id: string, clientMsgId: string): SessionRecord {
+  private continueDesktop(id: string, clientMsgId: string, bridgeMode = false): SessionRecord {
     if (!this.desktop) throw new Error("no such session");
     const { summary: s, open } = this.desktop.continuation(id);
+    if (open && !bridgeMode) throw new Error(DESKTOP_BLOCKED);
     const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
     const r: SessionRecord = { id, sdkSessionId: id, cwd: s.cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
+    if (bridgeMode) { r.desktopBridge = true; r.transcriptOffset = this.desktop.transcriptSize(id); }
     Object.assign(r, this.desktopModels.get(id));
     this.desktopModels.delete(id);
     this.logs.set(id, log);
     this.records.set(id, r);
     this.save();
-    this.append(id, { kind: "notice", code: open ? "desktop_open" : "desktop_resumed" });
+    this.append(id, { kind: "notice", code: bridgeMode ? "desktop_bridge" : "desktop_resumed" });
     this.opts.onSessions();
     return r;
   }
@@ -225,11 +251,19 @@ export class Sessions {
 
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
-    return { origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state: r.state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
+    const state = process ? process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running" : r.desktopBridge ? "stopped" : r.state;
+    return { origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
     if (!this.records.has(id)) {
+      const process = this.desktop?.liveProcess(id);
+      if (process?.bridgeSessionId && this.desktop?.has(id)) {
+        this.continueDesktop(id, "", true);
+        this.ensureBridge(id, process.bridgeSessionId);
+        return this.logs.get(id)!;
+      }
       if (this.desktop?.has(id)) return this.desktop.log(id);
       throw new Error("no such session");
     }
@@ -298,7 +332,22 @@ export class Sessions {
   }
 
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live. */
-  send(id: string, clientMsgId: string, text: string): string {
+  send(id: string, clientMsgId: string, text: string): string | Promise<string> {
+    const existing = this.records.get(id);
+    const desktopId = existing?.sdkSessionId ?? id;
+    if (this.desktop && !this.live.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
+      const process = this.desktop.liveProcess(desktopId);
+      if (process?.bridgeSessionId) {
+        const key = `${id}/${clientMsgId}`;
+        const pending = this.bridgeSends.get(key);
+        if (pending) return pending;
+        const sending = this.sendBridge(id, clientMsgId, text, process.bridgeSessionId).finally(() => this.bridgeSends.delete(key));
+        this.bridgeSends.set(key, sending);
+        return sending;
+      }
+      if (process || this.desktop.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+      if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
+    }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
     id = r.id;
     if (this.seen(id, clientMsgId)) return id;
@@ -318,6 +367,91 @@ export class Sessions {
     return id;
   }
 
+  private async sendBridge(id: string, clientMsgId: string, text: string, bridgeId: string): Promise<string> {
+    const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId, true);
+    if (!r.desktopBridge) {
+      r.desktopBridge = true;
+      r.transcriptOffset = this.desktop?.transcriptSize(r.sdkSessionId ?? id) ?? 0;
+      this.save();
+    }
+    if (this.seen(id, clientMsgId)) return id;
+    const connection = this.ensureBridge(id, bridgeId);
+    if (connection.failed) throw new Error(DESKTOP_BLOCKED);
+    try { await this.bridge.send(bridgeId, clientMsgId, text); }
+    catch (error) { this.bridgeFailure(id, error); throw new Error(`${DESKTOP_BLOCKED}\n${error instanceof Error ? error.message : "Remote Control failed."}`); }
+    // The durable user event also deduplicates the desktop transcript's echo by uuid.
+    this.append(id, { kind: "user", text, clientMsgId });
+    this.setState(r, "running");
+    return id;
+  }
+
+  private ensureBridge(id: string, bridgeId: string) {
+    const previous = this.bridges.get(id);
+    if (previous?.bridgeId === bridgeId) return previous;
+    this.closeBridge(id);
+    const connection = { bridgeId, abort: new AbortController(), failed: false, permissions: new Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }>() };
+    this.bridges.set(id, connection);
+    void this.bridge.stream(bridgeId, connection.abort.signal, frame => this.bridgeFrame(id, frame)).catch(error => {
+      if (!connection.abort.signal.aborted) this.bridgeFailure(id, error);
+    });
+    return connection;
+  }
+
+  private closeBridge(id: string): void {
+    const connection = this.bridges.get(id);
+    if (!connection) return;
+    connection.abort.abort();
+    this.opts.permissions.expireSession(id, "aborted");
+    this.bridges.delete(id);
+  }
+
+  private bridgeFailure(id: string, error: unknown): void {
+    const connection = this.bridges.get(id);
+    if (connection) { connection.failed = true; connection.abort.abort(); }
+    this.opts.permissions.expireSession(id, "aborted");
+    this.append(id, { kind: "notice", code: "desktop_blocked", text: error instanceof Error ? error.message : "Remote Control failed." });
+    this.opts.onSessions();
+  }
+
+  private bridgeFrame(id: string, frame: BridgeFrame): void {
+    if (frame.event !== "client_event") return;
+    const payload = object(frame.data.payload);
+    const connection = this.bridges.get(id);
+    if (!payload || !connection) return;
+    // Responses from another client close a pending card during replay or live delivery.
+    if (payload.type === "control_response") {
+      const response = object(payload.response);
+      if (typeof response?.request_id !== "string") return;
+      const pending = connection.permissions.get(response.request_id);
+      if (pending) this.opts.permissions.expire(pending.id, "cancelled");
+      connection.permissions.delete(response.request_id);
+      return;
+    }
+    // Only the server's worker channel may ask for authorization or withdraw a request.
+    if (frame.data.source !== "worker" || typeof payload.request_id !== "string") return;
+    const requestId = payload.request_id;
+    if (payload.type === "control_cancel_request") {
+      const pending = connection.permissions.get(requestId);
+      if (pending) this.opts.permissions.expire(pending.id, "cancelled");
+      connection.permissions.delete(requestId);
+      return;
+    }
+    const request = object(payload.request);
+    const input = object(request?.input);
+    if (payload.type !== "control_request" || request?.subtype !== "can_use_tool" || typeof request.tool_name !== "string" || !input || typeof request.tool_use_id !== "string" || connection.permissions.has(requestId)) return;
+    const r = this.records.get(id);
+    if (!r) return;
+    const { record, decision } = this.opts.permissions.request({ session: id, tool: request.tool_name, title: "", summary: summarize(request.tool_name, input, r.cwd), input }, connection.abort.signal);
+    connection.permissions.set(requestId, { id: record.id, input, toolUseId: request.tool_use_id });
+    this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, input, r.cwd), canAlways: false });
+    this.setState(r, "waiting");
+    void decision.then(answer => {
+      this.append(id, { kind: "permission_decided", id: record.id, decision: answer.decision, ...(answer.reason ? { reason: answer.reason } : {}) });
+      if (answer.decision === "expired") connection.permissions.delete(requestId);
+      this.opts.onSessions();
+    });
+  }
+
   private seen(id: string, clientMsgId: string): boolean {
     // The log is the record of what was received; scan from the end, where a resend's original is.
     const log = this.log(id);
@@ -331,13 +465,41 @@ export class Sessions {
     return false;
   }
 
-  decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny"): boolean {
+  decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny"): boolean | Promise<boolean> {
+    const connection = this.bridges.get(id);
+    const pending = connection && [...connection.permissions].find(([, value]) => value.id === permId);
+    if (connection && pending) {
+      const sending = this.bridgeDecisions.get(permId);
+      if (sending) return sending;
+      const answer = this.decideBridge(id, permId, decision, pending[0], pending[1]).finally(() => this.bridgeDecisions.delete(permId));
+      this.bridgeDecisions.set(permId, answer);
+      return answer;
+    }
     const p = this.opts.permissions.get(permId);
     if (!p || p.session !== id) return false;
     return this.opts.permissions.decide(permId, decision) !== null;
   }
 
+  private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }): Promise<boolean> {
+    const connection = this.bridges.get(id);
+    if (!connection || connection.failed || this.opts.permissions.get(permId)?.state !== "pending") return false;
+    if (decision === "allow_always") throw new Error("Remote Control supports allow once only.");
+    try {
+      await this.bridge.post(connection.bridgeId, { type: "control_response", uuid: randomUUID(), response: { subtype: "success", request_id: requestId, response: { behavior: decision, updatedInput: pending.input, toolUseID: pending.toolUseId, ...(decision === "deny" ? { message: "The user denied this from their phone." } : {}) } } });
+    } catch (error) { this.bridgeFailure(id, error); throw error; }
+    connection.permissions.delete(requestId);
+    return this.opts.permissions.decide(permId, decision) !== null;
+  }
+
   async interrupt(id: string): Promise<void> {
+    const connection = this.bridges.get(id);
+    if (connection) {
+      if (connection.failed) throw new Error(DESKTOP_BLOCKED);
+      try { await this.bridge.interrupt(connection.bridgeId); }
+      catch (error) { this.bridgeFailure(id, error); throw error; }
+      this.append(id, { kind: "notice", code: "interrupted" });
+      return;
+    }
     const live = this.live.get(id);
     if (!live) return;
     // Open requests resolve as expired; their canUseTool continuation writes the event.
@@ -351,6 +513,7 @@ export class Sessions {
   }
 
   async setModel(id: string, model: string, effort: Effort | null): Promise<void> {
+    if (this.desktop?.isOpen(this.records.get(id)?.sdkSessionId ?? id)) throw new Error("열려 있는 세션의 모델은 Mac 앱에서 변경해 주십시오. / Change this live session's model in the Mac app.");
     if (!this.records.has(id) && this.desktop?.has(id)) {
       this.desktopModels.set(id, { model, effort });
       this.opts.onSessions();
@@ -385,6 +548,7 @@ export class Sessions {
   shutdown(): void {
     this.shuttingDown = true;
     for (const id of Array.from(this.live.keys())) this.stop(id);
+    for (const id of this.bridges.keys()) this.closeBridge(id);
     for (const log of this.logs.values()) log.close();
     this.desktop?.close();
   }
@@ -392,6 +556,7 @@ export class Sessions {
   // ---- the query ----------------------------------------------------------------------------
 
   private start(r: SessionRecord): Live {
+    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new Error(DESKTOP_BLOCKED);
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};

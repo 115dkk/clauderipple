@@ -231,7 +231,7 @@ test("desktop sessions use ready, history, blobs and continue through a same-ses
   assert.equal(ack.msg.session, id);
   peer.send({ t: "attach", session: ack.msg.session });
   const continued = await peer.take("events", msg => msg.session === ack.msg.session && !!msg.tail);
-  assert.ok(continued.msg.events.some(e => e.kind === "notice" && e.code === "desktop_open"));
+  assert.ok(continued.msg.events.some(e => e.kind === "notice" && e.code === "desktop_resumed"));
   const imported = continued.msg.events.find(e => e.kind === "assistant" && e.msg === "large");
   assert.ok(imported?.kind === "assistant" && typeof imported.text !== "string");
   peer.send({ t: "req", reqId: "continued-blob", op: { op: "blob", session: ack.msg.session, id: imported.text.blob } });
