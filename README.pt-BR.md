@@ -303,13 +303,15 @@ que você mapeia vão para o seu provedor, e todo o resto vai para a Anthropic b
   última hora.
 - **Identificação dos subagentes.** O painel de tarefas em segundo plano mostra
   `Terra·high · Review` em vez de um "Agent" genérico.
-- **A rota, onde você digita.** Um mod do Claude Code coloca uma linha acima do prompt:
-  para onde foi sua última requisição, o esforço, o acerto de cache e o tempo. `Log` (ou
-  `/ripple-log`) abre o log de requisições em um painel lateral, com cores por provedor e
-  por resultado; `×` (ou `/ripple-bar`) oculta a linha. O mesmo mod mantém um worker no
-  próprio modelo quando a chamada do Agent indica outro, e lê o marcador
-  `[[ripple: name@level]]` dele onde quer que esteja no prompt. Basta um botão na tela
-  **Clientes**, ou `clauderipple mod on`.
+- **O mod ripple, acima do prompt.** Uma faixa mostra o esforço de raciocínio, o contexto, o
+  timer do cache e qual modelo respondeu sua última requisição, com o acerto de cache. Um
+  pequeno modelo juiz (Haiku 5.5 ou Jev) lê cada prompt junto com os turnos recentes e define
+  o esforço, de low a max. O trabalho delegado vai para `ripple:auto`, e o juiz manda cada
+  tarefa para um worker conforme a dificuldade: o leve para DeepSeek ou GLM, o difícil para
+  GPT ou Opus. Cartões avisam quando o cache esfriou, o contexto ficou pesado ou uma janela do
+  plano passou de 80%, e oferecem compactar ou passar para uma sessão nova na mesma pasta.
+  `Log` (ou `/ripple-log`) abre o log de requisições em um painel lateral. Basta um botão na
+  tela **Clientes**, ou `clauderipple mod on`.
 - **Imagens pela sua assinatura do ChatGPT.** `clauderipple image "<prompt>"`, com imagens
   de referência e fundos transparentes. Os subagentes recebem instruções de como fazer,
   então um worker GPT ou DeepSeek consegue criar uma imagem e olhar para ela sem uma
