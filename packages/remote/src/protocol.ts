@@ -16,6 +16,20 @@ export const PING_MS = 10_000;
 export const STALE_MS = 30_000;
 /** Reconnect backoff is min(BACKOFF_CAP_MS, attempt × 1 s) and never stops. */
 export const BACKOFF_CAP_MS = 30_000;
+/** A socket that opens but is not ready (relay hello, host ready) within this is abandoned. */
+export const READY_MS = 8_000;
+/** Largest frame the relay forwards: an encrypted FRAME_CAP frame (16-byte tag) with room to spare. */
+export const RELAY_FRAME_CAP = FRAME_CAP + 1024;
+
+/**
+ * The relay's own words (plain text frames; everything else it forwards untouched, encrypted):
+ *   to the host's control socket: {"relay":"hello"} once accepted, {"relay":"connect","conn":id} per phone;
+ *   to a phone: {"relay":"open"} once the host's data socket for it is there.
+ * The host pings its control socket with the text "ping" and the relay answers "pong".
+ */
+export type RelayMsg = { relay: "hello" } | { relay: "connect"; conn: string } | { relay: "open" };
+/** Close codes the relay uses. */
+export const RELAY_CLOSE = { badRequest: 4400, badSecret: 4401, hostOffline: 4404, replaced: 4409, peerGone: 4410, tooBig: 1009 } as const;
 
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -104,6 +118,8 @@ export type ClientMsg =
   | { t: "decide"; session: string; id: string; decision: "allow" | "allow_always" | "deny" }
   | { t: "interrupt"; session: string }
   | { t: "set_model"; session: string; model: string; effort: Effort | null }
+  /** The app is in front (visible) or not. Sent on change and every PING_MS while visible; the host pushes only when nobody is looking. */
+  | { t: "presence"; visible: boolean }
   /** Request/response over the same socket, so a relay later forwards one stream and nothing else. */
   | { t: "req"; reqId: string; op: ReqOp };
 
@@ -112,7 +128,14 @@ export type ReqOp =
   | { op: "folders" }
   | { op: "browse"; path?: string; hidden?: boolean }
   | { op: "blob"; session: string; id: string; offset?: number }
-  | { op: "sub"; session: string; sub: string; afterSeq?: number };
+  | { op: "sub"; session: string; sub: string; afterSeq?: number }
+  /** The host's VAPID public key (base64url), for PushManager.subscribe's applicationServerKey. */
+  | { op: "push_key" }
+  | { op: "push_subscribe"; subscription: PushSubscriptionJSON; lang: "ko" | "en" }
+  | { op: "push_unsubscribe" };
+
+/** PushSubscription.toJSON() as the browser gives it. */
+export interface PushSubscriptionJSON { endpoint: string; expirationTime?: number | null; keys: { p256dh: string; auth: string } }
 
 export interface BrowseResult { path: string; parent: string | null; home: string; entries: FolderEntry[]; truncated: boolean }
 export interface BlobChunk { text: string; offset: number; next: number | null; bytes: number }

@@ -174,6 +174,17 @@ export class Sessions {
 
   has(id: string): boolean { return this.records.has(id); }
 
+  /** A turn is in progress somewhere (including one waiting on the phone for a permission). */
+  busy(): boolean {
+    for (const r of this.records.values()) if (r.state === "starting" || r.state === "running" || r.state === "waiting") return true;
+    return false;
+  }
+
+  summaryOf(id: string): SessionSummary | undefined {
+    const r = this.records.get(id);
+    return r ? this.summary(r) : undefined;
+  }
+
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
     return { id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state: r.state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };

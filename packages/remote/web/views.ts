@@ -2,6 +2,7 @@
 // mockups in docs/media/remote are the shipped UI, not a drawing of it.
 import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionSummary, Text } from "../src/protocol.ts";
 import type { LinkStatus } from "./conn.ts";
+import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
 import { t } from "./i18n.ts";
 import type { Key } from "./i18n.ts";
@@ -29,6 +30,10 @@ export interface UI {
   workersOpen: boolean;
   permOpen: Set<string>;
   toast: string | null;
+  /** whether notifications can work here, and are on; null until known */
+  push?: PushAvail | null;
+  /** the person said "later" to the notification card */
+  pushLater?: boolean;
 }
 
 // ---- small helpers -----------------------------------------------------------------------------
@@ -108,7 +113,17 @@ export function homeMain(ui: UI): string {
   const empty = ui.sessions.length === 0
     ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body"))}</p><div class="hint">${icon.down(22)}</div></div>`
     : "";
-  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sec(t("home.waiting"), waiting, "waiting", true)}${sec(t("home.active"), active)}${sec(t("home.recent"), rest)}${empty}<div style="height:12px"></div>`;
+  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sec(t("home.waiting"), waiting, "waiting", true)}${sec(t("home.active"), active)}${sec(t("home.recent"), rest)}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
+}
+
+/** Below the list, near the thumb: turn notifications on, or what it takes on this phone. Gone once on or dismissed. */
+export function pushCard(ui: UI): string {
+  const p = ui.push;
+  if (!p || p === "on" || p === "unsupported" || ui.pushLater) return "";
+  const later = `<button class="btn ghost" data-act="push-later">${esc(t("push.later"))}</button>`;
+  const body = p === "off" ? t("push.body") : p === "install" ? t("push.install") : p === "denied" ? t("push.denied") : t("push.insecure");
+  const action = p === "off" ? `<button class="btn primary" data-act="push-on">${icon.bell(18)}${esc(t("push.on"))}</button>` : "";
+  return `<div class="banner push">${icon.bell(22)}<div class="txt"><b>${esc(t("push.title"))}</b>${esc(body)}<div class="act">${action}${later}</div></div></div>`;
 }
 
 export function homeTop(ui: UI): string {
@@ -272,5 +287,5 @@ export function sheet(ui: UI): string {
 // ---- pairing -----------------------------------------------------------------------------------
 
 export function pairScreen(): string {
-  return `<div class="pair">${ripple("calm", 96)}<h1>${esc(t("pair.title"))}</h1><ol><li><div>${esc(t("pair.step1"))}<code>npm run remote -- --bind tailscale</code></div></li><li><div>${esc(t("pair.step2"))}</div></li><li><div>${esc(t("pair.step3"))}</div></li></ol><div class="note">${esc(t("pair.note"))}</div></div>`;
+  return `<div class="pair">${ripple("calm", 96)}<h1>${esc(t("pair.title"))}</h1><ol><li><div>${esc(t("pair.step1"))}<code>npm run remote -- pair</code></div></li><li><div>${esc(t("pair.step2"))}</div></li><li><div>${esc(t("pair.step3"))}</div></li></ol><div class="note">${esc(t("pair.note"))}</div></div>`;
 }

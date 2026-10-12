@@ -5,7 +5,12 @@ import type { BlobChunk, BrowseResult, ClientMsg, Effort, FolderEntry, HostMsg, 
 import { Link } from "./conn.ts";
 import type { LinkStatus } from "./conn.ts";
 import { esc, icon, patchList, setHTML } from "./dom.ts";
-import { pickLang, setLang, t } from "./i18n.ts";
+import { lang, pickLang, setLang, t } from "./i18n.ts";
+import { browserPushEnv, currentSubscription, enablePush, sameKey } from "./notify.ts";
+import { pushAvailability } from "./pushstate.ts";
+import { RelaySocket, browserNacl, relayClientUrl } from "./secure.ts";
+import type { RawSocket, RelayPairing } from "./secure.ts";
+import { PING_MS } from "../src/protocol.ts";
 import { mergeEvents, reduce } from "./timeline.ts";
 import type { Item, Outgoing, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
@@ -46,6 +51,7 @@ export class App {
       now: Date.now(), link, host: null, home: undefined, sessions: [], models: [], sheet: null,
       draft: store.get("rr.draft", { cwd: null, model: null, effort: null }),
       expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null,
+      push: null, pushLater: store.get<boolean>("rr.pushLater", false),
     };
   }
 
@@ -56,6 +62,9 @@ export class App {
     const paired = hash.get("pair");
     if (paired) {
       store.set("rr.token", paired);
+      // A relay pairing names the host (server id) and its key; a direct one does not, and replaces any relay pairing.
+      const server = hash.get("server"), hpk = hash.get("hpk");
+      store.set("rr.relay", server && hpk ? ({ url: location.origin, server, hpk } satisfies RelayPairing) : null);
       history.replaceState(null, "", location.pathname);
     }
     const token = store.get<string | null>("rr.token", null);
@@ -64,10 +73,15 @@ export class App {
     window.addEventListener("hashchange", () => { this.screen = this.routeFromHash(); this.ui.sheet = null; this.render(); this.attachCurrent(); });
     const clientId = store.get<string>("rr.clientId", "") || uid();
     store.set("rr.clientId", clientId);
+    // Served by the relay → through the relay, encrypted end to end; served by the host itself → straight to it.
+    const relay = store.get<RelayPairing | null>("rr.relay", null);
+    const viaRelay = relay !== null && relay.url === location.origin;
     const link = new Link({
-      url: `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+      url: viaRelay ? relayClientUrl(relay) : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
       token, clientId,
-      makeSocket: (url) => new WebSocket(url) as unknown as import("./conn.ts").SocketLike,
+      makeSocket: viaRelay
+        ? (url) => new RelaySocket(new WebSocket(url) as unknown as RawSocket, relay, browserNacl())
+        : (url) => new WebSocket(url) as unknown as import("./conn.ts").SocketLike,
       now: () => Date.now(),
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (id) => clearTimeout(id as number),
@@ -79,8 +93,15 @@ export class App {
     link.onReady = () => this.onReady();
     window.addEventListener("online", () => link.nudge());
     window.addEventListener("offline", () => link.nudge());
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") link.nudge(); });
+    document.addEventListener("visibilitychange", () => { this.sendPresence(); if (document.visibilityState === "visible") { link.nudge(); void this.refreshPush(); } });
     setInterval(() => { this.ui.now = Date.now(); this.renderChrome(); }, 1000);
+    // While in front, say so every PING_MS: the host pushes nothing to a phone that is looking, and
+    // stops counting one whose app froze in the background without saying "hidden".
+    setInterval(() => { if (document.visibilityState === "visible") this.sendPresence(); }, PING_MS);
+    if (window.isSecureContext && "serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.ts", { scope: "./" }).catch(() => undefined);
+    }
+    void this.refreshPush();
     this.bind();
     this.render();
     link.start();
@@ -106,9 +127,47 @@ export class App {
 
   private onReady(): void {
     for (const c of this.caches.values()) c.attached = false;
+    this.sendPresence();
     this.attachCurrent();
     this.flushOutbox();
     if (!this.ui.models.length) void this.loadModels();
+    void this.resyncPush();
+  }
+
+  // ---- presence and notifications ----------------------------------------------------------
+
+  private sendPresence(): void {
+    this.link?.send({ t: "presence", visible: document.visibilityState === "visible" });
+  }
+
+  private async refreshPush(): Promise<void> {
+    const sub = await currentSubscription().catch(() => null);
+    const next = pushAvailability(browserPushEnv(sub !== null));
+    if (next !== this.ui.push) { this.ui.push = next; if (this.screen.name === "home") this.render(); }
+  }
+
+  /** A host may have dropped the subscription (a 410 it saw) or changed its key: tell it again on every connect. */
+  private async resyncPush(): Promise<void> {
+    try {
+      const sub = await currentSubscription();
+      if (!sub || Notification.permission !== "granted") return;
+      const { publicKey } = await this.req<{ publicKey: string }>({ op: "push_key" });
+      if (!sameKey(sub, publicKey)) { await sub.unsubscribe(); await this.refreshPush(); return; }
+      await this.registerPush(sub.toJSON());
+    } catch { /* tried again on the next connect */ }
+  }
+
+  private async registerPush(json: PushSubscriptionJSON): Promise<void> {
+    if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth) throw new Error("subscription without keys");
+    await this.req({ op: "push_subscribe", subscription: { endpoint: json.endpoint, keys: { p256dh: json.keys.p256dh, auth: json.keys.auth } }, lang: lang() });
+  }
+
+  private async turnOnPush(): Promise<void> {
+    try {
+      const r = await enablePush(async () => (await this.req<{ publicKey: string }>({ op: "push_key" })).publicKey, (json) => this.registerPush(json));
+      if (r === "on") this.toast(t("push.done"));
+    } catch (e) { this.toast(t("push.failed", { text: (e as Error).message })); }
+    await this.refreshPush();
   }
 
   onHost(m: HostMsg): void {
@@ -505,6 +564,9 @@ export class App {
         this.render();
       } break;
       case "settings": this.toggleLang(); break;
+      // No await before this: the permission prompt has to come from the tap itself.
+      case "push-on": await this.turnOnPush(); break;
+      case "push-later": store.set("rr.pushLater", true); this.ui.pushLater = true; this.render(); break;
     }
   }
 

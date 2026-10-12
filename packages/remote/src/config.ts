@@ -16,6 +16,12 @@ export interface HostConfig {
   port: number;
   adminUrl: string;
   claudePath?: string;
+  /** the relay's origin, once `--relay <url>` was given */
+  relay?: string;
+  /** this host's name on the relay: random, not secret (the phone needs it in the pairing link) */
+  serverId: string;
+  /** proves to the relay that a host connection is this host (first one in registers it) */
+  relaySecret: string;
 }
 
 export function remoteHome(): string {
@@ -26,7 +32,8 @@ export function newToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-export function loadConfig(dir = remoteHome()): HostConfig {
+/** `persist: false` reads without writing the generated secrets (for commands that only print). */
+export function loadConfig(dir = remoteHome(), persist = true): HostConfig {
   const file = path.join(dir, "host.json");
   const stored = readJson<Partial<HostConfig>>(file) ?? {};
   const cfg: HostConfig = {
@@ -35,8 +42,11 @@ export function loadConfig(dir = remoteHome()): HostConfig {
     port: typeof stored.port === "number" ? stored.port : DEFAULT_PORT,
     adminUrl: typeof stored.adminUrl === "string" ? stored.adminUrl : "http://127.0.0.1:8792",
     ...(typeof stored.claudePath === "string" ? { claudePath: stored.claudePath } : {}),
+    ...(typeof stored.relay === "string" ? { relay: stored.relay } : {}),
+    serverId: typeof stored.serverId === "string" && /^[\w-]{16,64}$/.test(stored.serverId) ? stored.serverId : randomBytes(16).toString("base64url"),
+    relaySecret: typeof stored.relaySecret === "string" && stored.relaySecret.length >= 32 ? stored.relaySecret : newToken(),
   };
-  if (cfg.token !== stored.token) saveConfig(cfg, dir);
+  if (persist && (cfg.token !== stored.token || cfg.serverId !== stored.serverId || cfg.relaySecret !== stored.relaySecret)) saveConfig(cfg, dir);
   return cfg;
 }
 
@@ -82,4 +92,21 @@ export function resolveBind(bind: string, ifaces: Ifaces = os.networkInterfaces(
 export function pairingUrl(advertise: string, port: number, token: string): string {
   const host = advertise.includes(":") ? `[${advertise}]` : advertise;
   return `http://${host}:${port}/#pair=${token}`;
+}
+
+/**
+ * The pairing link through the relay. Everything after `#` stays on the phone: browsers never send a
+ * fragment, so the relay sees neither the token nor the host's public key, only the page request.
+ */
+export function relayPairingUrl(relay: string, serverId: string, hostPublicKey: string, token: string): string {
+  const origin = new URL(relay).origin;
+  return `${origin}/#pair=${token}&server=${serverId}&hpk=${hostPublicKey}`;
+}
+
+/** The relay's address, validated: https (or http only for a local `wrangler dev`). */
+export function normalizeRelay(url: string): string {
+  const u = new URL(url);
+  const local = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) throw new Error(`relay must be https:// (http:// only for localhost): ${url}`);
+  return u.origin;
 }

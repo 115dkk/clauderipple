@@ -12,6 +12,8 @@ import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { HostServer } from "../src/server.ts";
+import type { ServerOptions } from "../src/server.ts";
+import { VISIBLE_MS } from "../src/push.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
 
@@ -111,7 +113,7 @@ class Peer {
   }
 }
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-server-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -135,7 +137,7 @@ async function fixture(t: TestContext) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
   server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
-    hostName: "test-host", version: "test-version", recentCli: async () => [], log: line => diagnostics.push(line),
+    hostName: "test-host", version: "test-version", recentCli: async () => [], log: line => diagnostics.push(line), ...extra,
   });
   await server.listen();
   const port = server.address().port;
@@ -230,10 +232,57 @@ test("static serves HTML, strips app TypeScript, exposes only the shared protoco
   assert.match(protocol.type, /^text\/javascript/);
   assert.match(protocol.body, /export const FRAME_CAP/);
   assert.ok(!protocol.body.includes("export interface"));
+  // The relay's encryption and tweetnacl are the other shared files; the service worker is an app file.
+  assert.match((await get(f.port, "/src/e2ee.ts")).body, /export function phoneHello/);
+  const naclJs = await get(f.port, "/vendor/nacl-fast.min.js");
+  assert.equal(naclJs.status, 200);
+  assert.match(naclJs.type, /^text\/javascript/);
+  const sw = await get(f.port, "/sw.ts");
+  assert.match(sw.type, /^text\/javascript/);
+  assert.match(sw.body, /showNotification/);
+  assert.ok(!sw.body.includes("interface SwScope"));
   // node:http preserves the literal path; fetch/URL would normalize ../ before sending it.
   for (const target of ["/../src/sessions.ts", "/src/sessions.ts", "/%2e%2e%2fsrc/sessions.ts"]) {
     assert.equal((await get(f.port, target)).status, 404, target);
   }
+});
+
+test("presence: a phone that reported visible within 30 s counts as looking; hidden, gone or silent does not", { timeout: 4500 }, async t => {
+  let now = 1_000_000;
+  const subscribed: { clientId: string; endpoint: string; lang: string }[] = [];
+  const unsubscribed: string[] = [];
+  const f = await fixture(t, {
+    now: () => now,
+    push: { publicKey: "BPUBLICKEY", subscribe: (clientId, sub, lang) => { subscribed.push({ clientId, endpoint: sub.endpoint, lang }); }, unsubscribe: (id) => { unsubscribed.push(id); } },
+  });
+  const looking = (): boolean => f.server.someoneLooking();
+  const peer = await f.auth();
+  assert.equal(looking(), false, "connected is not looking");
+  peer.send({ t: "presence", visible: true });
+  await peer.barrier();
+  assert.equal(looking(), true);
+  now += VISIBLE_MS - 1;
+  assert.equal(looking(), true);
+  now += 2;
+  assert.equal(looking(), false, "no fresh report: the app may be frozen in the background");
+  peer.send({ t: "presence", visible: true });
+  await peer.barrier();
+  peer.send({ t: "presence", visible: false });
+  await peer.barrier();
+  assert.equal(looking(), false, "hidden");
+  peer.send({ t: "presence", visible: true });
+  await peer.barrier();
+  // Push requests carry the device id from hello.
+  peer.send({ t: "req", reqId: "k", op: { op: "push_key" } });
+  assert.deepEqual((await peer.take("res", m => m.reqId === "k")).msg, { t: "res", reqId: "k", ok: true, data: { publicKey: "BPUBLICKEY" } });
+  peer.send({ t: "req", reqId: "s", op: { op: "push_subscribe", subscription: { endpoint: "https://push.example/1", keys: { p256dh: "p", auth: "a" } }, lang: "ko" } });
+  await peer.take("res", m => m.reqId === "s");
+  assert.deepEqual(subscribed, [{ clientId: "test-client", endpoint: "https://push.example/1", lang: "ko" }]);
+  peer.send({ t: "req", reqId: "u", op: { op: "push_unsubscribe" } });
+  await peer.take("res", m => m.reqId === "u");
+  assert.deepEqual(unsubscribed, ["test-client"]);
+  peer.ws.close();
+  await waitFor(() => !looking());
 });
 
 test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {

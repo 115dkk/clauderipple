@@ -88,6 +88,8 @@ main.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -web
 /* ---- connection banner: says what is true, and how old what you see is ----------------------- */
 .banner { margin: 2px 12px 8px; padding: 12px 14px; border-radius: var(--r-md); background: var(--surface); border: 1px solid var(--line); display: flex; gap: 12px; align-items: flex-start; box-shadow: var(--shadow); }
 .banner .ripple { flex: none; margin-top: 2px; }
+.banner.push { margin-top: 18px; box-shadow: none; }
+.banner.push > .ic { flex: none; margin-top: 2px; color: var(--accent); }
 .banner .txt { flex: 1; min-width: 0; font-size: 14.5px; line-height: 1.45; color: var(--ink-2); }
 .banner .txt b { display: block; font-size: 15.5px; color: var(--ink); margin-bottom: 2px; }
 .banner .txt small { display: block; margin-top: 6px; color: var(--muted); font-size: 13px; }

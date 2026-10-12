@@ -190,22 +190,63 @@ written. Figures arrived as events (cache 0 → 50 → 75 %, context 9 %, 5 h 7 
   with seq/epoch and resume-after-seq, paged history, blobs (`eventlog.ts`), one WebSocket with
   request/response for models, folders, browse, blobs and subagent logs (`server.ts`), router admin
   reader (`router.ts`), bind/token/QR (`config.ts`). Bind default 127.0.0.1; `--bind tailscale|lan`
-  picks the address.
+  picks the address (plain http: no service worker, so no push — use the relay).
 - `packages/remote/web`: the PWA above; `?demo=<state>&theme=` renders the fixture states the
   screenshots come from (`docs/media/remote/*`, 390×844 CSS px at 2×, rendered with headless Chrome
   for Testing over CDP).
-- Run: `npm run remote -- --bind tailscale` in the checkout, scan the QR.
+- Run: `npm run remote -- --bind lan` in the checkout, scan the QR (same network only).
+
+## Built (M2 relay, M3 push, daily service — 2026-10-12)
+
+- **Relay** (`packages/remote/relay`): a Cloudflare Worker + one Durable Object per host
+  (`worker.ts`, logic in `room.ts`). Host control socket `/ws/host`, one phone socket `/ws/client`
+  and one host data socket `/ws/host-data` per phone; frames forwarded untouched, capped at
+  `RELAY_FRAME_CAP` (FRAME_CAP + 1 KiB), nothing stored but a hash of the host's secret (the first
+  host to use a server id registers it; another secret gets 403). Hibernation API, host pings
+  answered by `setWebSocketAutoResponse` so an idle room costs no duration. The PWA is served from
+  the same origin as static assets (`build-web.ts` → `dist/`, headers from `dist/_headers`; only
+  `/ws/*` runs the worker) — the https origin service workers and web push need. *Measured*
+  2026-10-12 with `wrangler dev` 4.142.0: host connected, a headless phone completed the handshake
+  and received a seeded session's events; headless Chrome opened the pairing link, registered
+  `sw.ts`, connected through the relay and showed the home list and "알림 켜기"; after the relay was
+  killed and restarted the host reconnected by itself ("connected again after 4 attempt(s)").
+- **E2EE** (`src/e2ee.ts`, shared with the browser): host X25519 key `host-key.json` (0600), phone
+  ephemeral key, hello/ready where only the paired host can make a `ready` that opens, then
+  XSalsa20-Poly1305 frames under a key from both sides' ephemeral keys, with counted nonces (a
+  dropped, repeated, reordered or altered frame closes the link). tweetnacl 1.0.3. The pairing
+  link `https://<relay>/#pair=<token>&server=<id>&hpk=<host key>` keeps all three in the fragment;
+  the token is checked inside the channel as on the direct path.
+- **Host** `--relay <url>` (remembered; `--relay off`): control socket with ping 10 s / stale 30 s /
+  ready 8 s / backoff `min(30 s, n × 1 s)` forever (`src/relay.ts`). Direct LAN/loopback still
+  works; the PWA uses the relay when it was opened from the relay's origin, the direct socket when
+  served by the host itself.
+- **Push** (`src/push.ts`, `web/notify.ts`, `web/sw.ts`): VAPID keys made once (`vapid.json`,
+  0600), one subscription per device (`push.json`), `web-push` 3.6.7 with aes128gcm. Sent when a
+  permission request waits, a turn finishes, or a turn fails — only if no connected phone said
+  "visible" in the last 30 s (the app re-reports every 10 s while in front). 404/410 drop the
+  subscription. Home shows "알림 켜기" (asks from the tap), or what it takes: add to Home Screen on
+  iPhone, an https address, or allowing notifications in Settings.
+- **Daily service** (`src/service.ts`): `ripple-host install [--print] | uninstall | status | pair`;
+  launchd agent `com.clauderipple.host` (RunAtLoad, KeepAlive, ThrottleInterval 10, ProcessType
+  Interactive, log `~/.clauderipple/logs/host.log`, PATH with `claude`'s folder). Under launchd the
+  QR is not printed (the log would hold the token); `pair` prints it.
+- **Power** (`src/power.ts`): one `caffeinate -i -w <host pid>` while any session is starting,
+  running or waiting on a permission; killed when none is.
+- Run: `npm run relay:dev` (local relay on 127.0.0.1:8798) and
+  `npm run remote -- --relay http://127.0.0.1:8798`, or the deployed relay's https URL.
 
 ## Not built / open
 
 - **Desktop-app session concurrency** — not tested on purpose; the host only lists its own
   sessions. Continuing a session the desktop app has open would put two writers on one transcript.
-- Relay + E2EE (M2), push + presence (M3), launchd agent `com.clauderipple.host` (not installed),
-  tray/dashboard pairing QR (the terminal prints it today).
-- Plain `http://` over Tailscale is not a secure context: no service worker, so no offline shell and
-  no web push. `tailscale serve` (HTTPS on `*.ts.net`) would fix it; not tried.
+- Relay not deployed; no shared public relay. Rate limits / abuse controls on the relay (anyone
+  can open rooms for new server ids) are not built.
+- Push not tested against a real push service (APNs / FCM) yet: needs the deployed https relay
+  and a phone. Apple's acceptance of the VAPID subject (`mailto:…@clauderipple.invalid` when the
+  relay is not https) is unverified; with an https relay the subject is the relay URL.
+- Tray/dashboard pairing QR (the terminal prints it), unpair from the phone, key rotation.
+- No offline shell: the service worker caches nothing on purpose.
+- `host.log` is not rotated.
 - Packaging: the published npm package cannot strip types under `node_modules`, so the host is not
   in `clauderipple` yet (`scripts/build-npm.mjs` would need to compile it).
-- Settings screen (the gear only toggles ko/en), unpair from the phone, session archive/delete,
-  image attachments, voice input.
-- Power assertion while a turn runs (spec: `caffeinate -i -w`), not added.
+- Settings screen (the gear only toggles ko/en), session archive/delete, image attachments, voice input.

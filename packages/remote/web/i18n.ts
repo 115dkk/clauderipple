@@ -24,7 +24,7 @@ const ko = {
   "pair.step1": "Mac 터미널의 ClaudeRipple 폴더에서 실행하세요",
   "pair.step2": "나온 QR을 이 폰 카메라로 찍으세요",
   "pair.step3": "열린 페이지를 홈 화면에 추가하면 앱처럼 열려요",
-  "pair.note": "폰과 Mac이 같은 Wi-Fi나 같은 Tailscale에 있어야 해요.",
+  "pair.note": "릴레이로 연결하면 어디서든 닿고 알림도 받아요. 릴레이 없이는 같은 Wi-Fi에서만 닿아요.",
   "home.title": "세션",
   "home.waiting": "내 확인이 필요해요",
   "home.active": "진행 중",
@@ -123,6 +123,15 @@ const ko = {
   "a11y.close": "닫기",
   "error.cwd": "그 폴더를 열 수 없어요",
   "error.generic": "문제가 생겼어요: {text}",
+  "push.title": "알림 받기",
+  "push.body": "허락이 필요하거나 작업이 끝나면, 앱을 닫아 둬도 폰으로 알려 드려요.",
+  "push.on": "알림 켜기",
+  "push.later": "나중에",
+  "push.install": "아이폰은 홈 화면에 추가한 앱에서만 알림을 받아요. Safari 공유 버튼 → ‘홈 화면에 추가’ 후, 홈 화면의 Ripple로 여세요.",
+  "push.denied": "이 폰에서 알림이 막혀 있어요. 설정 → 알림 → Ripple에서 허용해 주세요.",
+  "push.insecure": "알림은 https 주소에서만 돼요. Mac에서 릴레이로 페어링한 링크(QR)로 여세요.",
+  "push.done": "알림을 켰어요",
+  "push.failed": "알림을 켜지 못했어요: {text}",
 } as const;
 
 export type Key = keyof typeof ko;
@@ -148,7 +157,7 @@ const en: Record<Key, string> = {
   "pair.step1": "On the Mac, in the ClaudeRipple folder, run",
   "pair.step2": "Scan the QR it shows with this phone's camera",
   "pair.step3": "Add the page to your Home Screen to open it like an app",
-  "pair.note": "The phone and the Mac must be on the same Wi-Fi or the same tailnet.",
+  "pair.note": "Through the relay it works from anywhere, with notifications. Without it, only on the same Wi-Fi.",
   "home.title": "Sessions",
   "home.waiting": "Needs you",
   "home.active": "Running",
@@ -247,6 +256,15 @@ const en: Record<Key, string> = {
   "a11y.close": "Close",
   "error.cwd": "That folder can't be opened",
   "error.generic": "Something went wrong: {text}",
+  "push.title": "Get notified",
+  "push.body": "When a session needs your OK or finishes, your phone tells you — even with the app closed.",
+  "push.on": "Turn on notifications",
+  "push.later": "Later",
+  "push.install": "On iPhone, notifications only reach an app added to the Home Screen. Tap Share → ‘Add to Home Screen’ in Safari, then open Ripple from the Home Screen.",
+  "push.denied": "Notifications are blocked on this phone. Allow them in Settings → Notifications → Ripple.",
+  "push.insecure": "Notifications need an https address. Open the relay pairing link (QR) from the Mac.",
+  "push.done": "Notifications are on",
+  "push.failed": "Couldn't turn on notifications: {text}",
 };
 
 export const dictionaries: Record<Lang, Record<Key, string>> = { ko, en };

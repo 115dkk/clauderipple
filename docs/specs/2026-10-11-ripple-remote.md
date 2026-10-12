@@ -1,7 +1,8 @@
 # Ripple Remote — design draft (2026-10-11)
 
-Status: **draft; M1 (host + LAN/Tailscale PWA) built on `feat/remote-app`**, see
-[2026-10-11-ripple-remote-ux.md](2026-10-11-ripple-remote-ux.md). Facts marked *measured* have a source; everything else is a
+Status: **draft; M1 (host + LAN PWA), M2 (relay + E2EE, not deployed) and M3 push + launchd agent
+built (2026-10-12)**, see [2026-10-11-ripple-remote-ux.md](2026-10-11-ripple-remote-ux.md) "Built"
+and "Not built / open". Facts marked *measured* have a source; everything else is a
 decision or an open question and says so. Paseo and Happy are behavioral references only — no
 code is copied from them (project CLAUDE.md).
 
@@ -80,7 +81,7 @@ Every issue cited here was re-read with `gh api` on 2026-10-11 and is **open**: 
 | Happy #988: messages arrive in bursts | Partial messages streamed as they come; coalescing only on the client. |
 | RC: gives up after 10/30 min | The host never gives up and says on the band and in the tray when it is unreachable. |
 
-## Architecture (decisions, not built)
+## Architecture (decisions; built as listed in the UX doc)
 
 - **Host process `ripple-host`, its own launchd agent** (`com.clauderipple.host`, KeepAlive,
   `ProcessType=Interactive`). Not inside the router: the router is the daily driver and must not

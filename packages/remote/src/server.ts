@@ -6,12 +6,13 @@ import http from "node:http";
 import module from "node:module";
 import path from "node:path";
 import { WebSocketServer } from "ws";
-import type WebSocket from "ws";
 import { tokenMatches } from "./config.ts";
 import { browse, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
 import { FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp } from "./protocol.ts";
+import { VISIBLE_MS } from "./push.ts";
+import type { Notifier } from "./push.ts";
 import type { RouterClient } from "./router.ts";
 import type { Sessions } from "./sessions.ts";
 
@@ -26,6 +27,15 @@ const TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".webmanifest": "application/manifest+json",
 };
 
+export const CSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
+const require = module.createRequire(import.meta.url);
+/** Published path → file, for what the PWA loads from outside web/. The relay's build serves the same paths. */
+export const SHARED: Record<string, (pkgDir: string) => string> = {
+  "src/protocol.ts": (pkg) => path.join(pkg, "src", "protocol.ts"),
+  "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
+  "vendor/nacl-fast.min.js": () => require.resolve("tweetnacl/nacl-fast.min.js"),
+};
+
 export interface ServerOptions {
   listen: string;
   port: number;
@@ -37,11 +47,31 @@ export interface ServerOptions {
   version: string;
   recentCli: () => Promise<RecentSource[]>;
   log?: (line: string) => void;
+  push?: Pick<Notifier, "subscribe" | "unsubscribe"> & { publicKey: string };
+  now?: () => number;
+}
+
+/**
+ * A phone connection: a `ws` socket on the direct path, or a decrypted channel through the relay
+ * (relay.ts). Both carry the same JSON frames, so everything below is the same for either.
+ */
+export interface Peer {
+  readonly readyState: number;
+  readonly OPEN: number;
+  readonly bufferedAmount: number;
+  send(text: string): void;
+  close(code?: number, reason?: string): void;
+  terminate(): void;
+  on(event: "message" | "close" | "error", fn: (data?: unknown) => void): unknown;
 }
 
 interface Client {
-  ws: WebSocket;
+  ws: Peer;
   authed: boolean;
+  /** the phone's own id from hello: one push subscription per device */
+  clientId: string;
+  /** last time this client said the app is visible; 0 once it said hidden */
+  visibleAt: number;
   lastRx: number;
   /** session → last seq sent to this client */
   attached: Map<string, number>;
@@ -76,6 +106,15 @@ export class HostServer {
     if (!origin) return true;
     try { return new URL(origin).host === req.headers.host; } catch { return false; }
   }
+
+  /** True while a connected phone reported the app visible within VISIBLE_MS: then nobody needs a push. */
+  someoneLooking(): boolean {
+    const now = this.now();
+    for (const c of this.clients) if (c.authed && c.visibleAt > 0 && now - c.visibleAt < VISIBLE_MS && c.ws.readyState === c.ws.OPEN) return true;
+    return false;
+  }
+
+  private now(): number { return (this.opts.now ?? Date.now)(); }
 
   listen(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -161,8 +200,9 @@ export class HostServer {
 
   // ---- sockets --------------------------------------------------------------------------------
 
-  private connected(ws: WebSocket): void {
-    const c: Client = { ws, authed: false, lastRx: Date.now(), attached: new Map(), pumping: new Set() };
+  /** A phone connected, directly or through the relay; it must say hello with the token within 10 s. */
+  connected(ws: Peer): void {
+    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set() };
     this.clients.add(c);
     const helloTimer = setTimeout(() => { if (!c.authed) ws.close(4001, "hello"); }, 10_000);
     ws.on("message", (data) => {
@@ -197,6 +237,7 @@ export class HostServer {
     if (!c.authed) {
       if (msg.t === "hello" && tokenMatches(this.opts.token, msg.token)) {
         c.authed = true;
+        c.clientId = typeof msg.clientId === "string" ? msg.clientId.slice(0, 100) : "";
         this.send(c, { t: "ready", host: this.hostInfo, sessions: this.opts.sessions.list() });
       } else {
         this.send(c, { t: "denied", reason: "token" });
@@ -236,9 +277,10 @@ export class HostServer {
         return;
       case "interrupt": await s.interrupt(msg.session); return;
       case "set_model": await s.setModel(msg.session, msg.model, msg.effort); return;
+      case "presence": c.visibleAt = msg.visible === true ? this.now() : 0; return;
       case "req":
         try {
-          this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: await this.request(msg.op) });
+          this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: await this.request(msg.op, c) });
         } catch (e) {
           this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
         }
@@ -246,7 +288,7 @@ export class HostServer {
     }
   }
 
-  private async request(op: ReqOp): Promise<unknown> {
+  private async request(op: ReqOp, c: Client): Promise<unknown> {
     const s = this.opts.sessions;
     switch (op.op) {
       case "models": {
@@ -272,6 +314,17 @@ export class HostServer {
         if (!log) throw new Error("no such subagent");
         return log.readAfter(op.afterSeq ?? 0);
       }
+      case "push_key":
+        if (!this.opts.push) throw new Error("push is off on this host");
+        return { publicKey: this.opts.push.publicKey };
+      case "push_subscribe":
+        if (!this.opts.push) throw new Error("push is off on this host");
+        if (!c.clientId) throw new Error("no device id");
+        this.opts.push.subscribe(c.clientId, op.subscription, op.lang);
+        return { ok: true };
+      case "push_unsubscribe":
+        if (c.clientId) this.opts.push?.unsubscribe(c.clientId);
+        return { ok: true };
     }
   }
 
@@ -291,10 +344,11 @@ export class HostServer {
     if (url.pathname === "/healthz") { res.writeHead(200, { "content-type": "application/json" }).end(`{"ok":true}`); return; }
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405).end(); return; }
     const rel = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname).replace(/^\/+/, "");
-    // The one host file the client loads: the protocol's shared constants.
-    const file = rel === "src/protocol.ts" ? path.join(path.dirname(this.opts.webDir), "src", "protocol.ts") : path.resolve(this.opts.webDir, rel);
+    // Files from outside web/ the client loads: the shared protocol and encryption, and tweetnacl.
+    const shared = SHARED[rel];
+    const file = shared ? shared(path.dirname(this.opts.webDir)) : path.resolve(this.opts.webDir, rel);
     const ext = path.extname(file);
-    if ((rel !== "src/protocol.ts" && !file.startsWith(this.opts.webDir + path.sep)) || !TYPES[ext]) { res.writeHead(404).end(); return; }
+    if ((!shared && !file.startsWith(this.opts.webDir + path.sep)) || !TYPES[ext]) { res.writeHead(404).end(); return; }
     let stat: fs.Stats;
     try { stat = fs.statSync(file); } catch { res.writeHead(404).end(); return; }
     let body: string | Buffer;
@@ -312,7 +366,7 @@ export class HostServer {
       "cache-control": "no-cache",
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",
-      ...(ext === ".html" ? { "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'" } : {}),
+      ...(ext === ".html" ? { "content-security-policy": CSP } : {}),
     });
     res.end(req.method === "HEAD" ? undefined : body);
   }

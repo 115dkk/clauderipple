@@ -3,11 +3,11 @@
 // front. A half-open socket (the phone switched networks, the Mac went away without a FIN) is
 // caught by the app-level ping, not by TCP. Only a refused token stops it, because retrying a
 // token the host rejects would just say "connecting" forever — which would be a lie.
-import { BACKOFF_CAP_MS, PING_MS, STALE_MS } from "../src/protocol.ts";
+import { BACKOFF_CAP_MS, PING_MS, READY_MS, STALE_MS } from "../src/protocol.ts";
 import type { ClientMsg, HostMsg } from "../src/protocol.ts";
 
-/** A socket that opens but never says `ready` is as good as down. */
-export const READY_MS = 8_000;
+/** A socket that opens but never says `ready` is as good as down (through the relay: the handshake counts too). */
+export { READY_MS };
 
 export type LinkState = "connecting" | "open" | "waiting" | "offline" | "denied";
 

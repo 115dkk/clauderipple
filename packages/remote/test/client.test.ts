@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { backoff, Link, READY_MS } from "../web/conn.ts";
 import type { SocketLike } from "../web/conn.ts";
 import { dictionaries } from "../web/i18n.ts";
+import { pushAvailability } from "../web/pushstate.ts";
 import { mergeEvents, reduce } from "../web/timeline.ts";
 import { BACKOFF_CAP_MS, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { EventBody, SessionEvent } from "../src/protocol.ts";
@@ -226,4 +227,15 @@ test("every Korean key has an English twin and the same placeholders", () => {
   assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
   const vars = (s: string): string[] => (s.match(/\{\w+\}/g) ?? []).sort();
   for (const k of Object.keys(ko) as (keyof typeof ko)[]) assert.deepEqual(vars(en[k]), vars(ko[k]), k);
+});
+
+test("notifications: what the phone can do decides the card — https first, then the iPhone Home Screen rule", () => {
+  const base = { secure: true, hasServiceWorker: true, hasPush: true, ios: false, standalone: false, permission: "default" as const, subscribed: false };
+  assert.equal(pushAvailability({ ...base, secure: false }), "insecure");
+  assert.equal(pushAvailability({ ...base, ios: true, hasPush: false }), "install", "iOS Safari tab: add to Home Screen, not 'unsupported'");
+  assert.equal(pushAvailability({ ...base, ios: true, standalone: true }), "off");
+  assert.equal(pushAvailability({ ...base, hasPush: false }), "unsupported");
+  assert.equal(pushAvailability({ ...base, permission: "denied" }), "denied");
+  assert.equal(pushAvailability({ ...base, permission: "granted", subscribed: true }), "on");
+  assert.equal(pushAvailability({ ...base, permission: "granted", subscribed: false }), "off", "granted but no subscription yet: offer the button");
 });
