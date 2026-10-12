@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Keyboard, ScrollView, Text, View } from 'react-native';
+import { Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { remote } from '../../src/client';
@@ -19,6 +19,7 @@ export default function Session() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const state = useRemote();
   const [text, setText] = useState('');
+  const [tasksOpen, setTasksOpen] = useState(false);
   const session = state.sessions.find(s => s.id === id);
   const history = state.histories[id];
   const view = reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder);
@@ -87,9 +88,20 @@ export default function Session() {
         {live ? <StateRing state="running" size={16} spin /> : <Icon name="clock" size={16} color={c.warn} />}
         <Text style={{ fontSize: 13.5, color: live ? c.muted : c.warn }}>{live ? t('running.for', { t: duration(now - (view.turnStartedAt ?? now)) }) : t('running.lastSeen', { time: clock(link?.lastRx ?? now) })}</Text>
       </View>}
-      {(session?.tasks ?? 0) > 0 && <View accessibilityRole="text" style={{ alignSelf: 'flex-start', marginHorizontal: 6, marginBottom: 8, paddingVertical: 6, paddingHorizontal: 10, borderRadius: radius.sm, backgroundColor: c.surface2 }}>
-        <Text style={{ color: c.muted, fontSize: 13 }}>{t('tasks.running', { n: session!.tasks! })}</Text>
-      </View>}
+      {(session?.tasks ?? 0) > 0 && <>
+        {tasksOpen && !!session!.taskList?.length && <View style={{ marginHorizontal: 6, marginBottom: 6, borderRadius: radius.sm, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
+          {session!.taskList!.map((task, i) => <View key={task.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8, paddingHorizontal: 10, borderTopWidth: i ? 1 : 0, borderColor: c.line }}>
+            <Icon name={task.kind === 'shell' ? 'terminal' : 'model'} size={16} color={c.muted} />
+            <Text numberOfLines={2} style={{ flex: 1, minWidth: 0, color: c.ink2, fontSize: 13.5 }}>{task.label}</Text>
+            {task.startedAt !== null && <Text style={{ color: c.faint, fontSize: 12.5, fontVariant: ['tabular-nums'] }}>{duration(now - task.startedAt)}</Text>}
+          </View>)}
+        </View>}
+        <Pressable accessibilityRole="button" accessibilityState={{ expanded: tasksOpen }} disabled={!session!.taskList?.length} onPress={() => setTasksOpen(v => !v)}
+          style={({ pressed }) => ({ alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 4, marginHorizontal: 6, marginBottom: 8, paddingVertical: 6, paddingHorizontal: 10, borderRadius: radius.sm, backgroundColor: pressed ? c.sunk : c.surface2 })}>
+          <Text style={{ color: c.muted, fontSize: 13 }}>{t('tasks.running', { n: session!.tasks! })}</Text>
+          {!!session!.taskList?.length && <Icon name={tasksOpen ? 'down' : 'chevron'} size={14} color={c.muted} />}
+        </Pressable>
+      </>}
       {!readOnly && session && <Composer testID="session-composer" value={text} onChangeText={setText} placeholder={t('composer.reply')} canSend={!!text.trim()} onSend={() => { void send(); }}
         onStop={['running', 'starting', 'waiting'].includes(session.state) ? () => { try { remote.send({ t: 'interrupt', session: id }); } catch (e) { remote.report(e); } } : undefined} />}
     </View>

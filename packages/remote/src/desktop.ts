@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { messageContent, type ImageSink } from "./images.ts";
-import type { EventBody, SessionSummary, ToolCall } from "./protocol.ts";
+import type { BackgroundTask, EventBody, SessionSummary, ToolCall } from "./protocol.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
@@ -194,10 +194,11 @@ function missing(error: unknown): boolean {
 
 /** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks. */
 export class BackgroundTasks {
-  private tools = new Map<string, { name: string; background: boolean }>();
-  private active = new Set<string>();
+  private tools = new Map<string, { name: string; background: boolean; label: string }>();
+  private active = new Map<string, BackgroundTask>();
   private terminal = new Set<string>();
   get count(): number { return this.active.size; }
+  get list(): BackgroundTask[] { return Array.from(this.active.values()); }
 
   accept(line: string): void {
     const r = record(line);
@@ -216,7 +217,8 @@ export class BackgroundTasks {
       const b = object(value);
       if (r.type === "assistant" && b?.type === "tool_use" && typeof b.id === "string") {
         const name = str(b.name);
-        if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: object(b.input)?.run_in_background === true });
+        const input = object(b.input);
+        if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: input?.run_in_background === true, label: str(input?.description) || str(input?.command) || name });
       }
       if (r.type !== "user" || b?.type !== "tool_result" || b.is_error === true) continue;
       const tool = this.tools.get(str(b.tool_use_id));
@@ -229,7 +231,8 @@ export class BackgroundTasks {
       } else if (result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(body)) {
         id = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(body)?.[1] || "";
       }
-      if (id && !this.terminal.has(id)) this.active.add(id);
+      const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
+      if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null });
       this.tools.delete(str(b.tool_use_id));
     }
   }
@@ -257,7 +260,10 @@ export class DesktopSessions {
     return Array.from(this.sources.values()).filter(s => !excluded.has(s.summary.id)).map(s => {
       // Unfinished-looking tasks linger in old transcripts; only a busy process can have any running.
       const live = this.liveProcess(s.summary.id);
-      if (live?.bridgeSessionId) s.summary = { ...s.summary, tasks: live.status === "busy" || live.status === "shell" ? this.backgroundTasks(s.summary.id) : 0 };
+      if (live?.bridgeSessionId) {
+        const taskList = live.status === "busy" || live.status === "shell" ? this.backgroundTaskList(s.summary.id) : [];
+        s.summary = { ...s.summary, tasks: taskList.length, taskList };
+      }
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
         ? { ...s.summary, lastSeq: cached.log.lastSeq, epoch: cached.log.epoch } : s.summary;
@@ -267,7 +273,7 @@ export class DesktopSessions {
   poll(): boolean {
     const fingerprint = () => JSON.stringify(Array.from(this.sources.values())
       .filter(s => !this.opts.excluded().has(s.summary.id))
-      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title, s.summary.tasks]));
+      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title, s.summary.tasks, s.summary.taskList?.map(t => t.id).join()]));
     const before = fingerprint();
     this.list();
     return before !== fingerprint();
@@ -301,9 +307,11 @@ export class DesktopSessions {
     } finally { fs.closeSync(fd); }
   }
 
-  backgroundTasks(id: string): number {
+  backgroundTasks(id: string): number { return this.backgroundTaskList(id).length; }
+
+  backgroundTaskList(id: string): BackgroundTask[] {
     const source = this.sources.get(id);
-    if (!source) return 0;
+    if (!source) return [];
     const fd = this.open(source.file);
     try {
       const size = fs.fstatSync(fd).size;
@@ -313,7 +321,7 @@ export class DesktopSessions {
         this.tasks.set(id, cached);
       }
       cached.offset = scanLines(fd, size, line => cached!.tracker.accept(line), cached.offset);
-      return cached.tracker.count;
+      return cached.tracker.list;
     } finally { fs.closeSync(fd); }
   }
 

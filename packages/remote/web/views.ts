@@ -258,6 +258,16 @@ export function workingLine(view: SessionView, ui: UI): string {
   return `<div class="working">${stateRing("running", 16)}<span>${esc(t("running.for", { t: duration(ui.now - since) }))}</span></div>`;
 }
 
+/** The background-task chip; with a task list from the host it opens to show what is running. */
+export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean): string {
+  if (!s?.tasks) return "";
+  const list = s.taskList ?? [];
+  const chip = esc(t("tasks.running", { n: s.tasks }));
+  if (!list.length) return `<div class="tasks-chip" role="status">${chip}</div>`;
+  const rows = open ? `<div class="tasks-list">${list.map(task => `<div class="task">${task.kind === "shell" ? icon.terminal(16) : icon.model(16)}<span>${esc(task.label)}</span>${task.startedAt === null ? "" : `<time>${esc(duration(ui.now - task.startedAt))}</time>`}</div>`).join("")}</div>` : "";
+  return `${rows}<button class="tasks-chip" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
+}
+
 // ---- sheets ------------------------------------------------------------------------------------
 
 export function sheet(ui: UI): string {

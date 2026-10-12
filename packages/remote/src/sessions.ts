@@ -330,7 +330,8 @@ export class Sessions {
     // The transcript keeps tasks whose end was never recorded; only a process the registry calls
     // busy can have any running, so an idle one reports none.
     const working = process?.status === "busy" || process?.status === "shell";
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: working ? this.desktop?.backgroundTasks(r.sdkSessionId ?? r.id) ?? 0 : 0, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    const taskList = working ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : [];
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {

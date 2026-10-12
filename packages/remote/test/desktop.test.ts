@@ -28,6 +28,18 @@ function fixture(t: import("node:test").TestContext) {
   return { root, projects, project, desktop, excluded, advance: () => { now += 6000; } };
 }
 
+test("background task list carries the launch description, command fallback and start time", () => {
+  const tasks = new BackgroundTasks();
+  tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Agent", id: "a", input: { description: "Review diff", run_in_background: true } }] } }));
+  tasks.accept(line({ type: "user", timestamp: "2026-10-13T01:00:00.000Z", toolUseResult: { isAsync: true, agentId: "w1" }, message: { content: [{ type: "tool_result", tool_use_id: "a", content: "launch" }] } }));
+  tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "b", input: { command: "npm test", run_in_background: true } }] } }));
+  tasks.accept(line({ type: "user", toolUseResult: { backgroundTaskId: "s1" }, message: { content: [{ type: "tool_result", tool_use_id: "b", content: "started" }] } }));
+  assert.deepEqual(tasks.list, [
+    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z") },
+    { id: "s1", kind: "shell", label: "npm test", startedAt: null },
+  ]);
+});
+
 test("background task lifecycle counts async Agent/Task and Bash, not synchronous or sidechain work", () => {
   const tasks = new BackgroundTasks();
   const launch = (name: string, id: string, result: Record<string, unknown>, background = false) => {
@@ -41,6 +53,7 @@ test("background task lifecycle counts async Agent/Task and Bash, not synchronou
   launch("Task", "b", { isAsync: true, agentId: "agent" });
   launch("Bash", "c", { backgroundTaskId: "shell" }, true);
   assert.equal(tasks.count, 2);
+  assert.deepEqual(tasks.list.map(task => [task.id, task.kind, task.label]), [["agent", "agent", "Task"], ["shell", "shell", "Bash"]]);
   tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", id: "fallback", name: "Agent", input: {} }] } }));
   tasks.accept(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "fallback", content: "Async agent launched successfully. agentId: fallback-worker" }] } }));
   assert.equal(tasks.count, 3);

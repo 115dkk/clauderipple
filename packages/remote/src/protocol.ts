@@ -103,6 +103,8 @@ export interface SessionSummary {
   desktopBridge?: boolean;
   /** Running background workers/shells, separate from the main turn. */
   tasks?: number;
+  /** What those background tasks are, oldest first; absent on older hosts. */
+  taskList?: BackgroundTask[];
   /** The main turn is idle but background work (subagents, shells) still runs: the app's dark blink. */
   background?: boolean;
   /** open permission requests */
@@ -112,6 +114,8 @@ export interface SessionSummary {
   lastSeq: number;
   epoch: string;
 }
+
+export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null }
 
 export interface ModelOption { model: string; name: string; provider: string; efforts: Effort[]; usable: boolean }
 export interface ProviderGroup { provider: string; label: string; usable: boolean; models: ModelOption[] }
