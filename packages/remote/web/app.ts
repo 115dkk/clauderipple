@@ -11,8 +11,8 @@ import { pushAvailability } from "./pushstate.ts";
 import { RelaySocket, browserNacl, relayClientUrl } from "./secure.ts";
 import type { RawSocket, RelayPairing } from "./secure.ts";
 import { PING_MS } from "../src/protocol.ts";
-import { mergeEvents, reduce } from "./timeline.ts";
-import type { Item, Outgoing, SessionView } from "./timeline.ts";
+import { mergeEvents, reduce, timelineItems } from "./timeline.ts";
+import type { TimelineItem, Outgoing, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
 import type { UI } from "./views.ts";
 
@@ -409,7 +409,7 @@ export class App {
     if (chromeOnly) return;
     const main = $("main");
     const stick = this.pinned;
-    patchList<Item>($("#tl"), view.items, (it) => V.item(it, this.ui));
+    patchList<TimelineItem>($("#tl"), timelineItems(view), (it) => V.item(it, this.ui));
     const c = this.cache(id);
     $("#older").hidden = !c.loadingOlder;
     if (stick) this.scrollToBottom();
@@ -564,6 +564,11 @@ export class App {
         break;
       case "perm-more": this.ui.permOpen.add(id); this.renderSession(true); break;
       case "workers": this.ui.workersOpen = !this.ui.workersOpen; this.renderSession(true); break;
+      case "tool-group":
+        if (this.ui.expanded.has(id)) this.ui.expanded.delete(id);
+        else this.ui.expanded.set(id, null);
+        this.rerenderItems();
+        break;
       case "tool": await this.toggleTool(id); break;
       case "sub": await this.openSub(id); break;
       case "pick-folder": await this.openFolderSheet(); break;
@@ -649,7 +654,7 @@ export class App {
     try {
       const page = await this.req<SubPage>({ op: "sub", session: this.screen.id, sub });
       const view = reduce(page.events);
-      const html = view.items.map((i) => V.item(i, this.ui)).join("");
+      const html = timelineItems(view).map((i) => V.item(i, this.ui)).join("");
       setHTML($("#sheet"), `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog"><div class="grab"></div><div class="sh"><b>${esc(t("sub.worker"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div><div class="sbody"><div class="tl">${html}</div></div></div>`);
     } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
   }

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import type { BlobChunk, SubPage, Text as WireText } from '../../../packages/remote/src/protocol.ts';
-import { reduce, type Item } from '../../../packages/remote/web/timeline.ts';
+import { reduce, timelineItems, type Item, type TimelineItem as DisplayItem } from '../../../packages/remote/web/timeline.ts';
 import { t, dictionaries, lang, type Key } from '../../../packages/remote/web/i18n.ts';
 import { remote } from './client';
 import { copy, useStyles } from './ui';
@@ -57,7 +57,7 @@ function ToolRow({ tool, session }: { tool: Extract<Item, { type: 'assistant' }>
 
 function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; session: string }) {
   const { c } = useStyles();
-  const [items, setItems] = useState<Item[] | null>(null);
+  const [items, setItems] = useState<DisplayItem[] | null>(null);
   const load = async () => {
     try {
       let events: SubPage['events'] = [], afterSeq = 0;
@@ -67,7 +67,7 @@ function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; 
         if (!page.more || !page.events.length) break;
         afterSeq = page.events.at(-1)!.seq;
       }
-      setItems(reduce(events).items);
+      setItems(timelineItems(reduce(events)));
     } catch (e) { remote.report(e); }
   };
   const status = item.status === 'running' ? t('sub.running') : item.status === 'done' ? t('sub.done') : t('sub.failed');
@@ -88,9 +88,20 @@ function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; 
   </View>;
 }
 
-export function TimelineItem({ item, session, readOnly }: { item: Item; session: string; readOnly: boolean }) {
+export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; session: string; readOnly: boolean }) {
   const { c, s } = useStyles();
   const [expanded, setExpanded] = useState(false);
+  if (item.type === 'toolGroup') {
+    const label = item.running ? item.latest : item.workers ? t('tool.groupWorkers', { n: item.tools, w: item.workers }) : t('tool.group', { n: item.tools });
+    return <View style={{ gap: 4 }}>
+      <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
+        {item.running ? <StateRing state="running" size={16} spin /> : <Icon name="terminal" size={16} color={c.ink2} />}
+        <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: c.muted }}>{label}</Text>
+        <View style={expanded ? { transform: [{ rotate: '90deg' }] } : undefined}><Icon name="chevron" size={16} color={c.muted} /></View>
+      </Pressable>
+      {expanded && item.rows.map(row => row.type === 'tool' ? <ToolRow key={row.tool.id} tool={row.tool} session={session} /> : <Worker key={row.key} item={row} session={session} />)}
+    </View>;
+  }
   if (item.type === 'start') return <Text style={{ alignSelf: 'center', fontSize: 12.5, color: c.faint, paddingVertical: 4 }}>{t('history.start')}</Text>;
   if (item.type === 'user') return <View style={{ alignSelf: 'flex-end', maxWidth: '86%', backgroundColor: c.userBg, paddingVertical: 10, paddingHorizontal: 14, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderBottomLeftRadius: 20, borderBottomRightRadius: 6, opacity: item.queued ? 0.72 : 1 }}>
     <Text selectable style={{ fontSize: 16, lineHeight: 24, color: c.ink }}>{item.text}</Text>

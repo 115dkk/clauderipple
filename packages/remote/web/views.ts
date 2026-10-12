@@ -8,7 +8,7 @@ import { t } from "./i18n.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
-import type { Item, SessionView, ToolView } from "./timeline.ts";
+import type { TimelineItem, SessionView, ToolView } from "./timeline.ts";
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }
 
@@ -191,8 +191,13 @@ function toolRow(tool: ToolView, ui: UI): string {
   return row + (body ? `<details class="tool-details"><summary>${esc(t("perm.showAll"))}</summary><div class="tool-out">${esc(body)}</div></details><div class="tool-preview tool-out">${esc(body.slice(0, 1200).split("\n").slice(0, 12).join("\n"))}${body.length > 1200 || body.split("\n").length > 12 ? "\n…" : ""}</div>` : "");
 }
 
-export function item(it: Item, ui: UI): string {
+export function item(it: TimelineItem, ui: UI): string {
   switch (it.type) {
+    case "toolGroup": {
+      const open = ui.expanded.has(it.key);
+      const label = it.running ? it.latest : it.workers ? t("tool.groupWorkers", { n: it.tools, w: it.workers }) : t("tool.group", { n: it.tools });
+      return `<div class="tools"><button class="tool" data-act="tool-group" data-id="${esc(it.key)}" aria-expanded="${open}">${it.running ? stateRing("running", 16) : toolIcon("Bash")}<span class="sm">${esc(label)}</span><span style="transform:rotate(${open ? 90 : 0}deg)">${icon.chevron(16)}</span></button>${open ? it.rows.map(row => row.type === "tool" ? toolRow(row.tool, ui) : item(row, ui)).join("") : ""}</div>`;
+    }
     case "start":
       return `<div class="start">${esc(t("history.start"))}</div>`;
     case "user": {

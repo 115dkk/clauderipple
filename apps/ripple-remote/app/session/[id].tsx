@@ -7,7 +7,7 @@ import { Button, Composer, ConnectionBanner, Frame, IconButton, copy, useKeyboar
 import { StateRing } from '../../src/mascot';
 import { Icon } from '../../src/icons';
 import { TimelineItem } from '../../src/timeline';
-import { reduce } from '../../../../packages/remote/web/timeline.ts';
+import { reduce, timelineItems } from '../../../../packages/remote/web/timeline.ts';
 import { t } from '../../../../packages/remote/web/i18n.ts';
 import { clock, duration, folderName } from '../../../../packages/remote/web/dom.ts';
 export default function Session() {
@@ -69,7 +69,7 @@ export default function Session() {
         if (dragging.current) pinned.current = e.contentSize.height - e.contentOffset.y - e.layoutMeasurement.height < 80;
       }}>
       {history?.hasOlder && <Button title={t('history.loading')} ghost onPress={() => { try { remote.older(id); } catch (e) { remote.report(e); } }} />}
-      {view.items.map(item => <TimelineItem key={item.key} item={item} session={id} readOnly={readOnly} />)}
+      {timelineItems(view).map(item => <TimelineItem key={item.key} item={item} session={id} readOnly={readOnly} />)}
     </ScrollView>
     <View style={[s.dock, { paddingBottom: keyboard ? 10 : insets.bottom + 10 }]}>
       {readOnly && <Text style={{ fontSize: 12.5, color: c.muted, textAlign: 'center', marginBottom: 2 }}>{copy('Mac에서 진행한 대화입니다. 이 앱에서는 읽기만 가능합니다.', 'This conversation ran on your Mac. It is read-only here.')}</Text>}

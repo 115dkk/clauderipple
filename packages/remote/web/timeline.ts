@@ -121,6 +121,62 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
   return { items, state, figures, model, effort, open, turnStartedAt, lastSeq };
 }
 
+export type ActivityRow = { type: "tool"; tool: ToolView } | Extract<Item, { type: "subagent" }>;
+export interface ToolGroup {
+  type: "toolGroup"; key: string; ver: string; rows: ActivityRow[];
+  tools: number; workers: number; running: boolean; latest: string;
+}
+export type TimelineItem = Item | ToolGroup;
+
+/** Presentation only: text, permissions and turn boundaries separate consecutive activity. */
+export function timelineItems(view: Pick<SessionView, "items" | "state">): TimelineItem[] {
+  const result: TimelineItem[] = [];
+  const workers = new Map(view.items.flatMap(i => i.type === "subagent" ? [[i.toolUseId, i] as const] : []));
+  const owned = new Set(view.items.flatMap(i => i.type === "assistant" ? i.tools.map(t => t.id) : []));
+  let group: ToolGroup | null = null;
+  const add = (row: ActivityRow, key: string, ver: string): void => {
+    if (!group) {
+      group = { type: "toolGroup", key: `g${key}`, ver: "", rows: [], tools: 0, workers: 0, running: false, latest: "" };
+      result.push(group);
+    }
+    group.rows.push(row);
+    group.ver += ver;
+    if (row.type === "tool") {
+      if (row.tool.name === "Agent" || row.tool.name === "Task") group.workers++;
+      else group.tools++;
+      group.latest = row.tool.summary || row.tool.name;
+    }
+    else { group.workers++; group.latest = row.description; }
+  };
+  for (const item of view.items) {
+    if (item.type === "subagent") {
+      if (!owned.has(item.toolUseId)) add(item, item.key, item.ver);
+      continue;
+    }
+    if (item.type === "assistant") {
+      if (typeof item.text !== "string" || item.text.trim() || item.streaming) {
+        group = null;
+        result.push({ ...item, tools: [] });
+      }
+      for (const tool of item.tools) {
+        const worker = workers.get(tool.id);
+        if (worker) add(worker, worker.key, worker.ver);
+        else add({ type: "tool", tool }, tool.id, item.ver);
+      }
+      continue;
+    }
+    group = null;
+    result.push(item);
+  }
+  // Only the final activity run of the active turn spins, even between tool results.
+  const last = result.at(-1);
+  if (last?.type === "toolGroup" && (view.state === "running" || view.state === "starting" || view.state === "waiting")) {
+    last.running = true;
+    last.ver += "running";
+  }
+  return result;
+}
+
 /** Merge a page into a sorted event list without duplicates (pages may overlap after a reconnect). */
 export function mergeEvents(into: SessionEvent[], page: readonly SessionEvent[]): SessionEvent[] {
   if (page.length === 0) return into;
