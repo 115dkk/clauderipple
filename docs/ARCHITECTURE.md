@@ -214,6 +214,16 @@ request went, and a `Pane` holds the request log.
   path list other plugins may share, so only the entry whose manifest is named
   `clauderipple-status` is added or removed (`clauderipple mod on|off`, the
   Clients screen switch).
+- **Developing it, sessions load a copy at the last commit.** With
+  `CLAUDE_CODE_PLUGIN_DIR_WATCH=1` a session reloads a plugin folder whenever
+  it changes, and each reload leaves "ripple reloaded (N hooks: …)" in every
+  open transcript: pointed at the checkout, one session editing the mod
+  flooded all the others (2026-10-13). On this machine the entry is
+  `~/.clauderipple/mod`, which `scripts/sync-mod.mts` keeps at main's
+  `packages/mod` from the post-commit, post-merge and post-rewrite hooks
+  (`--install` writes them), writing only files that differ. Uncommitted work
+  never reaches everyday sessions; `clauderipple mod on` would point the entry
+  back at the checkout.
 
 ### 3b. Shared mod settings and judge-only models (2026-10-10)
 

@@ -21,6 +21,9 @@ mod 플러그인 테스트 128, typecheck 통과. 일상 서비스 반영 완료
   기본값을 채워 전체 PUT → 주군 칸 목록·모드 "1" 소실 → 맥스=Opus 기본값으로 큰 작업이 Opus로 감. 복구 후 방지(`02a6856`):
   PUT에 `schemaVersion` 필수(옛 코드 426 거절), 모드는 사용자 변경만 라우터 최신본에 재적용, 저장마다 `mod-settings.json.bak-<rev>` 10개 보관.
   ⚠ 모드 코드를 바꾸면 **각 세션에서 `/reload-plugins`** 해야 새 코드가 돈다(안 하면 옛 코드가 계속 돈다 — 오늘 Opus 오배정의 첫 원인).
+  **10-13 이후:** 세션은 저장소가 아니라 `~/.clauderipple/mod` 사본을 읽는다(`settings.json` `CLAUDE_CODE_PLUGIN_DIRS`, `CLAUDE_CODE_PLUGIN_DIR_WATCH=1`).
+  사본은 main 커밋 때 git 훅이 `scripts/sync-mod.mts`로 갱신 → 커밋하면 자동 반영, 커밋 안 한 수정은 안 들어감.
+  이유: 저장소를 직접 읽으면 한 세션이 모드를 저장할 때마다 모든 세션에 "ripple reloaded (11 hooks…)"가 찍혔다. 훅이 없는 새 클론은 `node scripts/sync-mod.mts --install`.
 - 현재 주군 칸: 로우 deepseek-v4.1-flash·높음 → glm-5.3-flash·높음 / 미디움 deepseek-v4.1-flash·최대 → Luna·높음 /
   하이 Sol·중간 → Sonnet·높음 / 맥스 Astra·중간 → Opus·높음 → Fable·중간. 모드 "1"(적극 위임, ChatGPT 한도 초기화 때 종료).
 
