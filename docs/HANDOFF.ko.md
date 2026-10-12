@@ -58,9 +58,10 @@ mod 플러그인 테스트 128, typecheck 통과. 일상 서비스 반영 완료
   **직접 오가며 같은 순간의 화면을 나란히 대조**하고, 어긋나는 항목마다 원천 데이터(transcript, `~/.claude/sessions`, Remote Control
   `worker_status`, 사이드바 저장소)를 뽑아 원인을 확정한 뒤 고친다. 짐작으로 규칙을 정하지 않는다.
   작업 시간: **실측 확정·수정(10-13).** 클로드리플 세션에서 맥 50분(23:31:39 사람 메시지부터) vs 휴대폰 11분(호스트 첫 폴링
-  `state running` 00:12부터). 맥 세션 로그엔 `turn`·`result` 이벤트가 없다. 이제 `web/timeline.ts`가 `user` 이벤트 시각을 턴 시작으로 쓰고,
-  `idle`·`error`에서 끊는다(`stopped`는 호스트 재시작 깜빡임이라 안 끊음). 남은 의심: 턴 도중 자동 압축의 "Continuation record"도
-  `user`로 들어와 시간을 리셋할 수 있다 — transcript의 `origin.kind: "human"`으로 가를 수 있으나 아직 안 함.
+  `state running` 00:12부터). 맥 세션 로그엔 `turn`·`result` 이벤트가 없고, **휴대폰은 로그 끝부분만 받아** 23:31 메시지(seq 568)를
+  아예 못 본다 — 그래서 클라이언트 리듀서만 고친 첫 수정(`1a8b076`)은 실기기에서 여전히 15분이었다. 최종: 호스트가 transcript에서
+  마지막 `origin.kind: "human"` 기록 시각을 턴 시작으로 읽어(압축 요약·작업 알림 제외, end_turn·중단에서 끊음) 세션 요약 `turnStartedAt`으로
+  보낸다. 시뮬레이터에서 00:31에 "60분 동안 작업 중" 확인. 맥 앱 화면은 computer-use로 못 찍는다(Claude 앱 자체는 제어 금지) — 맥 쪽 대조는 주군 화면이나 원천 데이터로.
 - **윈도우 호스트:** 맥 전용 4곳(launchd, 키체인, `script` pty, `ps`) — `docs/specs/2026-10-12-ripple-remote-native.md` 표. 윈도우 작업 때 진행(주군 결정).
 - **앱 푸시:** 개발 빌드는 알림 없음. EAS 프로젝트(`eas init`, rippleworks) 필요 — 외부 계정 작업이라 주군 확인 후. 의존성 audit high 19건 미검토.
 - **메인 대화 강도 하한:** 권장은 하한 "중간" 이상 — 주군 결정 대기.
