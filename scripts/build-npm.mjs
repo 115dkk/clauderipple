@@ -25,10 +25,10 @@ execFileSync(npm, ["--workspace", "@clauderipple/app", "run", "build"], { cwd: r
 
 fs.cpSync(path.join(root, "packages", "ui"), path.join(dist, "ui"), { recursive: true });
 // The status mod is loaded by Claude Code itself, as TypeScript; the API types it writes beside the
-// manifest when it loads one are its own and are left out.
+// manifest when it loads one are its own and are left out, as is the design preview (a dev tool).
 fs.cpSync(path.join(root, "packages", "mod"), path.join(dist, "mod"), {
   recursive: true,
-  filter: (source) => !source.includes(`${path.sep}.claude-plugin${path.sep}types`),
+  filter: (source) => !source.includes(`${path.sep}.claude-plugin${path.sep}types`) && !source.includes(`${path.sep}mod${path.sep}preview`),
 });
 fs.cpSync(path.join(root, "packages", "app", "dist"), path.join(dist, "app", "dist"), { recursive: true });
 fs.cpSync(path.join(root, "packages", "app", "assets"), path.join(dist, "app", "assets"), { recursive: true });
