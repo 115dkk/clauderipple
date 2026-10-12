@@ -40,6 +40,22 @@ test("background task list carries the launch description, command fallback and 
   ]);
 });
 
+test("the main turn starts at the person's message, not a compaction summary or task notification", () => {
+  const tasks = new BackgroundTasks();
+  const user = (at: string, content: unknown, origin?: unknown) => tasks.accept(line({ type: "user", timestamp: at, ...(origin ? { origin } : {}), message: { content } }));
+  user("2026-10-12T14:31:01.617Z", "Continuation record from the previous conversation");
+  assert.equal(tasks.turnStartedAt, null);
+  user("2026-10-12T14:31:39.041Z", "진짜 너무 촌스럽다", { kind: "human" });
+  tasks.accept(line({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "tool_use", name: "Read", id: "r", input: {} }] } }));
+  user("2026-10-12T15:00:00.000Z", "<task-notification></task-notification>", { kind: "task-notification" });
+  assert.equal(tasks.turnStartedAt, Date.parse("2026-10-12T14:31:39.041Z"));
+  tasks.accept(line({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] } }));
+  assert.equal(tasks.turnStartedAt, null);
+  user("2026-10-12T16:00:00.000Z", "again", { kind: "human" });
+  user("2026-10-12T16:00:05.000Z", "[Request interrupted by user]");
+  assert.equal(tasks.turnStartedAt, null);
+});
+
 test("background task lifecycle counts async Agent/Task and Bash, not synchronous or sidechain work", () => {
   const tasks = new BackgroundTasks();
   const launch = (name: string, id: string, result: Record<string, unknown>, background = false) => {

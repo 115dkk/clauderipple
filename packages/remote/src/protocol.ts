@@ -103,6 +103,9 @@ export interface SessionSummary {
   desktopBridge?: boolean;
   /** Running background workers/shells, separate from the main turn. */
   tasks?: number;
+  /** Desktop sessions: when the running main turn began, from the person's message in the transcript.
+   * The phone's event window may not reach back that far. Null when unknown; absent on older hosts. */
+  turnStartedAt?: number | null;
   /** What those background tasks are, oldest first; absent on older hosts. */
   taskList?: BackgroundTask[];
   /** The main turn is idle but background work (subagents, shells) still runs: the app's dark blink. */

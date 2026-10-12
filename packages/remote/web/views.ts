@@ -250,11 +250,11 @@ export function permCard(view: SessionView, ui: UI): string {
   return `<div class="perm" role="alertdialog" aria-label="${esc(t("perm.title", { tool: p.tool }))}"><div class="hd">${icon.shield(16)}<span>${esc(p.tool)}</span>${view.open.length > 1 ? `<span class="of">${esc(t("perm.of", { i: 1, n: view.open.length }))}</span>` : ""}</div><div class="q">${esc(p.title || t("perm.title", { tool: p.tool }))}</div><div class="what${open ? " open" : ""}">${esc(what)}</div>${long && !open ? `<button class="more" data-act="perm-more" data-id="${esc(p.id)}">${esc(t("perm.showAll"))}</button>` : ""}<div class="act"><button class="deny" data-act="deny" data-id="${esc(p.id)}">${esc(t("perm.deny"))}</button><button class="allow" data-act="allow" data-id="${esc(p.id)}">${icon.check(20)}${esc(t("perm.allow"))}</button></div>${p.canAlways ? `<button class="always" data-act="always" data-id="${esc(p.id)}">${esc(t("perm.always"))}</button>` : ""}</div>`;
 }
 
-export function workingLine(view: SessionView, ui: UI): string {
+export function workingLine(view: SessionView, ui: UI, s?: SessionSummary): string {
   if (!(view.state === "running" || view.state === "starting") || view.open.length) return "";
   // Disconnected, a ticking "working for" would claim knowledge we do not have: say when it was last seen working.
   if (ui.link.state !== "open") return `<div class="working stale">${icon.clock(16)}<span>${esc(t("running.lastSeen", { time: clock(ui.link.lastRx ?? ui.now) }))}</span></div>`;
-  const since = view.turnStartedAt ?? ui.now;
+  const since = s?.turnStartedAt ?? view.turnStartedAt ?? ui.now;
   return `<div class="working">${stateRing("running", 16)}<span>${esc(t("running.for", { t: duration(ui.now - since) }))}</span></div>`;
 }
 

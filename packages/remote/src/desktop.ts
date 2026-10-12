@@ -192,18 +192,26 @@ function missing(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "");
 }
 
-/** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks. */
+/** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks.
+ * Also the main turn's start as the app counts it: the person's last message (origin "human"; compaction
+ * summaries and task notifications are not), until the model ends its turn or the person interrupts. */
 export class BackgroundTasks {
   private tools = new Map<string, { name: string; background: boolean; label: string }>();
   private active = new Map<string, BackgroundTask>();
   private terminal = new Set<string>();
   get count(): number { return this.active.size; }
   get list(): BackgroundTask[] { return Array.from(this.active.values()); }
+  turnStartedAt: number | null = null;
 
   accept(line: string): void {
     const r = record(line);
     if (!r || r.isSidechain === true) return;
     const content = object(r.message)?.content;
+    const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
+    if (r.type === "user" && object(r.origin)?.kind === "human" && Number.isFinite(at)) this.turnStartedAt = at;
+    else if (r.type === "user" && typeof content === "string" && /^\[Request interrupted/.test(content)) this.turnStartedAt = null;
+    else if (r.type === "assistant" && Array.isArray(content) && !content.some(b => object(b)?.type === "tool_use") &&
+      ["end_turn", "stop_sequence"].includes(str(object(r.message)?.stop_reason))) this.turnStartedAt = null;
     const notification = text(content);
     if (r.type === "user" && notification.startsWith("<task-notification>")) {
       const id = /<task-id>([^<]+)<\/task-id>/.exec(notification)?.[1];
@@ -231,7 +239,6 @@ export class BackgroundTasks {
       } else if (result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(body)) {
         id = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(body)?.[1] || "";
       }
-      const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
       if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null });
       this.tools.delete(str(b.tool_use_id));
     }
@@ -261,8 +268,9 @@ export class DesktopSessions {
       // Unfinished-looking tasks linger in old transcripts; only a busy process can have any running.
       const live = this.liveProcess(s.summary.id);
       if (live?.bridgeSessionId) {
-        const taskList = live.status === "busy" || live.status === "shell" ? this.backgroundTaskList(s.summary.id) : [];
-        s.summary = { ...s.summary, tasks: taskList.length, taskList };
+        const working = live.status === "busy" || live.status === "shell";
+        const taskList = working ? this.backgroundTaskList(s.summary.id) : [];
+        s.summary = { ...s.summary, tasks: taskList.length, taskList, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null };
       }
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
@@ -273,7 +281,7 @@ export class DesktopSessions {
   poll(): boolean {
     const fingerprint = () => JSON.stringify(Array.from(this.sources.values())
       .filter(s => !this.opts.excluded().has(s.summary.id))
-      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title, s.summary.tasks, s.summary.taskList?.map(t => t.id).join()]));
+      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title, s.summary.tasks, s.summary.taskList?.map(t => t.id).join(), s.summary.turnStartedAt]));
     const before = fingerprint();
     this.list();
     return before !== fingerprint();
@@ -308,10 +316,12 @@ export class DesktopSessions {
   }
 
   backgroundTasks(id: string): number { return this.backgroundTaskList(id).length; }
+  backgroundTaskList(id: string): BackgroundTask[] { return this.scan(id)?.list ?? []; }
+  turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
 
-  backgroundTaskList(id: string): BackgroundTask[] {
+  private scan(id: string): BackgroundTasks | null {
     const source = this.sources.get(id);
-    if (!source) return [];
+    if (!source) return null;
     const fd = this.open(source.file);
     try {
       const size = fs.fstatSync(fd).size;
@@ -321,7 +331,7 @@ export class DesktopSessions {
         this.tasks.set(id, cached);
       }
       cached.offset = scanLines(fd, size, line => cached!.tracker.accept(line), cached.offset);
-      return cached.tracker.list;
+      return cached.tracker;
     } finally { fs.closeSync(fd); }
   }
 

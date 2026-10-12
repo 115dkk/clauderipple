@@ -86,7 +86,7 @@ export default function Session() {
       {readOnly && <Text style={{ fontSize: 12.5, color: c.muted, textAlign: 'center', marginBottom: 2 }}>{copy('이 대화는 여기서 읽기만 가능합니다.', 'This conversation is read-only here.')}</Text>}
       {!readOnly && running && !view.open.length && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 6, marginBottom: 8 }}>
         {live ? <StateRing state="running" size={16} spin /> : <Icon name="clock" size={16} color={c.warn} />}
-        <Text style={{ fontSize: 13.5, color: live ? c.muted : c.warn }}>{live ? t('running.for', { t: duration(now - (view.turnStartedAt ?? now)) }) : t('running.lastSeen', { time: clock(link?.lastRx ?? now) })}</Text>
+        <Text style={{ fontSize: 13.5, color: live ? c.muted : c.warn }}>{live ? t('running.for', { t: duration(now - (session?.turnStartedAt ?? view.turnStartedAt ?? now)) }) : t('running.lastSeen', { time: clock(link?.lastRx ?? now) })}</Text>
       </View>}
       {(session?.tasks ?? 0) > 0 && <>
         {tasksOpen && !!session!.taskList?.length && <View style={{ marginHorizontal: 6, marginBottom: 6, borderRadius: radius.sm, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>

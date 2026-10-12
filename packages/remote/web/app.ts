@@ -440,7 +440,7 @@ export class App {
     setHTML(top, V.sessionTop(this.ui, s, view));
     setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
     const perm = s?.readOnly ? "" : V.permCard(view, this.ui);
-    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui)) + V.tasks(this.ui, s, this.tasksOpen));
+    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.tasks(this.ui, s, this.tasksOpen));
     // Stop only when the host can hear it; offline the button sends (queues) instead.
     const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
     if (s?.readOnly) {
