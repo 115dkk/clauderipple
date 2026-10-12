@@ -2358,7 +2358,10 @@ function openProviderForm(options) {
 // shown and the change made here is dropped, rather than quietly overwriting theirs.
 
 const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-const MOD_PARTS = ["timer", "reason", "route", "limits"];
+// The band's parts the person can turn off (`hide`), then the ones it shows only when turned on
+// (`extras`, as the mod's settings.ts EXTRAS): the judge's reason is in the effort's tip alone.
+const MOD_PARTS = ["timer", "route"];
+const MOD_EXTRAS = ["context", "limits"];
 // Named in themselves, as the mod's own Look card lists them.
 const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"]];
 // Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
@@ -2382,7 +2385,7 @@ const MOD_DEFAULTS = {
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
-  swampAt: 50, layout: "dashboard", appearance: "auto", language: "auto", hide: ["reason"], setupDone: false,
+  swampAt: 50, layout: "dashboard", appearance: "auto", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
 
 let modState = { settings: null, revision: 0, options: null, retiredNote: false };
@@ -2946,10 +2949,17 @@ function modLookCard() {
       cell(t("mod.appearance"), modSegmented("appearance", [{ value: "auto", label: t("mod.auto") }, { value: "dark", label: t("mod.dark") }, { value: "light", label: t("mod.lightAppearance") }], s.appearance, t("mod.appearance"), (appearance) => modPatch({ appearance })), null, "wide"),
       cell(t("mod.language"), modSelect("language", languages, s.language, t("mod.language"), (language) => modPatch({ language }), "narrow")),
     ]),
-    modSection(t("mod.show"), MOD_PARTS.map((part) => {
-      const shown = !s.hide.includes(part);
-      return cell(t(`mod.part.${part}`), modSwitch(`part:${part}`, shown, t(`mod.part.${part}`), (on) => modPatch({ hide: on ? s.hide.filter((entry) => entry !== part) : [...s.hide, part] })));
-    })),
+    modSection(t("mod.show"), [
+      ...MOD_PARTS.map((part) => {
+        const shown = !s.hide.includes(part);
+        return cell(t(`mod.part.${part}`), modSwitch(`part:${part}`, shown, t(`mod.part.${part}`), (on) => modPatch({ hide: on ? s.hide.filter((entry) => entry !== part) : [...s.hide, part] })));
+      }),
+      ...MOD_EXTRAS.map((part) => {
+        const extras = s.extras || [];
+        const shown = extras.includes(part);
+        return cell(t(`mod.part.${part}`), modSwitch(`part:${part}`, shown, t(`mod.part.${part}`), (on) => modPatch({ extras: on ? [...extras, part] : extras.filter((entry) => entry !== part) })));
+      }),
+    ]),
   ]);
 }
 
