@@ -1,7 +1,7 @@
 // The ripple mascot and the state ring, ported from packages/remote/web/mascot.ts. Geometry is
 // copied as-is; colours come from the palette so light and dark differ only by tokens.
 import React, { useEffect, useRef } from 'react';
-import { Animated, Easing } from 'react-native';
+import { Animated, Easing, StyleSheet, View } from 'react-native';
 import Svg, { Circle, G, Path, Rect } from 'react-native-svg';
 import { usePalette, type Palette } from './theme';
 
@@ -28,7 +28,7 @@ function Ring({ color, dashed }: { color: string; dashed?: boolean }) {
   return <Circle cx={28} cy={31} r={16.5} fill="none" stroke={color} strokeWidth={5} {...(dashed ? { strokeDasharray: '9.2 3.76', rotation: -99, origin: '28, 31' } : {})} />;
 }
 
-function face(name: Face, c: Palette): React.ReactNode {
+function face(name: Face, c: Palette, ring = true): React.ReactNode {
   const tone: Record<Tone, string> = { accent: c.accent, ok: c.ok, warn: c.warn, bad: c.bad, faint: c.faint, ink: c.ink, muted: c.muted };
   const ink = c.ink;
   switch (name) {
@@ -41,7 +41,7 @@ function face(name: Face, c: Palette): React.ReactNode {
     case 'uneasy':
       return <><Path d={CREST_UP} fill={tone.warn} /><Ring color={tone.faint} /><Line d="M28 14.5A16.5 16.5 0 1 1 13.07 23.97" color={tone.warn} w={5} /><Ears color={tone.warn} dim /><Eyes x1={20.6} x2={31.8} y={26.9} h={5} ink={ink} /><Line d="M19.4 24.4L25 22.4" color={ink} w={2} /><Line d="M36.6 24.4L31 22.4" color={ink} w={2} /><Line d="M22.9 37.2q1.275 -1.7 2.55 0t2.55 0t2.55 0t2.55 0" color={ink} w={2.2} /><Path d="M46.6 13.8q-2.3 3.1 -2.3 4.5a2.3 2.3 0 0 0 4.6 0q0 -1.4 -2.3 -4.5z" fill={tone.muted} /></>;
     case 'going':
-      return <><Path d={CREST_WIND} fill={tone.accent} /><Ring color={tone.accent} dashed /><Ears color={tone.accent} dim /><Eyes x1={22.2} x2={33.4} y={26.2} h={5.6} ink={ink} /><Line d="M26.6 37.2q1.4 1 2.8 0" color={ink} w={2.2} /></>;
+      return <><Path d={CREST_WIND} fill={tone.accent} />{ring ? <Ring color={tone.accent} dashed /> : null}<Ears color={tone.accent} dim /><Eyes x1={22.2} x2={33.4} y={26.2} h={5.6} ink={ink} /><Line d="M26.6 37.2q1.4 1 2.8 0" color={ink} w={2.2} /></>;
     case 'sorry':
       return <><Path d={CREST_WILT} fill={tone.bad} /><Ring color={tone.bad} /><Eyes x1={20.6} x2={31.8} y={27.6} h={4.4} ink={ink} /><Line d="M19.2 24.8L24.6 22.2" color={ink} w={2} /><Line d="M36.8 24.8L31.4 22.2" color={ink} w={2} /><Line d="M24.8 38.4q3.2 -2.6 6.4 0" color={ink} w={2.2} /><Path d="M36.4 33.2q-1.84 2.48 -1.84 3.6a1.84 1.84 0 0 0 3.68 0q0 -1.12 -1.84 -3.6z" fill={tone.muted} /></>;
   }
@@ -52,26 +52,30 @@ export function Ripple({ face: name, size }: { face: Face; size: number }) {
   return <Svg width={size} height={size} viewBox="0 0 56 56">{face(name, c)}</Svg>;
 }
 
+const STATE_FACE: Record<string, Face> = { running: 'going', starting: 'going', waiting: 'uneasy', idle: 'pleased', stopped: 'sleepy', error: 'sorry' };
+
 /**
- * The small state glyph in lists and headers: the same ring, no face. Dashed = in progress,
- * warn = needs you, ok = done, faint = paused, bad = error.
+ * The state glyph in lists and headers: Ripple with the face for the state. Going (working) can
+ * spin: only its dashed ring turns, around the ring's own centre, while the face stays upright.
  */
 export function StateRing({ state, size = 22, spin = false }: { state: string; size?: number; spin?: boolean }) {
   const c = usePalette();
-  const color = state === 'waiting' ? c.warn : state === 'error' ? c.bad : state === 'idle' ? c.ok : state === 'stopped' ? c.faint : c.accent;
-  const dashed = state === 'running' || state === 'starting';
+  const name = STATE_FACE[state] ?? 'calm';
   const turn = useRef(new Animated.Value(0)).current;
+  const spinning = spin && name === 'going';
   useEffect(() => {
-    if (!spin) return;
+    if (!spinning) return;
     const loop = Animated.loop(Animated.timing(turn, { toValue: 1, duration: 2400, easing: Easing.linear, useNativeDriver: true }));
     loop.start();
     return () => loop.stop();
-  }, [spin, turn]);
-  const glyph = <Svg width={size} height={size} viewBox="0 0 56 56">
-    <Path d={state === 'stopped' ? CREST_SHORT : CREST_UP} fill={color} />
-    <Circle cx={28} cy={31} r={16.5} fill="none" stroke={color} strokeWidth={6} {...(dashed ? { strokeDasharray: '9.2 3.76', rotation: -99, origin: '28, 31' } : {})} />
-    {state === 'waiting' ? <Circle cx={28} cy={31} r={6} fill={c.warn} /> : null}
-  </Svg>;
-  if (!spin) return glyph;
-  return <Animated.View style={{ transform: [{ rotate: turn.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }}>{glyph}</Animated.View>;
+  }, [spinning, turn]);
+  if (!spinning) return <Ripple face={name} size={size} />;
+  return <View style={{ width: size, height: size }}>
+    <Svg width={size} height={size} viewBox="0 0 56 56">{face(name, c, false)}</Svg>
+    {/* The ring's centre (28,31) sits 3 units below the box centre; this layer is shifted down by
+        that much and draws the ring at its own centre, so a plain rotate turns it in place. */}
+    <Animated.View style={[StyleSheet.absoluteFill, { top: (3 / 56) * size, bottom: -(3 / 56) * size, transform: [{ rotate: turn.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }]}>
+      <Svg width={size} height={size} viewBox="0 0 56 56"><Circle cx={28} cy={28} r={16.5} fill="none" stroke={c.accent} strokeWidth={5} strokeDasharray="9.2 3.76" /></Svg>
+    </Animated.View>
+  </View>;
 }

@@ -14,11 +14,12 @@ function SessionRow({ session, first, now }: { session: SessionSummary; first: b
   const { c } = useStyles();
   const waiting = session.pending > 0;
   const running = session.state === 'running' || session.state === 'starting';
-  const tag = waiting ? `${t('state.waiting')}${session.pending > 1 ? ` ${session.pending}` : ''}` : running ? t('state.running') : '';
+  // Working shows as the spinning ripple on the left; only a waiting approval keeps a text tag.
+  const tag = waiting ? `${t('state.waiting')}${session.pending > 1 ? ` ${session.pending}` : ''}` : '';
   return <Pressable accessibilityRole="button" accessibilityLabel={session.title} onPress={() => router.push({ pathname: '/session/[id]', params: { id: session.id } })}
     style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingLeft: 16, paddingRight: 14, minHeight: 68 }, pressed && { backgroundColor: c.surface2 }]}>
     {!first && <View style={{ position: 'absolute', left: 52, right: 0, top: 0, borderTopWidth: 1, borderColor: c.line }} />}
-    <StateRing state={waiting ? 'waiting' : session.state} size={24} />
+    <StateRing state={waiting ? 'waiting' : session.state} size={24} spin={running && !waiting} />
     <View style={{ flex: 1, minWidth: 0 }}>
       <Text numberOfLines={1} style={{ fontSize: 16, fontWeight: '600', lineHeight: 21, color: c.ink }}>{session.title}</Text>
       <View style={{ marginTop: 3, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
