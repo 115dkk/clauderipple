@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import { DEFAULTS, normalizeSettings } from '../../packages/mod/hooks/settings.ts'
-import { billingOf, cheapest, claudeChoices, nearestEffort, preset, presets, rungOf } from '../../packages/mod/hooks/ladder.ts'
+import { billingOf, cheapest, claudeChoices, fillLadder, ladderNeedsFill, nearestEffort, preset, rungOf, tickedChoices } from '../../packages/mod/hooks/ladder.ts'
 import type { LadderChoice, WorkerCandidate, WorkerVerdict } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
@@ -47,12 +47,13 @@ test('the default ladder runs each rung at its own effort, whatever effort the j
   assert.deepEqual(pick(DEFAULTS, v('standard', { effort: 'high' })), { target: { agent: 'gpt-6-1-sol' }, effort: 'medium', rung: 'standard' })
   assert.deepEqual(pick(DEFAULTS, v('deep')), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard' })
   assert.deepEqual(pick(DEFAULTS, v('deep', { kind: 'plan' })), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard' })
-  // Design has its own ladder on Claude.
-  assert.deepEqual(pick(DEFAULTS, v('standard', { domain: 'design' })).target, { agent: 'general-purpose', model: 'sonnet' })
+  // Every field follows the one ladder: there are no field rules left.
+  assert.deepEqual(pick(DEFAULTS, v('standard', { domain: 'design' })).target, { agent: 'gpt-6-1-sol' })
 })
 
 test('unavailable: the rung\'s backup, else one rung up, else the session model; never down', () => {
-  const ladder = (rungs: object) => normalizeSettings({ rules: { general: { mode: 'ladder', rungs } } })
+  // Built directly: loading drops a rung's backup, but a ladder that has one still routes by it.
+  const ladder = (rungs: Extract<typeof DEFAULTS.rules.general, { mode: 'ladder' }>['rungs']) => ({ ...DEFAULTS, rules: { ...DEFAULTS.rules, general: { mode: 'ladder' as const, rungs } } })
   const sol = { agent: 'gpt-6-1-sol' }, astra = { agent: 'gpt-6-astra' }, opus = { agent: 'general-purpose', model: 'opus' }, sonnet = { agent: 'general-purpose', model: 'sonnet' }
   // ChatGPT out of quota: Standard's backup runs, at Standard's effort.
   const backed = ladder({ standard: { target: sol, effort: 'medium', backup: sonnet }, hard: { target: astra, effort: 'high' } })
@@ -78,7 +79,7 @@ test('unavailable: the rung\'s backup, else one rung up, else the session model;
   assert.match(empty.fallbackReason ?? '', /Low worker has no model set/)
 })
 
-test('pins and Auto migrate: Auto stays Auto, pins become ladders with Plan one effort above Hard', () => {
+test('pins become ladders with Plan one effort above Hard; Auto becomes a ladder to fill and field rules are dropped', () => {
   // The owner's stored settings of 2026-10-11 (revision 24).
   const stored = { rules: {
     general: { mode: 'auto', allow: ['chatgpt', 'anthropic', 'deepseek'] },
@@ -86,11 +87,10 @@ test('pins and Auto migrate: Auto stays Auto, pins become ladders with Plan one 
     frontend: { mode: 'auto', allow: ['anthropic'] }, backend: { mode: 'inherit' },
   }, agentAuto: 'all', autoFloors: { light: 20, standard: 45, deep: 50 } }
   const s = normalizeSettings(stored)
-  assert.deepEqual(s.rules.general, { mode: 'auto', allow: ['chatgpt', 'anthropic', 'deepseek'] })
-  assert.deepEqual(s.rules.frontend, { mode: 'auto', allow: ['anthropic'] })
+  assert.deepEqual(s.rules.general, { mode: 'ladder', rungs: {} })
+  assert.deepEqual(s.allow, ['chatgpt', 'anthropic', 'deepseek'])
+  for (const domain of ['design', 'frontend', 'backend'] as const) assert.deepEqual(s.rules[domain], { mode: 'inherit' })
   assert.deepEqual(s.autoFloors, { light: 20, standard: 45, deep: 50 })
-  const sonnet = { agent: 'general-purpose', model: 'sonnet' }, opus = { agent: 'general-purpose', model: 'opus' }
-  assert.deepEqual(s.rules.design, { mode: 'ladder', rungs: { light: { target: sonnet, effort: 'medium' }, standard: { target: sonnet, effort: 'high' }, hard: { target: opus, effort: 'high' }, plan: { target: opus, effort: 'xhigh' } } })
   assert.deepEqual(normalizeSettings(s), s)
   // The old default general pin: its models keep the default ladder's efforts.
   const old = normalizeSettings({ rules: { general: { mode: 'pin', targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } } } }).rules.general
@@ -99,18 +99,18 @@ test('pins and Auto migrate: Auto stays Auto, pins become ladders with Plan one 
     hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
   } })
   // A pin's calibration moves each rung's effort as it moved the judge's; the ceiling holds Hard, Plan still goes one up.
-  const tuned = normalizeSettings({ rules: { backend: { mode: 'pin', targets: { light: { agent: 'a' }, deep: { agent: 'b' } }, effortOffset: 1, ceiling: 'high' } } }).rules.backend
+  const tuned = normalizeSettings({ rules: { general: { mode: 'pin', targets: { light: { agent: 'a' }, deep: { agent: 'b' } }, effortOffset: 1, ceiling: 'high' } } }).rules.general
   assert.deepEqual(tuned, { mode: 'ladder', rungs: { light: { target: { agent: 'a' }, effort: 'medium' }, standard: { target: { agent: 'b' }, effort: 'high' }, hard: { target: { agent: 'b' }, effort: 'high' }, plan: { target: { agent: 'b' }, effort: 'xhigh' } } })
-  // A pin with no target at all is the field's default ladder.
-  assert.deepEqual(normalizeSettings({ rules: { design: { mode: 'pin', targets: {} } } }).rules.design, DEFAULTS.rules.design)
+  // A pin with no target at all is the default ladder.
+  assert.deepEqual(normalizeSettings({ rules: { general: { mode: 'pin', targets: {} } } }).rules.general, DEFAULTS.rules.general)
 })
 
-test('ladder rungs validate: a bad effort is the rung default, a rung without a target is dropped, backups stay', () => {
-  const s = normalizeSettings({ rules: { docs: { mode: 'ladder', rungs: {
+test('ladder rungs validate: a bad effort is the rung default, a rung without a target is dropped, backups are dropped', () => {
+  const s = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
     light: { target: { agent: ' w ' }, effort: 'ultra', backup: { agent: 'general-purpose', model: 'haiku' } },
     standard: { target: { agent: 2 }, effort: 'high' }, hard: { target: { agent: 'h' }, effort: 'xhigh', backup: { agent: '' } }, extra: { target: { agent: 'x' } },
-  } } } }).rules.docs
-  assert.deepEqual(s, { mode: 'ladder', rungs: { light: { target: { agent: 'w' }, effort: 'low', backup: { agent: 'general-purpose', model: 'haiku' } }, hard: { target: { agent: 'h' }, effort: 'xhigh' } } })
+  } } } }).rules.general
+  assert.deepEqual(s, { mode: 'ladder', rungs: { light: { target: { agent: 'w' }, effort: 'low' }, hard: { target: { agent: 'h' }, effort: 'xhigh' } } })
 })
 
 test('efforts move to the nearest the model takes, ties up, as the router clamps them', () => {
@@ -143,8 +143,8 @@ const LIVE: LadderChoice[] = [
 ]
 const sonnet = { agent: 'general-purpose', model: 'sonnet' }, opus = { agent: 'general-purpose', model: 'opus' }, haiku = { agent: 'general-purpose', model: 'haiku' }
 
-test('presets fill the four rungs from what is connected, as the spec lists them', () => {
-  const all = presets(LIVE)
+test('the preset rules fill the four rungs from what is connected, as the spec lists them', () => {
+  const all = Object.fromEntries((['claude', 'claudeGpt', 'gpt', 'cheap'] as const).map(id => [id, preset(id, LIVE)])) as Record<'claude' | 'claudeGpt' | 'gpt' | 'cheap', ReturnType<typeof preset>>
   assert.deepEqual(all.claude, { rungs: { light: { target: haiku, effort: 'low' }, standard: { target: sonnet, effort: 'medium' }, hard: { target: opus, effort: 'high' }, plan: { target: opus, effort: 'high' } }, substituted: [] })
   // The cheapest pay-per-token model at max (DeepSeek's ladder has max), the newest Sol, Astra, Opus.
   assert.deepEqual(all.claudeGpt, { rungs: { light: { target: { agent: 'deepseek-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' }, hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: opus, effort: 'high' } }, substituted: [] })
@@ -184,4 +184,31 @@ test('spawn titles name the model that runs, replacing a guessed prefix', async 
   assert.equal(titleName('deepseek-v4.1-flash@max'), 'deepseek-v4.1-flash')
   assert.equal(spawnTitle('Opus5.5·high · Fix routing', 'gpt-6.1-sol@medium', 'medium', models), 'Sol·medium · Fix routing')
   assert.equal(spawnTitle('Fix routing', 'claude-opus-5-5', undefined), 'Opus5.5 · Fix routing')
+})
+
+test('the fill rule gives an empty or unticked rung a ticked, connected model and leaves the others alone', () => {
+  const sol = { target: { agent: 'gpt-6-1-sol' }, effort: 'low' as const }
+  // Nothing set, everything ticked: the Claude + GPT rule, the same four as the preset.
+  const none = fillLadder({}, [], LIVE)
+  assert.deepEqual(none.rungs, preset('claudeGpt', LIVE).rungs)
+  assert.deepEqual(none.filled, ['light', 'standard', 'hard', 'plan'])
+  // A rung with a ticked model is kept as it is, effort and all, even when the rule would pick another.
+  const kept = fillLadder({ standard: sol }, [], LIVE)
+  assert.deepEqual(kept.rungs.standard, sol)
+  assert.deepEqual(kept.filled, ['light', 'hard', 'plan'])
+  // Ticks narrow the fill: only Claude's own models ticked, so no GPT and no DeepSeek.
+  const claudeOnly = ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus']
+  assert.deepEqual(fillLadder({}, claudeOnly, LIVE).rungs, preset('claudeGpt', claudeChoices(anthropicLadder)).rungs)
+  // A rung on a model that is no longer ticked is filled again; the session model is always ticked.
+  const unticked = fillLadder({ light: { target: { agent: 'deepseek-flash' }, effort: 'max' }, hard: { target: { agent: 'general-purpose' }, effort: 'high' } }, claudeOnly, LIVE)
+  assert.deepEqual(unticked.rungs.light, { target: haiku, effort: 'low' })
+  assert.deepEqual(unticked.rungs.hard, { target: { agent: 'general-purpose' }, effort: 'high' })
+  assert.deepEqual(unticked.filled, ['light', 'standard', 'plan'])
+  // Nothing ticked is connected: the session model, which is what the preset says too.
+  assert.deepEqual(fillLadder({}, ['not-a-worker'], LIVE).rungs.light, { target: { agent: 'general-purpose' }, effort: 'max' })
+  // The cheap test before the choices are fetched.
+  assert.equal(ladderNeedsFill(DEFAULTS.rules.general.mode === 'ladder' ? DEFAULTS.rules.general.rungs : {}, []), false)
+  assert.equal(ladderNeedsFill({ light: sol }, []), true)
+  assert.equal(ladderNeedsFill(DEFAULTS.rules.general.mode === 'ladder' ? DEFAULTS.rules.general.rungs : {}, ['gpt-6-1-sol']), true)
+  assert.deepEqual(tickedChoices(LIVE, ['gpt-6-astra', 'chatgpt']).map(c => c.target.agent), ['gpt-6-1-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol'])
 })

@@ -583,61 +583,21 @@ a.cell { color: inherit; text-decoration: none; }
 .mod-card-head .hint { margin-top: 3px; font-size: var(--fs-sub); }
 .mod-card-head + .section, .mod-card-head + .group { margin-top: 0; }
 .group-footer.warn-text, .cell-note.warn-text, .cell-sub.warn-text { color: var(--warn); }
-.mod-card .cell-value select, .mod-sheet .cell-value select { width: 320px; max-width: 100%; }
-.mod-card .cell-value select.narrow, .mod-sheet .cell-value select.narrow { width: 160px; }
+.mod-card .cell-value select { width: 320px; max-width: 100%; }
+.mod-card .cell-value select.narrow { width: 160px; }
 .text-field { width: 320px; }
-.num-field { width: 76px; text-align: right; font-variant-numeric: tabular-nums; }
-.mod-domain .cell-value > span { white-space: nowrap; }
-.pref-rank { display: inline-block; min-width: 1.4em; color: var(--label-3); font-variant-numeric: tabular-nums; }
-.pref-row .cell-value { gap: 2px; }
-.pref-row .cell-sub { padding-left: 1.4em; }
-.candidate-state { margin-left: 10px; font-size: var(--fs-foot); }
-.aa-line { font-variant-numeric: tabular-nums; }
 
-/* The worker ladder: a rung's name and meaning on the left; its model, effort and AA index on the right. */
+/* The models to use: one block per provider, its billing beside the name, a checkbox for each model. */
+.tick-group + .tick-group { border-top: 1px solid var(--separator); }
+.tick-head { padding: 12px 16px 0; color: var(--label-2); font-size: var(--fs-foot); font-weight: 500; }
+.tick-group .model-check .model-effort-tag { margin-left: auto; }
+
+/* The four workers: a name and its meaning on the left; one menu for the model and effort on the right. */
 .rung-row { align-items: flex-start; }
 .rung-row > .cell-text { padding-top: 5px; }
-.rung-controls { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; min-width: 0; }
-.mod-card .cell-value select.rung-model, .mod-sheet .cell-value select.rung-model { width: 300px; }
-.rung-effort { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
-.rung-effort .segmented button { padding: 3px 11px; }
-.aa-hint { min-width: 112px; color: var(--label-3); font-size: var(--fs-cap); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.aa-hint:empty { display: none; }
-.preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; padding: 12px; }
-.offer-row + .preset-grid { position: relative; }
-.offer-row + .preset-grid::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; height: 1px; background: var(--separator); }
-.preset-btn {
-  appearance: none;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--separator);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--label);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.preset-btn:hover { background: var(--fill); }
-.preset-btn:active { background: var(--fill-press); }
-.preset-btn.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.preset-name { font-size: var(--fs-sub); font-weight: 600; }
-.preset-btn.active .preset-name { color: var(--accent); }
-.preset-sub { width: 100%; color: var(--label-2); font-size: var(--fs-cap); line-height: 1.4; }
-.preset-sub .nowrap { white-space: nowrap; }
+.mod-card .cell-value select.rung-model { width: 300px; }
 .offer-row { background: var(--accent-soft); }
 .offer-row .cell-label { font-size: var(--fs-sub); }
-.field-row .cell-value { flex-wrap: wrap; justify-content: flex-end; }
-.field-row .btn.placeholder { visibility: hidden; }
-.mod-details { margin: 18px 4px 0; }
-.mod-details-body { margin: 0 -4px; }
-.mod-details-body > .section:first-child { margin-top: 12px; }
-.mod-sheet > .section:first-child { margin-top: 18px; }
-.mod-sheet .section { margin-top: 22px; }
 
 /* The lean is a slider with a tick for each of its five stops, like a System Settings slider. */
 .lean { display: flex; align-items: center; gap: 10px; color: var(--label-2); font-size: var(--fs-foot); }
@@ -652,25 +612,6 @@ a.cell { color: inherit; text-decoration: none; }
 .lean-range::-moz-range-thumb { width: 20px; height: 20px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 0 0 0.5px rgba(0, 0, 0, 0.08); }
 .lean-ticks { display: flex; justify-content: space-between; padding: 0 9px; pointer-events: none; }
 .lean-ticks span { width: 2px; height: 5px; border-radius: 1px; background: var(--label-3); }
-
-/* AA data: index over cost per task, one row per model and one column per effort. */
-.aa-scroll { overflow-x: auto; border-radius: inherit; }
-.aa-table { min-width: 560px; }
-.aa-table th { text-align: right; }
-.aa-table th:first-child { text-align: left; }
-.aa-table td { padding: 7px 12px; text-align: right; line-height: 1.3; }
-.aa-table td:last-child, .aa-table th:last-child { padding-right: 16px; }
-.aa-table td.aa-model { text-align: left; }
-.aa-model span { display: block; font-weight: 500; white-space: nowrap; }
-.aa-model small { display: block; font-size: var(--fs-cap); white-space: nowrap; }
-.aa-cell b { display: block; font-weight: 500; }
-.aa-cell span { display: block; color: var(--label-2); font-size: var(--fs-cap); }
-.aa-cell.empty { color: var(--label-3); }
-.aa-cell.below b, .aa-cell.below span { color: var(--label-3); }
-.aa-cell.best { background: var(--accent-soft); }
-.aa-cell.best b { color: var(--accent); font-weight: 700; }
-.aa-cell.best span { color: var(--accent); }
-.aa-off td { opacity: 0.5; }
 
 /* ---- About --------------------------------------------------------------------------- */
 
@@ -874,16 +815,9 @@ a.cell { color: inherit; text-decoration: none; }
   .cell.wide .lean { width: 100%; }
   .cell.wide .lean-track { flex: 1 1 auto; width: auto; }
   .cell.wide .text-field { width: 100%; }
-  .mod-card .cell-value select, .mod-sheet .cell-value select { width: 100%; }
-  .mod-card .cell-value select.narrow, .mod-sheet .cell-value select.narrow { width: 140px; }
-  .mod-domain .cell-value { max-width: none; }
-  .rung-controls { align-items: stretch; width: 100%; }
-  .mod-card .cell-value select.rung-model, .mod-sheet .cell-value select.rung-model { width: 100%; }
-  .rung-effort { justify-content: space-between; }
-  .rung-effort .segmented { flex: 1 1 auto; }
-  .preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .field-row .cell-value { justify-content: flex-start; }
-  .field-row .btn.placeholder { display: none; }
+  .mod-card .cell-value select { width: 100%; }
+  .mod-card .cell-value select.narrow { width: 140px; }
+  .mod-card .cell-value select.rung-model { width: 100%; }
 
   /* Requests read as a list: model and status on top, the numbers on one quiet line below. */
   .logs-table-card { overflow: visible; }

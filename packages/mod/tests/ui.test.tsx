@@ -472,7 +472,8 @@ test('setup steps draw on both surfaces and move on', async ($, on) => {
     await workers.press({ key: 'back' })
     await (await mount($, 'setup-3', surface)).press({ key: 'set-warm' })
     const done = await mount($, 'setup-4', surface)
-    expect(await done.find({ type: 'Text', text: /^Ladder · exceptions: Design → own ladder$/ }), "done { type: 'Text', text: /Ladder · exceptions: Design → own ladder/ } " + surface).toBeDefined()
+    // The four workers' models, lowest first (the old tiers become the ladder; Max takes the Hard model).
+    expect(await done.find({ type: 'Text', text: 'deepseek-v4-1-flash · gpt-6-1-sol · gpt-6-astra · gpt-6-astra' }), 'done workers ' + surface).toBeDefined()
     expect(await done.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
     await done.press({ key: 'finish' })
   }

@@ -483,7 +483,6 @@ function renderHealthProviders() {
   }));
 }
 
-let agentTitleBusy = false;
 let statusModBusy = false;
 let codexBusy = false;
 function renderClients() {
@@ -512,11 +511,6 @@ function renderClients() {
   };
   renderClientPickerModels(picker.enabled);
   renderModelSlots();
-  const agentEnabled = Boolean(status.agentTitle);
-  const agentSwitch = $("#client-agent-title-toggle");
-  agentSwitch.checked = agentEnabled;
-  agentSwitch.disabled = agentTitleBusy;
-  agentSwitch.onchange = () => { agentSwitch.disabled = true; void toggleAgentTitle(!agentEnabled); };
   const modEnabled = Boolean(status.statusMod);
   const modSwitch = $("#client-status-mod-toggle");
   modSwitch.checked = modEnabled;
@@ -675,19 +669,6 @@ async function togglePicker(enabled, confirmed = false) {
   } finally {
     pickerBusy = false;
     $("#client-picker-msg").textContent = "";
-    void refreshHealth();
-  }
-}
-async function toggleAgentTitle(enabled) {
-  if (agentTitleBusy) return;
-  agentTitleBusy = true;
-  try {
-    await api("/api/agent-title", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) });
-    toast(t("common.saved"));
-  } catch (error) {
-    toast(t("common.actionFailed"), true, error.message);
-  } finally {
-    agentTitleBusy = false;
     void refreshHealth();
   }
 }
@@ -2374,8 +2355,6 @@ function openProviderForm(options) {
 // with the revision it was made on. A 409 means another surface saved first — its settings are
 // shown and the change made here is dropped, rather than quietly overwriting theirs.
 
-const MOD_DOMAINS = ["general", "design", "frontend", "backend", "infra", "data", "test", "docs", "research"];
-const MOD_LEVELS = ["light", "standard", "deep"];
 const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const MOD_PARTS = ["timer", "reason", "route", "limits"];
 // Named in themselves, as the mod's own Look card lists them.
@@ -2384,12 +2363,8 @@ const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中
 // first, and the AA ids their scores are kept under (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
 const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus"];
 const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
-// The worker ladder, bottom to top, and a rung's effort when nothing else says one.
+// The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
-const MOD_RUNG_EFFORT = { light: "low", standard: "medium", hard: "high", plan: "high" };
-const MOD_PRESETS = ["claude", "claudeGpt", "gpt", "cheap"];
-// The two fields whose own ladder the card offers up front: only these change who should do the work.
-const MOD_OVERRIDES = ["design", "research"];
 const modClaude = (model, effort) => ({ target: { agent: "general-purpose", model }, effort });
 /** The mod's defaults (packages/mod/hooks/settings.ts), for a router that has stored nothing yet. */
 const MOD_DEFAULTS = {
@@ -2400,23 +2375,21 @@ const MOD_DEFAULTS = {
       light: { target: { agent: "deepseek-v4-1-flash" }, effort: "max" }, standard: { target: { agent: "gpt-6-1-sol" }, effort: "medium" },
       hard: { target: { agent: "gpt-6-astra" }, effort: "high" }, plan: modClaude("opus", "high"),
     } },
-    design: { mode: "ladder", rungs: { light: modClaude("sonnet", "medium"), standard: modClaude("sonnet", "high"), hard: modClaude("opus", "high"), plan: modClaude("opus", "high") } },
+    design: { mode: "inherit" },
     frontend: { mode: "inherit" }, backend: { mode: "inherit" }, infra: { mode: "inherit" }, data: { mode: "inherit" },
     test: { mode: "inherit" }, docs: { mode: "inherit" }, research: { mode: "inherit" },
   },
-  providers: {}, preference: [], autoFloors: { light: 20, standard: 45, deep: 50 }, autoTieBand: 2,
+  allow: [], providers: {}, preference: [], autoFloors: { light: 20, standard: 45, deep: 50 }, autoTieBand: 2,
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
   swampAt: 50, layout: "dashboard", appearance: "auto", language: "auto", hide: ["reason"], setupDone: false,
 };
 
-let modState = { settings: null, revision: 0, options: null };
+let modState = { settings: null, revision: 0, options: null, retiredNote: false };
 let modSaveTimer = null;
 let modSaving = false;
 let modSaveAgain = false;
-let modAaLevel = "standard";
-let modSheet = null;
 
 /**
  * The router hands back the mod's full normalized settings; this only fills what an older router
@@ -2430,6 +2403,7 @@ function modNormalize(raw) {
     ...value,
     rules: { ...clone(MOD_DEFAULTS.rules), ...(value.rules || {}) },
     autoFloors: { ...MOD_DEFAULTS.autoFloors, ...(value.autoFloors || {}) },
+    allow: Array.isArray(value.allow) ? value.allow : [],
     providers: { ...(value.providers || {}) },
     preference: Array.isArray(value.preference) ? value.preference : [],
     hide: Array.isArray(value.hide) ? value.hide : clone(MOD_DEFAULTS.hide),
@@ -2445,61 +2419,6 @@ function modTargetOf(value) {
   return plus < 0 ? { agent: value } : { agent: value.slice(0, plus), model: value.slice(plus + 1) };
 }
 function modAgents() { return (modState.options && modState.options.agents) || []; }
-/** The router's AA record for a worker's exact model and provider. */
-function modScoreOf(agent) {
-  const scores = modState.options && modState.options.scores;
-  return ((scores && scores.models) || []).find((entry) => entry.model === agent.model && entry.provider === agent.provider && entry.matched && entry.variants.length);
-}
-/**
- * A worker's numbers in one line: the variant Auto would reach for at standard difficulty (the
- * cheapest at or above that floor), or the strongest one when none reaches it.
- */
-function modAaLine(agent) {
-  const score = modScoreOf(agent);
-  const measured = score ? score.variants.filter((variant) => typeof variant.intelligence === "number") : [];
-  if (!measured.length) return t("mod.aaNone");
-  const floor = modState.settings.autoFloors.standard;
-  const priced = measured.filter((variant) => variant.intelligence >= floor && typeof variant.costPerTask === "number").sort((a, b) => a.costPerTask - b.costPerTask);
-  const variant = priced[0] || [...measured].sort((a, b) => b.intelligence - a.intelligence)[0];
-  return t("mod.aaLine", {
-    index: variant.intelligence.toFixed(1),
-    effort: (variant.effort ? modEffortName(variant.effort) : t("mod.aaDefault")).toLocaleLowerCase(),
-    cost: modMoney(variant.costPerTask),
-  });
-}
-function modMoney(cost) { return typeof cost !== "number" ? "—" : cost < 0.01 ? "<$0.01" : `$${cost.toFixed(2)}`; }
-/** Whether a worker is among an Auto rule's candidates; an empty allow-list means every worker. */
-function modAllowed(rule, name) {
-  const names = modAgents().map((agent) => agent.name);
-  const allow = (rule.allow || []).filter((entry) => names.includes(entry));
-  return allow.length === 0 || allow.includes(name);
-}
-function modToggleAllowed(rule, name, on) {
-  const names = modAgents().map((agent) => agent.name);
-  const kept = new Set(names.filter((entry) => modAllowed(rule, entry)));
-  if (on) kept.add(name); else kept.delete(name);
-  return { ...rule, allow: kept.size === names.length ? [] : names.filter((entry) => kept.has(entry)) };
-}
-/** One switch per worker: what an Auto rule may choose from. The last one on cannot be turned off. */
-function modCandidateRows(rule, keyPrefix, onChange) {
-  const agents = modAgents();
-  const onCount = agents.filter((agent) => modAllowed(rule, agent.name)).length;
-  return agents.map((agent) => {
-    const on = modAllowed(rule, agent.name);
-    const control = modSwitch(`${keyPrefix}:${agent.name}`, on, `${agent.model} · ${agent.provider}`, (value) => onChange(modToggleAllowed(rule, agent.name, value)));
-    if (on && onCount === 1) control.querySelector("input").disabled = true;
-    const info = modProviderInfo(agent.provider);
-    return cell(
-      agent.model,
-      control,
-      [
-        el("span", { class: "cell-sub" }, [agent.provider, info && !info.usable ? el("span", { class: "badge warn candidate-state", text: t("mod.notUsable") }) : null]),
-        el("span", { class: "cell-sub aa-line", text: modAaLine(agent) }),
-      ],
-      "candidate-row",
-    );
-  });
-}
 function modProviderInfo(name) { return ((modState.options && modState.options.providers) || []).find((provider) => provider.name === name); }
 function modModels() {
   const seen = new Set();
@@ -2545,15 +2464,6 @@ function modSelect(key, items, value, label, onChange, cls) {
   select.value = String(value);
   select.addEventListener("change", () => onChange(select.value));
   return select;
-}
-function modNumber(key, value, range, label, onChange) {
-  const input = el("input", { type: "number", class: "num-field", min: String(range.min), max: String(range.max), step: String(range.step), value: String(value), inputmode: "decimal", "data-key": key, "aria-label": label });
-  input.addEventListener("change", () => {
-    const n = Number(input.value);
-    if (!input.value.trim() || !Number.isFinite(n)) { input.value = String(value); return; }
-    onChange(Math.min(range.max, Math.max(range.min, n)));
-  });
-  return input;
 }
 function modSection(title, rows, footers, action) {
   return el("section", { class: "section" }, [
@@ -2613,6 +2523,7 @@ async function saveMod() {
 async function loadMod() {
   // A change still on its way would be overwritten by what the router holds now.
   if (modSaveTimer || modSaving) return;
+  let retired = false;
   const [settingsResult, optionsResult] = await Promise.allSettled([api("/api/mod-settings"), api("/api/mod-options")]);
   if (settingsResult.status === "rejected") {
     if (!modState.settings) {
@@ -2622,15 +2533,18 @@ async function loadMod() {
   } else {
     modState.settings = modNormalize(settingsResult.value.settings);
     modState.revision = Number(settingsResult.value.revision) || 0;
+    retired = settingsResult.value.legacy === true;
   }
   modState.options = optionsResult.status === "fulfilled" ? optionsResult.value : null;
+  if (retired) modState.retiredNote = true;
   modRefresh();
+  // The settings came back without Auto and the field rules; saving them as they are keeps the note to this once.
+  if (retired) modPatch({});
 }
 function modRefresh() {
   if (!modState.settings) return;
   renderModNotice();
   modRedraw($("#mod-content"), [modEffortCard(), modWorkersCard(), modJudgeCard(), modCacheCard(), modHandoffCard(), modLookCard()]);
-  if (modSheet) modSheet.draw();
 }
 /** Settings for a mod that is switched off do nothing until it is on; the switch lives in Clients. */
 function renderModNotice() {
@@ -2666,10 +2580,10 @@ function modEffortCard() {
   ])]);
 }
 
-// ---- The worker ladder (docs/specs/2026-10-11-worker-ladder.md)
+// ---- The four workers (docs/specs/2026-10-12-worker-tiers.md)
 
 /**
- * Everything a rung can run: the router's workers (each with its model's effort ladder and how it
+ * Everything a worker can run: the router's workers (each with its model's effort ladder and how it
  * is paid for), Claude Code's own agent on each Claude model, and the session's own model.
  */
 function modChoices() {
@@ -2678,17 +2592,17 @@ function modChoices() {
   const workers = modAgents().map((agent) => {
     const info = modProviderInfo(agent.provider);
     return {
-      value: agent.name, label: agent.model, short: agent.model, model: agent.model, provider: agent.provider,
+      value: agent.name, label: agent.model, model: agent.model, provider: agent.provider,
       billing: /(?::|-)free$/i.test(agent.model) ? "free" : agent.billing || (info && info.billing) || null,
       usable: !info || info.usable !== false,
       efforts: Array.isArray(agent.efforts) ? agent.efforts : effortLevelsFor(agent.provider, agent.model),
     };
   });
   const claude = MOD_CLAUDE_MODELS.map((alias) => ({
-    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, short: modCap(alias), model: MOD_CLAUDE_IDS[alias], provider: "anthropic",
+    value: `general-purpose+${alias}`, label: `Claude ${modCap(alias)}`, model: MOD_CLAUDE_IDS[alias], provider: "anthropic",
     billing: "subscription", usable: true, efforts: claudeEfforts, claude: true,
   }));
-  const session = { value: "general-purpose", label: t("mod.sessionModel"), short: t("mod.sessionModelShort"), model: null, provider: null, billing: null, usable: true, efforts: claudeEfforts, claude: true };
+  const session = { value: "general-purpose", label: t("mod.sessionModel"), model: null, provider: null, billing: null, usable: true, efforts: claudeEfforts, claude: true };
   return [...workers, ...claude, session];
 }
 function modChoiceOf(target) { const value = modTargetValue(target); return modChoices().find((choice) => choice.value === value); }
@@ -2707,341 +2621,114 @@ function modNearest(effort, ladder) {
     return d < bd || (d === bd && MOD_EFFORTS.indexOf(next) > MOD_EFFORTS.indexOf(best)) ? next : best;
   });
 }
-/** A model pop-up grouped by provider, each group tagged free / pay-per-token / subscription. */
-function modModelSelect(key, target, label, onChange, noneLabel) {
-  const choices = modChoices();
+/** The group a model sits in: its provider, Claude's own together. */
+function modGroupName(choice) { return choice.claude ? "Claude" : choice.provider; }
+/** Choices in provider groups, each group tagged free / pay-per-token / subscription. */
+function modGroups(choices) {
   const groups = [];
   for (const choice of choices) {
-    const name = choice.claude ? "Claude" : choice.provider;
+    const name = modGroupName(choice);
     let group = groups.find((entry) => entry.name === name);
     if (!group) { group = { name, billing: choice.billing, items: [] }; groups.push(group); }
-    group.items.push({ value: choice.value, label: choice.label + (choice.usable ? "" : t("mod.unavailableNow")) });
+    group.items.push(choice);
   }
-  const items = [
-    ...(noneLabel ? [{ value: "", label: noneLabel }] : []),
-    ...groups.map((group) => ({ group: group.billing ? `${group.name} · ${t(`mod.billing.${group.billing}`)}` : group.name, items: group.items })),
-  ];
-  return modSelect(key, items, modTargetValue(target), label, onChange, "rung-model");
+  return groups;
 }
-/** The measured AA index (and cost per task) of a model at one effort: grey context, never a gate. */
-function modAaHint(choice, effort) {
-  if (!choice || !choice.model) return "";
-  const score = modScoreOf({ model: choice.model, provider: choice.provider });
-  const variant = score && score.variants.find((entry) => entry.effort === effort && typeof entry.intelligence === "number");
-  return variant ? t("mod.aaHint", { index: variant.intelligence.toFixed(1), cost: modMoney(variant.costPerTask) }) : "";
+function modGroupLabel(group) { return group.billing ? `${group.name} · ${t(`mod.billing.${group.billing}`)}` : group.name; }
+
+// ---- The models to use: what the four workers are filled from and may run on
+
+/** An allow-list key: a worker's agent name, or `general-purpose:<model>` for Claude's own. */
+function modTickKey(choice) { return choice.claude ? choice.value.replace("+", ":") : choice.value; }
+/** The models that can be ticked: every worker and Claude's own; the session's model is always there. */
+function modTickable() { return modChoices().filter((choice) => choice.value !== "general-purpose"); }
+/** Whether a model is ticked: an empty list means every model, and an old provider name ticks that provider's. */
+function modTicked(choice) {
+  const allow = modState.settings.allow || [];
+  return !allow.length || allow.includes(modTickKey(choice)) || allow.includes(choice.provider);
 }
-/** The rungs a preset had to fill otherwise, marked until the next preset (a page convenience). */
-let modPresetMarks = { domain: null, rungs: [] };
-function modMarked(domain, rung) { return modPresetMarks.domain === domain && modPresetMarks.rungs.includes(rung); }
-/** Four rows: the rung, its one-line meaning, its model and effort, and the model's AA index in grey. */
-function modRungRows(domain, rule, keyPrefix, onChange) {
-  const rungs = rule.rungs || {};
-  const set = (rung, step) => {
-    if (modPresetMarks.domain === domain) modPresetMarks = { domain, rungs: modPresetMarks.rungs.filter((entry) => entry !== rung) };
-    onChange({ ...rule, rungs: { ...rungs, [rung]: step } });
-  };
+/** Ticks one model; every model on again is stored as [], and the last one on cannot go off. */
+function modTick(choice, on) {
+  const all = modTickable();
+  const kept = new Set(all.filter(modTicked).map(modTickKey));
+  if (on) kept.add(modTickKey(choice)); else kept.delete(modTickKey(choice));
+  modPatch({ allow: kept.size === all.length ? [] : all.map(modTickKey).filter((key) => kept.has(key)) });
+}
+function modTickRows() {
+  const choices = modTickable();
+  if (!choices.length) return [el("div", { class: "cell-note", text: t("mod.noModels") })];
+  const onCount = choices.filter(modTicked).length;
+  return modGroups(choices).map((group) => {
+    const boxes = group.items.map((choice) => {
+      const on = modTicked(choice);
+      const input = el("input", { type: "checkbox", "data-key": `tick:${modTickKey(choice)}`, "aria-label": `${choice.label} · ${group.name}`, checked: on });
+      if (on && onCount === 1) input.disabled = true;
+      input.addEventListener("change", () => modTick(choice, input.checked));
+      // A model paid differently from its group (a :free model on a paid provider) says so beside its name.
+      const other = choice.billing && choice.billing !== group.billing ? el("span", { class: "model-effort-tag", text: t(`mod.billing.${choice.billing}`) }) : null;
+      const off = choice.usable ? null : el("span", { class: "model-effort-tag warn-text", text: t("mod.notUsable") });
+      return el("label", { class: "model-check", title: choice.model || choice.label }, [input, el("span", { text: choice.label }), other, off]);
+    });
+    return el("div", { class: "tick-group" }, [el("div", { class: "tick-head", text: modGroupLabel(group) }), el("div", { class: "model-checklist" }, boxes)]);
+  });
+}
+
+// ---- The four workers: a meaning, the pick, and one menu to change it
+
+/** The general ladder's rungs; the router fills any that are empty, so a missing one is only a failed load. */
+function modRungs() {
+  const general = modState.settings.rules.general;
+  return general && general.mode === "ladder" && general.rungs ? general.rungs : {};
+}
+/** One menu of `model · effort` for the ticked models, effort limited to what each model takes; the session's model too. */
+function modPickSelect(key, step, shown, label, onPick) {
+  const choices = modChoices().filter((choice) => choice.value === "general-purpose" || modTicked(choice));
+  const groups = modGroups(choices).map((group) => ({
+    group: modGroupLabel(group),
+    items: group.items.flatMap((choice) => modLadderOf(choice).map((effort) => ({ value: `${choice.value}|${effort}`, label: `${choice.label} · ${modEffortName(effort)}${choice.usable ? "" : t("mod.unavailableNow")}` }))),
+  }));
+  const current = step ? `${modTargetValue(step.target)}|${shown}` : "";
+  const items = [...(step ? [] : [{ value: "", label: "—" }]), ...groups];
+  // A pick that is not on offer now (its model unticked, or gone) keeps showing rather than a wrong neighbour.
+  if (step && !groups.some((group) => group.items.some((item) => item.value === current))) {
+    const choice = modChoiceOf(step.target);
+    items.unshift({ value: current, label: `${choice ? choice.label : modTargetValue(step.target)} · ${modEffortName(shown)}${t("mod.unavailable")}` });
+  }
+  return modSelect(key, items, current, label, (value) => {
+    if (!value) return;
+    const bar = value.lastIndexOf("|");
+    onPick(modTargetOf(value.slice(0, bar)), value.slice(bar + 1));
+  }, "rung-model");
+}
+function modRungRows() {
+  const rungs = modRungs();
   return MOD_RUNGS.map((rung) => {
     const step = rungs[rung];
     const choice = step && modChoiceOf(step.target);
-    const ladder = modLadderOf(choice);
-    const shown = step ? modNearest(step.effort, ladder) : null;
+    const shown = step ? modNearest(step.effort, modLadderOf(choice)) : null;
     const name = t(`mod.rung.${rung}`);
-    const select = modModelSelect(`${keyPrefix}:${rung}`, step && step.target, name, (value) => {
-      if (!value) return;
-      const target = modTargetOf(value);
-      // A model with another ladder keeps the nearest effort it takes, as the router would send it.
-      set(rung, { ...(step || {}), target, effort: modNearest(step ? step.effort : MOD_RUNG_EFFORT[rung], modLadderOf(modChoiceOf(target))) });
-    }, step ? null : "—");
-    const effort = step ? modSegmented(`${keyPrefix}-effort:${rung}`, ladder.map((value) => ({ value, label: modEffortName(value) })), shown, `${name} · ${t("mod.effort")}`, (value) => set(rung, { ...step, effort: value })) : null;
-    const aa = step ? modAaHint(choice, shown) : "";
+    const select = modPickSelect(`worker:${rung}`, step, shown, name, (target, effort) => modSetRule("general", { mode: "ladder", rungs: { ...rungs, [rung]: { target, effort } } }));
     const subs = [modCap(t(`mod.rungHint.${rung}`))];
-    if (modMarked(domain, rung)) subs.push(el("span", { class: "cell-sub warn-text", text: t("mod.presetFilled") }));
-    else if (choice && !choice.usable) subs.push(el("span", { class: "cell-sub warn-text", text: t("mod.rungUnusable") }));
-    return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-controls" }, [
-      select,
-      el("div", { class: "rung-effort" }, [effort, el("span", { class: "aa-hint", text: aa })]),
-    ]), subs, "wide rung-row");
+    if (choice && !choice.usable) subs.push(el("span", { class: "cell-sub warn-text", text: t("mod.rungUnusable") }));
+    return cell(el("span", { class: "cell-label strong", text: name }), select, subs, "wide rung-row");
   });
 }
-/** What runs when a rung's model cannot: tried before the rung above. */
-function modBackupRows(rule, keyPrefix, onChange) {
-  const rungs = rule.rungs || {};
-  return MOD_RUNGS.filter((rung) => rungs[rung]).map((rung) => {
-    const step = rungs[rung];
-    return cell(t(`mod.rung.${rung}`), modModelSelect(`${keyPrefix}-backup:${rung}`, step.backup, `${t(`mod.rung.${rung}`)} · ${t("mod.backupTitle")}`, (value) => {
-      const next = { ...step };
-      if (value) next.backup = modTargetOf(value); else delete next.backup;
-      onChange({ ...rule, rungs: { ...rungs, [rung]: next } });
-    }, t("mod.backupNone")));
-  });
-}
-/** A ladder: its four rows, then its backups behind a disclosure. */
-function modLadderSections(domain, rule, title, onChange) {
-  const backups = rule.rungs && Object.values(rule.rungs).filter((step) => step && step.backup).length;
-  return [
-    // How the ladder climbs is said once, under the main ladder; a field's own ladder climbs alike.
-    modSection(title, modRungRows(domain, rule, `rung-${domain}`, onChange), domain === "general" ? [t("mod.ladderHelp"), t("mod.attribution")] : [t("mod.attribution")]),
-    modDetails(`backup:${domain}`, backups ? t("mod.backupTitleCount", { n: backups }) : t("mod.backupTitle"), [modSection(null, modBackupRows(rule, `rung-${domain}`, onChange), [t("mod.backupHelp")])]),
-  ];
-}
-function modSameStep(a, b) { return Boolean(a && b) && modTargetValue(a.target) === modTargetValue(b.target) && a.effort === b.effort; }
-/** A preset's four models in a quiet line under its name, each kept whole when the line wraps. */
-function modPresetLine(preset) {
-  const names = MOD_RUNGS.map((rung) => { const step = preset.rungs[rung]; const choice = step && modChoiceOf(step.target); return choice ? choice.short : step ? step.target.agent : "—"; });
-  return names.flatMap((name, index) => [index ? " · " : null, el("span", { class: "nowrap", text: name })]).filter(Boolean);
-}
-function modApplyPreset(id) {
-  const preset = modState.options.presets[id];
-  const general = modState.settings.rules.general;
-  // A preset changes what runs on each rung, not the person's backups.
-  const rungs = Object.fromEntries(MOD_RUNGS.map((rung) => {
-    const backup = general.mode === "ladder" && general.rungs && general.rungs[rung] && general.rungs[rung].backup;
-    return [rung, { ...clone(preset.rungs[rung]), ...(backup ? { backup } : {}) }];
-  }));
-  modPresetMarks = { domain: "general", rungs: [...(preset.substituted || [])] };
-  modSetRule("general", { mode: "ladder", rungs });
-  const name = t(`mod.preset.${id}`);
-  toast(preset.substituted && preset.substituted.length ? t("mod.presetToastFilled", { name, rungs: preset.substituted.map((rung) => t(`mod.rung.${rung}`)).join(", ") }) : t("mod.presetToast", { name }));
-}
-const MOD_OFFER_KEY = "clauderipple_ladder_offer_seen";
-function modOfferSeen() { try { return localStorage.getItem(MOD_OFFER_KEY) === "1"; } catch { return false; } }
-function modPresetSection() {
-  const presets = modState.options && modState.options.presets;
-  if (!presets) return null;
-  const general = modState.settings.rules.general;
-  const current = general.mode === "ladder" ? MOD_PRESETS.find((id) => presets[id] && MOD_RUNGS.every((rung) => modSameStep(general.rungs && general.rungs[rung], presets[id].rungs[rung]))) : null;
-  const buttons = MOD_PRESETS.filter((id) => presets[id]).map((id) => el("button", { class: `preset-btn${current === id ? " active" : ""}`, type: "button", "data-key": `preset:${id}`, "aria-pressed": String(current === id), onclick: () => modApplyPreset(id) }, [
-    el("span", { class: "preset-name", text: t(`mod.preset.${id}`) }),
-    el("span", { class: "preset-sub" }, modPresetLine(presets[id])),
-  ]));
-  const rows = [];
-  // Settings saved on Auto keep Auto; this says once that a preset is the way onto the ladder.
-  if (general.mode === "auto" && !modOfferSeen()) {
-    const keep = el("button", { class: "btn secondary compact", type: "button", "data-key": "offer-keep", text: t("mod.offerKeep"), onclick: () => { try { localStorage.setItem(MOD_OFFER_KEY, "1"); } catch { /* unavailable */ } modRefresh(); } });
-    rows.push(cell(el("span", { class: "cell-label", text: t("mod.offerAuto") }), keep, null, "offer-row"));
-  }
-  rows.push(el("div", { class: "preset-grid" }, buttons));
-  return modSection(t("mod.presets"), rows, [t("mod.presetsHelp")]);
-}
-/** A field's own ladder starts from its default (design: Claude), else a copy of the main ladder. */
-function modFieldLadder(domain) {
-  const own = MOD_DEFAULTS.rules[domain];
-  if (own && own.mode === "ladder") return clone(own);
-  const general = modState.settings.rules.general;
-  return clone(general.mode === "ladder" ? general : MOD_DEFAULTS.rules.general);
-}
-function modOverrideSections() {
-  const s = modState.settings;
-  const rows = MOD_OVERRIDES.map((domain) => {
-    const rule = s.rules[domain];
-    const on = rule.mode !== "inherit";
-    const label = t(`mod.override.${domain}`);
-    return cell(label, modSwitch(`override:${domain}`, on, label, (value) => modSetRule(domain, value ? modFieldLadder(domain) : { mode: "inherit" })), on ? (rule.mode === "auto" ? modCap(t("mod.overrideAuto")) : null) : modCap(t("mod.overrideOff")));
-  });
-  const ladders = MOD_OVERRIDES.filter((domain) => s.rules[domain].mode === "ladder").flatMap((domain) => modLadderSections(domain, s.rules[domain], t(`mod.override.${domain}`), (rule) => modSetRule(domain, rule)));
-  return [modSection(t("mod.overrides"), rows, [t("mod.overridesHelp")]), ...ladders];
-}
-function modCalibrationSummary(rule) {
-  const parts = [];
-  if (rule.effortOffset) parts.push(`${t("mod.offset")} ${modSigned(rule.effortOffset)}`);
-  if (rule.floor) parts.push(`${t("mod.floor")} ${modEffortName(rule.floor)}`);
-  if (rule.ceiling) parts.push(`${t("mod.ceiling")} ${modEffortName(rule.ceiling)}`);
-  return parts;
-}
-function modRuleSummary(domain) {
-  const rule = modState.settings.rules[domain];
-  if (!rule || rule.mode === "inherit") return "";
-  if (rule.mode === "ladder") return MOD_RUNGS.map((rung) => { const step = rule.rungs && rule.rungs[rung]; const choice = step && modChoiceOf(step.target); return choice ? choice.short : step ? step.target.agent : "—"; }).join(" · ");
-  const head = `${t("mod.candidates")}: ${modAgents().every((agent) => modAllowed(rule, agent.name)) ? t("mod.allCandidates") : modAgents().filter((agent) => modAllowed(rule, agent.name)).map((agent) => agent.model).join(", ")}`;
-  return [head, ...modCalibrationSummary(rule)].join(" · ");
-}
-function modPreferenceLabel(item) {
-  const model = modModels().find((entry) => entry.model === item);
-  if (model) return { label: model.name || model.model, sub: `${model.model} · ${model.provider}` };
-  const provider = modProviderInfo(item);
-  if (provider) return { label: item, sub: provider.type === item ? null : provider.type };
-  const agent = modAgents().find((entry) => entry.name === item);
-  if (agent) return { label: agent.model, sub: agent.provider };
-  return { label: item, sub: null };
-}
-function modPreferenceRows() {
-  const order = modState.settings.preference;
-  const move = (index, delta) => {
-    const next = [...order];
-    const other = index + delta;
-    if (other < 0 || other >= next.length) return;
-    [next[index], next[other]] = [next[other], next[index]];
-    modPatch({ preference: next });
-  };
-  const rows = order.map((item, index) => {
-    const { label, sub } = modPreferenceLabel(item);
-    const up = el("button", { class: "icon-btn", type: "button", title: t("mod.up"), "aria-label": `${t("mod.up")}: ${label}`, "data-key": `pref-up:${item}`, onclick: () => move(index, -1) }, [svgIcon("0 0 20 20", ["M5 12.5l5-5 5 5"])]);
-    const down = el("button", { class: "icon-btn", type: "button", title: t("mod.down"), "aria-label": `${t("mod.down")}: ${label}`, "data-key": `pref-down:${item}`, onclick: () => move(index, 1) }, [svgIcon("0 0 20 20", ["M5 7.5l5 5 5-5"])]);
-    const remove = el("button", { class: "icon-btn remove", type: "button", title: t("mod.remove"), "aria-label": `${t("mod.remove")}: ${label}`, "data-key": `pref-remove:${item}`, onclick: () => modPatch({ preference: order.filter((_, i) => i !== index) }) }, [svgIcon("0 0 20 20", ["M10 2.8a7.2 7.2 0 1 0 0 14.4 7.2 7.2 0 0 0 0-14.4z", "M6.6 10h6.8"])]);
-    up.disabled = index === 0;
-    down.disabled = index === order.length - 1;
-    return cell(el("span", { class: "cell-label" }, [el("span", { class: "pref-rank", text: `${index + 1}` }), label]), [up, down, remove], sub ? el("span", { class: "cell-sub mono", text: sub }) : null, "pref-row");
-  });
-  // New entries name a worker (model and provider), the unit Auto now chooses between.
-  const taken = new Set(order);
-  const add = modSelect("pref-add", [
-    { value: "", label: "—" },
-    ...modAgents().filter((agent) => !taken.has(agent.name)).map((agent) => ({ value: agent.name, label: `${agent.model} · ${agent.provider}` })),
-  ], "", t("mod.addPreference"), (value) => { if (value) modPatch({ preference: [...order, value] }); });
-  return [
-    ...(rows.length ? rows : [el("div", { class: "cell-note", text: t("mod.preferenceEmpty") })]),
-    cell(t("mod.addPreference"), add),
-  ];
-}
-function modAaSection() {
-  const s = modState.settings;
-  const options = modState.options;
-  const scores = options && options.scores;
-  // One row per worker, so the table reads against the Candidates list above it.
-  const general = s.rules.general;
-  const rows = modAgents().map((agent) => ({ agent, score: modScoreOf(agent), on: general.mode !== "auto" || modAllowed(general, agent.name) }));
-  const models = rows.filter((row) => row.score).map((row) => ({ ...row.score, name: row.agent.model, on: row.on }));
-  const levelPicker = modSegmented("aa-level", MOD_LEVELS.map((level) => ({ value: level, label: t(`mod.level.${level}`) })), modAaLevel, t("mod.aaData"), (level) => { modAaLevel = level; modRefresh(); });
-  if (!models.length) return modSection(t("mod.aaData"), [el("div", { class: "cell-note", text: t("mod.aaNoData") })], [t("mod.attribution")]);
-  const floor = s.autoFloors[modAaLevel];
-  const columns = [...MOD_EFFORTS.filter((effort) => models.some((model) => model.variants.some((variant) => variant.effort === effort)))];
-  if (models.some((model) => model.variants.some((variant) => !variant.effort))) columns.push(null);
-  // The cell Auto would anchor on at this level: cheapest at or above the floor, among candidates that are on.
-  let best = null;
-  for (const model of models) {
-    if (!model.on) continue;
-    for (const variant of model.variants) {
-      if (typeof variant.intelligence !== "number" || typeof variant.costPerTask !== "number" || variant.intelligence < floor) continue;
-      if (!best || variant.costPerTask < best.variant.costPerTask) best = { model, variant };
-    }
-  }
-  const table = el("table", { class: "aa-table" }, [
-    el("thead", {}, [el("tr", {}, [el("th", { text: t("mod.model") }), ...columns.map((effort) => el("th", { text: effort ? modEffortName(effort) : t("mod.aaDefault") }))])]),
-    el("tbody", {}, models.map((model) => el("tr", { class: model.on ? "" : "aa-off" }, [
-      el("td", { class: "aa-model" }, [el("span", { text: model.name }), el("small", { text: model.provider })]),
-      ...columns.map((effort) => {
-        const variant = model.variants.find((entry) => (entry.effort || null) === effort);
-        if (!variant || typeof variant.intelligence !== "number") return el("td", { class: "aa-cell empty", text: "—" });
-        const isBest = best && best.variant === variant;
-        const below = variant.intelligence < floor;
-        return el("td", { class: `aa-cell${isBest ? " best" : below ? " below" : ""}` }, [el("b", { text: variant.intelligence.toFixed(1) }), el("span", { text: modMoney(variant.costPerTask) })]);
-      }),
-    ]))),
-  ]);
-  const unmatched = rows.filter((row) => !row.score).map((row) => row.agent.model);
-  const updated = scores.generatedAt ? new Date(scores.generatedAt).toLocaleDateString(CURRENT_LANG) : null;
-  return modSection(t("mod.aaData"), [el("div", { class: "aa-scroll" }, [table])], [
-    t("mod.aaHelp", { level: t(`mod.level.${modAaLevel}`), floor }),
-    unmatched.length ? t("mod.aaUnmatched", { models: unmatched.join(", ") }) : null,
-    updated ? `${t("mod.attribution")} · ${t("mod.aaUpdated", { date: updated })}` : t("mod.attribution"),
-  ], levelPicker);
-}
-/**
- * A disclosure that stays as the person left it across redraws: the page is rebuilt on every
- * change, and a details element built fresh would snap shut under the hand that opened it.
- */
-const modOpenDetails = new Set();
-function modDetails(key, summary, content) {
-  const details = el("details", { class: "details mod-details" }, [el("summary", { "data-key": `details:${key}`, text: summary }), el("div", { class: "mod-details-body" }, content.filter(Boolean))]);
-  details.open = modOpenDetails.has(key);
-  details.addEventListener("toggle", () => { if (details.open) modOpenDetails.add(key); else modOpenDetails.delete(key); });
-  return details;
-}
-/** Offset, floor and ceiling of one rule: how hard the chosen worker thinks. */
-function modCalibrationRows(rule, keyPrefix, onChange) {
-  const calibrate = (change) => {
-    const next = { ...rule, ...change };
-    for (const key of Object.keys(change)) if (change[key] === undefined) delete next[key];
-    onChange(next);
-  };
-  const anyEffort = [{ value: "", label: t("mod.anyEffort") }, ...MOD_EFFORTS.map((effort) => ({ value: effort, label: modEffortName(effort) }))];
-  const inverted = rule.floor && rule.ceiling && MOD_EFFORTS.indexOf(rule.ceiling) < MOD_EFFORTS.indexOf(rule.floor);
-  return [
-    cell(t("mod.offset"), modSegmented(`${keyPrefix}-offset`, [-2, -1, 0, 1, 2].map((n) => ({ value: n, label: modSigned(n) })), rule.effortOffset || 0, t("mod.offset"), (n) => calibrate({ effortOffset: Number(n) })), null, "wide"),
-    cell(t("mod.floor"), modSelect(`${keyPrefix}-floor`, anyEffort, rule.floor || "", t("mod.floor"), (value) => calibrate({ floor: value || undefined }), "narrow")),
-    cell(t("mod.ceiling"), modSelect(`${keyPrefix}-ceiling`, anyEffort, rule.ceiling || "", t("mod.ceiling"), (value) => calibrate({ ceiling: value || undefined }), "narrow"), inverted ? el("span", { class: "cell-sub warn-text", text: modCap(t("mod.floorWins")) }) : null),
-  ];
-}
-/** Switching between the ladder and Auto keeps the other one's last state for this page's life. */
-const modGeneralMemory = {};
-function modPickGeneral(mode) {
-  const current = modState.settings.rules.general;
-  modGeneralMemory[current.mode] = current;
-  const remembered = modGeneralMemory[mode];
-  modSetRule("general", remembered ? clone(remembered) : mode === "auto" ? { mode, allow: [] } : clone(MOD_DEFAULTS.rules.general));
-}
-/** One row per field: the main ladder as is, its own four rungs, or Auto (experimental). */
-function modFieldRows() {
-  const s = modState.settings;
-  return MOD_DOMAINS.filter((domain) => domain !== "general").map((domain) => {
-    const rule = s.rules[domain];
-    const name = t(`mod.domain.${domain}`);
-    const pick = (mode) => modSetRule(domain, mode === "inherit" ? { mode } : mode === "auto" ? { mode, allow: [] } : modFieldLadder(domain));
-    const mode = modSegmented(`field:${domain}`, [{ value: "inherit", label: t("mod.followLadder") }, { value: "ladder", label: t("mod.ownLadder") }, { value: "auto", label: t("mod.autoMode") }], rule.mode, name, pick);
-    // Kept in place (invisible) on a field that follows the ladder, so every row's control lines up.
-    const edit = el("button", { class: `btn secondary compact${rule.mode === "inherit" ? " placeholder" : ""}`, type: "button", "data-key": `field-edit:${domain}`, text: t("mod.editRungs"), onclick: () => openModField(domain) });
-    if (rule.mode === "inherit") { edit.disabled = true; edit.tabIndex = -1; edit.setAttribute("aria-hidden", "true"); }
-    return cell(name, [mode, edit], rule.mode === "inherit" ? null : modRuleSummary(domain), "wide field-row");
-  });
-}
-/** Auto's floors, tie band, preference and AA table: open when a rule uses Auto, else folded. */
-function modAutoDetails(titled) {
-  const s = modState.settings;
-  return [
-    modSection(titled ? t("mod.autoDetails") : null, [
-      ...MOD_LEVELS.map((level) => cell(t("mod.indexFloor", { level: t(`mod.level.${level}`) }), modNumber(`index-floor:${level}`, s.autoFloors[level], { min: 0, max: 100, step: 1 }, t("mod.indexFloor", { level: t(`mod.level.${level}`) }), (n) => modPatch({ autoFloors: { ...s.autoFloors, [level]: n } })))),
-      cell(t("mod.tieBand"), modNumber("tie-band", s.autoTieBand, { min: 0, max: 20, step: 0.5 }, t("mod.tieBand"), (n) => modPatch({ autoTieBand: n }))),
-    ], [t("mod.autoHelp")]),
-    modSection(t("mod.preference"), modPreferenceRows(), [t("mod.preferenceHint")]),
-    modAaSection(),
-  ];
+/** Said once after settings that still held Auto or field rules are read: they became the four workers. */
+function modRetiredNote() {
+  const close = el("button", { class: "btn secondary compact", type: "button", "data-key": "retired-ok", text: t("common.close"), onclick: () => { modState.retiredNote = false; modRefresh(); } });
+  return modSection(null, [cell(el("span", { class: "cell-label", text: t("mod.retired") }), close, null, "offer-row")]);
 }
 function modWorkersCard() {
   const s = modState.settings;
-  const general = s.rules.general;
-  const auto = general.mode === "auto";
-  const floors = MOD_LEVELS.map((level) => s.autoFloors[level]).join("/");
-  const anyAuto = MOD_DOMAINS.some((domain) => s.rules[domain] && s.rules[domain].mode === "auto");
   return modCard("workers", t("mod.workers"), t("mod.workersBlurb"), [
     modState.options ? null : modSection(null, [el("div", { class: "cell-note warn-text", text: t("mod.optionsFailed") })]),
+    modState.retiredNote ? modRetiredNote() : null,
     modSection(null, [
       cell(t("mod.takesOver"), modSegmented("agent-auto", [{ value: "off", label: t("mod.off") }, { value: "auto", label: "ripple:auto" }, { value: "all", label: t("mod.allSpawns") }], s.agentAuto, t("mod.takesOver"), (agentAuto) => modPatch({ agentAuto })), null, "wide"),
     ], [t("mod.takesOverHelp"), t("mod.takesOverHelp2")]),
-    modPresetSection(),
-    ...(auto
-      ? [
-        modSection(t("mod.autoMode"), modAgents().length ? modCandidateRows(general, "candidate", (rule) => modSetRule("general", rule)) : [el("div", { class: "cell-note", text: t("mod.noModels") })], [t("mod.pickHelpAuto"), t("mod.candidatesHelp"), t("mod.autoLine", { floor: floors })]),
-        modDetails("worker-effort", t("mod.workerEffort"), [modSection(null, modCalibrationRows(general, "general", (rule) => modSetRule("general", rule)))]),
-      ]
-      : modLadderSections("general", general, t("mod.ladder"), (rule) => modSetRule("general", rule))),
-    ...modOverrideSections(),
-    modDetails("finer", t("mod.finer"), [
-      modSection(null, [
-        cell(t("mod.picked"), modSegmented("picked", [{ value: "ladder", label: t("mod.ladder") }, { value: "auto", label: t("mod.autoMode") }], general.mode, t("mod.picked"), modPickGeneral), null, "wide"),
-      ], [t(auto ? "mod.pickHelpAuto" : "mod.pickHelpLadder")]),
-      modSection(t("mod.fields"), modFieldRows(), [t("mod.fieldsHelp")]),
-      ...(anyAuto ? modAutoDetails(true) : [modDetails("auto", t("mod.autoDetails"), modAutoDetails(false))]),
-    ]),
+    modSection(t("mod.models"), modTickRows(), [t("mod.modelsHelp")]),
+    modSection(t("mod.fourWorkers"), modRungRows(), [t("mod.ladderHelp")]),
   ]);
-}
-
-/** A field's own rule in a sheet: its four rungs and backups, or Auto's candidates and effort. */
-function modFieldSheet(domain) {
-  const rule = modState.settings.rules[domain];
-  const set = (next) => modSetRule(domain, next);
-  if (rule.mode === "ladder") return modLadderSections(domain, rule, null, set);
-  return [
-    modSection(t("mod.candidates"), modCandidateRows(rule, "field-candidate", set), [t("mod.candidatesHelp")]),
-    modSection(t("mod.workerEffort"), modCalibrationRows(rule, "field", set)),
-  ];
-}
-function openModField(domain) {
-  const body = el("div", { class: "mod-sheet" });
-  const done = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("mod.done"), onclick: closeModal });
-  showModal(el("div", {}, [el("h1", { id: "modal-title", text: t(`mod.domain.${domain}`) }), hint(t("mod.fieldSheetHelp")), body, el("div", { class: "actions end" }, [done])]), () => { modSheet = null; });
-  // The sheet closes when its field goes back to following the ladder (from another tab or session).
-  modSheet = { draw: () => { if (modState.settings.rules[domain] && modState.settings.rules[domain].mode !== "inherit") modRedraw(body, modFieldSheet(domain)); else closeModal(); } };
-  modSheet.draw();
 }
 
 function modJudgeCard() {

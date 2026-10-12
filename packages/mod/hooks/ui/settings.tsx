@@ -8,10 +8,9 @@
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
-import type { LadderChoice, Settings, Step } from '../../types'
-import { PRESET_IDS } from '../ladder'
+import type { LadderChoice, Settings } from '../../types'
 import { RUNGS } from '../settings'
-import { action, actions, dismiss, option, segmented, speak, toggle } from './parts'
+import { action, actions, dismiss, segmented, speak, toggle } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, textTone } from './theme'
 import type { Frame, SettingsActions, SettingsView } from './view'
@@ -19,7 +18,7 @@ import { effortLabel, isRich, targetLabel, targetValue } from './view'
 
 /** Every name a row of quick settings or setup shows: the name column is the widest of them. */
 const ROW_NAMES = ['settings.effortAuto', 'settings.lean', 'settings.judge', 'settings.key', 'settings.keepWarm', 'settings.workers', 'band.effort', 'band.cache',
-  'workers.rung.light', 'workers.rung.standard', 'workers.rung.hard', 'workers.rung.plan', 'settings.preset'] as const
+  'workers.rung.light', 'workers.rung.standard', 'workers.rung.hard', 'workers.rung.plan'] as const
 
 /** The name column's width in cells: snug to this language's names, so controls sit close to them. */
 function nameCells(frame: Frame): number {
@@ -135,17 +134,15 @@ function choiceLabel(choice: LadderChoice): string {
 }
 
 /**
- * The main ladder's four rungs as model Selects (each rung keeps its effort), then the presets.
- * Native Selects and Buttons only: the band redraws on every poll, and a picture would blink.
+ * The four workers as model Selects (each keeps its effort), offering the ticked models. Native
+ * Selects only: the band redraws on every poll, and a picture would blink.
  */
 export function ladderRows(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode[] {
   const { Box, Text } = el
   const general = view.settings.rules.general
   const options = view.ladder
   const out: RenderNode[] = []
-  if (general.mode !== 'ladder') {
-    out.push(row(el, frame, 'ladder-auto', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'settings.ladderAuto')}</Text>))
-  } else if (!options) {
+  if (general.mode !== 'ladder' || !options) {
     out.push(row(el, frame, 'ladder-wait', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'settings.ladderWaiting')}</Text>))
   } else {
     for (const rung of RUNGS) {
@@ -161,17 +158,6 @@ export function ladderRows(el: Els, frame: Frame, view: SettingsView, a: Setting
         : <Text>{items.find(item => item.value === current)?.label ?? '—'}</Text>
       out.push(row(el, frame, 'rung-' + rung, t(frame.lang, 'workers.rung.' + rung), control, effort))
     }
-  }
-  if (options && a.applyPreset) {
-    // A preset is an action, marked ● when the ladder is exactly what it would fill.
-    const same = (x: Step | undefined, y: Step) => !!x && targetValue(x.target) === targetValue(y.target) && x.effort === y.effort
-    const buttons = PRESET_IDS.flatMap(id => {
-      const p = options.presets[id]
-      if (!p) return []
-      const chosen = general.mode === 'ladder' && RUNGS.every(rung => same(general.rungs[rung], p.rungs[rung]))
-      return [option(el, 'preset-' + id, t(frame.lang, 'settings.preset.' + id), chosen, () => a.applyPreset!(id))]
-    })
-    out.push(row(el, frame, 'presets', t(frame.lang, 'settings.preset'), <Box flexDirection="row" flexWrap="wrap" columnGap={isRich(frame) ? 1 : 2}>{buttons}</Box>))
   }
   return out
 }

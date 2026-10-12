@@ -83,8 +83,10 @@ export type Step = { target: TierTarget; effort: Effort; backup?: TierTarget }
 export type Tier = Level | 'design'
 export type Calibration = { effortOffset?: -2 | -1 | 0 | 1 | 2; floor?: Effort; ceiling?: Effort }
 /**
- * ladder: the four rungs, each model + effort; auto: picked by AA scores among allowed workers
- * (experimental); inherit: the general rule. Pins stored before 2026-10-11 normalize to ladders.
+ * ladder: the four workers' rungs, each model + effort; inherit: the general rule. Loading
+ * (`normalizeSettings`) yields only these two, and only the general rule is a ladder: Auto
+ * (experimental), field rules and pins from before 2026-10-11 are read into it. `auto` stays in the
+ * type for the routing code that still reads it (`resolveWorker`), which nothing loaded reaches.
  */
 export type Rule = { mode: 'ladder'; rungs: Partial<Record<Rung, Step>> }
   | ({ mode: 'auto'; allow: string[] } & Calibration) | { mode: 'inherit' }
@@ -101,10 +103,11 @@ export type LadderChoice = {
   /** Its cheapest measured AA cost per task, when measured. */
   cost?: number
 }
+/** The fill rule's wishes, by name; only `claudeGpt` is used now (the router fills empty rungs with it). */
 export type PresetId = 'claude' | 'claudeGpt' | 'gpt' | 'cheap'
-/** A preset as computed from what is connected: the rungs, and the ones it had to fill otherwise. */
+/** The fill as computed from the ticked models: the rungs, and the ones it had to fill otherwise. */
 export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
-export type LadderOptions = { until: number; choices: LadderChoice[]; presets: Partial<Record<PresetId, Preset>> }
+export type LadderOptions = { until: number; choices: LadderChoice[] }
 export type RouterModel = { value: string; label: string; provider: string; name?: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
 export type AaScore = { intelligence: number; costPerTask: number }
@@ -130,6 +133,12 @@ export type Settings = {
   agentAuto: 'off' | 'auto' | 'all'
   jevSource: 'typesafe' | 'zen'
   rules: Record<Domain, Rule>
+  /**
+   * The models the user ticked (docs/specs/2026-10-12-worker-tiers.md): worker agent names and
+   * `general-purpose:<model>` for Claude's own. Empty means every model. Rungs run, and the fill
+   * picks, only among these.
+   */
+  allow: string[]
   providers: Record<string, boolean>
   preference: string[]
   autoFloors: Record<Level, number>
@@ -161,7 +170,13 @@ export type Settings = {
 }
 
 /** The admin API always returns a complete normalized settings object. */
-export type ModSettingsSnapshot = { settings: Settings; revision: number; stored: boolean }
+export type ModSettingsSnapshot = {
+  settings: Settings
+  revision: number
+  stored: boolean
+  /** The stored settings still held field overrides or Auto, which the four workers replaced; true until the next save. */
+  legacy?: boolean
+}
 /** Arrays and rule mode changes are atomic; other edits are rebased by field path. */
 export type SettingsChange = { path: string[]; value?: unknown; remove?: boolean }
 export type SettingsSync = { revision: number | null; pending: SettingsChange[]; migrationChecked: boolean; migration: Settings | null }

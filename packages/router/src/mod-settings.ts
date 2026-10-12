@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "./config.ts";
 import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
-import { normalizeSettings } from "../../mod/hooks/settings.ts";
+import { hadRetiredRouting, normalizeSettings } from "../../mod/hooks/settings.ts";
 import type { ModSettingsSnapshot } from "../../mod/types/index.d.ts";
 
 export const MAX_MOD_SETTINGS_BYTES = 64 * 1024;
@@ -49,7 +49,7 @@ function hasSecretKey(settings: Record<string, unknown>): boolean {
   return false;
 }
 
-function validateSettings(settings: unknown): asserts settings is Record<string, unknown> {
+export function validateSettings(settings: unknown): asserts settings is Record<string, unknown> {
   if (!object(settings)) throw new ModSettingsInputError("settings must be a JSON object");
   if (Buffer.byteLength(JSON.stringify(settings), "utf8") > MAX_MOD_SETTINGS_BYTES) throw new ModSettingsInputError("settings exceeds 64 KiB", 413);
   if (hasSecretKey(settings)) throw new ModSettingsInputError("settings must not contain credential fields (key, token, secret, password)");
@@ -66,7 +66,8 @@ export function readModSettings(home = homeDir()): ModSettingsSnapshot {
   const stored: unknown = JSON.parse(text);
   if (!object(stored) || !revision(stored.revision) || stored.revision < 1) throw new Error("invalid mod settings store");
   validateSettings(stored.settings);
-  return { settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true };
+  // Auto and field rules are gone: the dashboard says so once, until the next save drops them.
+  return { settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true, ...(hadRetiredRouting(stored.settings) ? { legacy: true } : {}) };
 }
 
 export type ModSettingsWrite = { stale: boolean; current: ModSettingsSnapshot };

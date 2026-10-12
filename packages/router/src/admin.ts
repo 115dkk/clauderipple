@@ -29,9 +29,10 @@ import { adminPort, homeDir, searchProviderFor, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { ModSettingsInputError, readModSettings, writeModSettings } from "./mod-settings.ts";
-import { billingOf, claudeChoices, presets } from "../../mod/hooks/ladder.ts";
-import type { Billing, Effort, LadderChoice, Preset, PresetId } from "../../mod/types/index.d.ts";
+import { ModSettingsInputError, readModSettings, validateSettings, writeModSettings } from "./mod-settings.ts";
+import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
+import { normalizeSettings } from "../../mod/hooks/settings.ts";
+import type { Billing, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
 import type { Stats } from "./proxy.ts";
@@ -347,16 +348,6 @@ function readSettingsEnv(): { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string
   }
 }
 
-/** Whether ClaudeRipple's agent-title hook is registered in settings.json (see packages/cli/src/settings.ts). */
-function agentTitleHookEnabled(): boolean {
-  try {
-    const s = JSON.parse(fs.readFileSync(settingsPath(), "utf8")) as { hooks?: { PreToolUse?: Record<string, unknown>[] } };
-    return (s.hooks?.PreToolUse ?? []).some((e) => e._clauderipple === "agent-title");
-  } catch {
-    return false;
-  }
-}
-
 /** Newest mtime of the served GUI files; the page reloads itself when this changes (an open window would otherwise run stale JS). */
 function uiRevision(): string {
   try {
@@ -464,8 +455,6 @@ export type ModOptions = {
   scores: ReturnType<typeof buildModelScores>;
   /** Claude's own models' effort ladder, for the rungs that run Claude Code's own agent. */
   claudeEfforts: Effort[];
-  /** The worker ladder's presets filled from the usable workers (docs/specs/2026-10-11-worker-ladder.md). */
-  presets: Record<PresetId, Preset>;
 };
 
 const MOD_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
@@ -508,16 +497,39 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   }));
   const scored = buildModelScores(cfg, await scores.get());
   const claudeEfforts = modEfforts(catalog.anthropic?.default);
-  // Presets offer only what can run now: a worker whose provider is signed out or out of quota is not connected.
-  const usable = new Set(providers.filter(p => p.usable).map(p => p.name));
-  const choices: LadderChoice[] = [
-    ...agents.filter(a => usable.has(a.provider)).map(a => {
-      const costs = (scored.models.find(m => m.model === a.model && m.provider === a.provider)?.variants ?? []).flatMap(v => typeof v.costPerTask === "number" ? [v.costPerTask] : []);
+  return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts };
+}
+
+/**
+ * What the four workers can be filled from: the generated workers whose provider can run now, with
+ * their ladders, billing and cheapest measured cost, then Claude's own models (always there).
+ */
+function ladderChoices(options: ModOptions): LadderChoice[] {
+  const usable = new Set(options.providers.filter(p => p.usable).map(p => p.name));
+  return [
+    ...options.agents.filter(a => usable.has(a.provider)).map(a => {
+      const costs = (options.scores.models.find(m => m.model === a.model && m.provider === a.provider)?.variants ?? []).flatMap(v => typeof v.costPerTask === "number" ? [v.costPerTask] : []);
       return { target: { agent: a.name }, model: a.model, provider: a.provider, billing: a.billing, efforts: a.efforts, ...(costs.length ? { cost: Math.min(...costs) } : {}) };
     }),
-    ...claudeChoices(claudeEfforts),
+    ...claudeChoices(options.claudeEfforts),
   ];
-  return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts, presets: presets(choices) };
+}
+
+/**
+ * Settings with the general ladder's empty rungs, and rungs on a model that is not ticked, filled
+ * from the ticked, connected models (the `claudeGpt` rule in mod/hooks/ladder.ts). Nothing is
+ * fetched when every rung has a ticked model; a failure leaves the rungs as they are.
+ */
+async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
+  const general = settings.rules.general;
+  if (general.mode !== "ladder" || !ladderNeedsFill(general.rungs, settings.allow)) return settings;
+  try {
+    const { rungs, filled } = fillLadder(general.rungs, settings.allow, ladderChoices(await modOptions(deps, scores)));
+    return filled.length ? { ...settings, rules: { ...settings.rules, general: { mode: "ladder", rungs } } } : settings;
+  } catch (error) {
+    deps.log.warn(`admin: filling the worker ladder failed: ${(error as Error).message}`);
+    return settings;
+  }
 }
 
 async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
@@ -615,7 +627,6 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     // to report and would only add a row that never changes.
     credentials: deps.credentials?.() ?? {},
     picker,
-    agentTitle: agentTitleHookEnabled(),
     statusMod: statusModEnabled(),
     pickerModels: chatPickerModels(cfg).map((m) => m.name || m.model),
     uiRevision: uiRevision(),
@@ -1508,7 +1519,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         return;
       }
       if (pathname === "/api/mod-settings" && method === "GET") {
-        sendJson(res, 200, readModSettings());
+        const snapshot = readModSettings();
+        // Filled here as well as on save, so a ladder with empty rungs (Auto migrated, or never set) reads whole to every surface.
+        sendJson(res, 200, { ...snapshot, settings: await withFilledLadder(deps, scores, snapshot.settings) });
         return;
       }
       if (pathname === "/api/mod-settings" && method === "PUT") {
@@ -1516,6 +1529,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         let parsed: unknown;
         try { parsed = JSON.parse(bytes.toString("utf8")); }
         catch { throw new ModSettingsInputError("invalid JSON"); }
+        const body = parsed as { settings?: unknown };
+        if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
+          // Checked before normalizing, which would drop a credential field the check is there to refuse.
+          validateSettings(body.settings);
+          body.settings = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
+        }
         const result = writeModSettings(parsed);
         sendJson(res, result.stale ? 409 : 200, result.current);
         return;

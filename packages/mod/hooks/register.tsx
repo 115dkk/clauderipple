@@ -2,8 +2,8 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, PresetId, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
-import { DEFAULTS, RUNGS, RUNG_EFFORT, applySettingsChanges, foldExceptions, normalizeSettings, settingsChanges } from './settings'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
+import { DEFAULTS, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
@@ -429,7 +429,7 @@ async function refreshLadder($: EngineInterface): Promise<void> {
   try {
     const response = await $.http.fetch(`${await adminUrl($)}/api/mod-options`)
     if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
-    const fresh = ladderOptionsFrom(JSON.parse(response.text), await $.clock.now() + KEEP_MS)
+    const fresh = ladderOptionsFrom(JSON.parse(response.text), await $.clock.now() + KEEP_MS, (await currentSettings($)).allow)
     if (!same(await read($, ladderOptions), fresh)) await update($, ladderOptions, () => fresh)
   } catch (error) { await report($, 'ladder options', error) }
 }
@@ -440,21 +440,6 @@ async function setRung($: EngineInterface, rung: Rung, value: string): Promise<v
   const step = general.rungs[rung]
   const next: Step = { ...(step ?? { effort: RUNG_EFFORT[rung] }), target: targetOf(value) }
   await settingsActions($).patch({ rules: { ...s.rules, general: { mode: 'ladder', rungs: { ...general.rungs, [rung]: next } } } })
-}
-async function applyPreset($: EngineInterface, id: PresetId): Promise<void> {
-  const language = await read($, lang)
-  const options = await read($, ladderOptions)
-  const chosen = options?.presets[id]
-  if (!chosen) return
-  const s = await currentSettings($)
-  // A rung's backup is the person's own: a preset changes what runs there, not what stands in.
-  const general = s.rules.general.mode === 'ladder' ? s.rules.general : null
-  const rungs = Object.fromEntries(RUNGS.map(rung => { const backup = general?.rungs[rung]?.backup; return [rung, { ...chosen.rungs[rung], ...(backup ? { backup } : {}) }] })) as Extract<Rule, { mode: 'ladder' }>['rungs']
-  await settingsActions($).patch({ rules: { ...s.rules, general: { mode: 'ladder', rungs } } })
-  const name = t(language, 'settings.preset.' + id)
-  await $.ui.toast(chosen.substituted.length
-    ? t(language, 'toasts.presetFilled', { name, rungs: chosen.substituted.map(rung => t(language, 'workers.rung.' + rung)).join(', ') })
-    : t(language, 'toasts.presetApplied', { name }))
 }
 async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Promise<string | undefined> {
   const selected = jevSource ?? normalizeSettings(await read($, settingsDraft) ?? await read($, settings)).jevSource
@@ -641,7 +626,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
   const general = s.rules.general.mode === 'ladder' ? s.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
   const resolved = forced
-    ? ladderPick(verdict, general, s, pinnedCandidates, usable, language, [], forced.rung)
+    ? ladderPick(verdict, general, s, pinnedCandidates, usable, language, s.allow, forced.rung)
     : explicitCandidate && candidateUsable(explicitCandidate, s, usable)
       ? { target: target!, effort: verdict.effort }
       : resolveWorker(verdict, s, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
@@ -691,7 +676,7 @@ async function startPanel($: EngineInterface, which: 'settings' | 'setup'): Prom
   try { await settingsTask(async () => { await syncSettings($, await adminUrl($)) }) }
   catch (error) { await report($, 'panel settings', error) }
   const s = await currentSettings($)
-  await update($, settingsDraft, () => which === 'setup' ? foldExceptions(normalizeSettings(s)) : null)
+  await update($, settingsDraft, () => which === 'setup' ? normalizeSettings(s) : null)
   await update($, settingsBase, () => which === 'setup' ? normalizeSettings(s) : null)
   if (which === 'setup') await update($, setupStep, () => 1)
   await update($, panel, () => which)
@@ -709,7 +694,7 @@ async function rebaseDraft($: EngineInterface): Promise<void> {
   if (!draft) return
   const fresh = await currentSettings($)
   const base = await read($, settingsBase)
-  const next = base ? applySettingsChanges(fresh, settingsChanges(normalizeSettings(base), normalizeSettings(draft))) : foldExceptions(normalizeSettings(fresh))
+  const next = base ? applySettingsChanges(fresh, settingsChanges(normalizeSettings(base), normalizeSettings(draft))) : normalizeSettings(fresh)
   if (base && JSON.stringify(normalizeSettings(base)) === JSON.stringify(fresh)) return
   await update($, settingsBase, () => normalizeSettings(fresh))
   if (JSON.stringify(next) !== JSON.stringify(normalizeSettings(draft))) await update($, settingsDraft, () => next)
@@ -721,7 +706,7 @@ async function patchDraft($: EngineInterface, change: Partial<Settings>): Promis
 }
 async function finishSetup($: EngineInterface, skip = false): Promise<void> {
   // A field whose rule picks as the main choice does is stored as no exception.
-  const draft = foldExceptions(normalizeSettings(skip ? await read($, settings) : await read($, settingsDraft)))
+  const draft = normalizeSettings(skip ? await read($, settings) : await read($, settingsDraft))
   const saved = await saveSettings($, { ...draft, setupDone: true }, skip ? undefined : normalizeSettings(await read($, settingsBase) ?? await currentSettings($)))
   await update($, panel, () => null)
   await update($, settingsDraft, () => null)
@@ -1017,7 +1002,7 @@ function settingsActions($: EngineInterface): SettingsActions {
       if (!saved) await $.ui.toast(t(await read($, lang), 'band.routerDown'))
     },
     jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
-    setRung: (rung, value) => setRung($, rung, value), applyPreset: id => applyPreset($, id),
+    setRung: (rung, value) => setRung($, rung, value),
     openAllSettings: () => openAllSettings($), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {

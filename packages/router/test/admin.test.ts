@@ -93,8 +93,10 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const defaults = { settings: normalizeSettings(null), revision: 0, stored: false };
     assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), defaults);
-    const input = { effortAuto: false, judge: "invalid", layout: "invalid", language: "invalid", keepWarmMinTokens: 1234, rules: { general: { mode: "auto", allow: [" sol ", "sol"] } }, future: [1, null, { nested: true }] };
-    const settings = normalizeSettings(input);
+    const input = { effortAuto: false, judge: "invalid", layout: "invalid", language: "invalid", keepWarmMinTokens: 1234, rules: { general: { mode: "auto", allow: [] } }, future: [1, null, { nested: true }] };
+    // Auto is a ladder with no rung set; saving fills it from the connected models (here only Claude's own).
+    const claude = (model: string, effort: string) => ({ target: { agent: "general-purpose", model }, effort });
+    const settings = normalizeSettings({ ...input, rules: { general: { mode: "ladder", rungs: { light: claude("haiku", "low"), standard: claude("sonnet", "medium"), hard: claude("opus", "high"), plan: claude("opus", "high") } } } });
     const saved = await putModSettings(port, { settings: input, revision: 0 });
     assert.equal(saved.status, 200);
     const snapshot = { settings, revision: 1, stored: true };
@@ -128,6 +130,38 @@ test("admin mod-settings normalizes legacy stored settings on GET without rewrit
     fs.writeFileSync(file, JSON.stringify(old));
     assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(old.settings), revision: 7, stored: true });
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), old);
+  });
+});
+
+test("admin mod-settings reads Auto and field rules as the four workers, fills empty rungs from the ticked models and says it once", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const file = path.join(home, "mod-settings.json");
+    const old = { settings: { language: "ko", rules: { general: { mode: "auto", allow: ["general-purpose:sonnet", "general-purpose:opus"] }, backend: { mode: "auto", allow: [] } } }, revision: 7 };
+    fs.writeFileSync(file, JSON.stringify(old));
+    const got = await (await fetch(`${base()}:${port}/api/mod-settings`)).json() as ModSettingsSnapshot;
+    assert.equal(got.legacy, true);
+    assert.deepEqual(got.settings.allow, ["general-purpose:sonnet", "general-purpose:opus"]);
+    assert.equal(got.settings.rules.backend.mode, "inherit");
+    const general = got.settings.rules.general;
+    assert.equal(general.mode, "ladder");
+    // Only Sonnet and Opus are ticked: Haiku cannot stand on Low, so Low takes the session model.
+    if (general.mode === "ladder") {
+      assert.deepEqual(general.rungs.light, { target: { agent: "general-purpose" }, effort: "max" });
+      assert.deepEqual([general.rungs.standard, general.rungs.hard, general.rungs.plan].map(step => step?.target.model), ["sonnet", "opus", "opus"]);
+    }
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), old, "reading rewrites nothing");
+    // The first save drops what was retired, so the note is said once.
+    const saved = await (await putModSettings(port, { settings: got.settings, revision: 7 })).json() as ModSettingsSnapshot;
+    assert.equal(saved.revision, 8);
+    assert.equal(Object.hasOwn(saved, "legacy"), false);
+    assert.equal(Object.hasOwn(await (await fetch(`${base()}:${port}/api/mod-settings`)).json() as object, "legacy"), false);
+    // A rung on a model that is no longer ticked is filled again on save; a ticked one is kept as it is.
+    const kept = { target: { agent: "general-purpose", model: "opus" }, effort: "xhigh" };
+    const unticked = await (await putModSettings(port, { settings: { allow: ["general-purpose:opus"], rules: { general: { mode: "ladder", rungs: { light: kept, standard: { target: { agent: "gpt-6-1-sol" }, effort: "low" } } } } } })).json() as ModSettingsSnapshot;
+    const rungs = unticked.settings.rules.general.mode === "ladder" ? unticked.settings.rules.general.rungs : {};
+    assert.deepEqual(rungs.light, kept);
+    assert.equal(rungs.standard?.target.model, undefined);
+    assert.deepEqual(rungs.standard?.target, { agent: "general-purpose" });
   });
 });
 
@@ -213,10 +247,7 @@ test("admin mod-options offers owned workers, every provider model, judge candid
       assert.deepEqual(options.agents, [{ name: "gpt-6-1-sol", model: "gpt-6.1-sol", provider: "codex", efforts: ["low", "medium", "high", "xhigh", "max"], billing: "subscription" }]);
       assert.deepEqual(options.providers.map(p => [p.name, p.billing]), [["codex", "subscription"], ["zen", "payg"], ["custom", "free"], ["native", "payg"], ["google", "subscription"]]);
       assert.deepEqual(options.claudeEfforts, ["low", "medium", "high", "max"]);
-      // ChatGPT out of quota is not connected: the GPT presets fall back to Claude and say so.
-      assert.deepEqual(options.presets.gpt.rungs.standard, { target: { agent: "general-purpose", model: "sonnet" }, effort: "medium" });
-      assert.deepEqual(options.presets.gpt.substituted, ["light", "standard", "hard", "plan"]);
-      assert.deepEqual(options.presets.claude.rungs.light, { target: { agent: "general-purpose", model: "haiku" }, effort: "low" });
+      assert.equal(Object.hasOwn(options, "presets"), false, "the presets are gone: the router fills empty rungs itself");
       assert.deepEqual(options.models.find(m => m.model === "jev-1.13"), { model: "jev-1.13", provider: "zen", name: "Jev", judgeOnly: true });
       assert.equal(options.models.length, 6);
       assert.deepEqual(options.zen, { configured: true, model: "jev-1.13" });
@@ -226,10 +257,18 @@ test("admin mod-options offers owned workers, every provider model, judge candid
       assert.equal(options.scores.attribution, "Data: Artificial Analysis (artificialanalysis.ai)");
       assert.equal(options.scores.models.find(m => m.model === "gpt-6.1-sol")?.variants[0]?.intelligence, 50.24);
       assert.equal(refreshed, 1);
+      // ChatGPT out of quota is not connected: an empty Standard rung is filled with Claude, not Sol.
+      const fill = async () => {
+        const saved = await putModSettings(port, { settings: { rules: { general: { mode: "auto", allow: [] } } } });
+        assert.equal(saved.status, 200);
+        const general = ((await saved.json()) as ModSettingsSnapshot).settings.rules.general;
+        return general.mode === "ladder" ? general.rungs : {};
+      };
+      assert.deepEqual((await fill()).standard, { target: { agent: "general-purpose", model: "sonnet" }, effort: "medium" });
       credit = true;
       const credited = await get();
       assert.equal(credited.providers.find(p => p.name === "codex")?.usable, true, "purchased credits keep a full account usable");
-      assert.deepEqual(credited.presets.gpt.rungs.standard, { target: { agent: "gpt-6-1-sol" }, effort: "medium" });
+      assert.deepEqual((await fill()).standard, { target: { agent: "gpt-6-1-sol" }, effort: "medium" });
       setCfg(makeCfg({ providers: { zen: { type: "openai-compatible", url: "https://opencode.ai/zen/v1", models: [{ id: "jev-2" }] } }, routes: {}, aliases: {}, direct: [] }));
       assert.deepEqual((await get()).zen, { configured: true, model: "jev-2" }, "hand-entered Zen URLs need no preset");
       setCfg(makeCfg({ providers: {}, routes: {}, aliases: {}, direct: [] }));

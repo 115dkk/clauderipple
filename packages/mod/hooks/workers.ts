@@ -1,10 +1,10 @@
 import type { AaScore, Billing, Calibration, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerAgent, WorkerCandidate, WorkerOption, WorkerVerdict } from '../types'
-import { CLAUDE_WORKERS, DEFAULTS, DOMAINS, EFFORTS, LEVELS, candidateKey } from './settings'
+import { CLAUDE_WORKERS, DEFAULTS, DOMAINS, EFFORTS, LEVELS, candidateKey, isAllowed } from './settings'
 import { MARKER, agentModel } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
 import { bounded, kindOf, parseEffortVerdict, verdictObject } from './judge'
-import { claudeChoices, presets, rungAbove, rungOf } from './ladder'
+import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 
 export const WORKER_TIERS = {
   low: { rung: 'light', level: 'light', description: "Low worker: quick lookups, finding files, skimming logs, mechanical edits. ClaudeRipple runs it on the user's low-tier model. If it fails or returns nothing usable, retry once on ripple:medium." },
@@ -125,7 +125,7 @@ function rank(candidate: WorkerCandidate, settings: Settings): number {
  * names from settings saved before 2026-10-10 still match.
  */
 export function allowed(candidate: WorkerCandidate, allow: readonly string[]): boolean {
-  return !allow.length || allow.includes(candidateKey(candidate.target)) || allow.includes(candidate.provider)
+  return isAllowed(candidateKey(candidate.target), candidate.provider, allow)
 }
 /** Claude's own models as candidates: general-purpose on each, scored as the model's AA id. */
 export function claudeCandidates(): WorkerCandidate[] {
@@ -147,9 +147,9 @@ const BILLINGS: readonly Billing[] = ['free', 'payg', 'subscription']
 /**
  * The router's rung choices (GET /api/mod-options), validated at the boundary: its workers whose
  * provider can run now, with ladders, billing and cheapest measured cost, then Claude's own
- * models. Presets are computed here from them, by the same rules as the dashboard's.
+ * models; only the ticked ones (`allow`, empty for every model).
  */
-export function ladderOptionsFrom(raw: unknown, until: number): LadderOptions {
+export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly string[] = []): LadderOptions {
   const root = record(raw)
   const efforts = (value: unknown): Effort[] => list(value).filter((e): e is Effort => EFFORTS.includes(e as Effort))
   const usable = new Set(list(root.providers).flatMap(p => { const v = record(p); return typeof v.name === 'string' && v.usable !== false ? [v.name] : [] }))
@@ -163,8 +163,7 @@ export function ladderOptionsFrom(raw: unknown, until: number): LadderOptions {
     const billing = BILLINGS.includes(a.billing as Billing) ? a.billing as Billing : 'payg'
     return [{ target: { agent: a.name }, model: a.model, provider: a.provider, billing, efforts: efforts(a.efforts), ...(costs.length ? { cost: Math.min(...costs) } : {}) }]
   })
-  const all = [...choices, ...claudeChoices(efforts(root.claudeEfforts))]
-  return { until, choices: all, presets: presets(all) }
+  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow) }
 }
 /**
  * The measured variant shown beside a worker: what Auto would use for standard work (the cheapest
@@ -223,7 +222,7 @@ export function ladderPick(verdict: WorkerVerdict, rule: Extract<Rule, { mode: '
  */
 export function resolveWorker(verdict: WorkerVerdict, settings: Settings, candidates: readonly WorkerCandidate[], scores: readonly ModelScore[], chatgpt: boolean, lang: Lang = 'en', pinnedCandidates: readonly WorkerCandidate[] = candidates): Resolution {
   const rule = resolvedRule(verdict.domain, settings)
-  if (rule.mode === 'ladder') return ladderPick(verdict, rule, settings, candidates, chatgpt, lang)
+  if (rule.mode === 'ladder') return ladderPick(verdict, rule, settings, candidates, chatgpt, lang, settings.allow)
   const measured = candidates.filter(c => candidateUsable(c, settings, chatgpt) && allowed(c, rule.allow)).flatMap(candidate => {
     const score = scores.find(s => s.model === candidate.model && s.provider === candidate.provider)
     return (score?.variants ?? []).flatMap(variant => {

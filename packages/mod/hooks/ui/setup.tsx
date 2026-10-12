@@ -6,14 +6,14 @@
 // back or out. It asks who should judge, waits calmly, and is pleased when all is set.
 
 import { t } from '../i18n'
-import { exceptionDomains } from '../settings'
 import type { RenderNode } from 'claude-code'
-import type { Domain } from '../../types'
+import { RUNGS } from '../settings'
 
 import { GREET_SIZE, action, actions, speak } from './parts'
 import type { Els } from './parts'
 import { judgeRows, keepWarmRow, row } from './settings'
 import type { Frame, SettingsActions, SettingsView, SetupActions, SetupView } from './view'
+import { targetLabel } from './view'
 
 const STEPS = [
   { title: 'setup.judgeTitle', blurb: 'setup.judgeBlurb' },
@@ -21,11 +21,10 @@ const STEPS = [
   { title: 'setup.cacheTitle', blurb: 'setup.cacheBlurb' },
 ] as const
 
-/** `Ladder · exceptions: Design → own ladder`: the main choice, then only the fields that differ. */
+/** `Sol · Astra · …`: the four workers' models, lowest first. */
 function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
-  const mode = (domain: Domain) => t(lang, 'workers.' + (d.rules[domain].mode === 'auto' ? 'auto' : domain === 'general' ? 'ladder' : 'ownLadder'))
-  const exceptions = exceptionDomains(d)
-  return mode('general') + (exceptions.length ? ' · ' + t(lang, 'workers.exceptionsSummary', { list: exceptions.map(domain => t(lang, 'workers.' + domain) + ' → ' + mode(domain)).join(', ') }) : '')
+  const general = d.rules.general
+  return RUNGS.map(rung => general.mode === 'ladder' && general.rungs[rung] ? targetLabel(general.rungs[rung]!.target, lang) : '—').join(' · ')
 }
 
 /** The steps as rings, the current one filled: ● ○ ○. */

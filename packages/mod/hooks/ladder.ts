@@ -1,9 +1,9 @@
-// The worker ladder (docs/specs/2026-10-11-worker-ladder.md): which rung a verdict lands on, and
-// the presets that fill the four rungs from what is connected. Pure, with type-only imports, so the
-// router can compute the same presets for its dashboard.
+// The four workers (docs/specs/2026-10-12-worker-tiers.md): which rung a verdict lands on, and the
+// fill that gives every rung a model from the ticked, connected ones. Pure, with type-only imports,
+// so the router fills settings with the same rule the mod uses.
 
 import type { Billing, Effort, LadderChoice, Preset, PresetId, Rung, Step, WorkerVerdict } from '../types/index.d.ts'
-import { CLAUDE_WORKERS, EFFORTS, LEVEL_RUNG, RUNGS } from './settings.ts'
+import { CLAUDE_WORKERS, EFFORTS, LEVEL_RUNG, RUNGS, candidateKey, isAllowed } from './settings.ts'
 
 /** Below this the judge is unsure enough that a task takes the next rung. */
 export const SURE_ENOUGH = 0.5
@@ -84,7 +84,7 @@ const SONNET = claudeModel('sonnet')
 const OPUS = claudeModel('opus')
 
 /**
- * Each preset rung's wishes in order: the first is what the preset names, the rest what stands in
+ * The fill rule's wishes (a preset's, by name; only `claudeGpt` is used): each rung's in order: the first is what the preset names, the rest what stands in
  * when it is not connected (the nearest choice, a GPT model's Claude counterpart).
  */
 const PRESETS: Readonly<Record<PresetId, Readonly<Record<Rung, readonly Want[]>>>> = {
@@ -111,7 +111,6 @@ const PRESETS: Readonly<Record<PresetId, Readonly<Record<Rung, readonly Want[]>>
     plan: [{ pick: SONNET, effort: 'high' }],
   },
 }
-export const PRESET_IDS: readonly PresetId[] = ['claude', 'claudeGpt', 'gpt', 'cheap']
 
 /** Claude's own models as rung choices: always there, since the session itself runs on Claude. */
 export function claudeChoices(efforts: readonly string[]): LadderChoice[] {
@@ -120,9 +119,9 @@ export function claudeChoices(efforts: readonly string[]): LadderChoice[] {
 }
 
 /**
- * A preset filled from the connected, ticked models: each rung takes its first wish that is there,
- * at that wish's effort moved to the nearest the model takes. A rung that had to take a later
- * wish is listed in `substituted`, so the screens can mark it.
+ * A preset's rule applied to the connected, ticked models: each rung takes its first wish that is
+ * there, at that wish's effort moved to the nearest the model takes. A rung that had to take a
+ * later wish is listed in `substituted`.
  */
 export function preset(id: PresetId, choices: readonly LadderChoice[]): Preset {
   const rungs = {} as Record<Rung, Step>
@@ -144,6 +143,36 @@ export function preset(id: PresetId, choices: readonly LadderChoice[]): Preset {
   return { rungs, substituted }
 }
 
-export function presets(choices: readonly LadderChoice[]): Record<PresetId, Preset> {
-  return Object.fromEntries(PRESET_IDS.map(id => [id, preset(id, choices)])) as Record<PresetId, Preset>
+/** The choices a person ticked; an empty list ticks every one. */
+export function tickedChoices(choices: readonly LadderChoice[], allow: readonly string[]): LadderChoice[] {
+  return choices.filter(choice => isAllowed(candidateKey(choice.target), choice.provider, allow))
+}
+
+/** Whether a rung's model is ticked: the session model always is, since the session runs on it. */
+function rungTicked(step: Step, allow: readonly string[], provider: string): boolean {
+  return (step.target.agent === 'general-purpose' && !step.target.model) || isAllowed(candidateKey(step.target), provider, allow)
+}
+
+/** Whether any rung has no model or one that is not ticked: a cheap test before the choices are fetched. */
+export function ladderNeedsFill(rungs: Partial<Record<Rung, Step>>, allow: readonly string[]): boolean {
+  return RUNGS.some(rung => !rungs[rung] || !rungTicked(rungs[rung]!, allow, ''))
+}
+
+/**
+ * The general ladder with every rung that has no model, or whose model is not ticked, filled by the
+ * `claudeGpt` rule from the ticked, connected `choices`. A rung that has a ticked model is left as
+ * it is (whether or not it can run now: the router says so when it cannot). `filled` names the
+ * rungs this changed.
+ */
+export function fillLadder(rungs: Partial<Record<Rung, Step>>, allow: readonly string[], choices: readonly LadderChoice[]): { rungs: Record<Rung, Step>; filled: Rung[] } {
+  const pick = preset('claudeGpt', tickedChoices(choices, allow))
+  const out = {} as Record<Rung, Step>
+  const filled: Rung[] = []
+  for (const rung of RUNGS) {
+    const own = rungs[rung]
+    if (own && rungTicked(own, allow, choices.find(c => candidateKey(c.target) === candidateKey(own.target))?.provider ?? '')) { out[rung] = own; continue }
+    out[rung] = pick.rungs[rung]
+    filled.push(rung)
+  }
+  return { rungs: out, filled }
 }

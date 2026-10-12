@@ -232,11 +232,11 @@ test('a quick change retries a stale revision once and preserves remote sibling 
   await start($)
   await command($, 'settings')
   const ui = await band($)
-  b.conflict(normalizeSettings({ setupDone: true, ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } }))
+  b.conflict(normalizeSettings({ setupDone: true, ceiling: 'high', language: 'pt', allow: ['remote'] }))
   await ui.press({ key: 'bias-1' })
   const writes = b.settingsRequests.filter(r => r.method === 'PUT')
   expect(writes.map(r => r.revision)).toEqual([1, 2])
-  expect(b.router().settings).toMatchObject({ bias: 1, ceiling: 'high', language: 'pt', rules: { backend: { mode: 'auto', allow: ['remote'] } } })
+  expect(b.router().settings).toMatchObject({ bias: 1, ceiling: 'high', language: 'pt', allow: ['remote'] })
   expectLanguage(b, 'pt')
   expect(b.storeWrites).not.toContain('settings')
   await ui.unmount()
@@ -461,8 +461,8 @@ for (const prefix of ['ripple:', '']) for (const [tier, rung, agent, model, effo
   }
 })
 
-for (const mode of ['auto', 'inherit'] as const) test('explicit tiers use the default general ladder when general is ' + mode, async ($, on) => {
-  boundaries(on, { rules: normalizeSettings({ rules: { general: { mode, allow: ['nobody'] }, design: { mode: 'auto', allow: ['anthropic'] } } }).rules })
+test('explicit tiers use the default general ladder when general is inherit', async ($, on) => {
+  boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'inherit' } } }).rules })
   const urls = http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
@@ -538,7 +538,7 @@ for (const agentAuto of ['off', 'auto', 'all'] as const) test('tier registration
   expect(judges.length).toBe(0)
 })
 
-test('ChatGPT exhaustion runs the rung\'s backup at the rung\'s effort and explains it in a toast', async ($, on) => {
+test('a rung\'s stored backup is dropped on load: ChatGPT exhaustion moves up, it does not run the backup', async ($, on) => {
   const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
     standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'high', backup: { agent: 'general-purpose', model: 'opus' } },
     hard: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
@@ -547,13 +547,11 @@ test('ChatGPT exhaustion runs the rung\'s backup at the rung\'s effort and expla
   http(on, true)
   judgeStub(on, '{"domain":"backend","level":"standard","effort":"low","why":"implementation"}')
   const sent = spawnStub(on)
-  const steps = stepStub(on)
   await start($)
   await $.agent.spawn(SPAWN)
-  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'opus' })
-  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes('Claude Opus'))).toBe(true)
-  await step($, 'claude-opus-5-5', 'low', 'worker-1')
-  expect(steps[0]?.effort).toBe('high')
+  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose' })
+  expect(sent[0]?.model).toBeUndefined()
+  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes("the session's model"))).toBe(true)
 })
 
 test('without a backup, ChatGPT exhaustion moves one rung up, then to the session model', async ($, on) => {
@@ -641,22 +639,6 @@ test('Zen without a key explains the missing key and falls back to Haiku', async
   expect(haiku.length).toBe(1)
   expect(urls.some(url => url.includes('opencode.ai'))).toBe(false)
   expect(b.toasts.some(text => text.includes('No OpenCode Zen authorization key'))).toBe(true)
-})
-
-for (const level of ['standard', 'deep'] as const) test('AA auto ' + level + ' picks Sol high over Astra medium and caches scores', async ($, on) => {
-  boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } }).rules })
-  const urls = http(on)
-  judgeStub(on, JSON.stringify({ domain: 'backend', level, effort: 'medium', why: 'implementation' }))
-  const sent = spawnStub(on)
-  await start($)
-  await $.agent.spawn(SPAWN)
-  await $.agent.spawn(SPAWN)
-  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high' })
-  expect(sent[1]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high' })
-  expect(urls.filter(url => url.endsWith('/api/model-scores')).length).toBe(1)
-  const debug = await command($, 'debug')
-  expect(debug.text).toContain('50.24')
-  expect(debug.text).toContain('0.3191')
 })
 
 test('provider off refuses named workers and every-provider-off refuses automatic spawning', async ($, on) => {
@@ -888,7 +870,7 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick controls sav
   await ui.unmount()
 })
 
-for (const surface of ['terminal', 'desktop'] as const) test('quick settings move a rung to another model at its own effort, and a preset fills all four on ' + surface, async ($, on) => {
+for (const surface of ['terminal', 'desktop'] as const) test('quick settings move a rung to another model at its own effort, and have no presets, on ' + surface, async ($, on) => {
   const b = boundaries(on)
   http(on)
   await start($)
@@ -900,31 +882,33 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick settings mov
   await ui.select({ key: 'rung-standard', value: 'general-purpose+sonnet' })
   const general = b.router().settings.rules.general
   expect(general.mode === 'ladder' && general.rungs.standard).toEqual({ target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'medium' })
-  // Claude only: every rung on Claude; nothing had to stand in.
-  await ui.press({ key: 'preset-claude' })
-  const claude = b.router().settings.rules.general
-  expect(claude.mode === 'ladder' && claude.rungs.light).toEqual({ target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' })
-  expect(b.toasts.at(-1)).toBe('Claude only preset applied')
-  // Mostly GPT has no Luna here: Light takes Haiku and the toast says so.
-  await ui.press({ key: 'preset-gpt' })
-  const gpt = b.router().settings.rules.general
-  expect(gpt.mode === 'ladder' && [gpt.rungs.light?.target, gpt.rungs.plan]).toEqual([{ agent: 'general-purpose', model: 'haiku' }, { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' }])
-  expect(b.toasts.at(-1)).toBe('Mostly GPT preset applied; filled with what is connected: Low worker')
+  // The presets are gone: the four workers are the whole of it.
+  for (const id of ['claude', 'claudeGpt', 'gpt', 'cheap']) expect(await ui.find({ key: 'preset-' + id })).toBeUndefined()
   await ui.unmount()
 })
 
-test('on Auto the quick settings say so, and a preset puts the workers on the ladder', async ($, on) => {
+test('Auto in stored settings is a ladder with no rung set: the quick settings show four empty rows and a pick fills one', async ($, on) => {
   const b = boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } }).rules })
   http(on)
   await start($)
   const ui = await band($)
   await ui.press({ key: 'settings' })
-  expect(await ui.find({ key: 'rung-light' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: 'Workers are picked by Auto (experimental). A preset puts them on the ladder.' })).toBeDefined()
-  await ui.press({ key: 'preset-claudeGpt' })
+  for (const rung of ['light', 'standard', 'hard', 'plan']) expect((await ui.find({ key: 'rung-' + rung }))?.props.value).toBe('')
+  await ui.select({ key: 'rung-light', value: 'general-purpose+haiku' })
   const general = b.router().settings.rules.general
-  expect(general.mode === 'ladder' && general.rungs.light).toEqual({ target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' })
-  expect(await ui.find({ key: 'rung-light' })).toBeDefined()
+  expect(general.mode === 'ladder' && general.rungs.light).toEqual({ target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' })
+  await ui.unmount()
+})
+
+test('quick settings offer only the ticked models', async ($, on) => {
+  boundaries(on, { allow: ['gpt-6-astra', 'general-purpose:opus'] })
+  http(on)
+  await start($)
+  const ui = await band($)
+  await ui.press({ key: 'settings' })
+  const rung = await ui.find({ key: 'rung-plan' })
+  // The rungs' own models stay in the list so a Select never shows a wrong neighbour.
+  expect((rung?.props.options as { label: string }[]).map(o => o.label)).toEqual(['gpt-6-astra · chatgpt', 'Claude Opus'])
   await ui.unmount()
 })
 
@@ -1313,8 +1297,7 @@ test('quick handoff runs on the timer and copies without clearing', async ($, on
 // ---- Regressions of 2026-10-10 (setup step 2, the band) ----------------------------------------
 
 test('setup step 2 opens the dashboard; its draft preserves edits and follows remote worker settings', async ($, on) => {
-  const general = DEFAULTS.rules.general
-  const b = boundaries(on, { setupDone: false, rules: normalizeSettings({ rules: { general, frontend: general } }).rules })
+  const b = boundaries(on, { setupDone: false })
   http(on)
   await start($)
   const ui = await band($)
@@ -1322,21 +1305,21 @@ test('setup step 2 opens the dashboard; its draft preserves edits and follows re
   expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
   await ui.press({ key: 'next' })
   expect(await ui.find({ type: 'Text', text: 'Workers start on the ladder; set it up on the dashboard.' })).toBeDefined()
-  expect(await ui.find({ key: 'exception-design' })).toBeUndefined()
   await ui.press({ key: 'all-settings' })
   expect(b.processes.at(-1)?.argv).toEqual(['xdg-open', 'http://127.0.0.1:9992/#mod'])
   // Changes on the dashboard reach setup without replacing the person's judge edit.
-  b.remote({ settings: normalizeSettings({ setupDone: false, rules: { general, frontend: general, design: { mode: 'auto', allow: ['general-purpose:opus'] } }, keepWarmHours: 8 }), revision: 2, stored: true })
+  const general = DEFAULTS.rules.general
+  const light = { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' }
+  b.remote({ settings: normalizeSettings({ setupDone: false, rules: { general: { ...general, rungs: { ...(general.mode === 'ladder' ? general.rungs : {}), light } } }, keepWarmHours: 8 }), revision: 2, stored: true })
   await b.clock.advance(3000)
   await ui.press({ key: 'next' })
   await ui.press({ key: 'set-warm' })
   await ui.press({ key: 'next' })
-  expect(await ui.find({ type: 'Text', text: 'Ladder · exceptions: Design → Auto (experimental)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Claude Haiku · gpt-6-1-sol · gpt-6-astra · Claude Opus' })).toBeDefined()
   await ui.press({ key: 'finish' })
   expect(b.router().settings).toMatchObject({ judge: 'model', keepWarm: true, keepWarmHours: 8, setupDone: true })
-  expect(b.router().settings.rules.general.mode).toBe('ladder')
-  expect(b.router().settings.rules.design).toEqual({ mode: 'auto', allow: ['general-purpose:opus'] })
-  expect(b.router().settings.rules.frontend).toEqual({ mode: 'inherit' })
+  const saved = b.router().settings.rules.general
+  expect(saved.mode === 'ladder' && saved.rungs.light).toEqual(light)
   expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
   await ui.unmount()
 })

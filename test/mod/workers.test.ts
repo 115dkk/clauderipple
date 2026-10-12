@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import { DEFAULTS, normalizeSettings } from '../../packages/mod/hooks/settings.ts'
-import type { ModelScore, WorkerCandidate, WorkerVerdict } from '../../packages/mod/types/index.d.ts'
+import type { ModelScore, Settings, WorkerCandidate, WorkerVerdict } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
@@ -17,7 +17,10 @@ const candidates: WorkerCandidate[] = [
 ]
 const scores: ModelScore[] = candidates.map((c, i) => ({ model: c.model, provider: c.provider, variants: [{ effort: ['max', 'high', 'medium', 'high'][i] as 'max' | 'high' | 'medium', intelligence: [39.46, 50.24, 49.6, 46.8][i]!, costPerTask: [0.2652, 0.3191, 1.541, 0.884][i]! }] }))
 const verdict: WorkerVerdict = { domain: 'backend', level: 'standard', effort: 'medium', why: 'implementation' }
-const auto = normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } })
+// Auto (experimental) and field rules no longer load (normalizeSettings turns them into the ladder), but the
+// routing code that reads them stays until it is removed; these settings are built whole rather than loaded.
+const withRules = (rules: Partial<Settings['rules']>, rest: Partial<Settings> = {}): Settings => ({ ...DEFAULTS, ...rest, rules: { ...DEFAULTS.rules, ...rules } })
+const auto = withRules({ general: { mode: 'auto', allow: [] } })
 const pick = (s = DEFAULTS, v = verdict, data = scores, workers = candidates, usable = true) => resolveWorker(v, s, workers, data, usable)
 
 test('judge separates domain and level, rejects mixed-tier legacy verdicts', () => {
@@ -50,10 +53,10 @@ test('router catalogue includes every declared model, including Anthropic and no
   const files = new Map([['sol', '---\ndescription: Execute via chatgpt.\nmodel: gpt-6.1-sol@high\n---\n'], ['missing', '---\nmodel: missing\n---\n']])
   assert.deepEqual(workerCandidates(files, [{ value: 'gpt-6.1-sol', provider: 'chatgpt', label: 'Sol' }]), [{ target: { agent: 'sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' }])
 })
-test('inherit resolves general, design defaults are level-dependent and pinned targets climb missing levels', () => {
+test('every field inherits the general ladder and a missing level climbs', () => {
   assert.deepEqual(resolvedRule('backend', DEFAULTS), DEFAULTS.rules.general)
   assert.equal(pick().target?.agent, 'gpt-6-1-sol')
-  assert.equal(pick(DEFAULTS, { ...verdict, domain: 'design', level: 'deep' }).target?.model, 'opus')
+  assert.equal(pick(DEFAULTS, { ...verdict, domain: 'design', level: 'deep' }).target?.agent, 'gpt-6-astra')
   assert.equal(pick(DEFAULTS, { ...verdict, level: 'light' }, [], candidates.slice(1)).target?.agent, 'gpt-6-1-sol')
 })
 test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {
@@ -73,7 +76,7 @@ test('quota/off never chooses the blocked provider: the ladder moves up, then to
 test('calibration offsets are steps; floor wins inverted ceiling', () => {
   assert.equal(calibratedEffort('medium', { effortOffset: 2 }), 'xhigh')
   assert.equal(calibratedEffort('low', { effortOffset: -2, floor: 'high', ceiling: 'medium' }), 'high')
-  const s = normalizeSettings({ rules: { backend: { mode: 'pin', targets: { standard: { agent: 'gpt-6-1-sol' } }, effortOffset: 1, ceiling: 'high' } } })
+  const s = withRules({ backend: { mode: 'ladder', rungs: { standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'high' } } } })
   assert.equal(pick(s).effort, 'high')
 })
 test('auto chooses Sol high over expensive Astra medium and deep floor 50 still selects Sol', () => {
@@ -85,14 +88,14 @@ test('auto chooses Sol high over expensive Astra medium and deep floor 50 still 
 })
 test('auto preferences win only within both index and cost tie boundaries', () => {
   const data = scores.map(s => ({ ...s, variants: s.model === 'gpt-6-astra' ? [{ effort: 'medium' as const, intelligence: 49.6, costPerTask: 0.35 }] : s.variants }))
-  const s = normalizeSettings({ ...auto, preference: ['gpt-6-astra'] })
+  const s = { ...auto, preference: ['gpt-6-astra'] }
   assert.equal(pick(s, verdict, data).target?.agent, 'gpt-6-astra')
   assert.equal(pick(s).target?.agent, 'gpt-6-1-sol')
   assert.equal(pick({ ...s, autoTieBand: 0.1 }, verdict, data).target?.agent, 'gpt-6-1-sol')
   assert.equal(pick(s, { ...verdict, level: 'deep' }, data).target?.agent, 'gpt-6-1-sol')
 })
 test('auto allow/provider/quota filters, strongest fallback, and no-data general pin fallback', () => {
-  const s = normalizeSettings({ rules: { backend: { mode: 'auto', allow: ['deepseek'] } } })
+  const s = withRules({ backend: { mode: 'auto', allow: ['deepseek'] } })
   assert.equal(pick(s).target?.agent, 'deepseek-v4-1-flash')
   assert.match(pick(s).fallbackReason ?? '', /strongest/)
   assert.equal(pick({ ...auto, providers: { chatgpt: false } }).target?.agent, 'claude-sonnet-5-5')
@@ -102,22 +105,22 @@ test('auto allow/provider/quota filters, strongest fallback, and no-data general
   assert.equal(resolveWorker(verdict, auto, [], [], true, 'en', candidates).target?.agent, 'gpt-6-1-sol')
 })
 test('auto calibration filters measured efforts rather than falsifying the score of a rewritten effort', () => {
-  const s = normalizeSettings({ rules: { general: { mode: 'auto', allow: [], floor: 'high', ceiling: 'high' } } })
+  const s = withRules({ general: { mode: 'auto', allow: [], floor: 'high', ceiling: 'high' } })
   assert.equal(pick(s).effort, 'high')
   assert.equal(pick(s).runnerUp?.effort, 'high')
   assert.deepEqual(scoreModels({ models: [{ model: 'x', provider: 'y', variants: [{ effort: 'high', intelligence: NaN, costPerTask: 1 }] }] })[0]?.variants, [])
 })
 test('auto offsets constrain measured efforts and no-data fallback preserves rule calibration/allow', () => {
-  const up = normalizeSettings({ rules: { general: { mode: 'auto', allow: [], effortOffset: 1 } } })
+  const up = withRules({ general: { mode: 'auto', allow: [], effortOffset: 1 } })
   assert.equal(pick(up).effort, 'high')
-  const down = normalizeSettings({ rules: { general: { mode: 'auto', allow: [], effortOffset: -1 } } })
+  const down = withRules({ general: { mode: 'auto', allow: [], effortOffset: -1 } })
   assert.equal(pick(down).effort, 'low') // no low measurements: general pin, calibrated for this rule
-  const allow = normalizeSettings({ rules: { backend: { mode: 'auto', allow: ['deepseek'], floor: 'max' } } })
+  const allow = withRules({ backend: { mode: 'auto', allow: ['deepseek'], floor: 'max' } })
   const noData = pick(allow, verdict, [])
   assert.equal(noData.target?.agent, 'deepseek-v4-1-flash')
   assert.equal(noData.effort, 'max')
   // A model of a switched-off provider named on Claude's own agent does not run either.
-  const pinnedModel = normalizeSettings({ providers: { chatgpt: false }, rules: { backend: { mode: 'pin', targets: { standard: { agent: 'general-purpose', model: 'gpt-6.1-sol' } } } } })
+  const pinnedModel = withRules({ backend: { mode: 'ladder', rungs: { standard: { target: { agent: 'general-purpose', model: 'gpt-6.1-sol' }, effort: 'medium' } } } }, { providers: { chatgpt: false } })
   assert.deepEqual(pick(pinnedModel).target, { agent: 'general-purpose' })
 })
 
@@ -146,9 +149,9 @@ test('allow-lists pick by worker agent, so one model from two providers is told 
   ]
   const data: ModelScore[] = [...scores, { model: 'deepseek-v4.1-flash', provider: 'opencode-go', variants: [{ effort: 'max', intelligence: 39.46, costPerTask: 0.2652 }] }]
   const light = { ...verdict, level: 'light' as const }
-  const go = normalizeSettings({ rules: { general: { mode: 'auto', allow: ['deepseek-v4-1-flash', 'gpt-6-1-sol'] } } })
+  const go = withRules({ general: { mode: 'auto', allow: ['deepseek-v4-1-flash', 'gpt-6-1-sol'] } })
   assert.equal(pick(go, light, data, twins).target?.agent, 'deepseek-v4-1-flash')
-  const direct = normalizeSettings({ rules: { general: { mode: 'auto', allow: ['deepseek-flash'] } } })
+  const direct = withRules({ general: { mode: 'auto', allow: ['deepseek-flash'] } })
   assert.equal(pick(direct, light, data, twins).target?.agent, 'deepseek-flash')
   assert.equal(allowed(twins[1]!, ['opencode-go']), true)
   assert.equal(allowed(twins[0]!, ['opencode-go']), false)
@@ -169,7 +172,7 @@ test('Auto over Claude only picks the cheapest Claude model and effort above the
     { model: 'claude-opus-5-5', provider: 'anthropic', variants: [{ effort: 'high', intelligence: 53.1, costPerTask: 2.9 }] },
   ]
   const onlyClaude = claudeCandidates().map(c => c.target.model).map(m => 'general-purpose:' + m)
-  const s = normalizeSettings({ rules: { general: DEFAULTS.rules.general, design: { mode: 'auto', allow: onlyClaude } } })
+  const s = withRules({ design: { mode: 'auto', allow: onlyClaude } })
   const all = [...candidates, ...claudeCandidates()]
   const design = (level: WorkerVerdict['level']) => resolveWorker({ domain: 'design', level, effort: 'high', why: 'taste' }, s, all, [...scores, ...claude], true)
   // Light floor 20: Haiku low (29.45) qualifies; at the old 30 it fell to medium.
@@ -182,4 +185,20 @@ test('Auto over Claude only picks the cheapest Claude model and effort above the
   assert.equal(allowed(claudeCandidates()[1]!, ['general-purpose:sonnet']), true)
   assert.equal(allowed(claudeCandidates()[1]!, ['gpt-6-1-sol']), false)
   assert.deepEqual(withClaude([]).map(w => w.name), ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
+})
+
+test('the ticked models bound the ladder: an unticked rung model falls to the next rung up, and the quick-settings choices list only the ticked', async () => {
+  const { ladderOptionsFrom } = await import('../../packages/mod/hooks/workers.ts')
+  // Sol is not ticked: Standard (Sol) moves up to Hard (Astra) and says so.
+  const ticked = { ...DEFAULTS, allow: ['gpt-6-astra', 'general-purpose:opus', 'deepseek-v4-1-flash'] }
+  const result = pick(ticked)
+  assert.deepEqual([result.target?.agent, result.rung], ['gpt-6-astra', 'hard'])
+  assert.match(result.fallbackReason ?? '', /not a candidate/)
+  const raw = { providers: [{ name: 'chatgpt', usable: true }, { name: 'deepseek', usable: true }], agents: [
+    { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt', billing: 'subscription', efforts: ['low', 'high'] },
+    { name: 'gpt-6-astra', model: 'gpt-6-astra', provider: 'chatgpt', billing: 'subscription', efforts: ['low', 'high'] },
+  ], claudeEfforts: ['low', 'high'] }
+  assert.deepEqual(ladderOptionsFrom(raw, 0).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-1-sol', 'gpt-6-astra', 'general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
+  assert.deepEqual(ladderOptionsFrom(raw, 0, ['gpt-6-astra', 'general-purpose:opus']).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-astra', 'general-purpose:opus'])
+  assert.equal(Object.hasOwn(ladderOptionsFrom(raw, 0), 'presets'), false)
 })
