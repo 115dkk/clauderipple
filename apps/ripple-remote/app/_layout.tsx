@@ -1,16 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { View } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import * as Localization from 'expo-localization';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { remote } from '../src/client';
-import { colors, Connection, useRemote } from '../src/ui';
-import { pickLang, setLang, t } from '../../../packages/remote/web/i18n.ts';
+import { ErrorToast, useRemote } from '../src/ui';
+import { usePalette } from '../src/theme';
+import { pickLang, setLang } from '../../../packages/remote/web/i18n.ts';
 Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
 export default function Layout() {
   const state = useRemote();
+  const c = usePalette();
   const [ready, setReady] = useState(false);
   useEffect(() => {
     void AsyncStorage.getItem('language').then(stored => { setLang(pickLang(Localization.getLocales().map(l => l.languageTag), stored)); setReady(true); }).catch(e => remote.report(e));
@@ -24,12 +26,12 @@ export default function Layout() {
     void Notifications.getLastNotificationResponseAsync().then(r => { if (r) open(r); }).catch(e => remote.report(e));
     return () => sub.remove();
   }, []);
-  if (!ready || !state.loaded) return null;
-  return <><StatusBar style="dark" /><SafeAreaView edges={['top']} style={{ backgroundColor: colors.bg }}><Connection /></SafeAreaView><Stack screenOptions={{ headerStyle: { backgroundColor: colors.bg }, headerTintColor: colors.ink, contentStyle: { backgroundColor: colors.bg }, headerShadowVisible: false }}>
-    <Stack.Screen name="index" options={{ title: 'Ripple Remote' }} />
-    <Stack.Screen name="pair" options={{ title: t('pair.title') }} />
-    <Stack.Screen name="session/[id]" options={{ title: t('home.title') }} />
-    <Stack.Screen name="new" options={{ title: t('home.empty.title') }} />
-    <Stack.Screen name="settings" options={{ title: t('a11y.settings') }} />
-  </Stack></>;
+  if (!ready || !state.loaded) return <View style={{ flex: 1, backgroundColor: c.bg }} />;
+  return <View style={{ flex: 1, backgroundColor: c.bg }}><StatusBar style="auto" /><Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: c.bg } }}>
+    <Stack.Screen name="index" />
+    <Stack.Screen name="pair" />
+    <Stack.Screen name="session/[id]" />
+    <Stack.Screen name="new" />
+    <Stack.Screen name="settings" />
+  </Stack><ErrorToast /></View>;
 }

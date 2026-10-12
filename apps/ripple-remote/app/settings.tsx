@@ -1,14 +1,18 @@
 import React, { useState } from 'react';
-import { Alert, ScrollView, Text } from 'react-native';
+import { Alert, ScrollView, Text, View } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { lang, setLang, t } from '../../../packages/remote/web/i18n.ts';
-import { Button, Label, copy, s } from '../src/ui';
+import { Button, Frame, Label, List, Opt, TopBar, copy, useStyles } from '../src/ui';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Icon } from '../src/icons';
 import { remote } from '../src/client';
 export default function Settings() {
+  const { c, s } = useStyles();
+  const insets = useSafeAreaInsets();
   const [, render] = useState(0);
   const [message, setMessage] = useState('');
   const enable = async () => {
@@ -27,11 +31,23 @@ export default function Settings() {
     { text: copy('취소', 'Cancel'), style: 'cancel' },
     { text: copy('연결 해제', 'Unpair'), style: 'destructive', onPress: () => { void remote.unpair().then(() => router.replace('/pair')).catch(e => setMessage(e instanceof Error ? e.message : String(e))); } },
   ]);
-  return <ScrollView style={s.page} contentContainerStyle={s.content}>
-    <Label>{copy('언어', 'Language')}</Label><Button title="한국어 / English" secondary onPress={() => { const next = lang() === 'ko' ? 'en' : 'ko'; setLang(next); remote.refresh(); render(n => n + 1); void AsyncStorage.setItem('language', next).catch(e => remote.report(e)); }} />
-    <Label>{t('push.title')}</Label><Text style={s.body}>{t('push.body')}</Text><Text style={s.muted}>{copy('알림에는 승인·완료·실패 상태만 포함됩니다. 대화 내용은 전송하지 않습니다.', 'Notifications contain only approval, completion or failure status. No conversation text is sent.')}</Text><Button title={t('push.on')} onPress={() => { void enable(); }} />
-    {message && <Text style={s.warning}>{message}</Text>}
-    <Label>{copy('연결', 'Connection')}</Label><Button title={copy('Mac 연결 해제', 'Unpair Mac')} secondary onPress={unpair} />
-    <Text style={s.muted}>Ripple Remote · 0.1.0</Text><Text style={s.muted}>{copy('Anthropic 또는 OpenAI와 제휴하지 않은 독립 앱입니다.', 'An independent app, not affiliated with Anthropic or OpenAI.')}</Text>
-  </ScrollView>;
+  const toggleLanguage = () => { const next = lang() === 'ko' ? 'en' : 'ko'; setLang(next); remote.refresh(); render(n => n + 1); void AsyncStorage.setItem('language', next).catch(e => remote.report(e)); };
+  return <Frame><TopBar title={t('a11y.settings')} /><ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}>
+    <Label>{copy('언어', 'Language')}</Label>
+    <List><Opt first icon={<Icon name="globe" size={20} color={c.muted} />} title="한국어 / English" trailing={<Text style={{ fontSize: 14, color: c.muted, fontWeight: '600' }}>{lang() === 'ko' ? '한국어' : 'English'}</Text>} onPress={toggleLanguage} /></List>
+    <Label>{t('push.title')}</Label>
+    <View style={[s.banner, { marginTop: 0, marginBottom: 0, shadowOpacity: 0 }]}>
+      <View style={{ marginTop: 2 }}><Icon name="bell" size={22} color={c.accent} /></View>
+      <View style={s.bannerTxt}>
+        <Text style={s.bannerBody}>{t('push.body')}</Text>
+        <Text style={s.bannerSmall}>{copy('알림에는 승인·완료·실패 상태만 포함됩니다. 대화 내용은 전송하지 않습니다.', 'Notifications contain only approval, completion or failure status. No conversation text is sent.')}</Text>
+        {message ? <Text style={[s.bannerSmall, { color: c.warn }]}>{message}</Text> : null}
+        <View style={s.bannerAct}><Button title={t('push.on')} onPress={() => { void enable(); }} icon={<Icon name="bell" size={18} color={c.accentInk} />} /></View>
+      </View>
+    </View>
+    <Label>{copy('연결', 'Connection')}</Label>
+    <List><Opt first danger icon={<Icon name="x" size={20} color={c.bad} />} title={copy('Mac 연결 해제', 'Unpair Mac')} onPress={unpair} /></List>
+    <Text style={[s.foot, { marginTop: 24 }]}>Ripple Remote · 0.1.0</Text>
+    <Text style={[s.foot, { marginTop: 4 }]}>{copy('Anthropic 또는 OpenAI와 제휴하지 않은 독립 앱입니다.', 'An independent app, not affiliated with Anthropic or OpenAI.')}</Text>
+  </ScrollView></Frame>;
 }

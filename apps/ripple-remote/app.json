@@ -7,7 +7,7 @@
     "scheme": "ripple-remote",
     "platforms": ["ios"],
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": { "bundleIdentifier": "com.clauderipple.remote", "supportsTablet": true },
     "plugins": [
       "expo-router", "expo-secure-store", "expo-notifications", "expo-localization", "./plugins/withPodTarget", "./plugins/withSceneLifecycle",
