@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.0 — 2026-10-13
+
+### Added
+
+- **The ripple mod.** A band above the Code tab's prompt shows reasoning effort, context, the
+  cache timer, and which model answered each request with its cache hit. Log opens the request
+  log, ⚙ opens quick settings, and the dashboard has a mod page with every setting.
+- **Effort picked per prompt.** A small judge model (Haiku 5.5 or Jev) reads the prompt and the
+  recent turns, then sets low through max. Pick an effort yourself whenever you want; Auto comes
+  back when you switch it on.
+- **Workers picked per task.** The main chat hands work to `ripple:auto`, and the judge decides
+  how hard each task is and sends it to the matching rung: light work to DeepSeek or GLM, hard work
+  to GPT or Opus. Rungs, candidate models and named modes (prefer or avoid a model, eager
+  delegation, switch off at a quota reset) are set on the dashboard. Every pick is kept in
+  `logs/worker-picks.jsonl`.
+- **Warnings that save tokens.** Cards appear when the prompt cache has gone cold on a big chat,
+  when the context gets heavy, and when a plan window passes 80%. Each card offers compact or a
+  handoff.
+- **Handoff to a fresh session.** A handoff writes a summary and opens a new session in the same
+  folder with it in the prompt box. The current chat is left as it is.
+- **리플이**, the mascot, on the band and every card, acting out what the band is doing. Mod text
+  in six languages, following the Mac's system language.
+- **Artificial Analysis scores** for every routable model, refreshed daily, used to rank worker
+  candidates by measured cost.
+- A provider that answers 402 or says its quota is exhausted is skipped for a while.
+
+### Changed
+
+- Dashboard settings are rebuilt in the style of macOS System Settings.
+- The mod's settings live in the router, so every session follows a change at once.
+
+### Fixed
+
+- Judge-only models such as Jev no longer appear in pickers, worker lists or Codex.
+- The install script works under macOS `/bin/sh` again.
+
 ## 0.8.10 — 2026-10-10
 
 ### Added
