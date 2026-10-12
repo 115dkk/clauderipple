@@ -2360,7 +2360,7 @@ const MOD_PARTS = ["timer", "reason", "route", "limits"];
 // Named in themselves, as the mod's own Look card lists them.
 const MOD_LANGUAGES = [["ko", "한국어"], ["en", "English"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português"]];
 // Claude Code's own agent with a model: what the mod offers besides the generated workers, smallest
-// first, and the AA ids their scores are kept under (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
+// first, and their current model ids (packages/mod/hooks/settings.ts CLAUDE_WORKERS).
 const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus"];
 const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5" };
 // The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
@@ -2375,11 +2375,8 @@ const MOD_DEFAULTS = {
       light: { target: { agent: "deepseek-v4-1-flash" }, effort: "max" }, standard: { target: { agent: "gpt-6-1-sol" }, effort: "medium" },
       hard: { target: { agent: "gpt-6-astra" }, effort: "high" }, plan: modClaude("opus", "high"),
     } },
-    design: { mode: "inherit" },
-    frontend: { mode: "inherit" }, backend: { mode: "inherit" }, infra: { mode: "inherit" }, data: { mode: "inherit" },
-    test: { mode: "inherit" }, docs: { mode: "inherit" }, research: { mode: "inherit" },
   },
-  allow: [], modes: [], providers: {}, preference: [], autoFloors: { light: 20, standard: 45, deep: 50 }, autoTieBand: 2,
+  allow: [], modes: [], providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
@@ -2402,11 +2399,9 @@ function modNormalize(raw) {
     ...clone(MOD_DEFAULTS),
     ...value,
     rules: { ...clone(MOD_DEFAULTS.rules), ...(value.rules || {}) },
-    autoFloors: { ...MOD_DEFAULTS.autoFloors, ...(value.autoFloors || {}) },
     allow: Array.isArray(value.allow) ? value.allow : [],
     modes: Array.isArray(value.modes) ? value.modes : [],
     providers: { ...(value.providers || {}) },
-    preference: Array.isArray(value.preference) ? value.preference : [],
     hide: Array.isArray(value.hide) ? value.hide : clone(MOD_DEFAULTS.hide),
   };
 }

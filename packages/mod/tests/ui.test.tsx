@@ -489,7 +489,7 @@ const AGENTS: AgentRec[] = [
     description: 'Port the request log renderer',
     type: 'gpt-6-1-sol',
     model: 'gpt-6.1-sol@high',
-    pick: { domain: 'frontend', level: 'standard', effort: 'high', sure: 0.8, why: 'designed refactor', target: { agent: 'gpt-6-1-sol' }, by: 'haiku', ms: 900, aa: { intelligence: 50.24, costPerTask: 0.3191 }, runnerUp: { target: { agent: 'gpt-6-astra' }, effort: 'medium', intelligence: 49.6, costPerTask: 1.541 } },
+    pick: { domain: 'frontend', level: 'standard', effort: 'high', sure: 0.8, why: 'designed refactor', target: { agent: 'gpt-6-1-sol' }, by: 'haiku', ms: 900 },
     state: 'running',
     now: 'Edit hooks/ui/log.tsx',
     toolSince: NOW - 14_000,
@@ -512,7 +512,6 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
     else expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), surface).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: 'Summarize the docs' })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Frontend \/ Standard/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /index 50.2.*\$0.32\/task.*next:.*Data: Artificial Analysis/ })).toBeDefined()
     await ui.press({ key: 'done' })
     const open = await mount($, 'agents-open', surface, 64)
     expect(await open.find({ type: 'Text', text: 'Summarize the docs' }), "open { type: 'Text', text: 'Summarize the docs' } " + surface).toBeDefined()

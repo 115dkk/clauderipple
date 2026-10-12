@@ -1,9 +1,9 @@
-import type { AaScore, Billing, Calibration, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerAgent, WorkerCandidate, WorkerOption, WorkerVerdict } from '../types'
-import { CLAUDE_WORKERS, DEFAULTS, DOMAINS, EFFORTS, LEVELS, candidateKey, isAllowed } from './settings'
-import { MARKER, agentModel } from './worker'
+import type { Billing, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerVerdict } from '../types'
+import { CLAUDE_WORKERS, DOMAINS, EFFORTS, LEVELS, candidateKey, isAllowed } from './settings'
+import { MARKER } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
-import { bounded, kindOf, parseEffortVerdict, verdictObject } from './judge'
+import { kindOf, parseEffortVerdict, verdictObject } from './judge'
 import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 
 export const WORKER_TIERS = {
@@ -98,28 +98,6 @@ export function scoreModels(raw: unknown): ModelScore[] {
     return [{ model: model.model, provider: model.provider, variants }]
   })
 }
-/** Only generated, readable workers whose exact file model is routable can enter Auto. */
-export function workerCandidates(files: ReadonlyMap<string, string>, models: readonly RouterModel[]): WorkerCandidate[] {
-  return [...files].flatMap(([agent, file]) => {
-    const model = baseModel(agentModel(file) ?? '')
-    const provider = agentProvider(file)
-    const route = models.find(m => m.value === model && (!provider || m.provider === provider))
-    return route ? [{ target: { agent }, model, provider: route.provider }] : []
-  })
-}
-export function resolvedRule(domain: Domain, settings: Settings): Exclude<Rule, { mode: 'inherit' }> {
-  const selected = settings.rules[domain]
-  const general = settings.rules.general
-  return selected.mode !== 'inherit' ? selected : general.mode !== 'inherit' ? general : DEFAULTS.rules.general as Exclude<Rule, { mode: 'inherit' }>
-}
-export function calibratedEffort(effort: Effort, rule: Calibration): Effort {
-  const shifted = EFFORTS[Math.max(0, Math.min(4, EFFORTS.indexOf(effort) + (rule.effortOffset ?? 0)))]!
-  return bounded(shifted, rule.floor ?? 'low', rule.ceiling ?? 'max')
-}
-function rank(candidate: WorkerCandidate, settings: Settings): number {
-  const at = settings.preference.findIndex(p => p === candidate.provider || p === candidate.model || p === candidate.target.agent)
-  return at < 0 ? Number.MAX_SAFE_INTEGER : at
-}
 /**
  * Allow-lists name worker agents, and Claude's own models as `general-purpose:<model>`; provider
  * names from settings saved before 2026-10-10 still match.
@@ -127,21 +105,9 @@ function rank(candidate: WorkerCandidate, settings: Settings): number {
 export function allowed(candidate: WorkerCandidate, allow: readonly string[]): boolean {
   return isAllowed(candidateKey(candidate.target), candidate.provider, allow)
 }
-/** Claude's own models as candidates: general-purpose on each, scored as the model's AA id. */
+/** Claude's own models as candidates: general-purpose on each. */
 export function claudeCandidates(): WorkerCandidate[] {
   return CLAUDE_WORKERS.map(w => ({ target: { ...w.target }, model: w.model, provider: w.provider }))
-}
-/** The router's workers and Claude's own models, as the Workers card lists them. */
-export function withClaude(agents: readonly WorkerAgent[]): WorkerAgent[] {
-  return [...agents, ...CLAUDE_WORKERS.map(w => ({ name: w.name, model: w.model, provider: w.provider }))]
-}
-/** The router's generated-worker list (GET /api/mod-options `agents`), validated at the boundary. */
-export function workerAgents(raw: unknown): WorkerAgent[] {
-  return list(record(raw).agents).flatMap(value => {
-    const agent = record(value)
-    return typeof agent.name === 'string' && agent.name && typeof agent.model === 'string' && agent.model && typeof agent.provider === 'string' && agent.provider
-      ? [{ name: agent.name, model: agent.model, provider: agent.provider }] : []
-  })
 }
 const BILLINGS: readonly Billing[] = ['free', 'payg', 'subscription']
 /**
@@ -165,21 +131,6 @@ export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly s
   })
   return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow) }
 }
-/**
- * The measured variant shown beside a worker: what Auto would use for standard work (the cheapest
- * variant at or above `floor`), else its strongest variant.
- */
-export function shownVariant(score: ModelScore | undefined, floor: number): (AaScore & { effort: Effort | null }) | undefined {
-  const measured = (score?.variants ?? []).flatMap(v => v.intelligence === null || v.costPerTask === null ? [] : [{ effort: v.effort, intelligence: v.intelligence, costPerTask: v.costPerTask }])
-  const qualified = measured.filter(v => v.intelligence >= floor).sort((a, b) => a.costPerTask - b.costPerTask || b.intelligence - a.intelligence)
-  return qualified[0] ?? measured.sort((a, b) => b.intelligence - a.intelligence || a.costPerTask - b.costPerTask)[0]
-}
-export function workerOptions(agents: readonly WorkerAgent[], scores: readonly ModelScore[], floor: number): WorkerOption[] {
-  return agents.map(agent => {
-    const aa = shownVariant(scores.find(s => s.model === agent.model && s.provider === agent.provider), floor)
-    return aa ? { ...agent, aa } : { ...agent }
-  })
-}
 export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean): boolean {
   return settings.providers[candidate.provider] !== false && (candidate.provider !== 'chatgpt' || chatgpt)
 }
@@ -187,28 +138,26 @@ function sameTarget(a: TierTarget, b: TierTarget): boolean { return a.agent === 
 function candidateOf(target: TierTarget, candidates: readonly WorkerCandidate[]): WorkerCandidate | undefined {
   return candidates.find(c => sameTarget(c.target, target)) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: candidates.find(c => c.model === baseModel(target.model ?? 'sonnet'))?.provider ?? 'anthropic' } : undefined)
 }
-export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; fallbackReason?: string; aa?: AaScore; runnerUp?: AaScore & { target: TierTarget; effort: Effort } }
+export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; fallbackReason?: string }
 
 /** Claude Code's own agent with no model: the subagent runs on the session's model. */
 export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
 
 /**
- * The ladder: the verdict's rung, else its backup, else one rung up (its model, then its backup),
- * else the session model, never down. Whatever ran instead says why (the fallback toast).
+ * The ladder: the verdict's rung, else one rung up, else the session model, never down. Whatever
+ * ran instead says why (the fallback toast).
  */
-export function ladderPick(verdict: WorkerVerdict, rule: Extract<Rule, { mode: 'ladder' }>, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], forcedRung?: Rung): Resolution {
+export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], forcedRung?: Rung): Resolution {
   const wanted = forcedRung ?? rungOf(verdict)
   let reason: string | undefined
   for (const rung of [wanted, rungAbove(wanted)]) {
     if (!rung) continue
     const step = rule.rungs[rung]
     if (!step) { reason ??= t(lang, 'workers.rungEmpty', { rung: t(lang, 'workers.rung.' + rung) }); continue }
-    for (const target of [step.target, step.backup]) {
-      if (!target) continue
-      const candidate = candidateOf(target, candidates)
-      if (candidate && candidateUsable(candidate, settings, chatgpt) && allowed(candidate, allow)) return { target: { ...target }, effort: step.effort, rung, ...(reason ? { fallbackReason: reason } : {}) }
-      reason ??= !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !allowed(candidate, allow) ? t(lang, 'workers.notCandidate', { name: candidate.model }) : t(lang, 'toasts.providerQuota')
-    }
+    const target = step.target
+    const candidate = candidateOf(target, candidates)
+    if (candidate && candidateUsable(candidate, settings, chatgpt) && allowed(candidate, allow)) return { target: { ...target }, effort: step.effort, rung, ...(reason ? { fallbackReason: reason } : {}) }
+    reason ??= !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !allowed(candidate, allow) ? t(lang, 'workers.notCandidate', { name: candidate.model }) : t(lang, 'toasts.providerQuota')
   }
   const effort = rule.rungs[wanted]?.effort ?? verdict.effort
   // The session's model is Claude's: with Anthropic switched off nothing is left to run it.
@@ -216,54 +165,6 @@ export function ladderPick(verdict: WorkerVerdict, rule: Extract<Rule, { mode: '
   return { target: { ...SESSION_MODEL }, effort, rung: wanted, fallbackReason: reason ?? t(lang, 'workers.none') }
 }
 
-/**
- * A ladder rule picks by rung; Auto (experimental) picks the cheapest floor-qualified variant, with
- * near-tie preferences measured against the cheapest anchor.
- */
-export function resolveWorker(verdict: WorkerVerdict, settings: Settings, candidates: readonly WorkerCandidate[], scores: readonly ModelScore[], chatgpt: boolean, lang: Lang = 'en', pinnedCandidates: readonly WorkerCandidate[] = candidates): Resolution {
-  const rule = resolvedRule(verdict.domain, settings)
-  if (rule.mode === 'ladder') return ladderPick(verdict, rule, settings, candidates, chatgpt, lang, settings.allow)
-  const measured = candidates.filter(c => candidateUsable(c, settings, chatgpt) && allowed(c, rule.allow)).flatMap(candidate => {
-    const score = scores.find(s => s.model === candidate.model && s.provider === candidate.provider)
-    return (score?.variants ?? []).flatMap(variant => {
-      const effort = variant.effort ?? calibratedEffort(verdict.effort, rule)
-      if (variant.intelligence === null || variant.costPerTask === null) return []
-      const min = EFFORTS.indexOf(rule.floor ?? 'low')
-      const max = Math.max(min, EFFORTS.indexOf(rule.ceiling ?? 'max'))
-      const index = EFFORTS.indexOf(effort)
-      if (index < min || index > max) return []
-      const adjusted = EFFORTS.indexOf(calibratedEffort(verdict.effort, rule))
-      if ((rule.effortOffset ?? 0) > 0 && index < adjusted || (rule.effortOffset ?? 0) < 0 && index > adjusted) return []
-      return [{ ...candidate, effort, intelligence: variant.intelligence, costPerTask: variant.costPerTask }]
-    })
-  })
-  if (!measured.length) {
-    // No usable AA data: the general ladder, among this rule's candidates, at this rule's effort.
-    const general = settings.rules.general.mode === 'ladder' ? settings.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
-    const result = ladderPick(verdict, general, settings, pinnedCandidates, chatgpt, lang, rule.allow)
-    const effort = calibratedEffort(verdict.effort, rule)
-    if (!result.target || sameTarget(result.target, SESSION_MODEL)) {
-      // A candidate this rule allows beats leaving the session model to it.
-      const any = pinnedCandidates.find(c => candidateUsable(c, settings, chatgpt) && allowed(c, rule.allow))
-      if (any && rule.allow.length) return { target: { ...any.target }, effort, fallbackReason: t(lang, 'workers.noData') }
-    }
-    return { ...result, effort, fallbackReason: result.fallbackReason ?? t(lang, 'workers.noData') }
-  }
-  const qualified = measured.filter(c => c.intelligence >= settings.autoFloors[verdict.level])
-  const byCost = (a: typeof measured[number], b: typeof measured[number]): number => a.costPerTask - b.costPerTask || b.intelligence - a.intelligence || a.model.localeCompare(b.model)
-  if (!qualified.length) {
-    measured.sort((a, b) => b.intelligence - a.intelligence || byCost(a, b))
-    const best = measured[0]!
-    const next = measured[1]
-    return { target: best.target, effort: best.effort, aa: { intelligence: best.intelligence, costPerTask: best.costPerTask }, ...(next ? { runnerUp: { target: next.target, effort: next.effort, intelligence: next.intelligence, costPerTask: next.costPerTask } } : {}), fallbackReason: t(lang, 'workers.noFloor') }
-  }
-  qualified.sort(byCost)
-  const cheapest = qualified[0]!
-  const ties = qualified.filter(c => Math.abs(c.intelligence - cheapest.intelligence) <= settings.autoTieBand && c.costPerTask <= cheapest.costPerTask * 1.25).sort((a, b) => rank(a, settings) - rank(b, settings) || byCost(a, b))
-  const best = ties[0]!
-  const next = qualified.filter(c => c !== best).sort(byCost)[0]
-  return { target: best.target, effort: best.effort, aa: { intelligence: best.intelligence, costPerTask: best.costPerTask }, ...(next ? { runnerUp: { target: next.target, effort: next.effort, intelligence: next.intelligence, costPerTask: next.costPerTask } } : {}) }
-}
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {
   return fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model
 }

@@ -68,11 +68,6 @@ function liveCard(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNo
           <Text dimColor wrap="wrap">{why}</Text>
         </Box>
       ) : '',
-      pick?.aa ? (
-        <Box key="aa" paddingLeft={2}>
-          <Text dimColor wrap="wrap">{t(frame.lang, 'agents.aa', { index: pick.aa.intelligence.toFixed(1), cost: pick.aa.costPerTask.toFixed(2), next: pick.runnerUp ? t(frame.lang, 'agents.aaNext', { name: targetLabel(pick.runnerUp.target, frame.lang), effort: pick.runnerUp.effort, index: pick.runnerUp.intelligence.toFixed(1), cost: pick.runnerUp.costPerTask.toFixed(2) }) : '' })}</Text>
-        </Box>
-      ) : '',
       pick?.fallbackReason ? (
         <Box key="fallback" paddingLeft={2}>
           <Text color={tone.warn} wrap="wrap">{t(frame.lang, 'agents.fallback', { reason: pick.fallbackReason })}</Text>

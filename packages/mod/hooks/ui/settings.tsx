@@ -142,7 +142,7 @@ export function ladderRows(el: Els, frame: Frame, view: SettingsView, a: Setting
   const general = view.settings.rules.general
   const options = view.ladder
   const out: RenderNode[] = []
-  if (general.mode !== 'ladder' || !options) {
+  if (!options) {
     out.push(row(el, frame, 'ladder-wait', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'settings.ladderWaiting')}</Text>))
   } else {
     for (const rung of RUNGS) {

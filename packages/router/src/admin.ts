@@ -522,10 +522,10 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
   const general = settings.rules.general;
-  if (general.mode !== "ladder" || !ladderNeedsFill(general.rungs, settings.allow)) return settings;
+  if (!ladderNeedsFill(general.rungs, settings.allow)) return settings;
   try {
     const { rungs, filled } = fillLadder(general.rungs, settings.allow, ladderChoices(await modOptions(deps, scores)));
-    return filled.length ? { ...settings, rules: { ...settings.rules, general: { mode: "ladder", rungs } } } : settings;
+    return filled.length ? { ...settings, rules: { general: { mode: "ladder", rungs } } } : settings;
   } catch (error) {
     deps.log.warn(`admin: filling the worker ladder failed: ${(error as Error).message}`);
     return settings;
@@ -1549,10 +1549,6 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/claude-models" && method === "GET") {
         sendJson(res, 200, await pickerModels(deps));
-        return;
-      }
-      if (pathname === "/api/model-scores" && method === "GET") {
-        sendJson(res, 200, buildModelScores(deps.config(), await scores.get()));
         return;
       }
       if (pathname === "/api/effort-levels" && method === "GET") {

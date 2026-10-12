@@ -2,21 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, candidateKey, hadRetiredRouting, isAllowed, normalizeSettings, settingsChanges } from '../../packages/mod/hooks/settings.ts'
 
-test('defaults hold one ladder, two axes and measured floors', () => {
+test('defaults hold one ladder', () => {
   assert.equal(DEFAULTS.judge, 'haiku')
   assert.equal(DEFAULTS.jevSource, 'typesafe')
-  assert.deepEqual(DEFAULTS.autoFloors, { light: 20, standard: 45, deep: 50 })
-  assert.equal(DEFAULTS.autoTieBand, 2)
   // The spec's "Claude + GPT" example ladder; the four workers replaced the field rules, so every field follows it.
-  assert.deepEqual(DEFAULTS.rules.general, { mode: 'ladder', rungs: {
+  assert.deepEqual(DEFAULTS.rules, { general: { mode: 'ladder', rungs: {
     light: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
     hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' },
-  } })
-  assert.deepEqual(DEFAULTS.rules.backend, { mode: 'inherit' })
-  assert.deepEqual(DEFAULTS.rules.research, { mode: 'inherit' })
-  assert.deepEqual(DEFAULTS.rules.design, { mode: 'inherit' })
+  } } })
   assert.deepEqual(DEFAULTS.allow, [])
-  assert.equal(Object.hasOwn(DEFAULTS, 'tiers'), false)
+  for (const key of ['tiers', 'preference', 'autoFloors', 'autoTieBand']) assert.equal(Object.hasOwn(DEFAULTS, key), false, key)
 })
 test('rebasing settings preserves remote siblings and deletes only locally removed fields', () => {
   const before = normalizeSettings({ providers: { old: true }, fallback: { agent: 'general-purpose', model: 'sonnet' }, allow: ['old'] })
@@ -33,8 +28,6 @@ test('rebasing settings preserves remote siblings and deletes only locally remov
 test('a rung changed here is rebased onto the other side, and an unchanged draft changes nothing', () => {
   const before = normalizeSettings(null)
   const general = before.rules.general
-  assert.equal(general.mode, 'ladder')
-  if (general.mode !== 'ladder') return
   const after = normalizeSettings({ ...before, rules: { general: { mode: 'ladder', rungs: { ...general.rungs, light: { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' } } } } })
   const remote = normalizeSettings({ ...before, language: 'ko' })
   const rebased = applySettingsChanges(remote, settingsChanges(before, after))
@@ -49,9 +42,9 @@ test('language accepts only auto and the six supported choices', () => {
 test('defaults are deeply independent after normalization', () => {
   for (const value of [undefined, null, false, 'bad', 7, [], {}]) assert.deepEqual(normalizeSettings(value), DEFAULTS)
   const first = normalizeSettings(null)
-  first.hide.push('timer'); first.preference.push('chatgpt'); first.providers.chatgpt = false
-  if (first.rules.general.mode === 'ladder') first.rules.general.rungs.light!.target.agent = 'changed'
-  first.allow.push('changed'); first.autoFloors.deep = 99; first.fallback.agent = 'changed'
+  first.hide.push('timer'); first.providers.chatgpt = false
+  first.rules.general.rungs.light!.target.agent = 'changed'
+  first.allow.push('changed'); first.fallback.agent = 'changed'
   assert.deepEqual(normalizeSettings(null), DEFAULTS)
 })
 test('old tiers migrate the general ladder once, explicit new rules win, the design pin is dropped', () => {
@@ -61,20 +54,17 @@ test('old tiers migrate the general ladder once, explicit new rules win, the des
     light: { target: { agent: 'custom' }, effort: 'low' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
     hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
   } })
-  assert.deepEqual(migrated.rules.design, { mode: 'inherit' })
+  assert.deepEqual(Object.keys(migrated.rules), ['general'])
   const current = normalizeSettings({ ...migrated, tiers: { light: { agent: 'obsolete' } } })
   assert.deepEqual(current, migrated)
 })
-test('only the general ladder survives loading: Auto is a ladder to fill, field rules and backups are dropped', () => {
+test('only the general ladder survives loading: Auto is a ladder to fill, field rules, backups and Auto\'s fields are dropped', () => {
   const s = normalizeSettings({ jevSource: 'zen', rules: { general: { mode: 'inherit' }, backend: { mode: 'auto', allow: ['chatgpt'], effortOffset: 2 }, docs: { mode: 'pin', targets: { light: { agent: 'worker' } } },
     design: { mode: 'ladder', rungs: { light: { target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' } } } }, providers: { chatgpt: false, deepseek: 'false' }, preference: ['gpt-6.1-sol', 'chatgpt', 'chatgpt', null], autoFloors: { light: 0, standard: -1, deep: 53 }, autoTieBand: 0 })
   assert.equal(s.jevSource, 'zen')
-  assert.deepEqual(s.rules.general, DEFAULTS.rules.general)
-  for (const domain of ['backend', 'docs', 'design'] as const) assert.deepEqual(s.rules[domain], { mode: 'inherit' }, domain)
+  assert.deepEqual(s.rules, { general: DEFAULTS.rules.general })
   assert.deepEqual(s.providers, { chatgpt: false })
-  assert.deepEqual(s.preference, ['gpt-6.1-sol', 'chatgpt'])
-  assert.deepEqual(s.autoFloors, { light: 0, standard: 45, deep: 53 })
-  assert.equal(s.autoTieBand, 0)
+  for (const key of ['preference', 'autoFloors', 'autoTieBand']) assert.equal(Object.hasOwn(s, key), false, key)
   // Auto becomes a ladder with no rung set, and its candidates become the ticked models.
   const auto = normalizeSettings({ rules: { general: { mode: 'auto', allow: [' sol ', 'sol', 1, 'gpt-6-astra'], floor: 'high' } } })
   assert.deepEqual(auto.rules.general, { mode: 'ladder', rungs: {} })
@@ -90,7 +80,6 @@ test('unrelated valid settings survive and invalid values retain defaults', () =
   assert.equal(s.effortAuto, false); assert.equal(s.judgeModel, 'custom'); assert.equal(s.handoffSkill, 'handoff')
   assert.deepEqual(s.hide, ['route', 'timer']); assert.deepEqual(s.fallback, { agent: 'custom', model: 'opus' })
   assert.deepEqual(normalizeSettings({ bias: '2', jevSource: 'bad', rules: [], providers: [], autoTieBand: -1 }), DEFAULTS)
-  for (const n of [-1, NaN, Infinity]) assert.equal(normalizeSettings({ autoTieBand: n }).autoTieBand, 2)
   for (const n of [-1, 101, NaN, Infinity]) assert.equal(normalizeSettings({ swampAt: n }).swampAt, 50)
 })
 test('allow-lists name workers; provider names from old settings migrate to that provider\'s workers', async () => {

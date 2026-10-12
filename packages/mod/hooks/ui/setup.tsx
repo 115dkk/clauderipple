@@ -24,7 +24,7 @@ const STEPS = [
 /** `Sol · Astra · …`: the four workers' models, lowest first. */
 function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
   const general = d.rules.general
-  return RUNGS.map(rung => general.mode === 'ladder' && general.rungs[rung] ? targetLabel(general.rungs[rung]!.target, lang) : '—').join(' · ')
+  return RUNGS.map(rung => general.rungs[rung] ? targetLabel(general.rungs[rung]!.target, lang) : '—').join(' · ')
 }
 
 /** The steps as rings, the current one filled: ● ○ ○. */

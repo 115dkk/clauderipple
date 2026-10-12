@@ -8,7 +8,7 @@ registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { resolveWorker } = await import('../../packages/mod/hooks/workers.ts')
+const { ladderPick } = await import('../../packages/mod/hooks/workers.ts')
 
 const v = (level: WorkerVerdict['level'], more: Partial<WorkerVerdict> = {}): WorkerVerdict => ({ domain: 'general', level, effort: 'medium', why: '', ...more })
 
@@ -40,7 +40,7 @@ const candidates: WorkerCandidate[] = [
   { target: { agent: 'general-purpose', model: 'opus' }, model: 'claude-opus-5-5', provider: 'anthropic' },
   { target: { agent: 'general-purpose', model: 'sonnet' }, model: 'claude-sonnet-5-5', provider: 'anthropic' },
 ]
-const pick = (s: typeof DEFAULTS, verdict: WorkerVerdict, chatgpt = true, workers = candidates) => resolveWorker(verdict, s, workers, [], chatgpt)
+const pick = (s: typeof DEFAULTS, verdict: WorkerVerdict, chatgpt = true, workers = candidates) => ladderPick(verdict, s.rules.general, s, workers, chatgpt, 'en', s.allow)
 
 test('the default ladder runs each rung at its own effort, whatever effort the judge said', () => {
   assert.deepEqual(pick(DEFAULTS, v('light', { effort: 'low' })), { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max', rung: 'light' })
@@ -51,18 +51,13 @@ test('the default ladder runs each rung at its own effort, whatever effort the j
   assert.deepEqual(pick(DEFAULTS, v('standard', { domain: 'design' })).target, { agent: 'gpt-6-1-sol' })
 })
 
-test('unavailable: the rung\'s backup, else one rung up, else the session model; never down', () => {
-  // Built directly: loading drops a rung's backup, but a ladder that has one still routes by it.
-  const ladder = (rungs: Extract<typeof DEFAULTS.rules.general, { mode: 'ladder' }>['rungs']) => ({ ...DEFAULTS, rules: { ...DEFAULTS.rules, general: { mode: 'ladder' as const, rungs } } })
+test('unavailable: one rung up, else the session model; never down', () => {
+  const ladder = (rungs: typeof DEFAULTS.rules.general.rungs) => ({ ...DEFAULTS, rules: { general: { mode: 'ladder' as const, rungs } } })
   const sol = { agent: 'gpt-6-1-sol' }, astra = { agent: 'gpt-6-astra' }, opus = { agent: 'general-purpose', model: 'opus' }, sonnet = { agent: 'general-purpose', model: 'sonnet' }
-  // ChatGPT out of quota: Standard's backup runs, at Standard's effort.
-  const backed = ladder({ standard: { target: sol, effort: 'medium', backup: sonnet }, hard: { target: astra, effort: 'high' } })
-  const b = pick(backed, v('standard'), false)
-  assert.deepEqual([b.target, b.effort, b.rung], [sonnet, 'medium', 'standard'])
-  assert.match(b.fallbackReason ?? '', /ChatGPT/)
-  // No backup: one rung up, at that rung's effort.
+  // ChatGPT out of quota: one rung up, at that rung's effort.
   const up = pick(ladder({ standard: { target: sol, effort: 'medium' }, hard: { target: opus, effort: 'high' } }), v('standard'), false)
   assert.deepEqual([up.target, up.effort, up.rung], [opus, 'high', 'hard'])
+  assert.match(up.fallbackReason ?? '', /ChatGPT/)
   // Nothing up there either: the session model, at the wanted rung's effort.
   const none = pick(ladder({ standard: { target: sol, effort: 'low' }, hard: { target: astra, effort: 'high' }, plan: { target: opus, effort: 'high' } }), v('standard'), false)
   assert.deepEqual([none.target, none.effort], [{ agent: 'general-purpose' }, 'low'])
@@ -87,10 +82,10 @@ test('pins become ladders with Plan one effort above Hard; Auto becomes a ladder
     frontend: { mode: 'auto', allow: ['anthropic'] }, backend: { mode: 'inherit' },
   }, agentAuto: 'all', autoFloors: { light: 20, standard: 45, deep: 50 } }
   const s = normalizeSettings(stored)
-  assert.deepEqual(s.rules.general, { mode: 'ladder', rungs: {} })
+  assert.deepEqual(s.rules, { general: { mode: 'ladder', rungs: {} } })
   assert.deepEqual(s.allow, ['chatgpt', 'anthropic', 'deepseek'])
-  for (const domain of ['design', 'frontend', 'backend'] as const) assert.deepEqual(s.rules[domain], { mode: 'inherit' })
-  assert.deepEqual(s.autoFloors, { light: 20, standard: 45, deep: 50 })
+  // Auto's own fields still load, and are dropped.
+  assert.equal(Object.hasOwn(s, 'autoFloors'), false)
   assert.deepEqual(normalizeSettings(s), s)
   // The old default general pin: its models keep the default ladder's efforts.
   const old = normalizeSettings({ rules: { general: { mode: 'pin', targets: { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } } } } }).rules.general

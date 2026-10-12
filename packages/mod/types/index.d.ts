@@ -77,19 +77,17 @@ export type Kind = 'plan' | 'do'
  * light, standard or hard regardless of kind; only an explicit max tier selects plan.
  */
 export type Rung = 'light' | 'standard' | 'hard' | 'plan'
-/** One rung: what runs there and how hard it thinks, and what runs when it cannot. */
-export type Step = { target: TierTarget; effort: Effort; backup?: TierTarget }
+/** One rung: what runs there and how hard it thinks. */
+export type Step = { target: TierTarget; effort: Effort }
 /** Historical stats include design counts from before the two-axis migration. */
 export type Tier = Level | 'design'
+/** How a pin stored before 2026-10-11 moved its efforts; read only to migrate it (`ladderFromPin`). */
 export type Calibration = { effortOffset?: -2 | -1 | 0 | 1 | 2; floor?: Effort; ceiling?: Effort }
 /**
- * ladder: the four workers' rungs, each model + effort; inherit: the general rule. Loading
- * (`normalizeSettings`) yields only these two, and only the general rule is a ladder: Auto
- * (experimental), field rules and pins from before 2026-10-11 are read into it. `auto` stays in the
- * type for the routing code that still reads it (`resolveWorker`), which nothing loaded reaches.
+ * The four workers' rungs, each model + effort. Loading (`normalizeSettings`) reads pins from
+ * before 2026-10-11 and Auto (experimental, removed 2026-10-12) into it, and drops field rules.
  */
 export type Rule = { mode: 'ladder'; rungs: Partial<Record<Rung, Step>> }
-  | ({ mode: 'auto'; allow: string[] } & Calibration) | { mode: 'inherit' }
 /** How a provider is paid for: what the Workers card tags each model with, and what presets read. */
 export type Billing = 'free' | 'payg' | 'subscription'
 /** A model a rung can run, as GET /api/mod-options describes it. */
@@ -110,13 +108,8 @@ export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
 export type LadderOptions = { until: number; choices: LadderChoice[] }
 export type RouterModel = { value: string; label: string; provider: string; name?: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
-export type AaScore = { intelligence: number; costPerTask: number }
+/** A model's AA measurements (GET /api/mod-options `scores`): the fill's cost order reads them. */
 export type ModelScore = { model: string; provider: string; variants: { effort: Effort | null; intelligence: number | null; costPerTask: number | null }[] }
-export type ScoreCache = { until: number; models: ModelScore[] }
-/** A generated worker as the router lists it (GET /api/mod-options `agents`). */
-export type WorkerAgent = { name: string; model: string; provider: string }
-/** A worker Auto may pick, with the measured variant shown beside it (none: no AA data). */
-export type WorkerOption = WorkerAgent & { aa?: AaScore & { effort: Effort | null } }
 
 /** An agent to spawn: a dispatchable `subagentType`, and a model only for Claude's own agents. */
 export type TierTarget = { agent: string; model?: string }
@@ -146,7 +139,8 @@ export type Settings = {
   /** off: never; auto: spawns of ripple:auto; all: also general-purpose spawns with no model. */
   agentAuto: 'off' | 'auto' | 'all'
   jevSource: 'typesafe' | 'zen'
-  rules: Record<Domain, Rule>
+  /** Only the general ladder: the four workers replaced the per-field rules (2026-10-12). */
+  rules: { general: Rule }
   /**
    * The models the user ticked (docs/specs/2026-10-12-worker-tiers.md): worker agent names and
    * `general-purpose:<model>` for Claude's own. Empty means every model. Rungs run, and the fill
@@ -163,12 +157,9 @@ export type Settings = {
    */
   activeSince?: number
   providers: Record<string, boolean>
-  preference: string[]
-  autoFloors: Record<Level, number>
-  autoTieBand: number
   /**
    * What ran when a pinned tier's agent was unavailable, before the ladder (2026-10-11). Kept so a
-   * stored choice survives; a ladder rung has its own backup instead.
+   * stored choice survives; the ladder moves one rung up instead.
    */
   fallback: TierTarget
   keepWarm: boolean
@@ -215,15 +206,13 @@ export type WorkerVerdict = { domain: Domain; level: Level; kind?: Kind; effort:
 
 /** What a spawn of ripple:auto (or a taken-over spawn) was turned into. */
 export type WorkerPick = WorkerVerdict & {
-  /** The ladder rung that ran it (absent for Auto and explicit choices). */
+  /** The ladder rung that ran it (absent for explicit choices). */
   rung?: Rung
   target: TierTarget
   by: JudgeKind | 'marker' | 'default' | 'tier'
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string
-  aa?: AaScore
-  runnerUp?: AaScore & { target: TierTarget; effort: Effort }
 }
 
 export type AgentState = 'running' | 'waiting' | 'done' | 'failed'
@@ -340,7 +329,6 @@ declare module 'claude-code' {
       agentsShowDone: boolean
       jev: JevState
       routerModels: RouterModel[]
-      modelScores: ScoreCache | null
       /** The router's rung choices and presets (GET /api/mod-options), for the quick settings. */
       ladderOptions: LadderOptions | null
       /** The active mode the eager note was last sent for (`modes.ts modeKey`); cleared on compaction. */

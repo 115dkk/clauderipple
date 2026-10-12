@@ -17,17 +17,14 @@ export const DEFAULTS: Settings = {
   bias: 0, floor: 'low', ceiling: 'max', agentAuto: 'auto',
   rules: {
     // The spec's "Claude + GPT" example; a rung whose worker is missing moves up and says so.
-    // Only the general rule is set: the four workers replaced the per-field rules (2026-10-12).
+    // Only the general rule: the four workers replaced the per-field rules (2026-10-12).
     general: { mode: 'ladder', rungs: {
       light: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
       hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: claude('opus', 'high'),
     } },
-    design: { mode: 'inherit' },
-    frontend: { mode: 'inherit' }, backend: { mode: 'inherit' }, infra: { mode: 'inherit' }, data: { mode: 'inherit' },
-    test: { mode: 'inherit' }, docs: { mode: 'inherit' }, research: { mode: 'inherit' },
   },
   allow: [], modes: [],
-  providers: {}, preference: [], autoFloors: { light: 20, standard: 45, deep: 50 }, autoTieBand: 2,
+  providers: {},
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: 'haiku', handoffSkill: '', handoffAfter: 'continue', handoffButton: 'advised',
@@ -38,8 +35,8 @@ export const DEFAULTS: Settings = {
 export const EXTRAS: readonly string[] = ['context', 'limits']
 
 /**
- * Claude's own models as Auto candidates: the built-in general-purpose agent run on the model, its
- * AA scores those of the model's current id. The key is what an Auto allow-list stores.
+ * Claude's own models as workers: the built-in general-purpose agent run on the model, `model` its
+ * current id. The key is what the allow-list stores.
  */
 export const CLAUDE_WORKERS: readonly { name: string; model: string; provider: string; target: TierTarget }[] = [
   { name: 'general-purpose:haiku', model: 'claude-haiku-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'haiku' } },
@@ -96,7 +93,7 @@ function step(raw: unknown, rung: Rung): Step | undefined {
 }
 /** The effort a migrated rung starts at: the default ladder's when it runs the same model there. */
 function migratedEffort(rung: Rung, chosen: TierTarget): Effort {
-  const own = DEFAULTS.rules.general.mode === 'ladder' ? DEFAULTS.rules.general.rungs[rung] : undefined
+  const own = DEFAULTS.rules.general.rungs[rung]
   return own && sameTarget(own.target, chosen) ? own.effort : RUNG_EFFORT[rung]
 }
 /**
@@ -104,9 +101,9 @@ function migratedEffort(rung: Rung, chosen: TierTarget): Effort {
  * missing level takes the nearest one above (as the pin climbed) or else below, each rung's effort
  * is its default calibrated as the pin was, and Plan is Hard's model one effort higher.
  */
-export function ladderFromPin(targets: Partial<Record<Level, TierTarget>>, cal: Calibration): Extract<Rule, { mode: 'ladder' }> {
+export function ladderFromPin(targets: Partial<Record<Level, TierTarget>>, cal: Calibration): Rule {
   const known = LEVELS.filter(level => targets[level])
-  if (!known.length) return copy(DEFAULTS.rules.general) as Extract<Rule, { mode: 'ladder' }>
+  if (!known.length) return copy(DEFAULTS.rules.general)
   const rungs: Partial<Record<Rung, Step>> = {}
   LEVELS.forEach((level, at) => {
     const above = LEVELS.slice(at).find(l => targets[l])
@@ -128,7 +125,7 @@ function ladderRungs(raw: unknown): Partial<Record<Rung, Step>> {
  * before the ladder becomes one; Auto (experimental, removed 2026-10-12) becomes a ladder with no
  * rungs set, which the router fills from the ticked models (`fillLadder`). Field rules are gone.
  */
-function generalRule(raw: unknown): Extract<Rule, { mode: 'ladder' }> {
+function generalRule(raw: unknown): Rule {
   const v = object(raw)
   if (v.mode === 'ladder') return { mode: 'ladder', rungs: ladderRungs(v.rungs) }
   if (v.mode === 'auto') return { mode: 'ladder', rungs: {} }
@@ -138,7 +135,7 @@ function generalRule(raw: unknown): Extract<Rule, { mode: 'ladder' }> {
     for (const level of LEVELS) { const parsed = target(source[level]); if (parsed) targets[level] = parsed }
     return ladderFromPin(targets, calibration(v))
   }
-  return copy(DEFAULTS.rules.general) as Extract<Rule, { mode: 'ladder' }>
+  return copy(DEFAULTS.rules.general)
 }
 
 type Worker = { name: string; provider: string }
@@ -227,13 +224,13 @@ const LEGACY_GENERAL: Readonly<Record<Level, TierTarget>> = { light: { agent: 'd
 /**
  * Persisted settings may be old; migrate tiers and pins once and never alias nested default data.
  * Only the general ladder survives: Auto becomes a ladder with no rungs set (its candidates become
- * the ticked models) and field rules become inherit. With `workers`, provider names in an
- * allow-list become those providers' workers.
+ * the ticked models); field rules and Auto's own fields (preference, autoFloors, autoTieBand) are
+ * dropped. With `workers`, provider names in an allow-list become those providers' workers.
  */
 export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Settings {
   const value = object(raw)
   const stored = object(value.rules)
-  const rules = Object.fromEntries(DOMAINS.map(domain => [domain, domain === 'general' ? generalRule(stored.general) : { mode: 'inherit' as const }])) as Record<Domain, Rule>
+  const rules: Settings['rules'] = { general: generalRule(stored.general) }
   const old = object(value.tiers)
   if (!Object.hasOwn(stored, 'general') && Object.keys(old).length) {
     const targets: Partial<Record<Level, TierTarget>> = copy(LEGACY_GENERAL)
@@ -241,10 +238,8 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
     rules.general = ladderFromPin(targets, {})
   }
   const ticked = names(Array.isArray(value.allow) ? value.allow : object(stored.general).mode === 'auto' ? object(stored.general).allow : [])
-  const result: Settings = { ...DEFAULTS, rules, allow: workers?.length ? migrateAllow(ticked, workers) : ticked, providers: {}, preference: names(value.preference), autoFloors: { ...DEFAULTS.autoFloors }, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
+  const result: Settings = { ...DEFAULTS, rules, allow: workers?.length ? migrateAllow(ticked, workers) : ticked, providers: {}, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
   for (const [name, enabled] of Object.entries(object(value.providers))) if (typeof enabled === 'boolean') result.providers[name] = enabled
-  for (const level of LEVELS) { const n = object(value.autoFloors)[level]; if (typeof n === 'number' && Number.isFinite(n) && n >= 0) result.autoFloors[level] = n }
-  if (typeof value.autoTieBand === 'number' && Number.isFinite(value.autoTieBand) && value.autoTieBand >= 0) result.autoTieBand = value.autoTieBand
   for (const key of ['effortAuto', 'keepWarm', 'setupDone', 'swampAlert'] as const) if (typeof value[key] === 'boolean') result[key] = value[key]
   if (Array.isArray(value.extras)) result.extras = [...new Set(value.extras.filter((part): part is string => typeof part === 'string' && EXTRAS.includes(part)))]
   const choices = {

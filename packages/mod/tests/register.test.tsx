@@ -131,7 +131,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
       zen(e)
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
     }
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/model-scores') ? AA : e.url.endsWith('/api/mod-options') ? MOD_OPTIONS : { requests: [] }
+    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/mod-options') ? MOD_OPTIONS : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
@@ -454,7 +454,7 @@ for (const prefix of ['ripple:', '']) for (const [tier, rung, agent, model, effo
   expect(sent[0]).toMatchObject({ subagentType: agent, model })
   expect(sent[0]?.prompt).not.toContain('[[ripple:')
   expect(judges.length).toBe(0)
-  expect(urls.some(url => url.includes('systemone') || url.endsWith('/api/model-scores'))).toBe(false)
+  expect(urls.some(url => url.includes('systemone'))).toBe(false)
   expect(JSON.parse(b.logs.find(log => log.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ tier, rung, by: 'tier', effort })
   // Named workers carry effort in their model suffix; Claude's own agent gets it on turn.step.
   if (agent === 'general-purpose') {
@@ -465,14 +465,13 @@ for (const prefix of ['ripple:', '']) for (const [tier, rung, agent, model, effo
 
 test('explicit tiers use the default general ladder when general is inherit', async ($, on) => {
   boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'inherit' } } }).rules })
-  const urls = http(on)
+  http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
   await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:medium' })
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
   expect(judges.length).toBe(0)
-  expect(urls.some(url => url.endsWith('/api/model-scores'))).toBe(false)
 })
 
 test('explicit tier uses the configured general ladder, then one rung up on a missing worker', async ($, on) => {

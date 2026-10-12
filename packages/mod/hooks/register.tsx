@@ -2,12 +2,12 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
-import { DEFAULTS, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import { RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, WORKER_TIERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, spawnTitle, takesOver, tierOf, workerCandidates, workerJudgeInput, zenJev } from './workers'
+import { WORKER_JUDGE_SYSTEM, WORKER_TIERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, tierOf, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import { modeRungs } from './ladder'
 import { activeModeOf, eagerNote, modeOver, modeProviders, quotaWindows } from './modes'
@@ -83,7 +83,6 @@ const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
-const modelScores = atom({ plugin: 'ripple', key: 'modelScores' } as const, null)
 const ladderOptions = atom({ plugin: 'ripple', key: 'ladderOptions' } as const, null)
 const modeNoted = atom({ plugin: 'ripple', key: 'modeNoted' } as const, null)
 const demo = atom({ plugin: 'ripple', key: 'demo' } as const, null)
@@ -406,26 +405,9 @@ async function refreshModels($: EngineInterface): Promise<void> {
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   await update($, routerModels, () => routerModelOptions(JSON.parse(response.text)))
 }
-/** How long an answer is kept: a good one ten minutes; a failure or an empty one only briefly. */
+/** How long the rung choices are kept: ten minutes. */
 const KEEP_MS = 600000
-const RETRY_MS = 20000
 
-async function scores($: EngineInterface): Promise<import('../types').ModelScore[]> {
-  const now = await $.clock.now()
-  const cached = await read($, modelScores)
-  if (cached && cached.until > now) return cached.models
-  try {
-    const response = await $.http.fetch(`${await adminUrl($)}/api/model-scores`)
-    if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
-    const models = scoreModels(JSON.parse(response.text))
-    await update($, modelScores, () => ({ until: now + (models.length ? KEEP_MS : RETRY_MS), models }))
-    return models
-  } catch (error) {
-    await report($, 'model scores', error)
-    await update($, modelScores, () => ({ until: now + RETRY_MS, models: cached?.models ?? [] }))
-    return cached?.models ?? []
-  }
-}
 /**
  * The quick settings' rung choices, read again each time the panel opens: a model ticked on the
  * dashboard shows in every Select without a restart. A failure keeps what was there.
@@ -441,7 +423,6 @@ async function refreshLadder($: EngineInterface): Promise<void> {
 async function setRung($: EngineInterface, rung: Rung, value: string): Promise<void> {
   const s = await currentSettings($)
   const general = s.rules.general
-  if (general.mode !== 'ladder') return
   const step = general.rungs[rung]
   const next: Step = { ...(step ?? { effort: RUNG_EFFORT[rung] }), target: targetOf(value) }
   await settingsActions($).patch({ rules: { ...s.rules, general: { mode: 'ladder', rungs: { ...general.rungs, [rung]: next } } } })
@@ -457,7 +438,7 @@ async function setMode($: EngineInterface, id: string): Promise<void> {
  */
 async function routingSettings($: EngineInterface, s: Settings, known: readonly WorkerCandidate[]): Promise<Settings> {
   const mode = activeModeOf(s)
-  if (!mode || s.rules.general.mode !== 'ladder') return s
+  if (!mode) return s
   await refreshLadder($)
   const moved = modeRungs(s.rules.general.rungs, mode, (await read($, ladderOptions))?.choices ?? [], known)
   return { ...s, rules: { ...s.rules, general: { mode: 'ladder', rungs: moved.rungs } } }
@@ -657,7 +638,6 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const files = await workerFiles($)
   try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
-  const candidates = [...workerCandidates(files, await read($, routerModels)), ...claudeCandidates()]
   const pinnedCandidates = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
   const tier = tierOf(e.subagentType)
@@ -687,12 +667,9 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // An active mode moves the tiers; an explicit marker still names its own model.
   const mode = activeModeOf(s)
   const routing = await routingSettings($, s, pinnedCandidates)
-  const general = routing.rules.general.mode === 'ladder' ? routing.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
-  const resolved = forced
-    ? ladderPick(verdict, general, routing, pinnedCandidates, usable, language, routing.allow, forced.rung)
-    : explicitCandidate && candidateUsable(explicitCandidate, s, usable)
-      ? { target: target!, effort: verdict.effort }
-      : resolveWorker(verdict, routing, resolvedRule(verdict.domain, routing).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, routing).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
+  const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable)
+    ? { target: target!, effort: verdict.effort }
+    : ladderPick(verdict, routing.rules.general, routing, pinnedCandidates, usable, language, routing.allow, forced?.rung)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -703,7 +680,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, ...(tier ? { tier } : {}), rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(resolved.aa ? { aa: resolved.aa } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
+  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, ...(tier ? { tier } : {}), rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
