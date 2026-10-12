@@ -54,6 +54,8 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
     switch (e.kind) {
       case "user":
         seenUser.add(e.clientMsgId);
+        // The app counts "working for" from the person's message; Mac sessions have no turn event to say so.
+        turnStartedAt = e.at;
         put({ type: "user", key: `u${e.clientMsgId}`, ver: `u${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), at: e.at });
         break;
       case "turn":
@@ -102,7 +104,9 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         break;
       case "state":
         state = e.state;
-        if (e.state === "running" && turnStartedAt === null) turnStartedAt = e.at;
+        // Idle ends a Mac session's turn (it has no result event); "stopped" is a host restart's blip, not an end.
+        if (e.state === "idle" || e.state === "error") turnStartedAt = null;
+        else if (e.state === "running" && turnStartedAt === null) turnStartedAt = e.at;
         break;
       case "figures":
         figures = e.figures;

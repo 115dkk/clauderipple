@@ -247,3 +247,18 @@ test("notifications: what the phone can do decides the card — https first, the
   assert.equal(pushAvailability({ ...base, permission: "granted", subscribed: true }), "on");
   assert.equal(pushAvailability({ ...base, permission: "granted", subscribed: false }), "off", "granted but no subscription yet: offer the button");
 });
+
+test("a Mac session's working time runs from the person's last message, not from when the host saw it running", () => {
+  // Measured 2026-10-13 on 클로드리플: the app said 50 min (from the 23:31 message), the phone 11 min (from the host's first poll).
+  const events: SessionEvent[] = [
+    { kind: "user", text: "first", clientMsgId: "a", seq: 1, at: 100 },
+    { kind: "user", text: "second", clientMsgId: "b", seq: 2, at: 500 },
+    { kind: "state", state: "running", seq: 3, at: 3000 },
+    { kind: "state", state: "stopped", seq: 4, at: 4000 },
+    { kind: "state", state: "running", seq: 5, at: 4100 },
+  ];
+  assert.equal(reduce(events).turnStartedAt, 500);
+  const idle: SessionEvent[] = [...events, { kind: "state", state: "idle", seq: 6, at: 5000 }];
+  assert.equal(reduce(idle).turnStartedAt, null);
+  assert.equal(reduce([...idle, { kind: "state", state: "running", seq: 7, at: 6000 }]).turnStartedAt, 6000, "woken without a message: from when it started");
+});
