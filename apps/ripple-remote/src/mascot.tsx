@@ -69,6 +69,9 @@ export function StateRing({ state, size = 22, spin = false }: { state: string; s
     loop.start();
     return () => loop.stop();
   }, [spinning, turn]);
+  if (state === 'unread' || state === 'read') return <Svg width={size} height={size} viewBox="0 0 56 56" accessibilityLabel={state === 'unread' ? 'Unread activity' : 'Read'}>
+    <Circle cx={28} cy={28} r={state === 'unread' ? 9 : 8} fill={state === 'unread' ? c.warn : 'none'} stroke={state === 'unread' ? c.warn : c.faint} strokeWidth={3} />
+  </Svg>;
   if (!spinning) return <Ripple face={name} size={size} />;
   return <View style={{ width: size, height: size }}>
     <Svg width={size} height={size} viewBox="0 0 56 56">{face(name, c, false)}</Svg>

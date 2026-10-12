@@ -10,6 +10,7 @@ import { EventLog } from "./eventlog.ts";
 import { messageContent } from "./images.ts";
 import type { ImagePart } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
+import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeClient, DESKTOP_BLOCKED, object, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
@@ -82,6 +83,7 @@ export interface SessionsOptions {
   coalesceMs?: number;
   /** Enabled by main; tests can use an isolated synthetic projects directory. */
   desktopProjects?: string;
+  desktopSidebar?: SidebarOptions;
   desktopProcesses?: () => string;
   desktopRegistry?: () => Map<string, DesktopProcess>;
   bridgeClient?: BridgeClient;
@@ -169,6 +171,8 @@ export class Sessions {
   private file: string;
   private now: () => number;
   private desktop: DesktopSessions | null;
+  private sidebar: DesktopSidebar | null;
+  private sidebarFingerprint = "";
   private desktopModels = new Map<string, { model: string; effort: Effort | null }>();
   private bridge: BridgeClient;
   private bridgeStates = new Map<string, { at: number; state?: SessionState; pending?: Promise<void> }>();
@@ -204,7 +208,11 @@ export class Sessions {
     this.now = opts.now ?? Date.now;
     this.file = path.join(opts.dir, "sessions.json");
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
+    this.sidebar = opts.desktopSidebar ? new DesktopSidebar({ ...opts.desktopSidebar, now: this.now,
+      onError: error => (opts.log ?? console.error)(`[desktop sidebar] ${error instanceof Error ? error.message : String(error)}`),
+    }) : null;
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
+      ...(this.sidebar ? { sidebarIds: () => new Set(this.sidebar!.read().sessions.keys()) } : {}),
       projects: opts.desktopProjects, now: this.now, summarize, ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
@@ -229,14 +237,24 @@ export class Sessions {
 
   list(): SessionSummary[] {
     const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
-    return [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id)).map(s => {
+    const hostCliIds = new Set([...this.records.values()].flatMap(r => r.sdkSessionId ? [r.sdkSessionId] : []));
+    const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
       return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true } : {}) };
     })];
+    return this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
+  }
+
+  groups(): string[] | undefined {
+    return this.sidebar ? [...this.sidebar.read().groups.map(g => g.name), PHONE_GROUP] : undefined;
   }
 
   async pollDesktop(): Promise<void> {
     if (this.desktop?.poll()) this.opts.onSessions();
+    if (this.sidebar) {
+      const fingerprint = JSON.stringify([this.groups(), this.list()]);
+      if (fingerprint !== this.sidebarFingerprint) { this.sidebarFingerprint = fingerprint; this.opts.onSessions(); }
+    }
     const ids = new Set(this.list().flatMap(s => {
       const process = this.desktop?.liveProcess(this.records.get(s.id)?.sdkSessionId ?? s.id);
       return process?.bridgeSessionId ? [process.bridgeSessionId] : [];

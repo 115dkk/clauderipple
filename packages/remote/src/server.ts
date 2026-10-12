@@ -160,7 +160,7 @@ export class HostServer {
     if (this.sessionsTimer) return;
     this.sessionsTimer = setTimeout(() => {
       this.sessionsTimer = null;
-      const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list() };
+      const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
       for (const c of this.clients) if (c.authed) this.send(c, msg);
     }, 150);
   }
@@ -249,7 +249,7 @@ export class HostServer {
       if (msg.t === "hello" && tokenMatches(this.opts.token, msg.token)) {
         c.authed = true;
         c.clientId = typeof msg.clientId === "string" ? msg.clientId.slice(0, 100) : "";
-        this.send(c, { t: "ready", host: this.hostInfo, sessions: this.opts.sessions.list() });
+        this.send(c, { t: "ready", host: this.hostInfo, sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() });
       } else {
         this.send(c, { t: "denied", reason: "token" });
         c.ws.close(4003, "denied");

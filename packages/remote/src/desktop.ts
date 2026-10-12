@@ -62,6 +62,7 @@ export interface DesktopOptions {
   excluded: () => Set<string>;
   processes?: () => string;
   registry?: () => Map<string, DesktopProcess>;
+  sidebarIds?: () => Set<string>;
 }
 
 /** Match session flags, not UUIDs appearing in a prompt or another flag's value. */
@@ -376,6 +377,7 @@ export class DesktopSessions {
     this.scannedAt = now;
     const candidates: { id: string; file: string; stat: fs.Stats }[] = [];
     const excluded = this.opts.excluded();
+    const sidebar = this.opts.sidebarIds?.();
     try {
       for (const project of fs.readdirSync(this.projects, { withFileTypes: true })) {
         if (!project.isDirectory()) continue; // Never follow project symlinks or recurse.
@@ -385,14 +387,14 @@ export class DesktopSessions {
           if (!entry.isFile() || !entry.name.endsWith(".jsonl") || !UUID.test(id) || excluded.has(id)) continue;
           const file = path.join(dir, entry.name);
           const stat = fs.lstatSync(file);
-          if (stat.isFile() && stat.mtimeMs >= now - RECENT_MS) candidates.push({ id, file, stat });
+          if (stat.isFile() && (sidebar?.size ? sidebar.has(id) : stat.mtimeMs >= now - RECENT_MS)) candidates.push({ id, file, stat });
         }
       }
     } catch (error) { if (!missing(error)) throw error; }
     candidates.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
     const next = new Map<string, Source>();
     for (const { id, file, stat } of candidates) {
-      if (next.size >= 50) break;
+      if (!sidebar?.size && next.size >= 50) break;
       if (next.has(id)) continue;
       const cached = this.sources.get(id);
       const source = cached?.file === file && cached.size === stat.size && cached.mtime === stat.mtimeMs

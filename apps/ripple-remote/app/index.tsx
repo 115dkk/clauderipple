@@ -6,6 +6,7 @@ import { Button, ConnectionBanner, Frame, IconButton, Label, LinkPill, List, cop
 import { Icon } from '../src/icons';
 import { Ripple, StateRing } from '../src/mascot';
 import { t } from '../../../packages/remote/web/i18n.ts';
+import { sidebarSections, sidebarState } from '../../../packages/remote/web/sidebar.ts';
 import { folderName, relTime } from '../../../packages/remote/web/dom.ts';
 import { remote } from '../src/client';
 import type { SessionSummary } from '../../../packages/remote/src/protocol.ts';
@@ -19,7 +20,7 @@ function SessionRow({ session, first, now }: { session: SessionSummary; first: b
   return <Pressable accessibilityRole="button" accessibilityLabel={session.title} onPress={() => router.push({ pathname: '/session/[id]', params: { id: session.id } })}
     style={({ pressed }) => [{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingLeft: 16, paddingRight: 14, minHeight: 68 }, pressed && { backgroundColor: c.surface2 }]}>
     {!first && <View style={{ position: 'absolute', left: 52, right: 0, top: 0, borderTopWidth: 1, borderColor: c.line }} />}
-    <StateRing state={waiting ? 'waiting' : session.state} size={24} spin={running && !waiting} />
+    <StateRing state={sidebarState(session)} size={24} spin={running && !waiting} />
     <View style={{ flex: 1, minWidth: 0 }}>
       <Text numberOfLines={1} style={{ fontSize: 16, fontWeight: '600', lineHeight: 21, color: c.ink }}>{session.title}</Text>
       <View style={{ marginTop: 3, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -34,12 +35,12 @@ function SessionRow({ session, first, now }: { session: SessionSummary; first: b
   </Pressable>;
 }
 
-function Section({ title, sessions, now, waiting = false, stale }: { title: string; sessions: SessionSummary[]; now: number; waiting?: boolean; stale: boolean }) {
+function Section({ title, sessions, now, stale }: { title: string; sessions: SessionSummary[]; now: number; stale: boolean }) {
   const { s } = useStyles();
   if (!sessions.length) return null;
   return <>
-    <Label count={waiting ? sessions.length : undefined}>{title}</Label>
-    <List style={[waiting && s.listWaiting, stale && s.listStale]}>{sessions.map((session, i) => <SessionRow key={session.id} session={session} first={i === 0} now={now} />)}</List>
+    <Label>{title}</Label>
+    <List style={[stale && s.listStale]}>{sessions.map((session, i) => <SessionRow key={session.id} session={session} first={i === 0} now={now} />)}</List>
   </>;
 }
 
@@ -49,11 +50,7 @@ export default function Home() {
   const insets = useSafeAreaInsets();
   const now = useNow(15000);
   if (!state.paired) return <Redirect href="/pair" />;
-  const host = state.sessions.filter(x => x.origin !== 'desktop');
-  const desktop = state.sessions.filter(x => x.origin === 'desktop');
-  const waiting = host.filter(x => x.pending > 0);
-  const active = host.filter(x => x.pending === 0 && (x.state === 'running' || x.state === 'starting'));
-  const rest = host.filter(x => x.pending === 0 && x.state !== 'running' && x.state !== 'starting');
+  const sections = sidebarSections(state.sessions, state.groups);
   // While the link is down the states below are the last ones seen, and look it.
   const stale = state.status?.state !== 'open';
   return <Frame>
@@ -69,11 +66,7 @@ export default function Home() {
           <Button title={copy('대기 메시지 제거', 'Remove queued message')} secondary onPress={() => { void remote.discardPending(p.message.clientMsgId).catch(e => remote.report(e)); }} />
         </View>
       </View>)}
-      <Section title={t('home.waiting')} sessions={waiting} now={now} waiting stale={stale} />
-      <Section title={t('home.active')} sessions={active} now={now} stale={stale} />
-      <Section title={t('home.recent')} sessions={rest} now={now} stale={stale} />
-      <Section title={t('home.desktop')} sessions={desktop} now={now} stale={stale} />
-      {!desktop.length && <Text style={s.foot}>{copy('Claude 앱 세션이 없습니다.', 'No Claude app sessions.')}</Text>}
+      {sections.map((g, i) => <Section key={i} title={g.name} sessions={g.sessions} now={now} stale={stale} />)}
       {!state.sessions.length && <View style={s.empty}>
         <Ripple face="calm" size={84} />
         <Text style={s.emptyB}>{t('home.empty.title')}</Text>

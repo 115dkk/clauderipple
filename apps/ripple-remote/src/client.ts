@@ -13,7 +13,7 @@ interface Pairing extends RelayPairing { token: string; clientId: string }
 interface Pending { message: Extract<ClientMsg, { t: 'send' | 'create' }>; at: number; error?: string }
 export interface History { epoch: string; events: SessionEvent[]; hasOlder: boolean }
 export interface Snapshot {
-  loaded: boolean; paired: boolean; host: HostInfo | null; sessions: SessionSummary[];
+  loaded: boolean; paired: boolean; host: HostInfo | null; sessions: SessionSummary[]; groups?: string[];
   status: LinkStatus | null; histories: Record<string, History>; pending: Pending[]; error: string | null;
 }
 const initial: Snapshot = { loaded: false, paired: false, host: null, sessions: [], status: null, histories: {}, pending: [], error: null };
@@ -168,8 +168,8 @@ class RemoteClient {
   }
   private receive(msg: HostMsg): void {
     switch (msg.t) {
-      case 'ready': this.update({ host: msg.host, sessions: msg.sessions }); break;
-      case 'sessions': this.update({ sessions: msg.sessions }); break;
+      case 'ready': this.update({ host: msg.host, sessions: msg.sessions, groups: msg.groups }); break;
+      case 'sessions': this.update({ sessions: msg.sessions, groups: msg.groups }); break;
       case 'host': this.update({ host: msg.host }); break;
       case 'events': this.merge(msg.session, msg.epoch, msg.events, msg.tail?.hasOlder ?? this.snapshot.histories[msg.session]?.hasOlder ?? false, !!msg.tail); break;
       case 'history': this.merge(msg.session, this.snapshot.histories[msg.session]?.epoch ?? '', msg.events, msg.hasOlder, false); break;

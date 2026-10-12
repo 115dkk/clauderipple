@@ -91,6 +91,10 @@ export interface SessionSummary {
   origin?: "host" | "desktop";
   readOnly?: boolean;
   title: string;
+  /** Desktop sidebar metadata; absent on older hosts. */
+  unread?: boolean;
+  group?: string;
+  order?: number;
   cwd: string;
   model: string;
   effort: Effort | null;
@@ -157,13 +161,13 @@ export interface SubPage { events: SessionEvent[]; more: boolean }
 // ---- host → client --------------------------------------------------------------------
 
 export type HostMsg =
-  | { t: "ready"; host: HostInfo; sessions: SessionSummary[] }
+  | { t: "ready"; host: HostInfo; sessions: SessionSummary[]; groups?: string[] | undefined }
   | { t: "pong"; n: number }
   | { t: "denied"; reason: "token" }
   /** Events after the client's seq. `more` means another frame follows at once. `tail` means older events exist before `events[0]`. */
   | { t: "events"; session: string; epoch: string; events: SessionEvent[]; more: boolean; tail?: { hasOlder: boolean } }
   | { t: "history"; session: string; reqId: string; events: SessionEvent[]; hasOlder: boolean }
-  | { t: "sessions"; sessions: SessionSummary[] }
+  | { t: "sessions"; sessions: SessionSummary[]; groups?: string[] | undefined }
   | { t: "host"; host: HostInfo }
   | { t: "ack"; clientMsgId: string; session: string }
   | { t: "res"; reqId: string; ok: true; data: unknown }

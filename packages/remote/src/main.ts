@@ -115,6 +115,7 @@ async function runHost(): Promise<void> {
   sessions = new Sessions({
     dir, router, permissions,
     desktopProjects: path.join(os.homedir(), ".claude", "projects"),
+    ...(process.platform === "darwin" ? { desktopSidebar: {} } : {}),
     queryFn: query as unknown as QueryFn,
     ...(claudePath ? { claudePath, ...(process.platform === "darwin" ? { handoff: desktopHandoff(claudePath) } : {}) } : {}),
     log,

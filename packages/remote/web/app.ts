@@ -219,11 +219,11 @@ export class App {
   onHost(m: HostMsg): void {
     switch (m.t) {
       case "ready":
-        this.ui.host = m.host; this.ui.sessions = m.sessions; this.render(); break;
+        this.ui.host = m.host; this.ui.sessions = m.sessions; this.ui.groups = m.groups; this.render(); break;
       case "host":
         this.ui.host = m.host; this.renderChrome(); break;
       case "sessions":
-        this.ui.sessions = m.sessions; if (this.screen.name === "home") this.render(); else this.renderChrome(); break;
+        this.ui.sessions = m.sessions; this.ui.groups = m.groups; if (this.screen.name === "home") this.render(); else this.renderChrome(); break;
       case "events": {
         const c = this.cache(m.session);
         if (m.tail || (c.epoch && c.epoch !== m.epoch)) { c.events = []; c.hasOlder = m.tail?.hasOlder ?? false; }

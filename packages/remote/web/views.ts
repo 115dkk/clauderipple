@@ -8,6 +8,7 @@ import { t } from "./i18n.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
+import { sidebarSections, sidebarState } from "./sidebar.ts";
 import type { TimelineItem, SessionView, ToolView } from "./timeline.ts";
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }
@@ -22,6 +23,7 @@ export interface UI {
   host: HostInfo | null;
   home: string | undefined;
   sessions: SessionSummary[];
+  groups?: string[] | undefined;
   draft: Draft;
   models: ProviderGroup[];
   sheet: Sheet | null;
@@ -104,23 +106,19 @@ function sessionRow(s: SessionSummary, ui: UI): string {
   const tag = s.pending > 0
     ? `<span class="tag">${esc(t("state.waiting"))}${s.pending > 1 ? ` ${s.pending}` : ""}</span>`
     : s.state === "running" || s.state === "starting" ? `<span class="tag run">${esc(t("state.running"))}</span>` : "";
-  return `<button class="row" data-act="open" data-id="${esc(s.id)}">${stateRing(s.pending > 0 ? "waiting" : s.state, 24)}<div class="body"><div class="t1">${esc(s.title)}</div><div class="t2"><span>${esc(folderName(s.cwd, ui.home))}</span><span class="sep">·</span><span class="m">${esc(modelName(ui.models, s.model))}</span><span class="sep">·</span><span>${esc(relTime(s.updatedAt, ui.now))}</span></div></div>${tag}</button>`;
+  return `<button class="row" data-act="open" data-id="${esc(s.id)}">${s.state === "error" && !s.pending ? ripple("sorry", 24) : stateRing(sidebarState(s), 24)}<div class="body"><div class="t1">${esc(s.title)}</div><div class="t2"><span>${esc(folderName(s.cwd, ui.home))}</span><span class="sep">·</span><span class="m">${esc(modelName(ui.models, s.model))}</span><span class="sep">·</span><span>${esc(relTime(s.updatedAt, ui.now))}</span></div></div>${tag}</button>`;
 }
 
 export function homeMain(ui: UI): string {
-  const host = ui.sessions.filter(s => s.origin !== "desktop");
-  const desktop = ui.sessions.filter(s => s.origin === "desktop");
-  const waiting = host.filter((s) => s.pending > 0);
-  const active = host.filter((s) => s.pending === 0 && (s.state === "running" || s.state === "starting"));
-  const rest = host.filter((s) => s.pending === 0 && s.state !== "running" && s.state !== "starting");
+  const sections = sidebarSections(ui.sessions, ui.groups);
   // While the link is down the states below are the last ones seen, and look it.
   const stale = ui.link.state === "open" ? "" : " stale";
-  const sec = (title: string, list: SessionSummary[], cls = "", count = false): string =>
-    list.length ? `<div class="sec">${esc(title)}${count ? `<span class="count">${list.length}</span>` : ""}</div><div class="list ${cls}${stale}">${list.map((s) => sessionRow(s, ui)).join("")}</div>` : "";
+  const sec = (title: string, list: SessionSummary[]): string =>
+    list.length ? `<div class="sec">${esc(title)}</div><div class="list${stale}">${list.map((s) => sessionRow(s, ui)).join("")}</div>` : "";
   const empty = ui.sessions.length === 0
     ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body", { host: hostName(ui) }))}</p><div class="hint">${icon.down(22)}</div></div>`
     : "";
-  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sec(t("home.waiting"), waiting, "waiting", true)}${sec(t("home.active"), active)}${sec(t("home.recent"), rest)}${sec(t("home.desktop"), desktop)}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
+  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sections.map(g => sec(g.name, g.sessions)).join("")}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
 }
 
 /** Below the list, near the thumb: turn notifications on, or what it takes on this phone. Gone once on or dismissed. */
