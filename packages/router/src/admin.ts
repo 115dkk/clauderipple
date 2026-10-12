@@ -29,7 +29,7 @@ import { adminPort, homeDir, searchProviderFor, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { ModSettingsInputError, readModSettings, validateSettings, writeModSettings } from "./mod-settings.ts";
+import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { normalizeSettings } from "../../mod/hooks/settings.ts";
 import type { Billing, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
@@ -1539,6 +1539,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         let parsed: unknown;
         try { parsed = JSON.parse(bytes.toString("utf8")); }
         catch { throw new ModSettingsInputError("invalid JSON"); }
+        validateSettingsSchema(parsed);
         const body = parsed as { settings?: unknown };
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.

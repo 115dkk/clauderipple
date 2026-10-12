@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { homeDir } from "./config.ts";
 import { withFileLock, writeJsonAtomic } from "./locked-file.ts";
-import { hadRetiredRouting, normalizeSettings } from "../../mod/hooks/settings.ts";
+import { MOD_SETTINGS_SCHEMA_VERSION, hadRetiredRouting, normalizeSettings } from "../../mod/hooks/settings.ts";
 import type { ModSettingsSnapshot } from "../../mod/types/index.d.ts";
 
 export const MAX_MOD_SETTINGS_BYTES = 64 * 1024;
@@ -70,11 +70,30 @@ export function readModSettings(home = homeDir()): ModSettingsSnapshot {
   return { settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true, ...(hadRetiredRouting(stored.settings) ? { legacy: true } : {}) };
 }
 
+/** Reject old writers before normalization/fill can erase evidence of their format. */
+export function validateSettingsSchema(body: unknown): void {
+  if (!object(body)) throw new ModSettingsInputError("body must be a JSON object");
+  if (body.schemaVersion !== MOD_SETTINGS_SCHEMA_VERSION) throw new ModSettingsInputError("settings schema unsupported; reload ClaudeRipple before saving", 426);
+}
+
+/** Exact previous bytes, not the normalized read view; backup failure aborts the write. */
+function backupModSettings(file: string, previousRevision: number): void {
+  const backup = `${file}.bak-${previousRevision}`;
+  fs.copyFileSync(file, backup);
+  fs.chmodSync(backup, 0o600);
+  const fd = fs.openSync(backup, "r");
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  const backups = fs.readdirSync(path.dirname(file)).filter(name => /^mod-settings\.json\.bak-\d+$/.test(name))
+    .sort((a, b) => Number(b.split("-").at(-1)) - Number(a.split("-").at(-1)));
+  for (const name of backups.slice(10)) fs.unlinkSync(path.join(path.dirname(file), name));
+}
+
 export type ModSettingsWrite = { stale: boolean; current: ModSettingsSnapshot };
 
 /** Compare-and-swap and revision increment share the account stores' cross-process lock. */
 export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWrite {
   if (!object(body)) throw new ModSettingsInputError("body must be a JSON object");
+  validateSettingsSchema(body);
   validateSettings(body.settings);
   if (body.revision !== undefined && !revision(body.revision)) throw new ModSettingsInputError("revision must be a non-negative safe integer");
   const settings = normalizeSettings(body.settings);
@@ -86,6 +105,7 @@ export function writeModSettings(body: unknown, home = homeDir()): ModSettingsWr
     if (expected !== undefined && expected !== current.revision) return { stale: true, current };
     if (current.revision === Number.MAX_SAFE_INTEGER) throw new Error("mod settings revision exhausted");
     const next: ModSettingsSnapshot = { settings, revision: current.revision + 1, stored: true };
+    if (current.stored) backupModSettings(file, current.revision);
     writeJsonAtomic(file, next);
     return { stale: false, current: next };
   });

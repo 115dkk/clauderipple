@@ -3,7 +3,7 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
-import { applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
+import { MOD_SETTINGS_SCHEMA_VERSION, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
@@ -33,7 +33,7 @@ const logOpen = atom({ plugin: 'ripple', key: 'logOpen' } as const, false)
 const onlySession = atom({ plugin: 'ripple', key: 'onlySession' } as const, false)
 const bandHidden = atom({ plugin: 'ripple', key: 'bandHidden' } as const, false)
 const settings = atom({ plugin: 'ripple', key: 'settings' } as const, null)
-const settingsSync = atom({ plugin: 'ripple', key: 'settingsSync' } as const, { revision: null, pending: [], migrationChecked: false, migration: null })
+const settingsSync = atom({ plugin: 'ripple', key: 'settingsSync' } as const, { schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, revision: null, pending: [], migrationChecked: false, migration: null })
 const settingsBase = atom({ plugin: 'ripple', key: 'settingsBase' } as const, null)
 const lang = atom({ plugin: 'ripple', key: 'lang' } as const, 'en')
 const pick = atom({ plugin: 'ripple', key: 'pick' } as const, null)
@@ -233,8 +233,10 @@ async function acceptSettings($: EngineInterface, snapshot: ModSettingsSnapshot,
 async function putSettings($: EngineInterface, admin: string, base: Settings): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const sync = await read($, settingsSync)
+    // A migration that lost a CAS race is not a user edit: never retry it as a full save.
+    if (!sync.pending.length && !sync.migration) return
     const count = sync.pending.length
-    const response = await $.http.fetch(`${admin}/api/mod-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ settings: applySettingsChanges(base, sync.pending), revision: sync.revision }) })
+    const response = await $.http.fetch(`${admin}/api/mod-settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, settings: applySettingsChanges(base, sync.pending), revision: sync.revision }) })
     if (!response.ok && response.status !== 409) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
     const snapshot = settingsSnapshot(response.text)
     await acceptSettings($, snapshot, response.ok ? count : 0)
@@ -248,6 +250,13 @@ async function syncSettings($: EngineInterface, admin: string): Promise<void> {
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   const snapshot = settingsSnapshot(response.text)
   let sync = await read($, settingsSync)
+  // Session atoms survive reloads. Old pending paths/drafts cannot prove user intent
+  // under this format; discard them rather than granting an old overwrite a new version.
+  if (sync.schemaVersion !== MOD_SETTINGS_SCHEMA_VERSION) {
+    sync = await update($, settingsSync, () => ({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, revision: null, pending: [], migrationChecked: false, migration: null }))
+    await update($, settingsBase, () => null)
+  }
+  if (snapshot.stored && sync.migration) sync = await update($, settingsSync, value => ({ ...value, migration: null }))
   if (!sync.migrationChecked) {
     let migration: Settings | null = null
     if (!snapshot.stored) {
@@ -279,18 +288,15 @@ async function loadSettings($: EngineInterface): Promise<void> {
   }
 }
 async function saveSettings($: EngineInterface, s: Settings, baseline?: Settings): Promise<boolean> {
-  const changes = settingsChanges(baseline ?? await currentSettings($), normalizeSettings(s))
+  // Both sides use the same format: normalization alone is never an edit.
+  const changes = settingsChanges(normalizeSettings(baseline ?? await currentSettings($)), normalizeSettings(s))
   try {
     await settingsTask(async () => {
       await update($, settingsSync, value => ({ ...value, pending: [...value.pending, ...changes] }))
       await installSettings($, applySettingsChanges(await currentSettings($), changes))
       const admin = await adminUrl($)
-      if ((await read($, settingsSync)).revision === null) await syncSettings($, admin)
-      else {
-        const sync = await read($, settingsSync)
-        // Local state already includes pending edits; applying them again is idempotent.
-        await putSettings($, admin, sync.migration ?? await currentSettings($))
-      }
+      // Always rebase on the router, never PUT the normalized local atom wholesale.
+      await syncSettings($, admin)
     })
     return true
   } catch (error) { await routerSettingsDown($, error); return false }

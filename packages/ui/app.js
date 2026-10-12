@@ -2495,7 +2495,7 @@ async function saveMod() {
   if (modSaving) { modSaveAgain = true; return; }
   modSaving = true;
   try {
-    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings: modState.settings, revision: modState.revision }) });
+    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, settings: modState.settings, revision: modState.revision }) });
     modState.revision = Number(out.revision) || modState.revision + 1;
     // The router's copy is the normalized one; take it unless a newer change is already waiting.
     if (out.settings && !modSaveTimer && !modSaveAgain) { modState.settings = modNormalize(out.settings); modRefresh(); }

@@ -2,7 +2,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
-import { DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
+import { MOD_SETTINGS_SCHEMA_VERSION, DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
 import type { ModSettingsSnapshot, Settings } from '../types'
 
@@ -43,7 +43,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   let offline = false
   let conflict: Settings | null = null
   let alwaysConflict = false
-  const settingsRequests: { method: string; settings?: unknown; revision?: unknown }[] = []
+  const settingsRequests: { method: string; settings?: unknown; revision?: unknown; schemaVersion?: unknown }[] = []
   on('http.fetch', { url: /\/api\/mod-settings$/ }, ($, e) => {
     if (offline) throw new Error('router unavailable')
     const method = e.init?.method ?? 'GET'
@@ -52,7 +52,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(router) } }
     }
     const input = JSON.parse(e.init?.body ?? '{}')
-    settingsRequests.push({ method, settings: input.settings, revision: input.revision })
+    settingsRequests.push({ method, settings: input.settings, revision: input.revision, schemaVersion: input.schemaVersion })
     if (conflict) { router = { settings: conflict, revision: router.revision + 1, stored: true }; conflict = null }
     if (alwaysConflict) router = { ...router, revision: router.revision + 1 }
     const stale = input.revision !== router.revision
@@ -197,6 +197,57 @@ test('router settings override legacy store and revision changes redraw even wit
   await ui.unmount()
 })
 
+test('an unrelated user change uses the fresh router ladder and saved modes, not a local whole snapshot', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  const steps = [{ target: { agent: 'gpt-6-astra' }, effort: 'high' as const }, { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' as const }]
+  const fresh = normalizeSettings({ setupDone: true, rules: { general: { mode: 'ladder', rungs: { hard: steps } } }, modes: [{ id: 'saved', name: 'Saved', rungs: { plan: steps }, until: 'none' }], activeMode: 'saved' })
+  b.remote({ settings: fresh, revision: 2, stored: true })
+  await ui.press({ key: 'bias-1' }) // No poll has installed the newer router snapshot yet.
+  expect(b.router().settings.rules).toEqual(fresh.rules)
+  expect(b.router().settings.modes).toEqual(fresh.modes)
+  expect(b.router().settings.activeMode).toBe('saved')
+  const writes = b.settingsRequests.filter(r => r.method === 'PUT')
+  expect(writes.length).toBe(1)
+  expect(writes[0]?.revision).toBe(2)
+  expect(writes[0]?.schemaVersion).toBe(MOD_SETTINGS_SCHEMA_VERSION)
+  await ui.unmount()
+})
+
+test('reload discards old-format pending overwrites and migration even at the same stored revision', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const original = b.router().settings
+  let oldState = true
+  let installed: unknown
+  on('state.get', { plugin: 'ripple', key: 'settingsSync' }, ($, e, next) => oldState ? { value: { value: { revision: 1, pending: [{ path: ['rules'], value: {} }, { path: ['modes'], value: [] }], migrationChecked: true, migration: normalizeSettings(null) }, version: 0 } } : next(e))
+  on('state.set', { plugin: 'ripple', key: 'settingsSync' }, async ($, e, next) => {
+    const result = await next(e)
+    oldState = false
+    installed = e.value
+    return result
+  })
+  await start($)
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
+  expect(b.router().settings).toEqual(original)
+  expect(installed).toMatchObject({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, pending: [], migration: null })
+})
+
+test('saving the already-selected setting sends no normalization-only PUT', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  await start($)
+  await command($, 'settings')
+  const ui = await band($)
+  await ui.press({ key: 'bias-0' })
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(0)
+  expect(b.router().revision).toBe(1)
+  await ui.unmount()
+})
+
 test('empty router uses defaults without writing when there is no legacy store', async ($, on) => {
   const b = boundaries(on)
   b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
@@ -273,6 +324,7 @@ test('migration loses a first-write race without overwriting existing server set
   http(on)
   await start($)
   expectLanguage(b, 'ja')
+  expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(1)
   expect(b.router().settings).toMatchObject({ language: 'ja', keepWarm: true })
   await b.clock.advance(3000)
   expect(b.storeReads.filter(key => key === 'settings').length).toBe(1)

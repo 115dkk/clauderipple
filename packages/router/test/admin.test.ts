@@ -17,7 +17,7 @@ import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount } fr
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
 import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
-import { normalizeSettings } from "../../mod/hooks/settings.ts";
+import { MOD_SETTINGS_SCHEMA_VERSION, normalizeSettings } from "../../mod/hooks/settings.ts";
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
   // port 0: let the OS pick a free ephemeral port so parallel tests never collide.
@@ -106,7 +106,54 @@ test("mod options and status expose runtime provider exhaustion and clear it on 
 });
 
 const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}/api/mod-settings`, {
-  method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, ...(body as Record<string, unknown>) }),
+});
+
+test("admin mod-settings rejects an old session's full empty/default overwrite even at the current revision", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const steps = [{ target: { agent: "first" }, effort: "high" }, { target: { agent: "second" }, effort: "medium" }];
+    const settings = normalizeSettings({ rules: { general: { mode: "ladder", rungs: { light: steps, standard: steps, hard: steps, plan: steps } } }, modes: [{ id: "saved", name: "Saved mode", rungs: { hard: steps }, delegation: "eager", until: "none" }], activeMode: "saved" });
+    const file = path.join(home, "mod-settings.json");
+    const original = JSON.stringify({ settings, revision: 9, stored: true });
+    fs.writeFileSync(file, original);
+    // Pre-a931858 reads Step[] as no Step. An unrelated toggle PUTs empty rungs,
+    // and the admin fill used to turn that into a complete default overwrite.
+    for (const lost of [{ ...settings, rules: { general: { mode: "ladder", rungs: {} } }, modes: [] }, normalizeSettings(null)]) {
+      const response = await putModSettings(port, { settings: lost, revision: 9, schemaVersion: undefined });
+      assert.equal(response.status, 426);
+      assert.equal(fs.readFileSync(file, "utf8"), original);
+    }
+  });
+});
+
+test("admin mod-settings keeps ten exact previous files and refuses unsupported schemas without backups", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const file = path.join(home, "mod-settings.json");
+    const previous = new Map<number, string>();
+    // An old file need not be normalized or formatted like today's serializer.
+    fs.writeFileSync(file, '{"revision":1,"settings":{"language":"pt","future":"preserve in backup"}}');
+    for (let revision = 1; revision <= 12; revision++) {
+      previous.set(revision, fs.readFileSync(file, "utf8"));
+      const response = await putModSettings(port, { settings: { language: "ko" }, revision });
+      assert.equal(response.status, 200);
+    }
+    const names = fs.readdirSync(home).filter(name => name.startsWith("mod-settings.json.bak-"));
+    assert.equal(names.length, 10);
+    for (let revision = 3; revision <= 12; revision++) {
+      const backup = `${file}.bak-${revision}`;
+      assert.equal(fs.readFileSync(backup, "utf8"), previous.get(revision));
+      if (process.platform !== "win32") assert.equal(fs.statSync(backup).mode & 0o777, 0o600);
+    }
+    const final = fs.readFileSync(file, "utf8");
+    for (const schemaVersion of [undefined, 0, 2, "1", null]) {
+      assert.equal((await putModSettings(port, { schemaVersion, settings: {}, revision: 13 })).status, 426);
+    }
+    assert.equal((await putModSettings(port, { settings: {}, revision: 0 })).status, 409);
+    assert.equal(fs.readFileSync(file, "utf8"), final);
+    assert.deepEqual(fs.readdirSync(home).filter(name => name.startsWith("mod-settings.json.bak-")), names);
+    // Current writers may deliberately shorten a list or remove a saved mode.
+    assert.equal((await putModSettings(port, { settings: normalizeSettings(null), revision: 13 })).status, 200);
+  });
 });
 
 test("admin mod-settings returns full defaults before storage, normalizes writes and persists revisions", async () => {

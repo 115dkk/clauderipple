@@ -1,5 +1,8 @@
 import type { Calibration, Domain, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Step, TierTarget } from '../types/index.d.ts'
 
+/** Bump whenever a writer's normalization can lose another format's fields. */
+export const MOD_SETTINGS_SCHEMA_VERSION = 1
+
 export const DOMAINS: readonly Domain[] = ['general', 'design', 'frontend', 'backend', 'infra', 'data', 'test', 'docs', 'research']
 export const LEVELS: readonly Level[] = ['light', 'standard', 'deep']
 export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
