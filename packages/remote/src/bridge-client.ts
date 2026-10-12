@@ -24,10 +24,20 @@ export function loadBridgeAuth(): BridgeAuth {
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
 export class BridgeClient {
   private fetchFn: typeof fetch;
-  private auth: () => BridgeAuth;
+  private loadAuth: () => BridgeAuth;
+  private cached: BridgeAuth | null = null;
   constructor(options: { fetch?: typeof fetch; auth?: () => BridgeAuth } = {}) {
     this.fetchFn = options.fetch ?? fetch;
-    this.auth = options.auth ?? loadBridgeAuth;
+    this.loadAuth = options.auth ?? loadBridgeAuth;
+  }
+  /**
+   * The keychain read is a synchronous child process; doing it per request blocked the host's
+   * event loop under the 3 s state poll until relay pings timed out (2026-10-12). Kept in memory
+   * and reread only near expiry or after a 401 (Claude Code refreshes the token on its own).
+   */
+  private auth(): BridgeAuth {
+    if (!this.cached || this.cached.expiresAt - Date.now() < 5 * 60_000) this.cached = this.loadAuth();
+    return this.cached;
   }
   private async request(id: string, suffix: string, options: RequestInit): Promise<Response> {
     const auth = this.auth();
@@ -42,6 +52,7 @@ export class BridgeClient {
       });
     } catch { throw new BridgeNetworkError("Claude 앱과 연결하지 못했습니다."); }
     if (!response.ok) {
+      if (response.status === 401) this.cached = null;
       await response.body?.cancel();
       // Do not expose server bodies (which may echo credentials), or retry rejected writes.
       throw new Error(`Claude 앱이 메시지를 받지 않았습니다 (${response.status}).`);
