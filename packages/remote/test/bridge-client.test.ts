@@ -27,7 +27,7 @@ test("expired auth never calls fetch; rejected writes are not retried and errors
   assert.equal(calls, 0);
   for (const status of [401, 403, 400, 500]) {
     const client = new BridgeClient({ auth, fetch: async () => { calls++; return new Response("secret-not-for-phone signature_wanted", { status }); } });
-    await assert.rejects(client.send("b", "u", "text"), error => error instanceof Error && error.message.includes(`HTTP ${status}`) && !error.message.includes("secret-not-for-phone"));
+    await assert.rejects(client.send("b", "u", "text"), error => error instanceof Error && error.message.includes(`(${status})`) && !error.message.includes("secret-not-for-phone"));
   }
   assert.equal(calls, 4);
   const client = new BridgeClient({ auth, fetch: async () => { throw new Error("secret-not-for-phone"); } });
@@ -46,16 +46,17 @@ test("SSE handles split UTF-8 and CRLF frames", async () => {
 test("stream reconnects from applied sequence and drops repeated durable events", async () => {
   const urls: string[] = [];
   const abort = new AbortController();
-  const client = new BridgeClient({ auth, fetch: async url => { urls.push(String(url)); return new Response(urls.length === 1 ? frame(4) : frame(4) + frame(5)); } });
+  const client = new BridgeClient({ auth, fetch: async url => { urls.push(String(url)); if (String(url).includes("sort_order=desc")) return Response.json({ data: [{ sequence_num: "3" }] }); return new Response(urls.length === 2 ? frame(4) : frame(4) + frame(5)); } });
   const sequences: unknown[] = [];
   await client.stream("b", abort.signal, event => { sequences.push(event.data.sequence_num); if (event.data.sequence_num === 5) abort.abort(); });
   assert.deepEqual(sequences, [4, 5]);
-  assert.ok(urls[1]?.endsWith("from_sequence_num=4"));
+  assert.ok(urls[1]?.endsWith("from_sequence_num=3"), "starts at the newest event, not 0");
+  assert.ok(urls[2]?.endsWith("from_sequence_num=4"));
 });
 
 test("stream HTTP auth refusal is terminal", async () => {
   let calls = 0;
   const client = new BridgeClient({ auth, fetch: async () => { calls++; return new Response("untrusted_device", { status: 403 }); } });
-  await assert.rejects(client.stream("b", new AbortController().signal, () => {}), /HTTP 403/);
+  await assert.rejects(client.stream("b", new AbortController().signal, () => {}), /\(403\)/);
   assert.equal(calls, 1);
 });

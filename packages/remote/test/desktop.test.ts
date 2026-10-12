@@ -227,7 +227,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
   if (mode === "process") {
     await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Mac 앱/);
-    assert.throws(() => sessions.send(id, "first-phone", "continue"), /휴대폰에서 입력할 수 없습니다/);
+    assert.throws(() => sessions.send(id, "first-phone", "continue"), /지금은 보낼 수 없습니다/);
     assert.equal(options.length, 0);
     assert.equal(sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "first-phone"), false);
     return;

@@ -6,7 +6,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
-export const DESKTOP_BLOCKED = "Mac 앱에서 열려 있는 세션이라 지금은 휴대폰에서 입력할 수 없습니다. / This session is open in the Mac app and cannot currently accept phone input.";
+export const DESKTOP_BLOCKED = "Mac 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
 export interface BridgeAuth { accessToken: string; organizationUuid: string; expiresAt: number }
 class BridgeNetworkError extends Error {}
 export function object(value: unknown): Record<string, unknown> | null {
@@ -19,7 +19,7 @@ export function loadBridgeAuth(): BridgeAuth {
     const account = object(object(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8")))?.oauthAccount);
     if (typeof oauth?.accessToken !== "string" || typeof oauth.expiresAt !== "number" || typeof account?.organizationUuid !== "string") throw new Error();
     return { accessToken: oauth.accessToken, expiresAt: oauth.expiresAt, organizationUuid: account.organizationUuid };
-  } catch { throw new Error("Claude 로그인 정보를 읽을 수 없습니다. / Cannot read Claude login credentials."); }
+  } catch { throw new Error("맥의 Claude 로그인 정보를 읽을 수 없습니다."); }
 }
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
 export class BridgeClient {
@@ -31,17 +31,17 @@ export class BridgeClient {
   }
   private async request(id: string, suffix: string, options: RequestInit): Promise<Response> {
     const auth = this.auth();
-    if (auth.expiresAt <= Date.now()) throw new Error("Claude 로그인이 만료되었습니다. / Claude login has expired.");
+    if (auth.expiresAt <= Date.now()) throw new Error("맥의 Claude 로그인이 만료되었습니다. Mac 앱을 한 번 열어 주십시오.");
     let response: Response;
     try {
       response = await this.fetchFn(`https://api.anthropic.com/v1/code/sessions/${encodeURIComponent(id)}${suffix}`, {
         ...options, redirect: "error", headers: { Authorization: `Bearer ${auth.accessToken}`, "anthropic-version": "2023-06-01", "anthropic-client-platform": "claude_code_remote", "x-organization-uuid": auth.organizationUuid, "Content-Type": "application/json", "User-Agent": "RippleRemote/0.8.10" },
       });
-    } catch { throw new BridgeNetworkError("Remote Control 연결에 실패했습니다. / Remote Control connection failed."); }
+    } catch { throw new BridgeNetworkError("Mac 앱과 연결하지 못했습니다."); }
     if (!response.ok) {
       await response.body?.cancel();
       // Do not expose server bodies (which may echo credentials), or retry rejected writes.
-      throw new Error(`Remote Control 요청이 거절되었습니다 (HTTP ${response.status}). / Remote Control request rejected.`);
+      throw new Error(`Mac 앱이 메시지를 받지 않았습니다 (${response.status}).`);
     }
     return response;
   }
@@ -58,9 +58,24 @@ export class BridgeClient {
   async events(id: string): Promise<Record<string, unknown>> {
     return object(await (await this.request(id, "/events?sort_order=asc", { signal: AbortSignal.timeout(15_000) })).json()) ?? {};
   }
+  /** The newest durable event's number; the stream starts there instead of replaying the whole session. */
+  private async latest(id: string, signal: AbortSignal): Promise<number> {
+    const body = object(await (await this.request(id, "/events?sort_order=desc&limit=1", { signal })).json());
+    const first = Array.isArray(body?.data) ? object(body.data[0]) : null;
+    return sequenceOf(first?.sequence_num) ?? 0;
+  }
   async stream(id: string, signal: AbortSignal, handle: (frame: BridgeFrame) => void): Promise<void> {
-    let sequence = 0;
+    let sequence: number | null = null;
     while (!signal.aborted) {
+      if (sequence === null) {
+        try { sequence = await this.latest(id, signal); }
+        catch (error) {
+          if (signal.aborted) return;
+          if (!(error instanceof BridgeNetworkError)) throw error;
+          await delay(1000, undefined, { signal }).catch(error => { if (!signal.aborted) throw error; });
+          continue;
+        }
+      }
       let response: Response;
       try { response = await this.request(id, `/events/stream?from_sequence_num=${sequence}`, { signal }); }
       catch (error) {
@@ -74,9 +89,10 @@ export class BridgeClient {
       try {
         for await (const frame of decodeSse(response.body)) {
           handling = true;
-          if (frame.event === "catch_up_truncated") throw new Error("Remote Control 이벤트가 누락되었습니다. / Remote Control event replay was truncated.");
-          const number = frame.data.sequence_num;
-          if (frame.event === "client_event" && typeof number === "number") {
+          // Only live permission prompts come from here; the conversation itself is read from the transcript.
+          if (frame.event === "catch_up_truncated") { handling = false; continue; }
+          const number = sequenceOf(frame.data.sequence_num);
+          if (frame.event === "client_event" && number !== undefined) {
             if (number <= sequence) { handling = false; continue; }
             handle(frame);
             sequence = number;
@@ -85,12 +101,18 @@ export class BridgeClient {
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (handling || (error instanceof Error && error.message.includes("truncated"))) throw error;
+        if (handling) throw error;
         // A broken read reconnects; HTTP rejection above is terminal. Writes are never retried.
       }
       await delay(1000, undefined, { signal }).catch(error => { if (!signal.aborted) throw error; });
     }
   }
+}
+
+/** The server sends sequence numbers as decimal strings ("9136"); tests and older shapes use numbers. */
+function sequenceOf(value: unknown): number | undefined {
+  const number = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+  return typeof number === "number" && Number.isSafeInteger(number) && number >= 0 ? number : undefined;
 }
 
 export async function* decodeSse(body: ReadableStream<Uint8Array>): AsyncGenerator<BridgeFrame> {

@@ -27,6 +27,7 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
       posts.push(JSON.parse(String(options.body)));
       return new Response("{}", { status: rejected ? 403 : 200 });
     }
+    if (String(url).includes("/events?sort_order=desc")) return Response.json({ data: [] });
     assert.ok(String(url).includes("/events/stream?from_sequence_num="));
     return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; options?.signal?.addEventListener("abort", () => c.close(), { once: true }); } }));
   } });
@@ -92,11 +93,11 @@ test("bridge prompts, transcript echo, permission allow/cancel and interrupt nev
   assert.equal(f.queries(), 1);
 });
 
-test("rejected live bridge blocks retry and never logs an unsent user or starts a writer", async t => {
+test("a rejected live bridge send fails each attempt without logging the user or starting a writer", async t => {
   const f = fixture(t, true);
-  await assert.rejects(Promise.resolve(f.sessions.send(id, "phone", "not accepted")), /휴대폰에서 입력할 수 없습니다/);
-  await assert.rejects(Promise.resolve(f.sessions.send(id, "phone", "not accepted")), /휴대폰에서 입력할 수 없습니다/);
-  assert.equal(f.posts.length, 1);
+  await assert.rejects(Promise.resolve(f.sessions.send(id, "phone", "not accepted")), /받지 않았습니다/);
+  await assert.rejects(Promise.resolve(f.sessions.send(id, "phone", "not accepted")), /받지 않았습니다/);
+  assert.equal(f.posts.length, 2);
   assert.equal(f.queries(), 0);
   assert.equal(f.sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "phone"), false);
 });

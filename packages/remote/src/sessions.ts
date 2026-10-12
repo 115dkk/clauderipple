@@ -375,10 +375,10 @@ export class Sessions {
       this.save();
     }
     if (this.seen(id, clientMsgId)) return id;
-    const connection = this.ensureBridge(id, bridgeId);
-    if (connection.failed) throw new Error(DESKTOP_BLOCKED);
+    // The stream only carries permission prompts; sending does not depend on it.
+    this.ensureBridge(id, bridgeId);
     try { await this.bridge.send(bridgeId, clientMsgId, text); }
-    catch (error) { this.bridgeFailure(id, error); throw new Error(`${DESKTOP_BLOCKED}\n${error instanceof Error ? error.message : "Remote Control failed."}`); }
+    catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
     this.append(id, { kind: "user", text, clientMsgId });
     this.setState(r, "running");
@@ -387,7 +387,8 @@ export class Sessions {
 
   private ensureBridge(id: string, bridgeId: string) {
     const previous = this.bridges.get(id);
-    if (previous?.bridgeId === bridgeId) return previous;
+    // A failed stream is retried on the next poll or send rather than blocking the session for good.
+    if (previous?.bridgeId === bridgeId && !previous.failed) return previous;
     this.closeBridge(id);
     const connection = { bridgeId, abort: new AbortController(), failed: false, permissions: new Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }>() };
     this.bridges.set(id, connection);
@@ -409,8 +410,8 @@ export class Sessions {
     const connection = this.bridges.get(id);
     if (connection) { connection.failed = true; connection.abort.abort(); }
     this.opts.permissions.expireSession(id, "aborted");
-    this.append(id, { kind: "notice", code: "desktop_blocked", text: error instanceof Error ? error.message : "Remote Control failed." });
-    this.opts.onSessions();
+    // Logged, not shown: a dropped permission stream reconnects on the next poll and says nothing new to the user.
+    console.error(`remote control stream (${id}): ${error instanceof Error ? error.message : "failed"}`);
   }
 
   private bridgeFrame(id: string, frame: BridgeFrame): void {
