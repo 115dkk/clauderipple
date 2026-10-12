@@ -7,8 +7,8 @@ test('defaults hold one ladder', () => {
   assert.equal(DEFAULTS.jevSource, 'typesafe')
   // The spec's "Claude + GPT" example ladder; the four workers replaced the field rules, so every field follows it.
   assert.deepEqual(DEFAULTS.rules, { general: { mode: 'ladder', rungs: {
-    light: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
-    hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' },
+    light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }], standard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'medium' }],
+    hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], plan: [{ target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' }],
   } } })
   assert.deepEqual(DEFAULTS.allow, [])
   for (const key of ['tiers', 'preference', 'autoFloors', 'autoTieBand']) assert.equal(Object.hasOwn(DEFAULTS, key), false, key)
@@ -43,7 +43,7 @@ test('defaults are deeply independent after normalization', () => {
   for (const value of [undefined, null, false, 'bad', 7, [], {}]) assert.deepEqual(normalizeSettings(value), DEFAULTS)
   const first = normalizeSettings(null)
   first.hide.push('timer'); first.providers.chatgpt = false
-  first.rules.general.rungs.light!.target.agent = 'changed'
+  first.rules.general.rungs.light![0]!.target.agent = 'changed'
   first.allow.push('changed'); first.fallback.agent = 'changed'
   assert.deepEqual(normalizeSettings(null), DEFAULTS)
 })
@@ -51,8 +51,8 @@ test('old tiers migrate the general ladder once, explicit new rules win, the des
   const migrated = normalizeSettings({ tiers: { light: { agent: ' custom ' }, design: { agent: 'general-purpose', model: 'haiku' } } })
   assert.equal(Object.hasOwn(migrated, 'tiers'), false)
   assert.deepEqual(migrated.rules.general, { mode: 'ladder', rungs: {
-    light: { target: { agent: 'custom' }, effort: 'low' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
-    hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
+    light: [{ target: { agent: 'custom' }, effort: 'low' }], standard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'medium' }],
+    hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'xhigh' }],
   } })
   assert.deepEqual(Object.keys(migrated.rules), ['general'])
   const current = normalizeSettings({ ...migrated, tiers: { light: { agent: 'obsolete' } } })
@@ -71,7 +71,7 @@ test('only the general ladder survives loading: Auto is a ladder to fill, field 
   assert.deepEqual(auto.allow, ['sol', 'gpt-6-astra'])
   // A rung keeps its model and effort; its backup is dropped, and a rung with no model stays empty.
   const backed = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { light: { target: { agent: 'a' }, effort: 'high', backup: { agent: 'b' } }, standard: { effort: 'low' } } } } })
-  assert.deepEqual(backed.rules.general, { mode: 'ladder', rungs: { light: { target: { agent: 'a' }, effort: 'high' } } })
+  assert.deepEqual(backed.rules.general, { mode: 'ladder', rungs: { light: [{ target: { agent: 'a' }, effort: 'high' }] } })
   // The ticks written on a ladder are kept as they are.
   assert.deepEqual(normalizeSettings({ allow: ['gpt-6-1-sol', 'gpt-6-1-sol', 3], rules: { general: { mode: 'auto', allow: ['ignored'] } } }).allow, ['gpt-6-1-sol'])
 })
@@ -106,8 +106,8 @@ test('allow-lists name workers; provider names from old settings migrate to that
 })
 
 test('Claude models are candidates keyed general-purpose:<model>', () => {
-  assert.deepEqual(CLAUDE_WORKERS.map(w => w.name), ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
-  assert.deepEqual(CLAUDE_WORKERS.map(w => w.model), ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'])
+  assert.deepEqual(CLAUDE_WORKERS.map(w => w.name), ['general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus', 'general-purpose:fable'])
+  assert.deepEqual(CLAUDE_WORKERS.map(w => w.model), ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1'])
   for (const w of CLAUDE_WORKERS) assert.equal(candidateKey(w.target), w.name)
   assert.equal(candidateKey({ agent: 'gpt-6-1-sol' }), 'gpt-6-1-sol')
 })

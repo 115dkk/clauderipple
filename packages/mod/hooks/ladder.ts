@@ -2,8 +2,8 @@
 // fill that gives every rung a model from the ticked, connected ones. Pure, with type-only imports,
 // so the router fills settings with the same rule the mod uses.
 
-import type { Billing, Effort, LadderChoice, Preset, PresetId, Rung, Step, TierTarget, WorkerVerdict } from '../types/index.d.ts'
-import { CLAUDE_WORKERS, EFFORTS, LEVEL_RUNG, RUNGS, RUNG_EFFORT, candidateKey, isAllowed } from './settings.ts'
+import type { Billing, Effort, LadderChoice, Preset, PresetId, Rung, Rungs, Step, WorkerVerdict } from '../types/index.d.ts'
+import { CLAUDE_WORKERS, EFFORTS, LEVEL_RUNG, RUNGS, candidateKey, isAllowed } from './settings.ts'
 
 /** Below this the judge is unsure enough that a task takes the next rung. */
 export const SURE_ENOUGH = 0.5
@@ -143,106 +143,28 @@ export function preset(id: PresetId, choices: readonly LadderChoice[]): Preset {
   return { rungs, substituted }
 }
 
-// ---- Operating modes (docs/specs/2026-10-12-worker-tiers.md "Operating modes") -----------------
-
-/** A model as a mode names it: by its provider, or by its key as `allow` stores it. */
-type Named = { target: TierTarget; provider: string }
-
-/** Whether a mode's targets name this model: its provider or its key. */
-export function inTargets(targets: readonly string[], model: Named): boolean {
-  return targets.includes(model.provider) || targets.includes(candidateKey(model.target))
-}
-
-/**
- * What a mode puts on each rung, in order: the fill rule's own wishes (the `claudeGpt` rule on Low,
- * Medium and High, the `gpt` rule's Astra-then-Opus on Max, the strongest of each family).
- */
-const MODE_WANTS: Readonly<Record<Rung, readonly Want[]>> = {
-  light: PRESETS.claudeGpt.light, standard: PRESETS.claudeGpt.standard, hard: PRESETS.claudeGpt.hard, plan: PRESETS.gpt.plan,
-}
-
-/**
- * When none of the wishes is among `pool`: the cheapest by measured cost on Low and Medium, the
- * dearest (the AA cost of a harder thinker) on High and Max; unmeasured models after measured ones.
- */
-function byCost(rung: Rung, pool: readonly LadderChoice[]): LadderChoice | undefined {
-  const top = rung === 'hard' || rung === 'plan'
-  const measured = pool.filter(c => c.cost !== undefined).sort((a, b) => (top ? b.cost! - a.cost! : a.cost! - b.cost!) || a.model.localeCompare(b.model))
-  return measured[0] ?? pool[0]
-}
-
-/**
- * The model a mode puts on a rung from `pool`, at the wish's effort, else the rung's own default
- * (low, medium, high, high: another model's effort means nothing to this one), as the model takes it.
- */
-function modePick(rung: Rung, pool: readonly LadderChoice[]): Step | undefined {
-  for (const want of MODE_WANTS[rung]) {
-    const choice = want.pick(pool)
-    if (choice) return { target: { ...choice.target }, effort: nearestEffort(want.effort, choice.efforts) }
-  }
-  const choice = byCost(rung, pool)
-  return choice ? { target: { ...choice.target }, effort: nearestEffort(RUNG_EFFORT[rung], choice.efforts) } : undefined
-}
-
-/**
- * The rungs an active mode runs on, from the user's own (`rungs`, as filled) and the ticked models
- * that can run now (`choices`). Prefer: a rung whose model is not a target and that the targets can
- * serve takes the target's model (strongest on High and Max, cheapest on Low; `MODE_WANTS`); a rung
- * already on a target, or where the targets have nothing, stays. Avoid: a rung on a target is filled
- * the same way from the other models, and left to the session's model when none is left. `known`
- * names the provider of models that cannot run now (so they are still recognised as a target).
- * `changed` lists the rungs this moved.
- */
-export function modeRungs(rungs: Partial<Record<Rung, Step>>, mode: { targets: readonly string[]; action: 'prefer' | 'avoid' }, choices: readonly LadderChoice[], known: readonly Named[] = []): { rungs: Partial<Record<Rung, Step>>; changed: Rung[] } {
-  const named = (step: Step): boolean => {
-    const key = candidateKey(step.target)
-    const model = choices.find(c => candidateKey(c.target) === key) ?? known.find(c => candidateKey(c.target) === key)
-    return model ? inTargets(mode.targets, model) : mode.targets.includes(key)
-  }
-  const targets = choices.filter(c => inTargets(mode.targets, c))
-  const others = choices.filter(c => !inTargets(mode.targets, c))
-  const out: Partial<Record<Rung, Step>> = {}
-  const changed: Rung[] = []
-  for (const rung of RUNGS) {
-    const own = rungs[rung]
-    let next = own
-    if (mode.action === 'prefer' && targets.length && !(own && named(own))) next = modePick(rung, targets)
-    if (mode.action === 'avoid' && own && named(own)) next = modePick(rung, others) ?? { target: { agent: 'general-purpose' }, effort: own.effort }
-    if (next) out[rung] = next
-    if (next !== own) changed.push(rung)
-  }
-  return { rungs: out, changed }
-}
-
 /** The choices a person ticked; an empty list ticks every one. */
 export function tickedChoices(choices: readonly LadderChoice[], allow: readonly string[]): LadderChoice[] {
   return choices.filter(choice => isAllowed(candidateKey(choice.target), choice.provider, allow))
 }
 
-/** Whether a rung's model is ticked: the session model always is, since the session runs on it. */
-function rungTicked(step: Step, allow: readonly string[], provider: string): boolean {
-  return (step.target.agent === 'general-purpose' && !step.target.model) || isAllowed(candidateKey(step.target), provider, allow)
-}
-
-/** Whether any rung has no model or one that is not ticked: a cheap test before the choices are fetched. */
-export function ladderNeedsFill(rungs: Partial<Record<Rung, Step>>, allow: readonly string[]): boolean {
-  return RUNGS.some(rung => !rungs[rung] || !rungTicked(rungs[rung]!, allow, ''))
+/** Only empty lists need filling; unticked entries stay in order and are skipped at dispatch. */
+export function ladderNeedsFill(rungs: Rungs, _allow: readonly string[] = []): boolean {
+  return RUNGS.some(rung => !rungs[rung]?.length)
 }
 
 /**
- * The general ladder with every rung that has no model, or whose model is not ticked, filled by the
- * `claudeGpt` rule from the ticked, connected `choices`. A rung that has a ticked model is left as
- * it is (whether or not it can run now: the router says so when it cannot). `filled` names the
- * rungs this changed.
+ * Fill empty lists from the ticked, connected choices. Existing ordered lists are never rewritten
+ * for temporary availability or shared allow-list changes; dispatch explains each skipped entry.
  */
-export function fillLadder(rungs: Partial<Record<Rung, Step>>, allow: readonly string[], choices: readonly LadderChoice[]): { rungs: Record<Rung, Step>; filled: Rung[] } {
+export function fillLadder(rungs: Rungs, allow: readonly string[], choices: readonly LadderChoice[]): { rungs: Record<Rung, Step[]>; filled: Rung[] } {
   const pick = preset('claudeGpt', tickedChoices(choices, allow))
-  const out = {} as Record<Rung, Step>
+  const out = {} as Record<Rung, Step[]>
   const filled: Rung[] = []
   for (const rung of RUNGS) {
     const own = rungs[rung]
-    if (own && rungTicked(own, allow, choices.find(c => candidateKey(c.target) === candidateKey(own.target))?.provider ?? '')) { out[rung] = own; continue }
-    out[rung] = pick.rungs[rung]
+    if (own?.length) { out[rung] = own; continue }
+    out[rung] = [pick.rungs[rung]]
     filled.push(rung)
   }
   return { rungs: out, filled }

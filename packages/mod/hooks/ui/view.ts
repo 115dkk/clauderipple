@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, Pick, Rung, Settings, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, Pick, Settings, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -157,8 +157,6 @@ export type SettingsView = {
 export type SettingsActions = {
   /** Applies and saves each change immediately. */
   patch: (change: Partial<Settings>) => void
-  /** Runs a rung of the main ladder on another model (a Select value); its effort stays. */
-  setRung?: (rung: Rung, value: string) => void
   /** Turns a mode on by id, or every mode off with ''. */
   setMode?: (id: string) => void
   /** The Jev key typed into the field (Enter). */

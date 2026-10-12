@@ -131,7 +131,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
       zen(e)
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
     }
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/mod-options') ? MOD_OPTIONS : { requests: [] }
+    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/mod-options') ? { ...MOD_OPTIONS, providers: MOD_OPTIONS.providers.map(p => p.name === 'chatgpt' ? { ...p, usable: !exhausted } : p) } : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
@@ -216,7 +216,7 @@ test('legacy settings and setup completion migrate once; unrelated store keys su
   b.saved.set('handoffChoice', { kind: 'full', after: 'copy' })
   http(on)
   await start($)
-  expect(b.router().settings).toMatchObject({ language: 'pt', keepWarm: true, setupDone: true, rules: { general: { mode: 'ladder', rungs: { light: { target: { agent: 'old-worker' } } } } } })
+  expect(b.router().settings).toMatchObject({ language: 'pt', keepWarm: true, setupDone: true, rules: { general: { mode: 'ladder', rungs: { light: [{ target: { agent: 'old-worker' } }] } } } })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').length).toBe(1)
   expect(b.settingsRequests.find(r => r.method === 'PUT')?.revision).toBe(0)
   b.saved.set('settings', { language: 'ko' })
@@ -431,7 +431,7 @@ test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung
   expect(b.logs.length).toBe(1)
   expect(b.logs[0]!.startsWith('ClaudeRipple worker pick: ')).toBe(true)
   expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toEqual({
-    task: 'Rename variable', domain: 'general', level: 'light', kind: 'do', sure: 0.9, rung: 'light',
+    task: 'Rename variable', domain: 'general', level: 'light', kind: 'do', sure: 0.9, rung: 'light', position: 1, skipped: [],
     target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash@max', effort: 'max', by: 'haiku',
   })
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
@@ -566,6 +566,31 @@ test('without a backup, ChatGPT exhaustion moves one rung up, then to the sessio
   expect(sent[0]?.subagentType).toBe('general-purpose')
   expect(sent[0]?.model).toBeUndefined()
   expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes("the session's model"))).toBe(true)
+})
+
+test('each tier spawn refreshes provider health before picking and toasts the exhaustion reason', async ($, on) => {
+  const b = boundaries(on, { language: 'ko' })
+  let exhausted = false
+  let reads = 0
+  on('http.fetch', { url: /\/api\/mod-options$/ }, () => {
+    reads++
+    const providers = MOD_OPTIONS.providers.map(p => p.name === 'deepseek' ? { ...p, usable: !exhausted, ...(exhausted ? { reason: 'insufficient_balance', exhaustedUntil: NOW + 1_800_000 } : {}) } : p)
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ ...MOD_OPTIONS, providers }) } }
+  })
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low' })
+  expect(sent[0]?.subagentType).toBe('deepseek-v4-1-flash')
+  const before = reads
+  exhausted = true
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low' })
+  expect(reads).toBeGreaterThan(before)
+  expect(sent[1]?.subagentType).toBe('gpt-6-1-sol')
+  expect(b.toasts.some(text => text.includes('deepseek: 잔액 부족'))).toBe(true)
+  exhausted = false
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low' })
+  expect(sent[2]?.subagentType).toBe('deepseek-v4-1-flash')
 })
 
 test('explicit generated worker preserves the old dropped-model and misplaced-marker fix', async ($, on) => {
@@ -825,7 +850,7 @@ test('failed Haiku compaction falls back; precompute skips; subagent stays with 
 
 // ---- Operating modes (docs/specs/2026-10-12-worker-tiers.md "Operating modes") -----------------
 
-const BURN = normalizeModes([{ id: 'burn', name: 'Burn GPT', targets: ['chatgpt'], action: 'prefer', delegation: 'eager' }])
+const BURN = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { ...DEFAULTS.rules.general.rungs, light: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'low' }] }, delegation: 'eager' }])
 
 test('an eager mode notes the main chat once, and again after a compaction; its tiers route spawns and each pick names it', async ($, on) => {
   const b = boundaries(on, { modes: BURN, activeMode: 'burn', activeSince: NOW, compactWith: 'session' })
@@ -884,15 +909,15 @@ test('a mode ends at its time and says so once; quick settings turn one on and o
   await command($, 'settings')
   const ui = await band($, 'desktop')
   const select = await ui.find({ type: 'Select', key: 'mode' })
-  expect((select?.props.options as { label: string }[]).map(o => o.label)).toEqual(['None', 'One minute', 'Burn GPT'])
+  expect((select?.props.options as { label: string }[]).map(o => o.label)).toEqual(['Base', 'One minute', 'Burn GPT'])
   await ui.select({ key: 'mode', value: 'burn' })
   expect([b.router().settings.activeMode, b.router().settings.activeSince]).toEqual(['burn', NOW + 79_000])
   await ui.select({ key: 'mode', value: '' })
   expect(Object.hasOwn(b.router().settings, 'activeMode')).toBe(false)
 })
 
-test('a mode until the quota resets ends once every ChatGPT account\'s window has reset since it turned on', async ($, on) => {
-  const modes = normalizeModes([{ id: 'burn', name: 'Burn GPT', targets: ['gpt-6-astra'], action: 'prefer', until: 'reset' }])
+test('a mode ends at the first ChatGPT reset after activation', async ($, on) => {
+  const modes = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] }, until: 'reset' }])
   const b = boundaries(on, { modes, activeMode: 'burn', activeSince: NOW })
   const asked: string[] = []
   on('http.fetch', { url: /\/api\/chatgpt-accounts/ }, ($, e) => {
@@ -902,15 +927,27 @@ test('a mode until the quota resets ends once every ChatGPT account\'s window ha
   })
   http(on)
   await start($)
-  // The five-hour window resetting does not end it; the weekly one does.
-  await b.clock.advance(100_000)
+  await b.clock.advance(20_000)
   expect(b.router().settings.activeMode).toBe('burn')
-  await b.clock.advance(100_000)
+  await b.clock.advance(20_000)
   expect(b.router().settings.activeMode).toBeUndefined()
   expect(b.toasts).toContain('The Burn GPT mode has ended.')
   // The quota is read at most once a minute, for the provider the target model belongs to.
   expect(asked.length).toBeLessThanOrEqual(4)
   expect(asked.every(url => url.endsWith('/api/chatgpt-accounts?provider=chatgpt'))).toBe(true)
+})
+
+for (const binding of ['five_hour', 'seven_day']) test('reset mode follows the band binding Claude limit: ' + binding, async ($, on) => {
+  const modes = normalizeModes([{ id: 'claude', name: 'Claude work', rungs: { light: [{ target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' }] }, until: 'reset' }])
+  const limits = ['five_hour', 'seven_day'].map(kind => ({ kind, percentUsed: kind === binding ? 90 : 20, resetsAt: new Date(NOW + (kind === binding ? 30_000 : 10_000)).toISOString() }))
+  const b = boundaries(on, { modes, activeMode: 'claude', activeSince: NOW }, { limits })
+  http(on)
+  await start($)
+  await b.clock.advance(20_000)
+  expect(b.router().settings.activeMode).toBe('claude')
+  await b.clock.advance(20_000)
+  expect(b.router().settings.activeMode).toBeUndefined()
+  expect(b.toasts.filter(text => text === 'The Claude work mode has ended.').length).toBe(1)
 })
 
 test('/ripple stats returns plain measured text', async ($, on) => {
@@ -961,45 +998,32 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick controls sav
   await ui.unmount()
 })
 
-for (const surface of ['terminal', 'desktop'] as const) test('quick settings move a rung to another model at its own effort, and have no presets, on ' + surface, async ($, on) => {
-  const b = boundaries(on)
+for (const surface of ['terminal', 'desktop'] as const) test('quick settings select a saved mode, never edit rungs, on ' + surface, async ($, on) => {
+  const b = boundaries(on, { modes: BURN })
   http(on)
   await start($)
   const ui = await band($, surface)
   await ui.press({ key: 'settings' })
-  const rung = await ui.find({ key: 'rung-standard' })
-  expect(rung?.type).toBe('Select')
-  expect((rung?.props.options as { value: string; label: string }[]).map(o => o.label)).toEqual(['deepseek-v4.1-flash · deepseek', 'gpt-6.1-sol · chatgpt', 'gpt-6-astra · chatgpt', 'Claude Haiku', 'Claude Sonnet', 'Claude Opus'])
-  await ui.select({ key: 'rung-standard', value: 'general-purpose+sonnet' })
-  const general = b.router().settings.rules.general
-  expect(general.mode === 'ladder' && general.rungs.standard).toEqual({ target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'medium' })
-  // The presets are gone: the four workers are the whole of it.
-  for (const id of ['claude', 'claudeGpt', 'gpt', 'cheap']) expect(await ui.find({ key: 'preset-' + id })).toBeUndefined()
+  const control = await ui.find({ key: 'mode' })
+  expect(control?.type).toBe('Select')
+  expect((control?.props.options as { label: string }[]).map(o => o.label)).toEqual(['Base', 'Burn GPT'])
+  for (const rung of ['light', 'standard', 'hard', 'plan']) expect(await ui.find({ key: 'rung-' + rung })).toBeUndefined()
+  await ui.select({ key: 'mode', value: 'burn' })
+  expect(b.router().settings.activeMode).toBe('burn')
+  expect(b.router().settings.rules).toEqual(DEFAULTS.rules)
+  await ui.select({ key: 'mode', value: '' })
+  expect(b.router().settings.activeMode).toBeUndefined()
   await ui.unmount()
 })
 
-test('Auto in stored settings is a ladder with no rung set: the quick settings show four empty rows and a pick fills one', async ($, on) => {
-  const b = boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'auto', allow: [] } } }).rules })
+test('quick settings show Base even before any mode is saved', async ($, on) => {
+  boundaries(on)
   http(on)
   await start($)
   const ui = await band($)
   await ui.press({ key: 'settings' })
-  for (const rung of ['light', 'standard', 'hard', 'plan']) expect((await ui.find({ key: 'rung-' + rung }))?.props.value).toBe('')
-  await ui.select({ key: 'rung-light', value: 'general-purpose+haiku' })
-  const general = b.router().settings.rules.general
-  expect(general.mode === 'ladder' && general.rungs.light).toEqual({ target: { agent: 'general-purpose', model: 'haiku' }, effort: 'low' })
-  await ui.unmount()
-})
-
-test('quick settings offer only the ticked models', async ($, on) => {
-  boundaries(on, { allow: ['gpt-6-astra', 'general-purpose:opus'] })
-  http(on)
-  await start($)
-  const ui = await band($)
-  await ui.press({ key: 'settings' })
-  const rung = await ui.find({ key: 'rung-plan' })
-  // The rungs' own models stay in the list so a Select never shows a wrong neighbour.
-  expect((rung?.props.options as { label: string }[]).map(o => o.label)).toEqual(['gpt-6-astra · chatgpt', 'Claude Opus'])
+  const mode = await ui.find({ key: 'mode' })
+  expect((mode?.props.options as { label: string }[]).map(o => o.label)).toEqual(['Base'])
   await ui.unmount()
 })
 
@@ -1410,7 +1434,7 @@ test('setup step 2 opens the dashboard; its draft preserves edits and follows re
   await ui.press({ key: 'finish' })
   expect(b.router().settings).toMatchObject({ judge: 'model', keepWarm: true, keepWarmHours: 8, setupDone: true })
   const saved = b.router().settings.rules.general
-  expect(saved.mode === 'ladder' && saved.rungs.light).toEqual(light)
+  expect(saved.mode === 'ladder' && saved.rungs.light).toEqual([light])
   expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
   await ui.unmount()
 })

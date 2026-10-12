@@ -8,13 +8,12 @@
 import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
-import type { LadderChoice, Settings } from '../../types'
-import { RUNGS } from '../settings'
+import type { Settings } from '../../types'
 import { action, actions, dismiss, segmented, speak, toggle } from './parts'
 import type { Els } from './parts'
 import { chOf, displayWidth, textTone } from './theme'
 import type { Frame, SettingsActions, SettingsView } from './view'
-import { effortLabel, isRich, targetLabel, targetValue } from './view'
+import { isRich } from './view'
 
 /** Every name a row of quick settings or setup shows: the name column is the widest of them. */
 const ROW_NAMES = ['settings.effortAuto', 'settings.lean', 'settings.judge', 'settings.key', 'settings.keepWarm', 'settings.workers', 'settings.mode', 'band.effort', 'band.cache',
@@ -128,47 +127,11 @@ export function judgeRows(el: Els, frame: Frame, view: SettingsView, a: Settings
   return out
 }
 
-/** How a rung choice reads in a Select: `model · provider`, Claude's own as `Claude Sonnet`. */
-function choiceLabel(choice: LadderChoice): string {
-  return choice.target.model ? targetLabel(choice.target) : choice.model + ' · ' + choice.provider
-}
-
 /**
- * The four workers as model Selects (each keeps its effort), offering the ticked models. Native
- * Selects only: the band redraws on every poll, and a picture would blink.
- */
-export function ladderRows(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode[] {
-  const { Box, Text } = el
-  const general = view.settings.rules.general
-  const options = view.ladder
-  const out: RenderNode[] = []
-  if (!options) {
-    out.push(row(el, frame, 'ladder-wait', t(frame.lang, 'settings.workers'), <Text dimColor wrap="wrap">{t(frame.lang, 'settings.ladderWaiting')}</Text>))
-  } else {
-    for (const rung of RUNGS) {
-      const step = general.rungs[rung]
-      const current = step ? targetValue(step.target) : ''
-      const items = options.choices.map(choice => ({ value: targetValue(choice.target), label: choiceLabel(choice) }))
-      // A rung on a model that is not offered now keeps showing it rather than a wrong neighbour.
-      if (step && !items.some(item => item.value === current)) items.push({ value: current, label: targetLabel(step.target, frame.lang) })
-      if (!step) items.unshift({ value: '', label: '—' })
-      const effort = step ? effortLabel(step.effort, frame.lang) : ''
-      const control = 'Select' in el && a.setRung
-        ? <el.Select key={'rung-' + rung} options={items} value={current} onSelect={(value: string) => { if (value) a.setRung!(rung, value) }} />
-        : <Text>{items.find(item => item.value === current)?.label ?? '—'}</Text>
-      out.push(row(el, frame, 'rung-' + rung, t(frame.lang, 'workers.rung.' + rung), control, effort))
-    }
-  }
-  return out
-}
-
-/**
- * The mode that is on, as one Select (none, then the user's modes); modes are made on the
- * dashboard, so with none made there is no row.
+ * The active saved worker set: Base followed by user-named modes. Rungs are edited on the dashboard.
  */
 export function modeRows(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode[] {
   const { Text } = el
-  if (!d.modes.length) return []
   const items = [{ value: '', label: t(frame.lang, 'settings.modeNone') }, ...d.modes.map(m => ({ value: m.id, label: m.name }))]
   const current = d.activeMode ?? ''
   const control = 'Select' in el && a.setMode
@@ -198,7 +161,6 @@ export function renderSettings(el: Els, frame: Frame, view: SettingsView, a: Set
         {effortRows(el, frame, view.settings, a)}
         {judgeRows(el, frame, view, a)}
         {modeRows(el, frame, view.settings, a)}
-        {ladderRows(el, frame, view, a)}
         {keepWarmRow(el, frame, view.settings, a)}
       </Box>,
       actions(el, frame, [action(el, frame, 'all-settings', t(frame.lang, 'settings.openAll'), a.openAllSettings, { hotkey: 's', primary: true }), rich ? '' : close]),

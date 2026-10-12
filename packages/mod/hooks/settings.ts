@@ -19,8 +19,8 @@ export const DEFAULTS: Settings = {
     // The spec's "Claude + GPT" example; a rung whose worker is missing moves up and says so.
     // Only the general rule: the four workers replaced the per-field rules (2026-10-12).
     general: { mode: 'ladder', rungs: {
-      light: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }, standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
-      hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' }, plan: claude('opus', 'high'),
+      light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }], standard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'medium' }],
+      hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], plan: [claude('opus', 'high')],
     } },
   },
   allow: [], modes: [],
@@ -42,6 +42,7 @@ export const CLAUDE_WORKERS: readonly { name: string; model: string; provider: s
   { name: 'general-purpose:haiku', model: 'claude-haiku-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'haiku' } },
   { name: 'general-purpose:sonnet', model: 'claude-sonnet-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'sonnet' } },
   { name: 'general-purpose:opus', model: 'claude-opus-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'opus' } },
+  { name: 'general-purpose:fable', model: 'claude-fable-5-1', provider: 'anthropic', target: { agent: 'general-purpose', model: 'fable' } },
 ]
 
 /** The allow-list key of a target: the agent's name, or `general-purpose:<model>` for Claude's own. */
@@ -93,7 +94,7 @@ function step(raw: unknown, rung: Rung): Step | undefined {
 }
 /** The effort a migrated rung starts at: the default ladder's when it runs the same model there. */
 function migratedEffort(rung: Rung, chosen: TierTarget): Effort {
-  const own = DEFAULTS.rules.general.rungs[rung]
+  const own = DEFAULTS.rules.general.rungs[rung]?.[0]
   return own && sameTarget(own.target, chosen) ? own.effort : RUNG_EFFORT[rung]
 }
 /**
@@ -112,12 +113,17 @@ export function ladderFromPin(targets: Partial<Record<Level, TierTarget>>, cal: 
     rungs[rung] = { target: { ...chosen }, effort: calibrated(migratedEffort(rung, chosen), cal) }
   })
   rungs.plan = { target: { ...rungs.hard!.target }, effort: effortUp(rungs.hard!.effort) }
-  return { mode: 'ladder', rungs }
+  return { mode: 'ladder', rungs: ladderRungs(rungs) }
 }
-function ladderRungs(raw: unknown): Partial<Record<Rung, Step>> {
+/** Single steps from older saves become one-item lists; malformed items are dropped in place. */
+function ladderRungs(raw: unknown): Rule['rungs'] {
   const source = object(raw)
-  const rungs: Partial<Record<Rung, Step>> = {}
-  for (const rung of RUNGS) { const parsed = step(source[rung], rung); if (parsed) rungs[rung] = parsed }
+  const rungs: Rule['rungs'] = {}
+  for (const rung of RUNGS) {
+    const items = Array.isArray(source[rung]) ? source[rung] : [source[rung]]
+    const parsed = items.flatMap(item => { const value = step(item, rung); return value ? [value] : [] })
+    if (parsed.length) rungs[rung] = parsed
+  }
   return rungs
 }
 /**
@@ -189,7 +195,7 @@ export function hadRetiredRouting(raw: unknown): boolean {
     if (stored.mode === undefined || stored.mode === 'inherit') return false
     if (domain !== 'design' || stored.mode !== 'ladder') return true
     const rungs = ladderRungs(stored.rungs)
-    return JSON.stringify(RUNGS.map(rung => { const s = rungs[rung]; return s ? [s.target.agent, s.target.model, s.effort] : null })) !== RETIRED_DESIGN
+    return JSON.stringify(RUNGS.map(rung => { const s = rungs[rung]?.[0]; return s ? [s.target.agent, s.target.model, s.effort] : null })) !== RETIRED_DESIGN
   })
 }
 
@@ -199,11 +205,10 @@ export const MODE_NAME_MAX = 40
 export const MODES_MAX = 20
 
 /**
- * The user's modes, validated: an entry needs an id (unique) and a name; targets are kept as names
- * (a mode may have none yet); an unknown action or delegation takes the default; `until` is kept
- * only as a time after the epoch or 'reset'.
+ * Saved worker sets. Old prefer/avoid modes copy the base ladder on load, dropping their policy.
+ * Every entry owns its lists: later base edits cannot mutate a saved mode.
  */
-export function normalizeModes(raw: unknown): Mode[] {
+export function normalizeModes(raw: unknown, base: Rule['rungs'] = DEFAULTS.rules.general.rungs): Mode[] {
   if (!Array.isArray(raw)) return []
   const out: Mode[] = []
   for (const entry of raw) {
@@ -211,8 +216,9 @@ export function normalizeModes(raw: unknown): Mode[] {
     const id = typeof v.id === 'string' ? v.id.trim().slice(0, 64) : ''
     const name = typeof v.name === 'string' ? v.name.trim().slice(0, MODE_NAME_MAX) : ''
     if (!id || !name || out.some(m => m.id === id)) continue
-    const until = v.until === 'reset' ? 'reset' as const : typeof v.until === 'number' && Number.isFinite(v.until) && v.until > 0 ? v.until : undefined
-    out.push({ id, name, targets: names(v.targets), action: v.action === 'avoid' ? 'avoid' : 'prefer', delegation: v.delegation === 'eager' ? 'eager' : 'normal', ...(until !== undefined ? { until } : {}) })
+    const until = v.until === 'reset' ? 'reset' as const : typeof v.until === 'number' && Number.isFinite(v.until) && v.until > 0 ? v.until : 'none' as const
+    const rungs = ladderRungs(v.rungs === undefined ? base : v.rungs)
+    out.push({ id, name, rungs, delegation: v.delegation === 'eager' ? 'eager' : 'normal', until })
     if (out.length === MODES_MAX) break
   }
   return out
@@ -255,7 +261,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   if (typeof value.swampAt === 'number' && Number.isFinite(value.swampAt) && value.swampAt >= 0 && value.swampAt <= 100) result.swampAt = value.swampAt
   if (Array.isArray(value.hide)) result.hide = [...new Set(value.hide.filter((part): part is string => typeof part === 'string' && ['timer', 'reason', 'route', 'limits'].includes(part)))]
   result.fallback = target(value.fallback, DEFAULTS.fallback)!
-  result.modes = normalizeModes(value.modes)
+  result.modes = normalizeModes(value.modes, rules.general.rungs)
   // An active mode must be one of the modes; its start time stays only with it.
   if (typeof value.activeMode === 'string' && result.modes.some(m => m.id === value.activeMode)) {
     result.activeMode = value.activeMode

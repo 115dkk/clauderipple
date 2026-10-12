@@ -48,47 +48,59 @@ levels map to low/medium/high; `max` only by explicit choice).
 
 ## Filling the tiers
 
-The user only ticks models. The mod fills the four tiers from them by strength (AA index as an
-ordering hint, never a gate) and cost class: cheapest capable model on low, strongest on max.
-Each tier shows its pick and can be overridden with one select (model · effort). No presets, no
-fields, no backups — a missing model falls to the next tier up, then the session model.
+The shared ticked-model list supplies every worker set. Each rung is an ordered `Step[]`, each
+step `{target, effort}`. An empty rung is filled with one model by `fillLadder`'s existing
+`claudeGpt` rule. Existing lists, including unticked or unavailable entries, are kept unchanged.
+At dispatch, try each entry in order; skip missing, unticked, switched-off, quota-exhausted or
+runtime-exhausted providers. Only when the whole list fails, try the list one rung up, then the
+session model (never down or two rungs up). The pick log records its 1-based position and every
+skipped model/reason; the fallback toast names the skipped model and reason.
 
 ## Operating modes
 
-For stretches like "burn the GPT quota before it resets" or "keep Claude for orchestrating only".
-**No mode is built in**: the user names and makes their own; the default is none (tiers as set).
-A mode is:
+A mode is a saved worker set, not a prefer/avoid policy. **No mode is built in**. The user supplies
+its name; `기본` (Base) means the base worker set, not a saved mode.
 
-- **Name** — anything the user types.
-- **Target** — one or more providers or models.
-- **Action** — *prefer*: fill every tier the target can serve with it (strongest of the target on
-  max, cheapest on low), other models only where it has nothing; *avoid*: drop the target from the
-  worker tiers (the main chat still runs on whatever the session uses).
-- **Delegation** — normal or eager. Eager adds one hidden note beside the prompt
-  (`prompt.submit` `context`, packages/mod/.claude-plugin/types/claude-code/index.d.ts:7752):
-  "Delegate everything except judgment and final review to ripple:low/medium/high/max." Sent on
-  the first prompt after the mode turns on and after each compaction, not every turn.
-- **Until** (optional) — a time, or the target provider's next quota reset where the router knows
-  it (ChatGPT windows); then the mode turns itself off and says so.
+- **Name** — user-typed, up to 40 characters.
+- **Rungs** — its own light/standard/hard/plan ordered lists (로우/미디움/하이/맥스), the same
+  `Step[]` shape and ticked-model/effort options as Base. New modes copy Base, without aliasing it.
+- **Delegation** — `normal` or `eager` (보통 / 적극 — 클로드는 지휘만). Eager adds the existing
+  hidden `prompt.submit` context note: "Delegate everything except judgment and final review to
+  ripple:low/medium/high/max." First prompt after activation and after main-chat compaction only.
+- **End** — `until: 'none' | number | 'reset'`: until turned off, epoch-ms time, or the first
+  known quota reset **after activation** among providers used anywhere in its rung lists.
+  ChatGPT uses signed-in, unpaused accounts' primary/secondary windows from `/api/chatgpt-accounts`.
+  Claude uses the mod's received `SessionRateLimit.resetsAt`: the five-hour or seven-day window
+  with the highest `percentUsed`, exactly as the band chooses its binding limit (input order
+  breaks ties). Do not extrapolate Claude's lazily started five-hour windows. Previously observed
+  deadlines are checked before replacing a rolled-forward snapshot. Unknown resets never end a mode.
+  The dashboard offers reset whenever at least one used provider has a known future reset; otherwise
+  the choice remains visible but disabled, with the reason directly beside it, not a floating note.
 
-One mode is active at a time. Unavailable target models fall back as tiers do (up, then session
-model). The band shows the active mode's name; every `worker pick:` line carries it.
+Only one mode is active. Its lists replace Base's for routing; the same ordered fallback applies.
+Explicit markers remain explicit. The band and every worker-pick log show the active mode name.
+Time/reset expiration clears activation and displays one toast; the saved worker set remains.
 
 ## Screens
 
 **Dashboard `#mod` → Workers card:**
 1. 적용 대상 (off / ripple workers / all subagents) — as now.
-2. 쓸 모델: checkboxes, grouped by provider, billing tag beside each.
-3. Four rows 로우·미디움·하이·맥스: one-line meaning, the current pick, "바꾸기" select.
+2. Tabs: `[기본] [user mode names…] [+ 새 모드]`. The active set is marked independently of
+   the tab being edited. The ticked-model list lives only on Base and is shared by every tab.
+3. Every tab has four worker rows, each an ordered list of model·effort selects, ↑/↓ reorder,
+   remove (minimum one), and `+ 모델 추가`.
+4. A saved-mode tab also has editable name, delegation, end, delete and an explicit
+   `이 모드 켜기/끄기` control. Creating a mode asks for a name and copies Base's lists.
 
-4. 모드: the user's modes (add / edit / delete: name, target, action, delegation, until) and which
-   one is on.
-
-**In-session quick settings:** the active mode select, and the four rows.
+**In-session quick settings:** active mode select (Base + saved modes) only for worker settings;
+individual workers are edited on the dashboard. Existing effort/judge/cache controls stay.
 
 ## Migration
 
 - Ladder rungs Light/Standard/Hard/Plan → low/medium/high/max, models and efforts kept.
+- A stored single Step loads as a one-item list, in Base and every mode.
+- Old target/action modes copy the current normalized Base ladder on load, dropping target/action;
+  name, delegation and end survive. Existing saved lists remain independent of later Base edits.
 - Field overrides and "더 세밀하게" rules are dropped; the card shows a one-time line saying so.
 - Auto (experimental, AA floors) is removed; `ripple:auto` uses the judge + tiers above.
 

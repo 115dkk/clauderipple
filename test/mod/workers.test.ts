@@ -65,7 +65,7 @@ test('quota/off never chooses the blocked provider: the ladder moves up, then to
   assert.equal(up.effort, 'medium')
   assert.match(up.fallbackReason ?? '', /deepseek is switched off/)
   // A model of a switched-off provider named on Claude's own agent does not run either.
-  const pinnedModel: Settings = { ...DEFAULTS, providers: { chatgpt: false }, rules: { general: { mode: 'ladder', rungs: { standard: { target: { agent: 'general-purpose', model: 'gpt-6.1-sol' }, effort: 'medium' } } } } }
+  const pinnedModel = normalizeSettings({ ...DEFAULTS, providers: { chatgpt: false }, rules: { general: { mode: 'ladder', rungs: { standard: { target: { agent: 'general-purpose', model: 'gpt-6.1-sol' }, effort: 'medium' } } } } })
   assert.deepEqual(pick(pinnedModel).target, { agent: 'general-purpose' })
 })
 
@@ -103,7 +103,7 @@ test('the ticked models bound the ladder: an unticked rung model falls to the ne
     { name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', provider: 'chatgpt', billing: 'subscription', efforts: ['low', 'high'] },
     { name: 'gpt-6-astra', model: 'gpt-6-astra', provider: 'chatgpt', billing: 'subscription', efforts: ['low', 'high'] },
   ], claudeEfforts: ['low', 'high'] }
-  assert.deepEqual(ladderOptionsFrom(raw, 0).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-1-sol', 'gpt-6-astra', 'general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus'])
+  assert.deepEqual(ladderOptionsFrom(raw, 0).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-1-sol', 'gpt-6-astra', 'general-purpose:haiku', 'general-purpose:sonnet', 'general-purpose:opus', 'general-purpose:fable'])
   assert.deepEqual(ladderOptionsFrom(raw, 0, ['gpt-6-astra', 'general-purpose:opus']).choices.map(c => c.target.agent + (c.target.model ? ':' + c.target.model : '')), ['gpt-6-astra', 'general-purpose:opus'])
   assert.equal(Object.hasOwn(ladderOptionsFrom(raw, 0), 'presets'), false)
 })

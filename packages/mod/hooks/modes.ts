@@ -1,8 +1,7 @@
 // Operating modes in the session (docs/specs/2026-10-12-worker-tiers.md "Operating modes"): which
 // mode is on, when it ends by itself, and the eager-delegation note. Pure; register.tsx wires them.
-// The rungs a mode runs on are ladder.ts `modeRungs`, which the router can use as well.
 
-import type { Mode, Settings, TierTarget } from '../types'
+import type { Hot, Mode, Rungs, Settings, TierTarget } from '../types'
 import { candidateKey } from './settings'
 
 /** The mode that is on, if the settings name one that exists. */
@@ -31,12 +30,24 @@ export function eagerNote(s: Pick<Settings, 'modes' | 'activeMode' | 'activeSinc
   return noted === key ? { noted } : { note: modeNote(mode.name), noted: key }
 }
 
-/**
- * The providers a mode's targets name: a model key stands for its provider (from `models`), any
- * other target is a provider's name.
- */
-export function modeProviders(targets: readonly string[], models: readonly { target: TierTarget; provider: string }[]): string[] {
-  return [...new Set(targets.map(name => models.find(m => candidateKey(m.target) === name)?.provider ?? name))]
+/** Modes replace the base worker set, without changing fallback, allow-list or provider policy. */
+export function routingSettings(s: Settings): Settings {
+  const mode = activeModeOf(s)
+  return mode ? { ...s, rules: { general: { mode: 'ladder', rungs: mode.rungs } } } : s
+}
+
+/** Every provider used by any entry of the saved worker set; unknown workers have no known reset. */
+export function modeProviders(rungs: Rungs, models: readonly { target: TierTarget; provider: string }[]): string[] {
+  return [...new Set(Object.values(rungs).flatMap(steps => steps.flatMap(step => {
+    const provider = models.find(m => candidateKey(m.target) === candidateKey(step.target))?.provider
+    return provider ? [provider] : []
+  })))]
+}
+
+/** Same binding limit as the band: highest percent used, input order breaking ties. */
+export function claudeWindow(limit: Hot | null): QuotaWindow[] {
+  const at = limit?.resetsAt ? Date.parse(limit.resetsAt) : NaN
+  return Number.isFinite(at) ? [{ at }] : []
 }
 
 /** One account's quota window: when it resets next, and how long it is when known. */
@@ -47,7 +58,7 @@ function record(value: unknown): Record<string, unknown> {
 }
 
 /**
- * Each signed-in, unpaused ChatGPT account's longest window (weekly when there is one), from GET
+ * Each signed-in, unpaused ChatGPT account's known windows, from GET
  * /api/chatgpt-accounts: `quota.rate_limits.{primary,secondary}` with `reset_at` (epoch seconds,
  * or ms) or `reset_after_seconds` from the snapshot's `at`, and `window_minutes`
  * (packages/router/src/providers/chatgpt/index.ts rateLimitsFromHeaders/rateLimitsFromUsage).
@@ -61,24 +72,25 @@ export function quotaWindows(body: unknown): QuotaWindow[] {
     if (account.state === 'paused' || account.state === 'needs-login') return []
     const quota = record(account.quota)
     const limits = record(quota.rate_limits)
-    const secondary = record(limits.secondary)
-    const window = Object.keys(secondary).length ? secondary : record(limits.primary)
-    const resetAt = typeof window.reset_at === 'number' ? (window.reset_at > 1e12 ? window.reset_at : window.reset_at * 1000)
-      : typeof window.reset_after_seconds === 'number' && typeof quota.at === 'number' ? quota.at + window.reset_after_seconds * 1000 : undefined
-    if (resetAt === undefined || !Number.isFinite(resetAt)) return []
-    const minutes = window.window_minutes
-    return [{ at: resetAt, ...(typeof minutes === 'number' && minutes > 0 ? { windowMs: minutes * 60_000 } : {}) }]
+    return ['primary', 'secondary'].flatMap(key => {
+      const window = record(limits[key])
+      const resetAt = typeof window.reset_at === 'number' ? (window.reset_at > 1e12 ? window.reset_at : window.reset_at * 1000)
+        : typeof window.reset_after_seconds === 'number' && typeof quota.at === 'number' ? quota.at + window.reset_after_seconds * 1000 : undefined
+      if (resetAt === undefined || !Number.isFinite(resetAt)) return []
+      const minutes = window.window_minutes
+      return [{ at: resetAt, ...(typeof minutes === 'number' && minutes > 0 ? { windowMs: minutes * 60_000 } : {}) }]
+    })
   })
 }
 
 /**
- * Whether a mode's time is up. A time: once it has come. The quota reset: once every account's
- * window has reset since the mode turned on (`since`), read from its next reset and, when the
- * window's length is known, the reset that started it. Unknown resets never end a mode.
+ * End at the first known reset after activation, not after every provider/account resets.
+ * ChatGPT's fixed window length also identifies a reset when a fresh snapshot has rolled forward.
+ * Claude windows are not extrapolated: the five-hour window can start lazily after idle.
  */
 export function modeOver(mode: Pick<Mode, 'until'>, since: number | undefined, now: number, windows: readonly QuotaWindow[] = []): boolean {
   if (typeof mode.until === 'number') return now >= mode.until
   if (mode.until !== 'reset' || since === undefined || !windows.length) return false
   const passed = (at: number) => at > since && at <= now
-  return windows.every(w => passed(w.at) || (w.windowMs !== undefined && passed(w.at - w.windowMs)))
+  return windows.some(w => passed(w.at) || (w.windowMs !== undefined && passed(w.at - w.windowMs)))
 }

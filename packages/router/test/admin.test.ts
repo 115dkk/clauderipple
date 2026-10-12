@@ -30,6 +30,7 @@ async function withAdmin(
   extraDeps: {
     agentDir?: string;
     credentials?: NonNullable<AdminDeps["credentials"]>;
+    providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
     shutdown?: () => void;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
     startCliDetached?: (args: string[], log: string) => void;
@@ -83,6 +84,26 @@ async function withAdmin(
 }
 
 const base = () => `http://127.0.0.1`;
+
+test("mod options and status expose runtime provider exhaustion and clear it on recovery", async () => {
+  const { ProviderHealth, providerExhaustion } = await import('../src/health.ts');
+  const health = new ProviderHealth();
+  health.observe('deepseek', 402, providerExhaustion(402, 'Insufficient Balance'));
+  const cfg = makeCfg({ providers: { deepseek: { type: 'anthropic-compatible', url: 'http://127.0.0.1:1' } } });
+  await withAdmin(cfg, async ({ port }) => {
+    const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.equal(options.providers[0]?.usable, false);
+    assert.equal(options.providers[0]?.reason, 'insufficient_balance');
+    assert.ok(options.providers[0]?.exhaustedAt);
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { providers: Record<string, { usable: boolean; exhaustion?: { reason: string } }> };
+    assert.equal(status.providers.deepseek?.usable, false);
+    assert.equal(status.providers.deepseek?.exhaustion?.reason, 'insufficient_balance');
+    health.observe('deepseek', 200);
+    const recovered = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.equal(recovered.providers[0]?.usable, true);
+    assert.equal(recovered.providers[0]?.reason, undefined);
+  }, { providerHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+});
 
 const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}/api/mod-settings`, {
   method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -144,21 +165,21 @@ test("admin mod-settings reads Auto and field rules as the four workers, fills e
     const general = got.settings.rules.general;
     assert.equal(general.mode, "ladder");
     // Only Sonnet and Opus are ticked: Haiku cannot stand on Low, so Low takes the session model.
-    assert.deepEqual(general.rungs.light, { target: { agent: "general-purpose" }, effort: "max" });
-    assert.deepEqual([general.rungs.standard, general.rungs.hard, general.rungs.plan].map(step => step?.target.model), ["sonnet", "opus", "opus"]);
+    assert.deepEqual(general.rungs.light, [{ target: { agent: "general-purpose" }, effort: "max" }]);
+    assert.deepEqual([general.rungs.standard, general.rungs.hard, general.rungs.plan].map(steps => steps?.[0]?.target.model), ["sonnet", "opus", "opus"]);
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), old, "reading rewrites nothing");
     // The first save drops what was retired, so the note is said once.
     const saved = await (await putModSettings(port, { settings: got.settings, revision: 7 })).json() as ModSettingsSnapshot;
     assert.equal(saved.revision, 8);
     assert.equal(Object.hasOwn(saved, "legacy"), false);
     assert.equal(Object.hasOwn(await (await fetch(`${base()}:${port}/api/mod-settings`)).json() as object, "legacy"), false);
-    // A rung on a model that is no longer ticked is filled again on save; a ticked one is kept as it is.
+    // Existing ordered lists survive allow-list changes; dispatch skips unticked entries.
     const kept = { target: { agent: "general-purpose", model: "opus" }, effort: "xhigh" };
     const unticked = await (await putModSettings(port, { settings: { allow: ["general-purpose:opus"], rules: { general: { mode: "ladder", rungs: { light: kept, standard: { target: { agent: "gpt-6-1-sol" }, effort: "low" } } } } } })).json() as ModSettingsSnapshot;
     const rungs = unticked.settings.rules.general.mode === "ladder" ? unticked.settings.rules.general.rungs : {};
-    assert.deepEqual(rungs.light, kept);
-    assert.equal(rungs.standard?.target.model, undefined);
-    assert.deepEqual(rungs.standard?.target, { agent: "general-purpose" });
+    assert.deepEqual(rungs.light, [kept]);
+    assert.equal(rungs.standard?.[0]?.target.model, undefined);
+    assert.deepEqual(rungs.standard?.[0]?.target, { agent: "gpt-6-1-sol" });
   });
 });
 
@@ -261,11 +282,11 @@ test("admin mod-options offers owned workers, every provider model, judge candid
         const general = ((await saved.json()) as ModSettingsSnapshot).settings.rules.general;
         return general.mode === "ladder" ? general.rungs : {};
       };
-      assert.deepEqual((await fill()).standard, { target: { agent: "general-purpose", model: "sonnet" }, effort: "medium" });
+      assert.deepEqual((await fill()).standard, [{ target: { agent: "general-purpose", model: "sonnet" }, effort: "medium" }]);
       credit = true;
       const credited = await get();
       assert.equal(credited.providers.find(p => p.name === "codex")?.usable, true, "purchased credits keep a full account usable");
-      assert.deepEqual((await fill()).standard, { target: { agent: "gpt-6-1-sol" }, effort: "medium" });
+      assert.deepEqual((await fill()).standard, [{ target: { agent: "gpt-6-1-sol" }, effort: "medium" }]);
       setCfg(makeCfg({ providers: { zen: { type: "openai-compatible", url: "https://opencode.ai/zen/v1", models: [{ id: "jev-2" }] } }, routes: {}, aliases: {}, direct: [] }));
       assert.deepEqual((await get()).zen, { configured: true, model: "jev-2" }, "hand-entered Zen URLs need no preset");
       setCfg(makeCfg({ providers: {}, routes: {}, aliases: {}, direct: [] }));
@@ -602,7 +623,7 @@ test("GET /api/status reports native Anthropic TCP reachability and token-file s
     const res = await fetch(`${base()}:${port}/api/status`);
     assert.equal(res.status, 200);
     const body = await res.json() as { providers: Record<string, { url: string; type: string; reachable: boolean; authSource: string | null }> };
-    assert.deepEqual(Object.keys(body.providers.native ?? {}).sort(), ["accountCount", "authSource", "reachable", "signedIn", "type", "url"]);
+    assert.deepEqual(Object.keys(body.providers.native ?? {}).sort(), ["accountCount", "authSource", "reachable", "signedIn", "type", "url", "usable"]);
     assert.equal(body.providers.native?.url, "https://api.anthropic.com");
     assert.equal(body.providers.native?.type, "anthropic");
     assert.equal(body.providers.native?.authSource, "token-file");

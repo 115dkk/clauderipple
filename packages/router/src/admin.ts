@@ -35,6 +35,7 @@ import { normalizeSettings } from "../../mod/hooks/settings.ts";
 import type { Billing, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
+import type { ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
@@ -87,6 +88,7 @@ export type AdminDeps = {
   log: Logger;
   stats: () => Stats;
   health: () => number;
+  providerHealth?: () => Record<string, ProviderExhaustion>;
   version: string;
   requests: RequestLog;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
@@ -450,7 +452,7 @@ export type ModOptions = {
   /** Each worker with its model's effort ladder (mod efforts only) and how it is paid for. */
   agents: (ReturnType<typeof generatedAgents>[number] & { efforts: Effort[]; billing: Billing })[];
   models: { model: string; provider: string; name: string; judgeOnly: boolean }[];
-  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing }[];
+  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing; reason?: string; exhaustedAt?: number; exhaustedUntil?: number }[];
   zen: { configured: boolean; model: string | null };
   scores: ReturnType<typeof buildModelScores>;
   /** Claude's own models' effort ladder, for the rungs that run Claude Code's own agent. */
@@ -465,6 +467,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const chatgpt = await chatgptStatus(deps);
   const google = deps.google?.().accounts() ?? {};
   const credentials = deps.credentials?.() ?? {};
+  const health = deps.providerHealth?.() ?? {};
   const providers = Object.entries(cfg.providers).map(([name, p]) => {
     let usable = true;
     if (p.type === "chatgpt") {
@@ -478,7 +481,10 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY) : claudeAuthStore(deps).describeSource() !== null;
     }
     if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready");
-    return { name, type: p.type, usable, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }) };
+    const exhausted = health[name];
+    return { name, type: p.type, usable: usable && !exhausted, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
+      ...(exhausted ? { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until } : {}),
+    };
   });
   const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
   const zen = Object.values(cfg.providers).find(p => {
@@ -516,16 +522,17 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
 }
 
 /**
- * Settings with the general ladder's empty rungs, and rungs on a model that is not ticked, filled
- * from the ticked, connected models (the `claudeGpt` rule in mod/hooks/ladder.ts). Nothing is
- * fetched when every rung has a ticked model; a failure leaves the rungs as they are.
+ * Fill empty ordered lists in Base and saved modes from the same ticked, connected choices.
+ * Existing lists survive availability and allow-list changes; dispatch handles skips.
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
   const general = settings.rules.general;
-  if (!ladderNeedsFill(general.rungs, settings.allow)) return settings;
+  if (![general, ...settings.modes].some(set => ladderNeedsFill(set.rungs))) return settings;
   try {
-    const { rungs, filled } = fillLadder(general.rungs, settings.allow, ladderChoices(await modOptions(deps, scores)));
-    return filled.length ? { ...settings, rules: { general: { mode: "ladder", rungs } } } : settings;
+    const choices = ladderChoices(await modOptions(deps, scores));
+    const { rungs } = fillLadder(general.rungs, settings.allow, choices);
+    const modes = settings.modes.map(mode => ({ ...mode, rungs: fillLadder(mode.rungs, settings.allow, choices).rungs }));
+    return { ...settings, rules: { general: { mode: "ladder", rungs } }, modes };
   } catch (error) {
     deps.log.warn(`admin: filling the worker ladder failed: ${(error as Error).message}`);
     return settings;
@@ -534,6 +541,7 @@ async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, sett
 
 async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): Promise<Record<string, unknown>> {
   const cfg = deps.config();
+  const health = deps.providerHealth?.() ?? {};
   const providers: Record<string, { url: string; type: string; reachable: boolean; authSource?: "observed" | "env" | "keychain" | "credentials-file" | "token-file" | null; signedIn?: "oauth" | "setup-token" | null; accountCount?: number }> = {};
   // Keyed in the order the config lists them. Assigning inside the Promise.all callbacks ordered
   // them by whichever TCP check answered first, so the Health list reshuffled on every poll.
@@ -551,6 +559,8 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         url,
         type: p.type,
         reachable,
+        usable: reachable && !health[name],
+        ...(health[name] ? { exhaustion: health[name] } : {}),
         // Whether the router could run a `WebSearch` side request through this provider, so the
         // Clients screen can say so beside a model name. Nothing on that screen said which ones
         // those are, and a `smallFast` slot pointed at one turns every search into a visible failure

@@ -129,16 +129,30 @@ export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly s
     const billing = BILLINGS.includes(a.billing as Billing) ? a.billing as Billing : 'payg'
     return [{ target: { agent: a.name }, model: a.model, provider: a.provider, billing, efforts: efforts(a.efforts), ...(costs.length ? { cost: Math.min(...costs) } : {}) }]
   })
-  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow) }
+  const providers = Object.fromEntries(list(root.providers).flatMap(value => {
+    const p = record(value)
+    if (typeof p.name !== 'string' || typeof p.usable !== 'boolean') return []
+    return [[p.name, { usable: p.usable, ...(typeof p.reason === 'string' ? { reason: p.reason } : {}), ...(typeof p.exhaustedUntil === 'number' ? { exhaustedUntil: p.exhaustedUntil } : {}) }]]
+  }))
+  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow), providers }
 }
-export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean): boolean {
-  return settings.providers[candidate.provider] !== false && (candidate.provider !== 'chatgpt' || chatgpt)
+export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean, providers: NonNullable<LadderOptions['providers']> = {}): boolean {
+  const live = providers[candidate.provider]
+  return settings.providers[candidate.provider] !== false && (live ? live.usable : candidate.provider !== 'chatgpt' || chatgpt)
+}
+function unavailableReason(provider: string, providers: NonNullable<LadderOptions['providers']>, lang: Lang): string {
+  const reason = providers[provider]?.reason
+  if (!reason && provider === 'chatgpt') return t(lang, 'toasts.providerQuota')
+  const labels: Record<string, string> = lang === 'ko'
+    ? { insufficient_balance: '잔액 부족', billing_exhausted: '결제 한도 소진', quota_exhausted: '사용량 한도 소진' }
+    : { insufficient_balance: 'insufficient balance', billing_exhausted: 'billing exhausted', quota_exhausted: 'quota exhausted' }
+  return `${provider}: ${reason && labels[reason] || (lang === 'ko' ? '현재 사용 불가' : 'currently unavailable')}`
 }
 function sameTarget(a: TierTarget, b: TierTarget): boolean { return a.agent === b.agent && a.model === b.model }
 function candidateOf(target: TierTarget, candidates: readonly WorkerCandidate[]): WorkerCandidate | undefined {
   return candidates.find(c => sameTarget(c.target, target)) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: candidates.find(c => c.model === baseModel(target.model ?? 'sonnet'))?.provider ?? 'anthropic' } : undefined)
 }
-export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; fallbackReason?: string }
+export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; position?: number; skipped?: { rung: Rung; position: number; model: string; reason: string }[]; fallbackReason?: string }
 
 /** Claude Code's own agent with no model: the subagent runs on the session's model. */
 export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
@@ -147,22 +161,31 @@ export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
  * The ladder: the verdict's rung, else one rung up, else the session model, never down. Whatever
  * ran instead says why (the fallback toast).
  */
-export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], forcedRung?: Rung): Resolution {
+export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], forcedRung?: Rung, providers: NonNullable<LadderOptions['providers']> = {}): Resolution {
   const wanted = forcedRung ?? rungOf(verdict)
-  let reason: string | undefined
+  const skipped: NonNullable<Resolution['skipped']> = []
+  const reasons: string[] = []
   for (const rung of [wanted, rungAbove(wanted)]) {
     if (!rung) continue
-    const step = rule.rungs[rung]
-    if (!step) { reason ??= t(lang, 'workers.rungEmpty', { rung: t(lang, 'workers.rung.' + rung) }); continue }
-    const target = step.target
-    const candidate = candidateOf(target, candidates)
-    if (candidate && candidateUsable(candidate, settings, chatgpt) && allowed(candidate, allow)) return { target: { ...target }, effort: step.effort, rung, ...(reason ? { fallbackReason: reason } : {}) }
-    reason ??= !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !allowed(candidate, allow) ? t(lang, 'workers.notCandidate', { name: candidate.model }) : t(lang, 'toasts.providerQuota')
+    const steps = rule.rungs[rung] ?? []
+    if (!steps.length) reasons.push(t(lang, 'workers.rungEmpty', { rung: t(lang, 'workers.rung.' + rung) }))
+    for (const [index, step] of steps.entries()) {
+      const target = step.target
+      const candidate = candidateOf(target, candidates)
+      const ticked = target.agent === 'general-purpose' && !target.model || candidate && allowed(candidate, allow)
+      if (candidate && candidateUsable(candidate, settings, chatgpt, providers) && ticked) {
+        return { target: { ...target }, effort: step.effort, rung, position: index + 1, skipped, ...(reasons.length ? { fallbackReason: reasons.join('; ') } : {}) }
+      }
+      const reason = !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !ticked ? t(lang, 'workers.notCandidate', { name: candidate.model }) : providers[candidate.provider]?.usable === false ? unavailableReason(candidate.provider, providers, lang) : t(lang, 'toasts.providerQuota')
+      const model = candidate?.model ?? target.model ?? target.agent
+      skipped.push({ rung, position: index + 1, model, reason })
+      reasons.push(`${model}: ${reason}`)
+    }
   }
-  const effort = rule.rungs[wanted]?.effort ?? verdict.effort
+  const effort = rule.rungs[wanted]?.[0]?.effort ?? verdict.effort
   // The session's model is Claude's: with Anthropic switched off nothing is left to run it.
-  if (settings.providers.anthropic === false) return { effort, rung: wanted, fallbackReason: t(lang, 'workers.none') }
-  return { target: { ...SESSION_MODEL }, effort, rung: wanted, fallbackReason: reason ?? t(lang, 'workers.none') }
+  if (settings.providers.anthropic === false) return { effort, rung: wanted, skipped, fallbackReason: t(lang, 'workers.none') }
+  return { target: { ...SESSION_MODEL }, effort, rung: wanted, skipped, fallbackReason: reasons.join('; ') || t(lang, 'workers.none') }
 }
 
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {

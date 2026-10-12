@@ -45,6 +45,61 @@ function loadGroupedModels(): (config: Config) => { name: string }[] {
   return new Function(`${source.slice(start, end)}; return groupedModels;`)() as (config: Config) => { name: string }[];
 }
 
+test("live provider exhaustion beats a green connection probe and disappears after recovery", () => {
+  const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js");
+  const source = fs.readFileSync(file, "utf8");
+  const start = source.indexOf("function providerConnection(");
+  const end = source.indexOf("function providerState(");
+  const status: { providers: Record<string, { reachable: boolean; exhaustion?: { reason: string; until: number } }> } = { providers: { p: { reachable: true, exhaustion: { reason: 'insufficient_balance', until: Date.now() + 60_000 } } } };
+  const make = new Function('status', 'stateFor', 'probeIsStale', 't', `${source.slice(start, end)}; return providerConnection;`) as (status: unknown, state: () => unknown, stale: () => boolean, t: (s: string) => string) => (name: string) => { level: string; text: string };
+  const connection = make(status, () => ({ ok: true }), () => false, key => key);
+  assert.equal(connection('p').level, 'warn');
+  assert.match(connection('p').text, /insufficient balance/);
+  delete status.providers.p!.exhaustion;
+  assert.equal(connection('p').level, 'ok');
+});
+
+test("mode reset needs a known future timestamp; Claude uses its binding window", () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  const code = source.slice(source.indexOf('function modQuotaKnown('), source.indexOf('async function modLoadResets('));
+  const known = new Function(`${code}; return modQuotaKnown;`)() as (accounts: unknown[], binding?: boolean) => boolean;
+  const window = (used_percent: number, seconds: number) => ({ used_percent, reset_at: Date.now() / 1000 + seconds });
+  assert.equal(known([{ state: 'ready', quota: null }]), false);
+  assert.equal(known([{ state: 'paused', quota: { rate_limits: { primary: window(90, 600) } } }]), false);
+  const accounts = [{ quota: { rate_limits: { primary: window(90, -10), secondary: window(20, 600) } } }];
+  assert.equal(known(accounts), true);
+  assert.equal(known(accounts, true), false);
+  accounts[0]!.quota.rate_limits.primary = window(90, 600);
+  assert.equal(known(accounts, true), true);
+});
+
+test("mode editor keeps reset disabled with an adjacent reason, and enabled controls omit disabled", () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  type Node = { tag: string; attrs: Record<string, unknown>; children: Node[]; value: string; addEventListener: () => void; appendChild: (child: Node) => void; setAttribute: (key: string, value: string) => void; querySelector: (selector: string) => Node | undefined };
+  const find = (node: Node, key: string): Node | undefined => node.attrs['data-key'] === key ? node : node.children.map(child => find(child, key)).find(Boolean);
+  const el = (tag: string, attrs: Record<string, unknown> = {}, children: Node[] = []): Node => ({ tag, attrs, children, value: '', addEventListener() {}, appendChild(child) { this.children.push(child); }, setAttribute(key, value) { this.attrs[key] = value; }, querySelector(selector) { return find(this, /data-key="([^"]+)"/.exec(selector)?.[1] ?? ''); } });
+  const segment = source.slice(source.indexOf('function modSegmented('), source.indexOf('/** A pop-up menu.'));
+  const section = source.slice(source.indexOf('function modModeSection('), source.indexOf('function modWorkersCard('));
+  const build = new Function('el', 'known', `
+    const t = key => key, modState = {settings:{}};
+    const modResetKnown = () => known, modRungRows = () => [];
+    const modUpdateMode = () => {}, modSetActive = () => {}, modRemoveMode = () => {};
+    const cell = (label, controls) => el('cell', {}, Array.isArray(controls) ? controls : [controls]);
+    const modSection = (title, rows) => el('section', {}, rows);
+    ${segment}\n${section}\nreturn modModeSection({id:'test',name:'Test',rungs:{},until:'none',delegation:'normal'});
+  `) as (make: typeof el, known: boolean) => Node;
+  const disabled = build(el, false);
+  const reset = find(disabled, 'mode-until:reset')!;
+  assert.equal(Object.hasOwn(reset.attrs, 'disabled'), true);
+  assert.equal(reset.attrs['aria-describedby'], 'mode-reset-reason');
+  const until = disabled.children.find(row => row.children.some(control => control.children.some(child => child.attrs.role === 'radiogroup' && child.attrs['aria-label'] === 'mod.modeUntil')))!;
+  const group = until.children[0]!.children[0]!;
+  assert.equal(group.children.at(-1)?.attrs.id, 'mode-reset-reason');
+  assert.equal(group.children.at(-1)?.attrs.text, 'mod.modeResetUnknown');
+  assert.equal(Object.hasOwn(find(disabled, 'mode-until:time')!.attrs, 'disabled'), false);
+  assert.equal(Object.hasOwn(find(build(el, true), 'mode-until:reset')!.attrs, 'disabled'), false);
+});
+
 const { applyPickerSelections: apply, pickerSelectionsExcept: except } = loadPickerBlock();
 const groups = loadGroupedModels();
 

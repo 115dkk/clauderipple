@@ -417,6 +417,8 @@ function credentialLine(name) {
  */
 function providerConnection(name) {
   const live = status && status.providers && status.providers[name];
+  // A successful TCP probe (or an older model probe) cannot undo a real billing refusal.
+  if (live && live.exhaustion) return { level: "warn", text: `${live.exhaustion.reason.replace(/_/g, " ")} · ${new Date(live.exhaustion.until).toLocaleTimeString()}` };
   // Reaching the host is not the same as being able to use it. A ChatGPT provider with no
   // credentials would otherwise read "Connected" and send the user off believing it works.
   if (live && live.needsLogin) return { level: "warn", text: t("providerStatus.loginNeeded") };
@@ -2372,8 +2374,8 @@ const MOD_DEFAULTS = {
   bias: 0, floor: "low", ceiling: "max", agentAuto: "auto",
   rules: {
     general: { mode: "ladder", rungs: {
-      light: { target: { agent: "deepseek-v4-1-flash" }, effort: "max" }, standard: { target: { agent: "gpt-6-1-sol" }, effort: "medium" },
-      hard: { target: { agent: "gpt-6-astra" }, effort: "high" }, plan: modClaude("opus", "high"),
+      light: [{ target: { agent: "deepseek-v4-1-flash" }, effort: "max" }], standard: [{ target: { agent: "gpt-6-1-sol" }, effort: "medium" }],
+      hard: [{ target: { agent: "gpt-6-astra" }, effort: "high" }], plan: [modClaude("opus", "high")],
     } },
   },
   allow: [], modes: [], providers: {},
@@ -2439,7 +2441,7 @@ function modSwitch(key, checked, label, onChange) {
 function modSegmented(key, choices, value, label, onPick) {
   return el("div", { class: "segmented", role: "radiogroup", "aria-label": label }, choices.map((choice) => {
     const on = String(choice.value) === String(value);
-    const button = el("button", { type: "button", class: on ? "active" : "", role: "radio", "aria-checked": String(on), "data-key": `${key}:${choice.value}`, text: choice.label });
+    const button = el("button", { type: "button", class: on ? "active" : "", role: "radio", "aria-checked": String(on), "data-key": `${key}:${choice.value}`, text: choice.label, ...(choice.disabled ? { disabled: "" } : {}) });
     button.addEventListener("click", () => { if (!on) onPick(choice.value); });
     return button;
   }));
@@ -2532,6 +2534,7 @@ async function loadMod() {
     retired = settingsResult.value.legacy === true;
   }
   modState.options = optionsResult.status === "fulfilled" ? optionsResult.value : null;
+  await modLoadResets();
   if (retired) modState.retiredNote = true;
   modRefresh();
   // The settings came back without Auto and the field rules; saving them as they are keeps the note to this once.
@@ -2696,17 +2699,38 @@ function modPickSelect(key, step, shown, label, onPick) {
     onPick(modTargetOf(value.slice(0, bar)), value.slice(bar + 1));
   }, "rung-model");
 }
-function modRungRows() {
-  const rungs = modRungs();
+function modRungRows(mode) {
+  const rungs = mode ? mode.rungs : modRungs();
   return MOD_RUNGS.map((rung) => {
-    const step = rungs[rung];
-    const choice = step && modChoiceOf(step.target);
-    const shown = step ? modNearest(step.effort, modLadderOf(choice)) : null;
+    const steps = rungs[rung] || [];
     const name = t(`mod.rung.${rung}`);
-    const select = modPickSelect(`worker:${rung}`, step, shown, name, (target, effort) => modSetRule("general", { mode: "ladder", rungs: { ...rungs, [rung]: { target, effort } } }));
-    const subs = [modCap(t(`mod.rungHint.${rung}`))];
-    if (choice && !choice.usable) subs.push(el("span", { class: "cell-sub warn-text", text: t("mod.rungUnusable") }));
-    return cell(el("span", { class: "cell-label strong", text: name }), select, subs, "wide rung-row");
+    const save = (next) => {
+      const updated = { ...rungs, [rung]: next };
+      if (mode) modUpdateMode(mode.id, { rungs: updated });
+      else modSetRule("general", { mode: "ladder", rungs: updated });
+    };
+    const rows = steps.map((step, index) => {
+      const choice = modChoiceOf(step.target);
+      const shown = modNearest(step.effort, modLadderOf(choice));
+      const key = `worker:${mode ? mode.id : "base"}:${rung}:${index}`;
+      const select = modPickSelect(key, step, shown, `${name} ${index + 1}`, (target, effort) => save(steps.map((item, at) => at === index ? { target, effort } : item)));
+      const move = (delta) => { const next = [...steps]; [next[index], next[index + delta]] = [next[index + delta], next[index]]; save(next); };
+      const button = (suffix, text, label, disabled, onclick) => el("button", { type: "button", class: "btn secondary compact", "data-key": `${key}:${suffix}`, text, "aria-label": label, ...(disabled ? { disabled: "" } : {}), onclick });
+      return el("li", { class: "rung-item" }, [
+        select,
+        el("div", { class: "rung-actions" }, [
+          button("up", "↑", t("mod.modeMoveUp"), index === 0, () => move(-1)),
+          button("down", "↓", t("mod.modeMoveDown"), index === steps.length - 1, () => move(1)),
+          button("remove", "✕", t("common.remove"), steps.length <= 1, () => save(steps.filter((_, at) => at !== index))),
+        ]),
+        choice && !choice.usable ? el("small", { class: "warn-text", text: t("mod.rungUnusable") }) : null,
+      ]);
+    });
+    const add = el("button", { type: "button", class: "btn secondary compact", "data-key": `worker-add:${mode ? mode.id : "base"}:${rung}`, text: t("mod.modeAddModel"), onclick: () => {
+      const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item)) || modChoices().at(-1);
+      save([...steps, { target: modTargetOf(choice.value), effort: modNearest("medium", modLadderOf(choice)) }]);
+    } });
+    return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), modCap(t(`mod.rungHint.${rung}`)), "wide rung-row");
   });
 }
 /** Said once after settings that still held Auto or field rules are read: they became the four workers. */
@@ -2716,37 +2740,48 @@ function modRetiredNote() {
 }
 // ---- Operating modes (docs/specs/2026-10-12-worker-tiers.md "Operating modes")
 //
-// None is built in: the user names each one, picks what it prefers or avoids, and turns one on.
-// The mod moves the four workers while it is on (packages/mod/hooks/ladder.ts modeRungs) and turns
-// it off itself when its time comes (hooks/modes.ts modeOver).
+// A tab edits a saved worker set; activation is always an explicit, separate action.
+let modModeTab = "";
+let modResetProviders = new Set();
 
-/** A provider as a person reads it: Claude's own models sit under "Claude", as in the lists above. */
-function modProviderLabel(name) { return name === "anthropic" ? "Claude" : name; }
-/** The provider a target names: a model key's provider, else the target itself (a provider's name). */
-function modTargetProvider(target) {
-  const choice = modTickable().find((entry) => modTickKey(entry) === target);
-  return choice ? choice.provider : target;
+/** Only actual future reset timestamps enable the option, never a provider type alone. */
+function modQuotaKnown(accounts, binding = false) {
+  return (accounts || []).some((account) => {
+    if (account.state === "paused" || account.state === "needs-login") return false;
+    const quota = account.quota || {};
+    const windows = Object.values(quota.rate_limits || {}).filter(Boolean);
+    const selected = binding ? windows.sort((a, b) => (b.used_percent || 0) - (a.used_percent || 0)).slice(0, 1) : windows;
+    return selected.some((window) => {
+      if (!window) return false;
+      const at = typeof window.reset_at === "number" ? window.reset_at * (window.reset_at > 1e12 ? 1 : 1000)
+        : typeof window.reset_after_seconds === "number" && typeof quota.at === "number" ? quota.at + window.reset_after_seconds * 1000 : NaN;
+      return Number.isFinite(at) && at > Date.now();
+    });
+  });
 }
-function modTargetLabel(target) {
-  const choice = modTickable().find((entry) => modTickKey(entry) === target);
-  return choice ? choice.label : modProviderLabel(target);
+async function modLoadResets() {
+  const known = new Set();
+  await Promise.all(((modState.options && modState.options.providers) || []).map(async (provider) => {
+    if (provider.type === "anthropic") {
+      if (modQuotaKnown(status && status.claude && status.claude.accounts, true)) { known.add(provider.name); known.add("anthropic"); }
+      return;
+    }
+    if (provider.type !== "chatgpt") return;
+    try {
+      const body = await api(`/api/chatgpt-accounts?provider=${encodeURIComponent(provider.name)}`);
+      if (body.provider === provider.name && modQuotaKnown(body.accounts)) known.add(provider.name);
+    } catch (error) { console.warn("Mode quota unavailable", provider.name, error.message); }
+  }));
+  modResetProviders = known;
 }
-/** The quota reset is offered only where the router knows it: every target on a ChatGPT provider. */
-function modResetKnown(targets) {
-  return targets.length > 0 && targets.every((target) => { const info = modProviderInfo(modTargetProvider(target)); return Boolean(info) && info.type === "chatgpt"; });
+function modResetKnown(rungs) {
+  return Object.values(rungs).some((steps) => steps.some((step) => {
+    const choice = modChoiceOf(step.target);
+    return choice && modResetProviders.has(choice.provider);
+  }));
 }
-function modUntilText(mode) {
-  if (mode.until === "reset") return t("mod.modeUntilReset");
-  if (typeof mode.until === "number") return t("mod.modeUntilAt", { time: new Date(mode.until).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) });
-  return "";
-}
-function modModeSummary(mode) {
-  return [
-    t(mode.action === "avoid" ? "mod.modeAvoid" : "mod.modePrefer"),
-    mode.targets.map(modTargetLabel).join(", ") || "—",
-    mode.delegation === "eager" ? t("mod.modeEager") : "",
-    modUntilText(mode),
-  ].filter(Boolean).join(" · ");
+function modUpdateMode(id, change) {
+  modPatch({ modes: modState.settings.modes.map((mode) => mode.id === id ? { ...mode, ...change } : mode) });
 }
 function modSetActive(id) {
   // The start time is when a mode that runs until the quota resets counts its reset from.
@@ -2757,22 +2792,30 @@ function modRemoveMode(mode) {
   const s = modState.settings;
   modPatch({ modes: s.modes.filter((entry) => entry.id !== mode.id), ...(s.activeMode === mode.id ? { activeMode: undefined, activeSince: undefined } : {}) });
 }
-function modModeRows() {
+function modModeTabs() {
   const s = modState.settings;
-  const modes = s.modes || [];
-  if (!modes.length) return [el("div", { class: "cell-note", text: t("mod.modeEmpty") })];
-  const items = [{ value: "", label: t("mod.modeNone") }, ...modes.map((mode) => ({ value: mode.id, label: mode.name }))];
-  const rows = [cell(t("mod.modeActive"), modSelect("active-mode", items, s.activeMode || "", t("mod.modeActive"), modSetActive, "narrow"))];
-  for (const mode of modes) {
-    const on = s.activeMode === mode.id;
-    const name = el("span", { class: "cell-label strong" }, [el("span", { text: mode.name }), on ? el("span", { class: "mode-on", text: t("mod.modeOn") }) : null]);
-    const buttons = [
-      el("button", { class: "btn secondary compact", type: "button", "data-key": `mode-edit:${mode.id}`, text: t("common.edit"), onclick: () => openModeEditor(mode) }),
-      el("button", { class: "btn secondary compact", type: "button", "data-key": `mode-remove:${mode.id}`, text: t("common.remove"), onclick: () => modRemoveMode(mode) }),
-    ];
-    rows.push(cell(name, buttons, modModeSummary(mode), "mode-row"));
-  }
-  return rows;
+  const tabs = [{ id: "", name: t("mod.modeNone") }, ...s.modes];
+  if (!tabs.some((tab) => tab.id === modModeTab) && modModeTab !== "+") modModeTab = "";
+  const buttons = tabs.map((tab) => {
+    const on = (s.activeMode || "") === tab.id;
+    return el("button", { type: "button", role: "tab", class: modModeTab === tab.id ? "active" : "", "aria-selected": String(modModeTab === tab.id), "aria-controls": "worker-tab-panel", "data-key": `mode-tab:${tab.id || "base"}`, onclick: () => { modModeTab = tab.id; modRefresh(); } }, [
+      el("span", { text: tab.name }), on ? el("span", { class: "mode-on", text: t("mod.modeOn") }) : null,
+    ]);
+  });
+  buttons.push(el("button", { type: "button", role: "tab", "aria-selected": String(modModeTab === "+"), "data-key": "mode-add", text: t("mod.modeAdd"), ...(s.modes.length >= 20 ? { disabled: "" } : {}), onclick: () => { modModeTab = "+"; modRefresh(); } }));
+  return el("div", { class: "mode-tabs", role: "tablist", "aria-label": t("mod.modes") }, buttons);
+}
+function modNewMode() {
+  const input = el("input", { type: "text", class: "text-field", maxlength: "40", "data-key": "mode-new-name", "aria-label": t("mod.modeName"), placeholder: t("mod.modeName") });
+  const add = () => {
+    const name = input.value.trim();
+    if (!name) { toast(t("mod.modeNameRequired"), true); input.focus(); return; }
+    const mode = { id: `mode-${crypto.randomUUID()}`, name, rungs: clone(modRungs()), delegation: "normal", until: "none" };
+    modModeTab = mode.id;
+    modPatch({ modes: [...modState.settings.modes, mode] });
+  };
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") add(); });
+  return modSection(t("mod.modeAddTitle"), [cell(t("mod.modeName"), [input, el("button", { type: "button", class: "btn compact", text: t("common.save"), "data-key": "mode-create", onclick: add })], t("mod.modeNameHelp"), "wide")]);
 }
 /** A datetime-local value for an epoch-ms time, in this browser's zone. */
 function modLocalTime(ms) {
@@ -2780,85 +2823,44 @@ function modLocalTime(ms) {
   const two = (n) => String(n).padStart(2, "0");
   return `${at.getFullYear()}-${two(at.getMonth() + 1)}-${two(at.getDate())}T${two(at.getHours())}:${two(at.getMinutes())}`;
 }
-/** Adds a mode, or edits one, in a sheet; nothing is saved until Save. */
-function openModeEditor(existing) {
-  const draft = existing ? clone(existing) : { id: `mode-${Date.now().toString(36)}`, name: "", targets: [], action: "prefer", delegation: "normal" };
-  const nameInput = el("input", { type: "text", class: "text-field", value: draft.name, maxlength: "40", spellcheck: "false", autocomplete: "off", "aria-label": t("mod.modeName") });
-  nameInput.addEventListener("input", () => { draft.name = nameInput.value; });
-  const targetsBox = el("div", { class: "mode-targets" });
-  const actionBox = el("div");
-  const delegationBox = el("div");
-  const untilBox = el("div", { class: "mode-until" });
-  const untilHelp = el("small");
-  function drawTargets() {
-    const offered = modTickable().filter(modTicked);
-    const providers = [...new Set(modTickable().map((choice) => choice.provider))];
-    // A saved target that is not offered now (a model unticked since) stays visible, so it can be taken off.
-    const extra = draft.targets.filter((target) => !providers.includes(target) && !offered.some((choice) => modTickKey(choice) === target));
-    const box = (value, label) => {
-      const input = el("input", { type: "checkbox", "data-key": `mode-target:${value}`, "aria-label": label, checked: draft.targets.includes(value) });
-      input.addEventListener("change", () => {
-        draft.targets = input.checked ? [...draft.targets, value] : draft.targets.filter((entry) => entry !== value);
-        drawUntil();
-      });
-      return el("label", { class: "model-check", title: label }, [input, el("span", { text: label })]);
-    };
-    targetsBox.replaceChildren(
-      el("div", { class: "tick-head", text: t("mod.modeProviders") }),
-      el("div", { class: "model-checklist" }, providers.map((provider) => box(provider, modProviderLabel(provider)))),
-      el("div", { class: "tick-head", text: t("mod.modeModels") }),
-      el("div", { class: "model-checklist" }, [...offered.map((choice) => box(modTickKey(choice), `${choice.label} · ${modGroupName(choice)}`)), ...extra.map((target) => box(target, target))]),
-    );
-  }
-  function drawChoice(holder, key, choices, field, label) {
-    holder.replaceChildren(modSegmented(key, choices, draft[field], label, (value) => { draft[field] = value; drawChoice(holder, key, choices, field, label); }));
-  }
-  function drawUntil() {
-    const resetKnown = modResetKnown(draft.targets);
-    // Chosen while every target was on ChatGPT; with another target the reset is unknown.
-    if (draft.until === "reset" && !resetKnown) delete draft.until;
-    const kind = draft.until === "reset" ? "reset" : typeof draft.until === "number" ? "time" : "none";
-    const choices = [{ value: "none", label: t("mod.modeUntilNone") }, { value: "time", label: t("mod.modeUntilTime") }, ...(resetKnown ? [{ value: "reset", label: t("mod.modeUntilResetChoice") }] : [])];
-    const picker = modSegmented("mode-until", choices, kind, t("mod.modeUntil"), (value) => {
-      if (value === "none") delete draft.until;
-      else if (value === "reset") draft.until = "reset";
-      else draft.until = Date.now() + 3 * 3_600_000;
-      drawUntil();
-    });
-    const parts = [picker];
-    if (kind === "time") {
-      const at = el("input", { type: "datetime-local", class: "text-field", "data-key": "mode-until-time", value: modLocalTime(draft.until), "aria-label": t("mod.modeUntilTime") });
-      at.addEventListener("change", () => { const ms = new Date(at.value).getTime(); if (Number.isFinite(ms)) draft.until = ms; });
-      parts.push(at);
-    }
-    untilBox.replaceChildren(...parts);
-    untilHelp.textContent = resetKnown ? t("mod.modeResetHelp") : t("mod.modeResetUnknown");
-  }
-  drawTargets();
-  drawChoice(actionBox, "mode-action", [{ value: "prefer", label: t("mod.modePrefer") }, { value: "avoid", label: t("mod.modeAvoid") }], "action", t("mod.modeAction"));
-  drawChoice(delegationBox, "mode-delegation", [{ value: "normal", label: t("mod.modeNormal") }, { value: "eager", label: t("mod.modeEager") }], "delegation", t("mod.modeDelegation"));
-  drawUntil();
-  const form = el("div", { class: "provider-form mode-form" }, [
-    el("h1", { id: "modal-title", text: existing ? t("mod.modeEditTitle") : t("mod.modeAddTitle") }),
-    inputRow(t("mod.modeName"), nameInput, t("mod.modeNameHelp")),
-    el("div", { class: "form-field" }, [el("span", { text: t("mod.modeTargets") }), targetsBox, el("small", { text: t("mod.modeTargetsHelp") })]),
-    el("div", { class: "form-field" }, [el("span", { text: t("mod.modeAction") }), actionBox, el("small", { text: t("mod.modeActionHelp") })]),
-    el("div", { class: "form-field" }, [el("span", { text: t("mod.modeDelegation") }), delegationBox, el("small", { text: t("mod.modeEagerHelp") })]),
-    el("div", { class: "form-field" }, [el("span", { text: t("mod.modeUntil") }), untilBox, untilHelp]),
-  ]);
-  const save = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("mod.modeAdd") });
-  save.addEventListener("click", () => {
-    const name = draft.name.trim();
-    if (!name) { toast(t("mod.modeNameRequired"), true); return; }
-    if (!draft.targets.length) { toast(t("mod.modeTargetsRequired"), true); return; }
-    if (typeof draft.until === "number" && draft.until <= Date.now()) { toast(t("mod.modeTimePast"), true); return; }
-    const mode = { ...draft, name };
-    const modes = modState.settings.modes || [];
-    modPatch({ modes: existing ? modes.map((entry) => entry.id === existing.id ? mode : entry) : [...modes, mode] });
-    closeModal();
+function modModeSection(mode) {
+  const on = modState.settings.activeMode === mode.id;
+  const name = el("input", { type: "text", class: "text-field", value: mode.name, maxlength: "40", "data-key": `mode-name:${mode.id}`, "aria-label": t("mod.modeName") });
+  name.addEventListener("change", () => {
+    if (!name.value.trim()) { name.value = mode.name; toast(t("mod.modeNameRequired"), true); return; }
+    modUpdateMode(mode.id, { name: name.value.trim() });
   });
-  form.appendChild(el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), save]));
-  showModal(form);
+  const known = modResetKnown(mode.rungs);
+  const kind = typeof mode.until === "number" ? "time" : mode.until || "none";
+  const until = modSegmented("mode-until", [
+    { value: "none", label: t("mod.modeUntilNone") }, { value: "time", label: t("mod.modeUntilTime") },
+    { value: "reset", label: t("mod.modeUntilResetChoice"), disabled: !known },
+  ], kind, t("mod.modeUntil"), (value) => modUpdateMode(mode.id, { until: value === "time" ? Date.now() + 3 * 3_600_000 : value }));
+  const reset = until.querySelector('[data-key="mode-until:reset"]');
+  if (!known) {
+    reset.setAttribute("aria-describedby", "mode-reset-reason");
+    until.appendChild(el("span", { id: "mode-reset-reason", class: "mode-reset-reason", text: t("mod.modeResetUnknown") }));
+  }
+  const endControls = [until];
+  if (kind === "time") {
+    const at = el("input", { type: "datetime-local", class: "text-field", "data-key": "mode-until-time", value: modLocalTime(mode.until), "aria-label": t("mod.modeUntilTime") });
+    at.addEventListener("change", () => {
+      const ms = new Date(at.value).getTime();
+      if (!Number.isFinite(ms) || ms <= Date.now()) { at.value = modLocalTime(mode.until); toast(t("mod.modeTimePast"), true); return; }
+      modUpdateMode(mode.id, { until: ms });
+    });
+    endControls.push(at);
+  }
+  return modSection(null, [
+    cell(t("mod.modeName"), name),
+    ...modRungRows(mode),
+    cell(t("mod.modeDelegation"), modSegmented("mode-delegation", [{ value: "normal", label: t("mod.modeNormal") }, { value: "eager", label: t("mod.modeEager") }], mode.delegation, t("mod.modeDelegation"), (delegation) => modUpdateMode(mode.id, { delegation })), null, "wide"),
+    cell(t("mod.modeUntil"), el("div", { class: "mode-until" }, endControls), known ? t("mod.modeResetHelp") : null, "wide"),
+    cell(t("mod.modeActive"), [
+      el("button", { type: "button", class: "btn compact", "data-key": "mode-toggle", text: t(on ? "mod.modeTurnOff" : "mod.modeTurnOn"), onclick: () => modSetActive(on ? "" : mode.id) }),
+      el("button", { type: "button", class: "btn secondary compact", "data-key": `mode-remove:${mode.id}`, text: t("common.remove"), onclick: () => modRemoveMode(mode) }),
+    ], on ? t("mod.modeOn") : null, "wide"),
+  ]);
 }
 
 function modWorkersCard() {
@@ -2869,10 +2871,12 @@ function modWorkersCard() {
     modSection(null, [
       cell(t("mod.takesOver"), modSegmented("agent-auto", [{ value: "off", label: t("mod.off") }, { value: "auto", label: "ripple:auto" }, { value: "all", label: t("mod.allSpawns") }], s.agentAuto, t("mod.takesOver"), (agentAuto) => modPatch({ agentAuto })), null, "wide"),
     ], [t("mod.takesOverHelp"), t("mod.takesOverHelp2")]),
-    modSection(t("mod.models"), modTickRows(), [t("mod.modelsHelp")]),
-    modSection(t("mod.fourWorkers"), modRungRows(), [t("mod.ladderHelp")]),
-    modSection(t("mod.modes"), modModeRows(), [t("mod.modesHelp")],
-      el("button", { class: "btn secondary compact", type: "button", "data-key": "mode-add", text: t("mod.modeAdd"), onclick: () => openModeEditor(null) })),
+    modModeTabs(),
+    el("div", { id: "worker-tab-panel", role: "tabpanel" }, modModeTab === "+" ? [modNewMode()] : modModeTab ? [modModeSection(s.modes.find((mode) => mode.id === modModeTab))] : [
+      modSection(t("mod.models"), modTickRows(), [t("mod.modelsHelp")]),
+      modSection(t("mod.fourWorkers"), modRungRows(), [t("mod.modeOrderHelp")]),
+      s.activeMode ? modSection(null, [cell(t("mod.modeActive"), el("button", { type: "button", class: "btn secondary compact", "data-key": "mode-base-on", text: t("mod.modeUseBase"), onclick: () => modSetActive("") }))]) : null,
+    ].filter(Boolean)),
   ]);
 }
 

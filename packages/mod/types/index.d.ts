@@ -87,7 +87,8 @@ export type Calibration = { effortOffset?: -2 | -1 | 0 | 1 | 2; floor?: Effort; 
  * The four workers' rungs, each model + effort. Loading (`normalizeSettings`) reads pins from
  * before 2026-10-11 and Auto (experimental, removed 2026-10-12) into it, and drops field rules.
  */
-export type Rule = { mode: 'ladder'; rungs: Partial<Record<Rung, Step>> }
+export type Rungs = Partial<Record<Rung, Step[]>>
+export type Rule = { mode: 'ladder'; rungs: Rungs }
 /** How a provider is paid for: what the Workers card tags each model with, and what presets read. */
 export type Billing = 'free' | 'payg' | 'subscription'
 /** A model a rung can run, as GET /api/mod-options describes it. */
@@ -105,7 +106,8 @@ export type LadderChoice = {
 export type PresetId = 'claude' | 'claudeGpt' | 'gpt' | 'cheap'
 /** The fill as computed from the ticked models: the rungs, and the ones it had to fill otherwise. */
 export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
-export type LadderOptions = { until: number; choices: LadderChoice[] }
+export type ProviderAvailability = { usable: boolean; reason?: string; exhaustedUntil?: number }
+export type LadderOptions = { until: number; choices: LadderChoice[]; providers?: Record<string, ProviderAvailability> }
 export type RouterModel = { value: string; label: string; provider: string; name?: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }
 /** A model's AA measurements (GET /api/mod-options `scores`): the fill's cost order reads them. */
@@ -116,16 +118,15 @@ export type TierTarget = { agent: string; model?: string }
 
 /**
  * An operating mode the user made (docs/specs/2026-10-12-worker-tiers.md "Operating modes").
- * `targets` are provider names or model keys as `allow` stores them; prefer fills the tiers with
- * them, avoid takes them out. `until` is an epoch-ms time or the target's next quota reset.
+ * Each rung is an ordered worker list, independent of the base ladder, sharing its ticked models.
+ * `until` is an epoch-ms time, the next known quota reset, or no automatic end.
  */
 export type Mode = {
   id: string
   name: string
-  targets: string[]
-  action: 'prefer' | 'avoid'
+  rungs: Rungs
   delegation: 'normal' | 'eager'
-  until?: number | 'reset'
+  until: 'none' | number | 'reset'
 }
 
 export type Settings = {
@@ -208,6 +209,9 @@ export type WorkerVerdict = { domain: Domain; level: Level; kind?: Kind; effort:
 export type WorkerPick = WorkerVerdict & {
   /** The ladder rung that ran it (absent for explicit choices). */
   rung?: Rung
+  /** One-based position in the selected rung; skipped entries explain ordered fallback. */
+  position?: number
+  skipped?: { rung: Rung; position: number; model: string; reason: string }[]
   target: TierTarget
   by: JudgeKind | 'marker' | 'default' | 'tier'
   ms: number
