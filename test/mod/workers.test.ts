@@ -22,6 +22,9 @@ test('judge separates domain and level, rejects mixed-tier legacy verdicts', () 
   assert.match(WORKER_JUDGE_SYSTEM, /independent/)
   assert.equal(workerJudgeInput({ description: 'Review', prompt: 'x'.repeat(3000) + 'discard' }).includes('discard'), false)
   assert.match(WORKER_JUDGE_SYSTEM, /"kind":"plan\|do"/)
+  // Deep planning is the Max worker's, and a retry after a failure reads as harder.
+  assert.match(WORKER_JUDGE_SYSTEM, /Deep plan is the hardest work/)
+  assert.match(WORKER_JUDGE_SYSTEM, /earlier attempt failed is one level higher/)
   assert.deepEqual(parseWorkerVerdict('```json\n{"domain":"design","level":"deep","effort":"high","sure":0.9,"why":"taste"}\n```'), { domain: 'design', level: 'deep', kind: 'do', effort: 'high', sure: 0.9, why: 'taste' })
   assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"plan","effort":"high","sure":0.8,"why":"billing design"}')?.kind, 'plan')
   assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"ponder","effort":"high"}')?.kind, 'do')
@@ -74,6 +77,8 @@ test('spawn suffix and takeover retain named-worker and fork boundaries', () => 
   assert.equal(spawnModel({ agent: 'general-purpose', model: 'sonnet' }, 'high'), 'sonnet')
   assert.equal(takesOver({ subagentType: 'ripple:auto', fork: false }, DEFAULTS), true)
   assert.equal(takesOver({ subagentType: 'ripple:auto', fork: true }, DEFAULTS), false)
+  // The tier agents are gone (2026-10-12): a stale session's ripple:low runs as Claude Code spawns it.
+  assert.equal(takesOver({ subagentType: 'ripple:low', fork: false }, DEFAULTS), false)
   assert.equal(takesOver({ subagentType: 'general-purpose', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), true)
   assert.equal(takesOver({ subagentType: 'general-purpose', model: 'sonnet', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), false)
 })

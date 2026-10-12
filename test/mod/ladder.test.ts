@@ -12,22 +12,23 @@ const { ladderPick, ladderOptionsFrom, candidateUsable } = await import('../../p
 
 const v = (level: WorkerVerdict['level'], more: Partial<WorkerVerdict> = {}): WorkerVerdict => ({ domain: 'general', level, effort: 'medium', why: '', ...more })
 
-test('levels land on light, standard and hard regardless of planning kind', () => {
+test('levels land on light, standard and hard; only deep planning lands on plan', () => {
   assert.equal(rungOf(v('light')), 'light')
   assert.equal(rungOf(v('standard')), 'standard')
   assert.equal(rungOf(v('deep')), 'hard')
   assert.equal(rungOf(v('standard', { kind: 'plan' })), 'standard')
-  assert.equal(rungOf(v('deep', { kind: 'plan' })), 'hard')
+  assert.equal(rungOf(v('deep', { kind: 'plan' })), 'plan')
   // A light plan (rename a section of the spec) is still light work.
   assert.equal(rungOf(v('light', { kind: 'plan' })), 'light')
   assert.equal(rungOf(v('deep', { kind: 'do' })), 'hard')
 })
 
-test('an unsure verdict takes the next rung up, stopping at hard even for planning', () => {
+test('an unsure verdict takes the next rung up, never into plan; plan stays plan', () => {
   assert.equal(rungOf(v('light', { sure: 0.49 })), 'standard')
   assert.equal(rungOf(v('standard', { sure: 0.3 })), 'hard')
+  assert.equal(rungOf(v('standard', { kind: 'plan', sure: 0.3 })), 'hard')
   assert.equal(rungOf(v('deep', { sure: 0.1 })), 'hard')
-  assert.equal(rungOf(v('deep', { kind: 'plan', sure: 0.1 })), 'hard')
+  assert.equal(rungOf(v('deep', { kind: 'plan', sure: 0.1 })), 'plan')
   assert.equal(rungOf(v('light', { sure: 0.5 })), 'light')
   assert.equal(rungOf(v('light')), 'light')
 })
@@ -46,7 +47,8 @@ test('the default ladder runs each rung at its own effort, whatever effort the j
   assert.deepEqual(pick(DEFAULTS, v('light', { effort: 'low' })), { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max', rung: 'light', position: 1, skipped: [] })
   assert.deepEqual(pick(DEFAULTS, v('standard', { effort: 'high' })), { target: { agent: 'gpt-6-1-sol' }, effort: 'medium', rung: 'standard', position: 1, skipped: [] })
   assert.deepEqual(pick(DEFAULTS, v('deep')), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard', position: 1, skipped: [] })
-  assert.deepEqual(pick(DEFAULTS, v('deep', { kind: 'plan' })), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard', position: 1, skipped: [] })
+  assert.deepEqual(pick(DEFAULTS, v('deep', { kind: 'do' })), { target: { agent: 'gpt-6-astra' }, effort: 'high', rung: 'hard', position: 1, skipped: [] })
+  assert.deepEqual(pick(DEFAULTS, v('deep', { kind: 'plan' })), { target: { agent: 'general-purpose', model: 'opus' }, effort: 'high', rung: 'plan', position: 1, skipped: [] })
   // Every field follows the one ladder: there are no field rules left.
   assert.deepEqual(pick(DEFAULTS, v('standard', { domain: 'design' })).target, { agent: 'gpt-6-1-sol' })
 })
@@ -79,7 +81,7 @@ test('a runtime-exhausted rung climbs once and retains its provider and reason',
     { name: 'opencode-go', usable: false, reason: 'insufficient_balance', exhaustedUntil: 1_800_000 },
     { name: 'chatgpt', usable: true },
   ] }, 600_000)
-  const result = ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'ko', [], 'light', options.providers)
+  const result = ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'ko', [], options.providers)
   assert.deepEqual([result.target, result.effort, result.rung, result.position], [{ agent: 'gpt-6-1-sol' }, 'medium', 'standard', 1])
   assert.match(result.fallbackReason!, /deepseek-v4.1-flash: opencode-go: 잔액 부족/)
   assert.deepEqual(result.skipped, [{ rung: 'light', position: 1, model: 'deepseek-v4.1-flash', reason: 'opencode-go: 잔액 부족' }])
@@ -87,7 +89,7 @@ test('a runtime-exhausted rung climbs once and retains its provider and reason',
   // The router's account-aware availability wins over the old status helper's single-window view.
   assert.equal(candidateUsable(candidates[1]!, DEFAULTS, false, options.providers), true)
   const recovered = ladderOptionsFrom({ providers: [{ name: 'opencode-go', usable: true }] }, 600_000)
-  assert.equal(ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'ko', [], 'light', recovered.providers).rung, 'light')
+  assert.equal(ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'ko', [], recovered.providers).rung, 'light')
 })
 
 test('pins become ladders with Plan one effort above Hard; Auto becomes a ladder to fill and field rules are dropped', () => {
@@ -227,11 +229,11 @@ test('ordered lists skip missing, disabled, unticked and exhausted entries befor
     ], standard: [{ target: opus, effort: 'max' }],
   } } } })
   const providers = { 'opencode-go': { usable: false, reason: 'insufficient_balance' } }
-  const result = ladderPick(v('light'), s.rules.general, s, candidates, true, 'en', [], undefined, providers)
+  const result = ladderPick(v('light'), s.rules.general, s, candidates, true, 'en', [], providers)
   assert.deepEqual([result.target, result.position, result.rung], [{ agent: 'gpt-6-1-sol' }, 3, 'light'])
   assert.deepEqual(result.skipped?.map(item => item.position), [1, 2])
   assert.match(result.fallbackReason!, /missing.*deepseek-v4.1-flash.*insufficient balance/)
-  const onlyOpus = ladderPick(v('light'), s.rules.general, { ...s, providers: { chatgpt: false } }, candidates, true, 'en', ['general-purpose:opus'], undefined, providers)
+  const onlyOpus = ladderPick(v('light'), s.rules.general, { ...s, providers: { chatgpt: false } }, candidates, true, 'en', ['general-purpose:opus'], providers)
   assert.deepEqual([onlyOpus.target, onlyOpus.rung], [opus, 'standard'])
   assert.equal(onlyOpus.skipped?.length, 4)
   s.rules.general.rungs.light!.reverse()

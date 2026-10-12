@@ -3,6 +3,10 @@
 Status: **built 2026-10-12 (commits d231fde, ba4d1a8, 7160945, 9b3529e).** Supersedes docs/specs/2026-10-11-worker-ladder.md (presets, field
 overrides and "더 세밀하게" go away; the four rungs survive under new names).
 
+Revised 2026-10-12: the main chat no longer names a tier. It only decides whether to delegate, and
+always to `ripple:auto`; the judge picks among all four tiers, `max` included (deep + plan). The
+four tier agents (`ripple:low/medium/high/max`) are no longer registered.
+
 ## Why
 
 The ladder was still too much to set: presets, four rungs × model × effort × backup, two field
@@ -15,36 +19,42 @@ claims) agreed on three points:
   prompt alone.
 - Better signals than prompt text: the orchestrator choosing, and stepping up on failure.
 
-The main chat already knows the whole conversation; the judge sees one description. So the
-**main chat names the tier**, and the mod keeps deciding **which model** serves it.
+The main chat already knows the whole conversation; the judge sees one description. The first
+build therefore had the **main chat name the tier**. Revised 2026-10-12: the main chat only
+decides **whether** to delegate; the judge names the tier and the mod decides **which model**
+serves it. A failed attempt reaches the judge as part of the next task's prompt.
 
 ## Model
 
 Four workers, named by the effort words AI users already know (Claude Code effort, OpenAI
 reasoning effort):
 
-| Worker | Agent name | Use for |
-|---|---|---|
-| 로우 워커 | `ripple:low` | finding files, single lookups, skimming logs, mechanical edits |
-| 미디움 워커 | `ripple:medium` | specified implementation, refactors, summaries, drafts |
-| 하이 워커 | `ripple:high` | hard debugging, multi-file changes, independent review and rebuttal |
-| 맥스 워커 | `ripple:max` | the best result available: planning, design, architecture, opinions |
+| Worker | Rung | Judge verdict | Use for |
+|---|---|---|---|
+| 로우 워커 | light | light | finding files, single lookups, skimming logs, mechanical edits |
+| 미디움 워커 | standard | standard | specified implementation, refactors, summaries, drafts |
+| 하이 워커 | hard | deep + do | hard debugging, multi-file changes, independent review and rebuttal |
+| 맥스 워커 | plan | deep + plan | the best result available: planning, design, architecture, design decisions |
 
-`ripple:auto` stays: no tier given → the judge picks one of the four (its light/standard/deep
-levels map to low/medium/high; `max` only by explicit choice).
+The workers are rungs, not agents (2026-10-12 revision): the only agent is `ripple:auto`, and the
+judge picks one of the four (`ladder.ts` `rungOf`). An unsure verdict (`sure` < 0.5) moves up one
+rung, low → medium → high; it never reaches max, which only a deep planning verdict does.
 
 **Who decides what**
 
-- Main chat: how hard the task is — by choosing the agent. Nothing in the user's CLAUDE.md; each
-  agent's `description` (shipped in the plugin, always visible in the Agent tool list) says when to
-  use it. Distributable as is.
+- Main chat: only whether to delegate, always to `ripple:auto`. Nothing in the user's CLAUDE.md;
+  the agent's `description` (shipped in the plugin, always visible in the Agent tool list) says so.
+  Distributable as is.
+- Judge: how hard the task is — one of low/medium/high/max (light / standard / deep + do /
+  deep + plan).
 - Mod: which model and effort serve the tier, from the models the user ticked; skips providers
   that are off, out of quota or failing (402/429/5xx) and says so (existing `fallbackReason`);
   respects billing class.
-- **Failure steps up once:** a worker that errors or returns no usable result is retried one tier
-  up (low → medium → high). `max` does not step; it reports to the main chat.
-- Always visible: the task list label shows tier and model ("하이 · Astra·high · …"); every pick
-  is logged as now (`worker pick:`).
+- **Failure re-delegates once:** when a worker errors or returns no usable result, the main chat
+  delegates to `ripple:auto` once more and says the earlier attempt failed (the `auto`
+  description asks for this). The judge reads that as one level harder.
+- Always visible: the task list label shows the model ("Astra·high · …"); every pick is logged as
+  now (`worker pick:`, with its rung).
 
 ## Filling the tiers
 
@@ -67,7 +77,7 @@ its name; `기본` (Base) means the base worker set, not a saved mode.
 - **Delegation** — `normal` or `eager` (보통 / 적극 — 메인 대화는 지휘만). The main chat may run on
   any model, so no string names Claude as the one directing. Eager adds the existing
   hidden `prompt.submit` context note: "Delegate everything except judgment and final review to
-  ripple:low/medium/high/max." First prompt after activation and after main-chat compaction only.
+  ripple:auto." First prompt after activation and after main-chat compaction only.
 - **End** — `until: 'none' | number | { reset: '<provider>' }`: until turned off, epoch-ms time,
   or the named provider's first known quota reset **after activation** (끄기 전까지 / 시각 지정 /
   한도 초기화 때). Only that provider's reset counts, whatever the rung lists use.
@@ -115,6 +125,8 @@ individual workers are edited on the dashboard. Existing effort/judge/cache cont
 
 ## Acceptance
 
-Ten-task probe (as 2026-10-11) dispatched by the main chat without hints: each lands on a sensible
-tier, every pick logged with tier + model; a forced 402 on the low model steps to the next
-available model and shows the reason; a failing low task retries on medium once.
+Ten-task probe (as 2026-10-11) dispatched by the main chat to `ripple:auto` without hints: the
+judge lands each on a sensible tier, a planning/architecture task on max; every pick logged with
+rung + model; a forced 402 on the low model steps to the next available model and shows the
+reason; a failed task is re-delegated to `ripple:auto` once, saying the earlier attempt failed,
+and the judge lands it one level up.

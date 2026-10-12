@@ -214,7 +214,7 @@ export type WorkerPick = WorkerVerdict & {
   position?: number
   skipped?: { rung: Rung; position: number; model: string; reason: string }[]
   target: TierTarget
-  by: JudgeKind | 'marker' | 'default' | 'tier'
+  by: JudgeKind | 'marker' | 'default'
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string

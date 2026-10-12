@@ -144,7 +144,7 @@ test('the eager note goes with the first prompt after the mode turns on and afte
   const on = { modes, activeMode: 'burn', activeSince: 5 }
   const first = eagerNote(on, null)
   assert.equal(first.note, modeNote('Burn GPT'))
-  assert.equal(first.note, 'ClaudeRipple mode Burn GPT: delegate everything except judgment and final review to ripple:low/medium/high/max.')
+  assert.equal(first.note, 'ClaudeRipple mode Burn GPT: delegate everything except judgment and final review to ripple:auto.')
   assert.equal(first.noted, modeKey(on))
   // The next turn: nothing.
   assert.deepEqual(eagerNote(on, first.noted), { noted: first.noted })

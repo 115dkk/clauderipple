@@ -15,7 +15,7 @@ export function modeKey(s: Pick<Settings, 'activeMode' | 'activeSince'>): string
 
 /** What the main chat reads beside the prompt while an eager mode is on. */
 export function modeNote(name: string): string {
-  return `ClaudeRipple mode ${name}: delegate everything except judgment and final review to ripple:low/medium/high/max.`
+  return `ClaudeRipple mode ${name}: delegate everything except judgment and final review to ripple:auto.`
 }
 
 /**

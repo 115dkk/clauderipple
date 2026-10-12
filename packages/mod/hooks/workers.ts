@@ -6,22 +6,13 @@ import type { Lang } from './i18n'
 import { kindOf, parseEffortVerdict, verdictObject } from './judge'
 import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 
-export const WORKER_TIERS = {
-  low: { rung: 'light', level: 'light', description: "Low worker: quick lookups, finding files, skimming logs, mechanical edits. ClaudeRipple runs it on the user's low-tier model. If it fails or returns nothing usable, retry once on ripple:medium." },
-  medium: { rung: 'standard', level: 'standard', description: "Medium worker: specified implementation, refactors, summaries, drafts. ClaudeRipple runs it on the user's medium-tier model. If it fails, retry once on ripple:high." },
-  high: { rung: 'hard', level: 'deep', description: "High worker: hard debugging, multi-file changes, independent review and rebuttal. ClaudeRipple runs it on the user's high-tier model. If it fails, retry once on ripple:max." },
-  max: { rung: 'plan', level: 'deep', description: "Max worker: the best result available — planning, design, architecture, opinions. ClaudeRipple runs it on the user's max-tier model. If it fails, report to the user instead of retrying." },
-} as const satisfies Record<string, { rung: Rung; level: Level; description: string }>
-
-export function tierOf(subagentType: string): keyof typeof WORKER_TIERS | undefined {
-  const name = subagentType.replace(/^ripple:/, '')
-  return Object.hasOwn(WORKER_TIERS, name) ? name as keyof typeof WORKER_TIERS : undefined
-}
+/** The one agent the main chat delegates to; the judge picks the worker (docs/specs/2026-10-12-worker-tiers.md). */
+export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple judges how hard it is (low/medium/high/max) and picks the model. If a worker fails or returns nothing usable, delegate again here once and say the earlier attempt failed.'
 
 export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level, kind of work and the cheapest effort that still does this delegated task well. Evaluate actual scope and risk, not prompt length.
 Domains: design (visual taste, composition, brand), frontend (UI implementation), backend (APIs and server logic), infra (deployment and operations), data (queries and processing), test (verification), docs (writing), research (investigation), general (other or cross-domain).
-Levels are independent of domain: light (chores, mechanical work, simple lookups), standard (designed implementation, ordinary research and review), deep (careful high-stakes reasoning, subtle bugs, architecture, security).
-Kind: plan (decide what to build: architecture, design decisions, specifications, a review whose verdict decides) or do (carry out what is decided: implement, fix, run, look up, write).
+Levels are independent of domain: light (chores, mechanical work, simple lookups), standard (designed implementation, ordinary research and review), deep (careful high-stakes reasoning, subtle bugs, architecture, security). A task that says an earlier attempt failed is one level higher than it would otherwise be.
+Kind: plan (decide what to build: architecture, design decisions, specifications, a review whose verdict decides) or do (carry out what is decided: implement, fix, run, look up, write). Deep plan is the hardest work, which runs on the strongest model: architecture, system design, consequential design decisions.
 Effort choices are low, medium, high, xhigh, max; reserve the last two for exceptionally hard work. Return only JSON {"domain":"design|frontend|backend|infra|data|test|docs|research|general","level":"light|standard|deep","kind":"plan|do","effort":"low|medium|high|xhigh|max","sure":0.0,"why":"brief reason"}. Confidence is zero to one and is about the level; explain in the user's language in at most six words.`
 
 export function workerJudgeInput(input: { description: string; prompt: string }): string {
@@ -161,8 +152,8 @@ export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
  * The ladder: the verdict's rung, else one rung up, else the session model, never down. Whatever
  * ran instead says why (the fallback toast).
  */
-export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], forcedRung?: Rung, providers: NonNullable<LadderOptions['providers']> = {}): Resolution {
-  const wanted = forcedRung ?? rungOf(verdict)
+export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], providers: NonNullable<LadderOptions['providers']> = {}): Resolution {
+  const wanted = rungOf(verdict)
   const skipped: NonNullable<Resolution['skipped']> = []
   const reasons: string[] = []
   for (const rung of [wanted, rungAbove(wanted)]) {
@@ -222,5 +213,5 @@ export function spawnTitle(description: string, model: string, effort: string | 
 
 export function takesOver(spawn: { subagentType: string; model?: string; fork: boolean }, settings: Settings): boolean {
   if (spawn.fork || settings.agentAuto === 'off') return false
-  return tierOf(spawn.subagentType) !== undefined || ['ripple:auto', 'auto'].includes(spawn.subagentType) || (settings.agentAuto === 'all' && spawn.subagentType === 'general-purpose' && spawn.model === undefined)
+  return ['ripple:auto', 'auto'].includes(spawn.subagentType) || (settings.agentAuto === 'all' && spawn.subagentType === 'general-purpose' && spawn.model === undefined)
 }

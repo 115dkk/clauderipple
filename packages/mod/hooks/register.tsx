@@ -3,11 +3,11 @@
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
-import { RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
+import { applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { WORKER_JUDGE_SYSTEM, WORKER_TIERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, tierOf, workerJudgeInput, zenJev } from './workers'
+import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -201,10 +201,7 @@ async function resolveLanguage($: EngineInterface, s: Settings): Promise<Lang> {
 }
 async function registerAuto($: EngineInterface, s: Settings): Promise<void> {
   if (s.agentAuto === 'off') return
-  await $.agent.register({ name: 'auto', description: 'Delegate here when unsure of the tier; ClaudeRipple judges low/medium/high and picks the model. Prefer ripple:low/medium/high/max when you know how hard the task is.', prompt: EXECUTOR, disallowedTools: ['Agent'] })
-  for (const [name, tier] of Object.entries(WORKER_TIERS)) {
-    await $.agent.register({ name, description: tier.description, prompt: EXECUTOR, disallowedTools: ['Agent'] })
-  }
+  await $.agent.register({ name: 'auto', description: AUTO_DESCRIPTION, prompt: EXECUTOR, disallowedTools: ['Agent'] })
 }
 async function installSettings($: EngineInterface, s: Settings): Promise<void> {
   const previous = await currentSettings($)
@@ -627,18 +624,13 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
   const pinnedCandidates = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
-  const tier = tierOf(e.subagentType)
-  const forced = tier ? WORKER_TIERS[tier] : undefined
   const marker = readMarker(e.prompt)
-  const explicit = !forced && marker && !['auto', 'ripple'].includes(marker.name) ? marker : null
+  const explicit = marker && !['auto', 'ripple'].includes(marker.name) ? marker : null
   let verdict: WorkerVerdict = { domain: 'general', level: 'standard', effort: 'high', why: t(language, 'toasts.judgeUnavailable') }
   let by: WorkerPick['by'] = 'default'
   let ms = 0
   let target: TierTarget | undefined
-  if (forced) {
-    verdict = { domain: 'general', level: forced.level, kind: tier === 'max' ? 'plan' : 'do', effort: RUNG_EFFORT[forced.rung], why: t(language, 'workers.rung.' + forced.rung) }
-    by = 'tier'
-  } else if (explicit) {
+  if (explicit) {
     // Agent names and their file-model ids are both valid explicit routing notes.
     const name = files.has(explicit.name) ? explicit.name : [...files].find(([, f]) => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === explicit.name)?.[0]
     target = name ? { agent: name } : { agent: 'general-purpose', model: explicit.name }
@@ -662,7 +654,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const routing = routingSettings(s)
   const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
     ? { target: target!, effort: verdict.effort }
-    : ladderPick(verdict, routing.rules.general, routing, pinnedCandidates, usable, language, routing.allow, forced?.rung, providers)
+    : ladderPick(verdict, routing.rules.general, routing, pinnedCandidates, usable, language, routing.allow, providers)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -673,7 +665,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, ...(tier ? { tier } : {}), rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
+  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
