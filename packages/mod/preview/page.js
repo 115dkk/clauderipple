@@ -17,7 +17,9 @@
   const color = (c, t) => (c in t ? t[c] : c)
 
   function styleBox(p, t) {
-    const s = { display: p.display === 'none' ? 'none' : 'flex', flexDirection: p.flexDirection ?? 'row', position: p.position ?? 'relative', boxSizing: 'border-box', minWidth: 0 }
+    // A Box is static unless it says otherwise, as in the app: an absolute Box paints over every
+    // sibling that is not positioned itself (2026-10-12, the backdrop that hid the panel's words).
+    const s = { display: p.display === 'none' ? 'none' : 'flex', flexDirection: p.flexDirection ?? 'row', position: p.position ?? 'static', boxSizing: 'border-box', minWidth: 0 }
     if (p.top !== undefined) s.top = rows(p.top)
     if (p.bottom !== undefined) s.bottom = rows(p.bottom)
     if (p.left !== undefined) s.left = cells(p.left)
@@ -189,8 +191,13 @@
   const grid = document.createElement('div')
   apply(grid, { display: 'grid', gridTemplateColumns: '1fr', gap: '0' })
   document.body.appendChild(grid)
+  // `#settings,band-menu` draws those scenes alone; `@light` or `@dark` after one picks its theme.
+  const wanted = decodeURIComponent(window.location.hash.slice(1)).split(',').filter(Boolean).map(w => w.split('@'))
   for (const scene of window.SCENES) {
+    const pick = wanted.find(([name]) => name === scene.name)
+    if (wanted.length && !pick) continue
     for (const mode of ['dark', 'light']) {
+      if (pick && pick[1] && pick[1] !== mode) continue
       const t = THEMES[mode]
       const frame = document.createElement('section')
       frame.dataset.scene = scene.name + '-' + mode
