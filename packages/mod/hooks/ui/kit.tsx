@@ -6,9 +6,10 @@
 // - A Box drawn `position: "absolute"` is painted over every sibling that is not itself positioned,
 //   whatever comes after it in the tree (CSS stacking). The 2026-10-12 surfaces put their backdrop in
 //   such a Box and their words in plain ones: in the app the backdrop hid the panel's title, its ×
-//   and every row's name, and only the `relative` controls showed. So a capsule paints its sea
-//   first, absolute, and holds everything else in one `relative` layer after it; every control that
-//   lays a press over a picture is `relative` too.
+//   and every row's name, and only the controls with a press laid over them showed. The app does
+//   not take `position: "relative"` from a Box either: it positions a Box only when one of its own
+//   children is absolute. So a capsule paints its sea first, absolute, and holds everything else in
+//   one layer after it that starts with an empty absolute Box (`lift`), which makes it positioned.
 // - A blank button's label is no-break spaces (U+00A0): the host sets a button's label
 //   `white-space: nowrap`, which would fold ordinary spaces into one. It is sized a little short of
 //   the drawing (an ellipsis would show) and sits in an absolute Box over the control, clipped to it.
@@ -63,6 +64,17 @@ export function press(el: Els, key: string, px: number, onPress: () => void): Re
       <Button key={key} plain label={blank(px)} onPress={() => onPress()} />
     </Box>
   )
+}
+
+/**
+ * An empty absolute Box: the first child of a Box that must paint above an absolute picture laid
+ * before it. The app does not take a Box's own `position: "relative"`; it positions a Box only
+ * when one of its children is absolute (seen 2026-10-13: every capsule's words, tiles and 리플이
+ * lay under the water, and only controls with a press laid over them showed).
+ */
+export function lift(el: Els): RenderNode {
+  const { Box } = el
+  return <Box position="absolute" top={0} left={0} />
 }
 
 /** A picture, `width` × `height` px, in a Box of its own that never shrinks. */
@@ -124,6 +136,7 @@ export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 
         {pic(el, c.key + '-sea', seaArt(width, height, { ...c.sea, at, visible }), 'ClaudeRipple', width, height)}
       </Box>
       <Box key={c.key + '-layer'} position="relative" flexDirection="column" rowGap={c.gap ?? 0} paddingX={padX} paddingY={padY} width="100%" minWidth={0}>
+        {lift(el)}
         {c.children}
       </Box>
     </Box>
@@ -183,6 +196,7 @@ export function well(el: Els, key: string, cells: number, field: RenderNode, alt
         {pic(el, 'well-' + key, wellArt(w, WELL_PX), alt, w, WELL_PX)}
       </Box>
       <Box key={'well-field-' + key} position="relative" flexGrow={1} flexShrink={1} minWidth={0}>
+        {lift(el)}
         {field}
       </Box>
     </Box>

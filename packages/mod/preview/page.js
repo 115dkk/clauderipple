@@ -17,9 +17,11 @@
   const color = (c, t) => (c in t ? t[c] : c)
 
   function styleBox(p, t) {
-    // A Box is static unless it says otherwise, as in the app: an absolute Box paints over every
-    // sibling that is not positioned itself (2026-10-12, the backdrop that hid the panel's words).
-    const s = { display: p.display === 'none' ? 'none' : 'flex', flexDirection: p.flexDirection ?? 'row', position: p.position ?? 'static', boxSizing: 'border-box', minWidth: 0 }
+    // As in the app (2026-10-13): a Box is absolute when it says so, relative only when one of its
+    // own children is absolute (a `relative` it asks for is not taken), else static; an absolute
+    // Box paints over every Box that is not positioned, whatever comes after it.
+    const absChild = (p.__children || []).some(c => c && c.type === 'Box' && c.props && c.props.position === 'absolute')
+    const s = { display: p.display === 'none' ? 'none' : 'flex', flexDirection: p.flexDirection ?? 'row', position: p.position === 'absolute' ? 'absolute' : absChild ? 'relative' : 'static', boxSizing: 'border-box', minWidth: 0 }
     if (p.top !== undefined) s.top = rows(p.top)
     if (p.bottom !== undefined) s.bottom = rows(p.bottom)
     if (p.left !== undefined) s.left = cells(p.left)
@@ -133,7 +135,7 @@
     switch (node.type) {
       case 'Box': {
         const el = document.createElement('div')
-        apply(el, styleBox(p, t))
+        apply(el, styleBox({ ...p, __children: (node.children || []).flat(Infinity) }, t))
         let inner = scope
         if (p.key) { el.id = 'e' + ++uid; inner = el.id }
         hoverRule(scope === inner ? scope : inner, el, p.hover, t)

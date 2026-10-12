@@ -34,7 +34,7 @@ import type { RenderChildren, RenderNode } from 'claude-code'
 import type { Effort } from '../../types'
 import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, clockArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, switchArt, textPx } from './art'
 import type { Sea, Tone } from './art'
-import { CLOSE_CELLS, capsule, closeButton, lit, pic, pill, press, ripple, rowsOf, segmented, toggle, toggleCells } from './kit'
+import { CLOSE_CELLS, capsule, closeButton, lift, lit, pic, pill, press, ripple, rowsOf, segmented, toggle, toggleCells } from './kit'
 import { textButton } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
@@ -543,6 +543,7 @@ function whyDrawn(el: Els, frame: Frame, view: DashboardView, tips: { key: strin
             {pic(el, 'tip-plate-' + tip.key, plateArt(width, ROW_PX), tip.text, width, ROW_PX)}
           </Box>
           <Box position="relative" flexShrink={1} minWidth={0}>
+            {lift(el)}
             <Text color={INK} wrap="truncate">{tip.text}</Text>
           </Box>
         </Box>
