@@ -57,7 +57,7 @@ export default function Session() {
     <View style={s.top}>
       <IconButton name="back" label={t('a11y.back')} onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
       <View style={s.topTitle}>
-        <Text style={s.topB} numberOfLines={1}>{session ? folderName(session.cwd) : t('tool.loading')}</Text>
+        <Text style={s.topB} numberOfLines={1}>{session ? session.title || folderName(session.cwd) : t('tool.loading')}</Text>
         <Text style={s.topSub} numberOfLines={1}>{model}{effort && !readOnly ? ` · ${t(`effort.${effort}`)}` : ''}</Text>
       </View>
       <View style={[s.iconBtn, !live && { opacity: 0.45 }]} accessibilityLabel={t(`state.${sessionState}`)}><StateRing state={readOnly ? 'stopped' : sessionState} size={24} /></View>

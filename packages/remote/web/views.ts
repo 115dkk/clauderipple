@@ -154,8 +154,8 @@ export function sessionTop(ui: UI, s: SessionSummary | undefined, view: SessionV
   const model = view.model ?? s?.model ?? null;
   const eff = view.effort ?? s?.effort ?? null;
   const state = s?.desktopBridge ? s.state : view.open.length ? "waiting" : view.state ?? s?.state ?? "stopped";
-  if (s?.readOnly) return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(folderName(s.cwd, ui.home))}</b><span>${esc(modelName(ui.models, model))}</span></div>${stateRing("stopped", 24)}`;
-  return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s ? folderName(s.cwd, ui.home) : "")}</b><button data-act="pick-model-session"><span>${esc(modelName(ui.models, model))}${eff ? ` · ${esc(effortLabel(eff))}` : ""}</span>${icon.down(14)}</button></div><span class="icon-btn${ui.link.state === "open" ? "" : " stale"}" aria-label="${esc(t(`state.${state}` as Key))}">${stateRing(state, 24)}</span>`;
+  if (s?.readOnly) return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s.title || folderName(s.cwd, ui.home))}</b><span>${esc(modelName(ui.models, model))}</span></div>${stateRing("stopped", 24)}`;
+  return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s ? s.title || folderName(s.cwd, ui.home) : "")}</b><button data-act="pick-model-session"><span>${esc(modelName(ui.models, model))}${eff ? ` · ${esc(effortLabel(eff))}` : ""}</span>${icon.down(14)}</button></div><span class="icon-btn${ui.link.state === "open" ? "" : " stale"}" aria-label="${esc(t(`state.${state}` as Key))}">${stateRing(state, 24)}</span>`;
 }
 
 function pct(v: number | null): string {
