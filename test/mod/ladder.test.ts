@@ -12,11 +12,12 @@ const { ladderPick, ladderOptionsFrom, candidateUsable } = await import('../../p
 
 const v = (level: WorkerVerdict['level'], more: Partial<WorkerVerdict> = {}): WorkerVerdict => ({ domain: 'general', level, effort: 'medium', why: '', ...more })
 
-test('levels land on light, standard and hard; only deep planning lands on plan', () => {
+test('levels land on light, standard and hard; planning from standard up lands on plan', () => {
   assert.equal(rungOf(v('light')), 'light')
   assert.equal(rungOf(v('standard')), 'standard')
   assert.equal(rungOf(v('deep')), 'hard')
-  assert.equal(rungOf(v('standard', { kind: 'plan' })), 'standard')
+  // A business strategy judged "standard plan" went to the Medium worker (pick log, 2026-10-12).
+  assert.equal(rungOf(v('standard', { kind: 'plan' })), 'plan')
   assert.equal(rungOf(v('deep', { kind: 'plan' })), 'plan')
   // A light plan (rename a section of the spec) is still light work.
   assert.equal(rungOf(v('light', { kind: 'plan' })), 'light')
@@ -26,7 +27,7 @@ test('levels land on light, standard and hard; only deep planning lands on plan'
 test('an unsure verdict takes the next rung up, never into plan; plan stays plan', () => {
   assert.equal(rungOf(v('light', { sure: 0.49 })), 'standard')
   assert.equal(rungOf(v('standard', { sure: 0.3 })), 'hard')
-  assert.equal(rungOf(v('standard', { kind: 'plan', sure: 0.3 })), 'hard')
+  assert.equal(rungOf(v('standard', { kind: 'plan', sure: 0.3 })), 'plan')
   assert.equal(rungOf(v('deep', { sure: 0.1 })), 'hard')
   assert.equal(rungOf(v('deep', { kind: 'plan', sure: 0.1 })), 'plan')
   assert.equal(rungOf(v('light', { sure: 0.5 })), 'light')

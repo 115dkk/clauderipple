@@ -9,13 +9,15 @@ import { CLAUDE_WORKERS, EFFORTS, LEVEL_RUNG, RUNGS, candidateKey, isAllowed } f
 export const SURE_ENOUGH = 0.5
 
 /**
- * Light, standard and deep land on Low, Medium and High; deep planning (architecture, design
- * decisions) lands on Plan, the Max worker. Kind moves only the deep level.
+ * Doing work lands on Low, Medium and High by level. Planning — a deliverable that is a decision,
+ * design, strategy or verdict — is the Max worker's job from standard up (a business strategy
+ * judged "standard plan" went to the Medium worker before, 2026-10-12 pick log); a light plan
+ * (rename a section of a spec) is still light work.
  * An unsure verdict moves up one rung (Low → Medium → High); High and Plan stay, so only a
  * planning verdict ever reaches Plan.
  */
 export function rungOf(verdict: Pick<WorkerVerdict, 'level' | 'kind' | 'sure'>): Rung {
-  const rung = verdict.level === 'deep' && verdict.kind === 'plan' ? 'plan' : LEVEL_RUNG[verdict.level]
+  const rung = verdict.kind === 'plan' && verdict.level !== 'light' ? 'plan' : LEVEL_RUNG[verdict.level]
   if (verdict.sure === undefined || !(verdict.sure < SURE_ENOUGH)) return rung
   return rung === 'light' ? 'standard' : rung === 'standard' ? 'hard' : rung
 }
