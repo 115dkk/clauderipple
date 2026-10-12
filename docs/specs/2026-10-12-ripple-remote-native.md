@@ -51,6 +51,21 @@ one transcript is unmeasured, so **no "continue here" in this round**.
   "작업이 실패했습니다") plus the session id in `data` for deep-linking. 404-equivalents
   (`DeviceNotRegistered`) drop the token.
 
+## Windows host (deferred to the Windows release — decided 2026-10-12)
+
+The phone app, relay, E2EE and transcript handling are OS-neutral. These host parts are macOS-only
+today and need a Windows path before Ripple Remote ships on Windows:
+
+| Part | macOS now | Windows needs |
+|---|---|---|
+| Resident host | launchd (`src/service.ts`) | Task Scheduler or a service |
+| Claude login token for Remote Control | keychain `security find-generic-password -s "Claude Code-credentials"` (`src/bridge-client.ts`) | where Windows Claude Code keeps it — verify |
+| Handoff to the desktop app | `/usr/bin/script` pty around `claude --desktop --resume` (`src/handoff.ts`) | ConPTY |
+| Live-session check | `~/.claude/sessions/<pid>.json` (shared) + `ps` fallback (`src/desktop.ts`) | replace the `ps` fallback |
+
+First confirm the Windows Claude app writes the same session registry and supports Remote Control.
+Verify in the Parallels VM (prlctl exec).
+
 ## Acceptance
 
 - Part A: unit tests for transcript parsing (fixtures, malformed lines); the phone lists today's
