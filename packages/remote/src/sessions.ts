@@ -181,7 +181,10 @@ export class Sessions {
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       projects: opts.desktopProjects, now: this.now, summarize, ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
-      excluded: () => new Set(Array.from(this.records.values()).filter(r => !r.desktopBridge).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
+      // Only transcripts the host is writing right now, or a phone session not yet handed to the
+      // desktop app, are hidden; any other one may be open in the app and must stay reachable
+      // (a record the host once resumed is rebased onto Remote Control from here).
+      excluded: () => new Set(Array.from(this.records.values()).filter(r => !r.desktopBridge && (this.live.has(r.id) || r.desktopHandoff === "pending")).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
     });
   }
 
