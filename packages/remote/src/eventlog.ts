@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -228,6 +228,15 @@ export class EventLog {
     const start = Math.min(this.entries.length - 1, Math.ceil(beforeSeq) - 2);
     const { events, remaining } = this.page(start, -1, maxBytes);
     return { events, hasOlder: remaining };
+  }
+
+  /** Content-addressed, so repeated SDK snapshots do not duplicate large image bytes. */
+  image(base64: string): string {
+    this.assertOpen();
+    const hash = createHash("sha256").update(base64).digest("hex");
+    const id = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+    writeFileAtomic(join(this.dir, "blobs", `${id}.txt`), base64);
+    return id;
   }
 
   blob(id: string): string | null {

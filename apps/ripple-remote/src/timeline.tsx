@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { Image, Modal, Pressable, ScrollView, Text, View } from 'react-native';
+import type { ImagePart } from '../../../packages/remote/src/protocol.ts';
 import type { BlobChunk, SubPage, Text as WireText } from '../../../packages/remote/src/protocol.ts';
 import { reduce, timelineItems, type Item, type TimelineItem as DisplayItem } from '../../../packages/remote/web/timeline.ts';
 import { t, dictionaries, lang, type Key } from '../../../packages/remote/web/i18n.ts';
@@ -37,6 +38,49 @@ export function EventText({ value, session, markdown = false, mono: monoText = f
   return <View style={{ gap: 6 }}>{draw(full ?? value.preview)}<Pressable accessibilityRole="button" disabled={busy} onPress={() => { if (full) setFull(null); else void load(); }}><Text style={{ fontSize: 13, fontWeight: '600', color: c.accent, paddingVertical: 4 }}>{busy ? t('tool.loading') : full ? t('tool.less') : t('perm.showAll')}</Text></Pressable></View>;
 }
 
+function ConversationImage({ part, session }: { part: ImagePart; session: string }) {
+  const { c } = useStyles();
+  const [uri, setUri] = useState<string | null>(null);
+  const [failed, setFailed] = useState(!part.blob);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setUri(null); setFailed(!part.blob);
+    if (!part.blob) return;
+    void (async () => {
+      try {
+        let offset = 0, base64 = '';
+        for (;;) {
+          const chunk = await remote.request({ op: 'blob', session, id: part.blob!, offset }) as BlobChunk;
+          if (cancelled) return;
+          base64 += chunk.text;
+          if (chunk.next === null) break;
+          offset = chunk.next;
+        }
+        setUri(`data:${part.mediaType};base64,${base64}`);
+      } catch (error) { if (!cancelled) { setFailed(true); remote.report(error); } }
+    })();
+    return () => { cancelled = true; };
+  }, [session, part.blob, part.mediaType]);
+  const label = copy('이미지를 표시할 수 없습니다', 'Image unavailable');
+  return <View style={{ marginVertical: 6 }}>
+    {uri && !failed ? <Pressable accessibilityRole="button" accessibilityLabel={copy('이미지 크게 보기', 'View full image')} onPress={() => setOpen(true)}>
+      <Image source={{ uri }} resizeMode="contain" onError={() => setFailed(true)} style={{ width: 240, maxWidth: '100%', height: 180, borderRadius: 12, backgroundColor: c.sunk }} />
+    </Pressable> : <Text style={{ fontSize: 12.5, color: c.muted, padding: 8 }}>{failed ? label : t('tool.loading')}</Text>}
+    <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+      <View style={{ flex: 1, backgroundColor: '#000', paddingTop: 60, paddingBottom: 40 }}>
+        <Pressable accessibilityRole="button" accessibilityLabel={t('a11y.close')} onPress={() => setOpen(false)} style={{ alignSelf: 'flex-end', padding: 16 }}><Text style={{ color: '#fff', fontSize: 17 }}>{t('a11y.close')}</Text></Pressable>
+        <ScrollView maximumZoomScale={5} minimumZoomScale={1} centerContent contentContainerStyle={{ flexGrow: 1, justifyContent: 'center' }}>
+          {uri && <Image source={{ uri }} resizeMode="contain" style={{ width: '100%', height: 600 }} />}
+        </ScrollView>
+      </View>
+    </Modal>
+  </View>;
+}
+function ConversationImages({ images, session }: { images?: ImagePart[]; session: string }) {
+  return <>{images?.map((part, i) => <ConversationImage key={`${part.blob ?? 'missing'}-${i}`} part={part} session={session} />)}</>;
+}
+
 function ToolRow({ tool, session }: { tool: Extract<Item, { type: 'assistant' }>['tools'][number]; session: string }) {
   const { c } = useStyles();
   const [open, setOpen] = useState(false);
@@ -50,7 +94,7 @@ function ToolRow({ tool, session }: { tool: Extract<Item, { type: 'assistant' }>
     </Pressable>
     {open && <View style={{ marginTop: 2, marginBottom: 4, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: c.sunk, gap: 12 }}>
       {tool.input && <EventText value={tool.input} session={session} mono />}
-      {tool.result && <View style={{ borderTopWidth: tool.input ? 1 : 0, borderTopColor: c.line2, paddingTop: tool.input ? 10 : 0 }}><EventText value={tool.result.text} session={session} mono /></View>}
+      {tool.result && <View style={{ borderTopWidth: tool.input ? 1 : 0, borderTopColor: c.line2, paddingTop: tool.input ? 10 : 0 }}><EventText value={tool.result.text} session={session} mono /><ConversationImages images={tool.result.images} session={session} /></View>}
     </View>}
   </View>;
 }
@@ -106,10 +150,12 @@ export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; s
   if (item.type === 'start') return <Text style={{ alignSelf: 'center', fontSize: 12.5, color: c.faint, paddingVertical: 4 }}>{t('history.start')}</Text>;
   if (item.type === 'user') return <View style={{ alignSelf: 'flex-end', maxWidth: '86%', backgroundColor: c.userBg, paddingVertical: 10, paddingHorizontal: 14, borderTopLeftRadius: 20, borderTopRightRadius: 20, borderBottomLeftRadius: 20, borderBottomRightRadius: 6, opacity: item.queued ? 0.72 : 1 }}>
     <Text selectable style={{ fontSize: 16, lineHeight: 24, color: c.ink }}>{item.text}</Text>
+    <ConversationImages images={item.images} session={session} />
     {item.queued && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4, justifyContent: 'flex-end' }}><Icon name="clock" size={13} color={c.muted} /><Text style={{ fontSize: 12.5, color: c.muted }}>{t(`queue.${item.queued}`)}</Text></View>}
   </View>;
   if (item.type === 'assistant') return <View>
     <EventText value={item.text} session={session} markdown streaming={item.streaming} />
+    <ConversationImages images={item.images} session={session} />
     {item.tools.length > 0 && <View style={{ gap: 4, marginTop: 8 }}>{item.tools.map(tool => <ToolRow key={tool.id} tool={tool} session={session} />)}</View>}
   </View>;
   if (item.type === 'permission') {

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { messageContent, type ImageSink } from "./images.ts";
 import type { EventBody, SessionSummary, ToolCall } from "./protocol.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,7 +87,7 @@ function prompt(r: RecordValue): string {
 function title(value: string): string { return value.trim().replace(/\s+/g, " ").slice(0, 160); }
 
 /** Unknown records and malformed block shapes never become events. */
-export function transcriptEvents(line: string, cwd: string, summarize: Summarize): { at: number | null; bodies: EventBody[] } {
+export function transcriptEvents(line: string, cwd: string, summarize: Summarize, sink?: ImageSink): { at: number | null; bodies: EventBody[] } {
   const r = record(line);
   const bodies: EventBody[] = [];
   if (!r || r.isSidechain === true) return { at: null, bodies };
@@ -102,11 +103,14 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       const status = /<status>([^<]+)<\/status>/.exec(p)?.[1];
       // A notification without its tool call has nothing to attach to; it is not the user's words.
       if (toolUseId) bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? p });
-    } else if (p) bodies.push({ kind: "user", text: p, clientMsgId: str(r.uuid) });
+    } else if (p) {
+      const converted = messageContent(message?.content, sink);
+      bodies.push({ kind: "user", ...converted, clientMsgId: str(r.uuid) });
+    }
     for (const value of Array.isArray(message?.content) ? message.content : []) {
       const b = object(value);
       if (b?.type === "tool_result" && typeof b.tool_use_id === "string") {
-        bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, text: text(b.content) });
+        bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...messageContent(b.content, sink) });
       }
     }
   } else if (r.type === "assistant" && message && Array.isArray(message.content)) {
@@ -121,8 +125,8 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
         input: worker && typeof input.prompt === "string" ? input.prompt : JSON.stringify(input, null, 2) });
     }
-    const body = text(message.content);
-    if (body || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), text: body, tools });
+    const body = messageContent(message.content, sink);
+    if (body.text || body.images.length || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), ...body, tools });
   } else if (r.type === "result") {
     const ok = r.subtype === "success" && r.is_error !== true;
     bodies.push({ kind: "result", ok, ...(!ok ? { error: str(r.result) || str(r.subtype) } : {}), ms: typeof r.duration_ms === "number" ? r.duration_ms : 0, turns: typeof r.num_turns === "number" ? r.num_turns : 0 });
@@ -269,7 +273,7 @@ export class DesktopSessions {
   }
 
   /** Tail complete transcript lines into an existing host log; never write the transcript. */
-  tail(id: string, offset: number, visit: (body: EventBody) => void): number {
+  tail(id: string, offset: number, visit: (body: EventBody) => void, sink?: ImageSink): number {
     const source = this.sources.get(id);
     if (!source) return offset;
     const fd = this.open(source.file);
@@ -277,7 +281,7 @@ export class DesktopSessions {
       const size = fs.fstatSync(fd).size;
       if (size < offset) throw new Error("Desktop transcript was truncated.");
       return scanLines(fd, size, line => {
-        for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize).bodies) visit(body);
+        for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize, sink).bodies) visit(body);
       }, offset);
     } finally { fs.closeSync(fd); }
   }
@@ -322,7 +326,7 @@ export class DesktopSessions {
     const log = EventLog.open({ dir, now: () => importing ? at : now() });
     try {
       source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize);
+        const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize, data => log.image(data));
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });

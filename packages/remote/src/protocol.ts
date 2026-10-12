@@ -45,9 +45,13 @@ export type SessionState =
 export interface BlobRef { blob: string; bytes: number; preview: string }
 export type Text = string | BlobRef;
 
+/** Image bytes are base64 in the existing chunked blob transport, never in an event. */
+export interface ImagePart { type: "image"; blob?: string; mediaType: string; width?: number; height?: number }
+export interface MessageImages { images?: ImagePart[] }
+
 export interface ToolCall { id: string; name: string; /** one line a person reads: a command, a path */ summary: string; input?: Text }
 
-export type EventBody =
+export type EventBody = MessageImages & (
   | { kind: "user"; text: string; clientMsgId: string }
   | { kind: "turn"; model: string; effort: Effort | null }
   /** Streamed text, coalesced by the host (~80 ms). Superseded by the `assistant` event with the same `msg`. */
@@ -61,7 +65,7 @@ export type EventBody =
   | { kind: "result"; ok: boolean; error?: string; ms: number; turns: number }
   | { kind: "state"; state: SessionState; detail?: string }
   | { kind: "figures"; figures: Figures }
-  | { kind: "notice"; code: NoticeCode; text?: string };
+  | { kind: "notice"; code: NoticeCode; text?: string });
 
 export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked";
 

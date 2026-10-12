@@ -561,6 +561,30 @@ test("blob req chunks round-trip full Unicode output with next offsets until nul
   assert.equal(combined, text);
 });
 
+test("large image blobs round-trip in capped frames without inlining bytes in events", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const bytes = Buffer.alloc(700_000, 173);
+  const data = bytes.toString("base64");
+  const blob = f.sessions.log(id).image(data);
+  const event = f.sessions.log(id).append({ kind: "user", text: "", clientMsgId: "image-user", images: [{ type: "image", blob, mediaType: "image/png" }] });
+  assert.ok(Buffer.byteLength(JSON.stringify(event)) < 1024);
+  const peer = await f.auth();
+  let offset: number | null = 0, combined = "", chunks = 0;
+  while (offset !== null) {
+    const reqId = `image-${++chunks}`;
+    peer.send({ t: "req", reqId, op: { op: "blob", session: id, id: blob, offset } });
+    const frame = await peer.take("res", msg => msg.reqId === reqId);
+    assert.ok(frame.bytes <= FRAME_CAP);
+    assert.ok(frame.msg.ok);
+    const chunk = frame.msg.data as BlobChunk;
+    assert.equal(chunk.offset, offset);
+    combined += chunk.text; offset = chunk.next;
+  }
+  assert.ok(chunks > 10);
+  assert.deepEqual(Buffer.from(combined, "base64"), bytes);
+});
+
 test("browse req lists only visible subdirectories in sorted order", { timeout: 4500 }, async t => {
   const f = await fixture(t);
   const dir = path.join(f.dir, "browse");

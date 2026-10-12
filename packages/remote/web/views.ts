@@ -1,6 +1,6 @@
 // Screens as strings of markup. The app and the screenshot fixtures both call these, so the
 // mockups in docs/media/remote are the shipped UI, not a drawing of it.
-import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionSummary, Text } from "../src/protocol.ts";
+import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
 import type { LinkStatus } from "./conn.ts";
 import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
@@ -186,6 +186,12 @@ export function band(ui: UI, view: SessionView): string {
   return `<button class="band${ui.link.state === "open" ? "" : " stale"}" data-act="workers" aria-expanded="${ui.workersOpen}">${cells}</button>${workers}`;
 }
 
+function images(parts?: ImagePart[]): string {
+  return (parts ?? []).map(part => part.blob
+    ? `<button class="conversation-image" data-act="image" data-blob="${esc(part.blob)}" data-media="${esc(part.mediaType)}" aria-label="${esc(t('image.view'))}"><span>${esc(t('tool.loading'))}</span><img hidden alt="${esc(t('image.view'))}" /></button>`
+    : `<div class="image-unavailable">${esc(t('image.unavailable'))}</div>`).join('');
+}
+
 function toolRow(tool: ToolView, ui: UI): string {
   const open = ui.expanded.has(tool.id);
   const st = !tool.result ? `<span class="st run">${icon.clock(15)}</span>` : tool.result.ok ? `<span class="st">${icon.check(15)}</span>` : `<span class="st bad">${icon.x(15)}</span>`;
@@ -193,7 +199,7 @@ function toolRow(tool: ToolView, ui: UI): string {
   if (!open) return row;
   const fetched = ui.expanded.get(tool.id);
   const body = fetched ?? [tool.input ? textOf(tool.input) : "", tool.result ? textOf(tool.result.text) : ""].filter(Boolean).join("\n\n────\n\n");
-  return row + (body ? `<details class="tool-details"><summary>${esc(t("perm.showAll"))}</summary><div class="tool-out">${esc(body)}</div></details><div class="tool-preview tool-out">${esc(body.slice(0, 1200).split("\n").slice(0, 12).join("\n"))}${body.length > 1200 || body.split("\n").length > 12 ? "\n…" : ""}</div>` : "");
+  return row + (body ? `<details class="tool-details"><summary>${esc(t("perm.showAll"))}</summary><div class="tool-out">${esc(body)}</div></details><div class="tool-preview tool-out">${esc(body.slice(0, 1200).split("\n").slice(0, 12).join("\n"))}${body.length > 1200 || body.split("\n").length > 12 ? "\n…" : ""}</div>` : "") + images(tool.result?.images);
 }
 
 export function item(it: TimelineItem, ui: UI): string {
@@ -207,7 +213,7 @@ export function item(it: TimelineItem, ui: UI): string {
       return `<div class="start">${esc(t("history.start"))}</div>`;
     case "user": {
       const q = it.queued ? `<div class="q">${icon.clock(13)}${esc(it.queued === "pending" ? t("queue.pending") : t("queue.sending"))}</div>` : "";
-      return `<div class="msg-user${it.queued ? " queued" : ""}">${esc(it.text)}${q}</div>`;
+      return `<div class="msg-user${it.queued ? " queued" : ""}">${esc(it.text)}${images(it.images)}${q}</div>`;
     }
     case "assistant": {
       const text = textOf(it.text);
@@ -215,7 +221,7 @@ export function item(it: TimelineItem, ui: UI): string {
       const html = text ? markdown(text) : "";
       const withCaret = caret ? (html.endsWith("</p>") ? html.slice(0, -4) + caret + "</p>" : html + caret) : html;
       const tools = it.tools.length ? `<div class="tools">${it.tools.map((tl) => toolRow(tl, ui)).join("")}</div>` : "";
-      return `<div class="msg-asst">${withCaret}${tools}</div>`;
+      return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}</div>`;
     }
     case "subagent": {
       const st = it.status === "running" ? t("sub.running") : it.status === "done" ? t("sub.done") : t("sub.failed");

@@ -60,6 +60,45 @@ export class App {
   private lastOpenPerm = "";
   private pinned = true;
   private timelineSize: ResizeObserver | null = null;
+  private imageUrls = new Map<string, Promise<string>>();
+
+  private clearImages(): void {
+    for (const url of this.imageUrls.values()) void url.then(value => URL.revokeObjectURL(value), () => undefined);
+    this.imageUrls.clear();
+  }
+
+  private hydrateImages(root: HTMLElement, session: string): void {
+    for (const el of root.querySelectorAll<HTMLElement>('.conversation-image')) {
+      if (el.dataset.loading) continue;
+      el.dataset.loading = 'true';
+      const id = el.dataset.blob!, media = el.dataset.media!;
+      let loading = this.imageUrls.get(id);
+      if (!loading) {
+        loading = (async () => {
+          let offset = 0, base64 = '';
+          for (;;) {
+            const chunk = await this.req<BlobChunk>({ op: 'blob', session, id, offset });
+            base64 += chunk.text;
+            if (chunk.next === null) break;
+            offset = chunk.next;
+          }
+          const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+          return URL.createObjectURL(new Blob([bytes], { type: media }));
+        })();
+        this.imageUrls.set(id, loading);
+      }
+      void loading.then(url => {
+        if (!el.isConnected) return;
+        const image = el.querySelector('img')!;
+        image.onerror = () => { image.hidden = true; el.querySelector('span')!.textContent = t('image.unavailable'); };
+        image.onload = () => { el.querySelector('span')!.textContent = ''; };
+        image.src = url; image.hidden = false;
+      }, error => {
+        if (el.isConnected) el.querySelector('span')!.textContent = t('image.unavailable');
+        this.toast(t('error.generic', { text: (error as Error).message }));
+      });
+    }
+  }
 
   constructor(link: LinkStatus) {
     this.ui = {
@@ -348,6 +387,7 @@ export class App {
     const root = $("#app");
     const key = this.screen.name === "session" ? `s:${this.screen.id}` : this.screen.name;
     if (key !== this.renderedScreen) {
+      this.clearImages();
       this.renderedScreen = key;
       this.pinned = true;
       this.composerMode = "";
@@ -413,6 +453,7 @@ export class App {
     const main = $("main");
     const stick = this.pinned;
     patchList<TimelineItem>($("#tl"), timelineItems(view), (it) => V.item(it, this.ui));
+    this.hydrateImages($("#tl"), id);
     const c = this.cache(id);
     $("#older").hidden = !c.loadingOlder;
     if (stick) this.scrollToBottom();
@@ -537,6 +578,19 @@ export class App {
     const session = this.screen.name === "session" ? this.screen.id : "";
     if (session && this.summary(session)?.readOnly && ["send", "stop", "allow", "deny", "always", "pick-model-session"].includes(act)) return;
     switch (act) {
+      case "image": {
+        const image = el.querySelector('img');
+        if (!image?.src || image.hidden) break;
+        const viewer = document.createElement('div');
+        viewer.className = 'image-viewer'; viewer.setAttribute('role', 'dialog'); viewer.setAttribute('aria-modal', 'true');
+        const close = document.createElement('button'); close.textContent = t('a11y.close');
+        const full = document.createElement('img'); full.src = image.src; full.alt = t('image.view');
+        viewer.append(close, full); $("#app").append(viewer);
+        const dismiss = () => { viewer.remove(); document.removeEventListener('keydown', key); el.focus(); };
+        const key = (event: KeyboardEvent) => { if (event.key === 'Escape') dismiss(); };
+        close.onclick = dismiss; document.addEventListener('keydown', key); close.focus();
+        break;
+      }
       case "retry": this.link?.nudge(); break;
       case "pair-link": {
         // A Home Screen app keeps its own storage, apart from Safari's: the pairing a scanned QR
@@ -659,6 +713,7 @@ export class App {
       const view = reduce(page.events);
       const html = timelineItems(view).map((i) => V.item(i, this.ui)).join("");
       setHTML($("#sheet"), `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog"><div class="grab"></div><div class="sh"><b>${esc(t("sub.worker"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div><div class="sbody"><div class="tl">${html}</div></div></div>`);
+      this.hydrateImages($("#sheet"), this.screen.id);
     } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
   }
 }

@@ -17,7 +17,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: string } = {}) {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean } = {}) {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -44,7 +44,9 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: string } = {
           if (script.toolOutput !== undefined) {
             yield { type: "user", parent_tool_use_id: null, message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: script.toolOutput, is_error: false }] } };
           }
-          yield { type: "assistant", parent_tool_use_id: null, message: { id, model: "x", content: [{ type: "text", text: "pong" }] } };
+          const image = { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from("sdk image").toString("base64") } };
+          if (script.images) yield { type: "user", uuid: "sdk-image-user", message: { content: [image] } };
+          yield { type: "assistant", parent_tool_use_id: null, message: { id, model: "x", content: [{ type: "text", text: "pong" }, ...(script.images ? [image] : [])] } };
           yield { type: "result", subtype: "success", is_error: false, duration_ms: 5, num_turns: 1, modelUsage: { x: { contextWindow: 1000 } } };
         }
       },
@@ -88,6 +90,16 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
   await nextTick();
 }
+
+test("SDK user, assistant and tool-result image blocks retain chunked blob references", async t => {
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from("sdk image").toString("base64") } };
+  const f = fixture(t, { images: true, toolOutput: [image] });
+  const id = await f.create();
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  const events = f.sessions.log(id).readAfter(0).events.filter(e => e.images?.length);
+  assert.deepEqual(events.map(e => e.kind).sort(), ["assistant", "tool_result", "user"]);
+  for (const event of events) assert.equal(f.sessions.log(id).blob(event.images![0]!.blob!), image.source.data);
+});
 
 function eventLabels(events: SessionEvent[]): string[] {
   return events.filter(event => event.kind !== "figures").map(event => event.kind === "state" ? `state ${event.state}` : event.kind);

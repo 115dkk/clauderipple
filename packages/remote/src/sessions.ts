@@ -7,6 +7,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { messageContent } from "./images.ts";
+import type { ImagePart } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { BridgeClient, DESKTOP_BLOCKED, object, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
@@ -56,7 +58,7 @@ interface Live {
   buffer: { msg: string; text: string } | null;
   flushTimer: ReturnType<typeof setTimeout> | null;
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
-  current: { msg: string; text: string; tools: ToolCall[]; model: string } | null;
+  current: { msg: string; text: string; images?: ImagePart[]; tools: ToolCall[]; model: string } | null;
   /** Task/Agent tool ids → their subagent while it runs */
   subs: Map<string, { description: string; model: string | null; steps: number }>;
   turnStart: number;
@@ -152,12 +154,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function uuidFrom(text: string): string {
   const h = createHash("sha256").update(text).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
-}
-
-function toolResultText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return content === undefined ? "" : JSON.stringify(content);
-  return content.map((b: { type?: string; text?: string }) => (b?.type === "text" ? b.text ?? "" : b?.type === "image" ? "[image]" : "")).join("\n");
 }
 
 export class Sessions {
@@ -257,7 +253,7 @@ export class Sessions {
       try {
         r.transcriptOffset = this.desktop.tail(r.sdkSessionId ?? r.id, r.transcriptOffset ?? 0, body => {
           if (body.kind !== "user" || !(this.seen(r.id, body.clientMsgId) || this.bridgeEchoes.has(body.clientMsgId))) this.append(r.id, body);
-        });
+        }, data => this.log(r.id).image(data));
         this.save();
         const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
         this.setState(r, process ? this.bridgeState(process) : "stopped");
@@ -719,8 +715,10 @@ export class Sessions {
         const id = message.id ?? randomUUID();
         if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? r.model };
         const cur = live.current;
+        const converted = messageContent(message.content, data => this.log(r.id).image(data));
+        if (converted.text) cur.text += (cur.text ? "\n\n" : "") + converted.text;
+        cur.images = [...(cur.images ?? []), ...converted.images];
         for (const b of message.content ?? []) {
-          if (b.type === "text" && b.text) cur.text += (cur.text ? "\n\n" : "") + b.text;
           if (b.type === "tool_use" && b.id && b.name) {
             const input = b.input ?? {};
             cur.tools.push({ id: b.id, name: b.name, summary: summarize(b.name, input, r.cwd), input: JSON.stringify(input, null, 2) });
@@ -732,15 +730,22 @@ export class Sessions {
           }
         }
         if (message.model) cur.model = message.model;
-        this.append(r.id, { kind: "assistant", msg: cur.msg, model: cur.model, text: cur.text, tools: cur.tools });
+        this.append(r.id, { kind: "assistant", msg: cur.msg, model: cur.model, text: cur.text, images: cur.images, tools: cur.tools });
         return;
       }
       case "user": {
         const message = msg.message as { content?: unknown } | undefined;
         const blocks = Array.isArray(message?.content) ? (message!.content as { type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[]) : [];
+        const converted = messageContent(message?.content, data => this.log(r.id).image(data));
+        // SDK user echoes normally already have a phone event; retain image-bearing echoes only.
+        if (converted.images.length) {
+          const body: EventBody = { kind: "user", ...converted, clientMsgId: typeof msg.uuid === "string" ? msg.uuid : randomUUID() };
+          if (parent) this.subLog(r.id, `sub-${parent}`)?.append(body);
+          else this.append(r.id, body);
+        }
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
-          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, text: toolResultText(b.content) };
+          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data)) };
           if (parent) { this.subLog(r.id, `sub-${parent}`)?.append(body); continue; }
           this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);
@@ -810,9 +815,9 @@ export class Sessions {
   private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {
     const log = this.subLog(r.id, `sub-${parent}`);
     if (!log) return;
-    const text = (message.content ?? []).filter((b) => b.type === "text" && b.text).map((b) => b.text!).join("\n\n");
+    const converted = messageContent(message.content, data => this.log(r.id).image(data));
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b) => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd) }));
-    log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", text, tools });
+    log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     const sub = live.subs.get(parent);
     if (sub) { sub.steps++; if (message.model) sub.model = message.model; }
   }

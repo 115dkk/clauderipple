@@ -5,6 +5,8 @@ export type Lang = "ko" | "en";
 
 const ko = {
   "app.name": "리플 리모트",
+  "image.view": "이미지 크게 보기",
+  "image.unavailable": "이미지를 표시할 수 없습니다",
   /** What copy calls the connected computer before its name is known (and on the pair screen). */
   "host.fallback": "컴퓨터",
   "conn.open": "연결됨",
@@ -153,6 +155,8 @@ export type Key = keyof typeof ko;
 
 const en: Record<Key, string> = {
   "app.name": "Ripple Remote",
+  "image.view": "View full image",
+  "image.unavailable": "Image unavailable",
   /** What copy calls the connected computer before its name is known (and on the pair screen). */
   "host.fallback": "computer",
   "conn.open": "Connected",
