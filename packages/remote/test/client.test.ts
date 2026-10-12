@@ -4,10 +4,18 @@ import assert from "node:assert/strict";
 import { backoff, Link, READY_MS } from "../web/conn.ts";
 import type { SocketLike } from "../web/conn.ts";
 import { dictionaries } from "../web/i18n.ts";
+import { markdown } from "../web/md.ts";
 import { pushAvailability } from "../web/pushstate.ts";
 import { mergeEvents, reduce } from "../web/timeline.ts";
 import { BACKOFF_CAP_MS, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { EventBody, SessionEvent } from "../src/protocol.ts";
+
+test("quoted paragraphs, line breaks, lists and code keep their structure", () => {
+  assert.equal(markdown("> First line\n> Second line\n>\n> 1. First\n>    continuation\n> 2. Second\n>\n> ```\n> a\n> b\n> ```"),
+    '<blockquote><p>First line<br>Second line</p><ol><li>First<br>continuation</li><li>Second</li></ol><pre class="md-code"><code>a\nb</code></pre></blockquote>');
+  assert.equal(markdown("one\ntwo\n\n- alpha\n- beta"), '<p>one<br>two</p><ul><li>alpha</li><li>beta</li></ul>');
+  assert.equal(markdown("<script>bad</script>"), '<p>&lt;script&gt;bad&lt;/script&gt;</p>');
+});
 
 class Clock {
   now = 0;

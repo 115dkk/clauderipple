@@ -36,7 +36,7 @@ function parse(src: string): Block[] {
       const items: string[] = [];
       while (i < lines.length && LIST.test(lines[i]!)) {
         let item = lines[i++]!.replace(LIST, '');
-        while (i < lines.length && /^\s{2,}\S/.test(lines[i]!) && !LIST.test(lines[i]!)) item += ' ' + lines[i++]!.trim();
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]!) && !LIST.test(lines[i]!)) item += '\n' + lines[i++]!.trim();
         items.push(item);
       }
       out.push({ k: 'list', ordered, items });
@@ -45,7 +45,7 @@ function parse(src: string): Block[] {
     if (/^\s*>/.test(line)) {
       const quote: string[] = [];
       while (i < lines.length && /^\s*>/.test(lines[i]!)) quote.push(lines[i++]!.replace(/^\s*>\s?/, ''));
-      out.push({ k: 'quote', text: quote.join(' ') });
+      out.push({ k: 'quote', text: quote.join('\n') });
       continue;
     }
     if (!line.trim()) { i++; continue; }
@@ -81,7 +81,7 @@ export function Markdown({ text, caret = false }: { text: string; caret?: boolea
       case 'h': return <Text key={i} style={[base, gap, { fontSize: 16.5, lineHeight: 22, fontWeight: '700', marginTop: i ? 4 : 0 }]}><Inline text={b.text} />{last ? cursor : null}</Text>;
       case 'code': return <ScrollView key={i} horizontal style={[gap, { backgroundColor: c.sunk, borderRadius: 10 }]} contentContainerStyle={{ paddingVertical: 10, paddingHorizontal: 12 }}><Text style={{ fontFamily: mono, fontSize: 13, lineHeight: 19.5, color: c.ink }}>{b.text}</Text></ScrollView>;
       case 'list': return <View key={i} style={[gap, { gap: 2 }]}>{b.items.map((it, j) => <View key={j} style={{ flexDirection: 'row', paddingLeft: 4 }}><Text style={[base, { width: 22, color: c.ink }]}>{b.ordered ? `${j + 1}.` : '•'}</Text><Text style={[base, { flex: 1 }]}><Inline text={it} />{last && j === b.items.length - 1 ? cursor : null}</Text></View>)}</View>;
-      case 'quote': return <View key={i} style={[gap, { paddingLeft: 12, borderLeftWidth: 3, borderLeftColor: c.line2 }]}><Text style={[base, { color: c.ink2 }]}><Inline text={b.text} />{last ? cursor : null}</Text></View>;
+      case 'quote': return <View key={i} style={[gap, { paddingLeft: 12, borderLeftWidth: 3, borderLeftColor: c.line2 }]}><Markdown text={b.text} caret={last && caret} /></View>;
       default: return <Text key={i} style={[base, gap]}><Inline text={b.text} />{last ? cursor : null}</Text>;
     }
   })}{!blocks.length && cursor ? <Text style={base}>{cursor}</Text> : null}</View>;

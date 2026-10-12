@@ -170,7 +170,8 @@ main.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -web
 
 /* ---- timeline -------------------------------------------------------------------------------- */
 .tl { padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
-.tl > * { content-visibility: auto; contain-intrinsic-size: auto 80px; }
+/* Real item heights keep initial and streaming bottom anchors accurate. */
+.tl > * { min-width: 0; }
 .msg-user { align-self: flex-end; max-width: 86%; background: var(--user-bg); color: var(--ink); padding: 10px 14px; border-radius: 20px 20px 6px 20px; font-size: 16px; white-space: pre-wrap; word-break: break-word; }
 .msg-user.queued { opacity: 0.72; }
 .msg-user .q { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--muted); margin-top: 4px; justify-content: flex-end; }
@@ -199,6 +200,12 @@ main.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -web
 .tool .st.bad { color: var(--bad); }
 .tool .st.run { color: var(--faint); }
 .tool-out { margin: 2px 0 4px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--sunk); font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 50vh; overflow: auto; color: var(--ink-2); }
+
+.tool-details { font-size: 13px; color: var(--accent); }
+.tool-details summary { padding: 4px 0; cursor: pointer; }
+.tool-details[open] + .tool-preview { display: none; }
+.tool-details .tool-out { max-height: none; }
+.msg-asst blockquote > :last-child { margin-bottom: 0; }
 
 .sub { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--r-md); background: var(--surface); border: 1px solid var(--line); width: 100%; text-align: left; }
 .sub .body { flex: 1; min-width: 0; }

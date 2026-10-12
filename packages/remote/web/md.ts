@@ -1,7 +1,7 @@
 // A small Markdown subset for model answers: fenced code, inline code, bold/italic, headings,
 // lists, quotes, tables and http(s) links. Everything is escaped first; nothing a model writes
 // becomes markup we did not choose.
-import { esc } from "./dom.ts";
+import { esc } from "./esc.ts";
 
 function inline(src: string): string {
   const codes: string[] = [];
@@ -56,8 +56,8 @@ export function markdown(src: string): string {
       const items: string[] = [];
       while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i]!)) {
         let item = lines[i++]!.replace(/^\s*([-*+]|\d+[.)])\s+/, "");
-        while (i < lines.length && /^\s{2,}\S/.test(lines[i]!) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]!)) item += " " + lines[i++]!.trim();
-        items.push(`<li>${inline(item)}</li>`);
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]!) && !/^\s*([-*+]|\d+[.)])\s+/.test(lines[i]!)) item += "\n" + lines[i++]!.trim();
+        items.push(`<li>${item.split("\n").map(inline).join("<br>")}</li>`);
       }
       out.push(ordered ? `<ol>${items.join("")}</ol>` : `<ul>${items.join("")}</ul>`);
       continue;
@@ -65,7 +65,7 @@ export function markdown(src: string): string {
     if (/^\s*>/.test(line)) {
       const quote: string[] = [];
       while (i < lines.length && /^\s*>/.test(lines[i]!)) quote.push(lines[i++]!.replace(/^\s*>\s?/, ""));
-      out.push(`<blockquote>${inline(quote.join(" "))}</blockquote>`);
+      out.push(`<blockquote>${markdown(quote.join("\n"))}</blockquote>`);
       continue;
     }
     if (!line.trim()) { i++; continue; }

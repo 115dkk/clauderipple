@@ -184,11 +184,11 @@ export function band(ui: UI, view: SessionView): string {
 function toolRow(tool: ToolView, ui: UI): string {
   const open = ui.expanded.has(tool.id);
   const st = !tool.result ? `<span class="st run">${icon.clock(15)}</span>` : tool.result.ok ? `<span class="st">${icon.check(15)}</span>` : `<span class="st bad">${icon.x(15)}</span>`;
-  const row = `<button class="tool" data-act="tool" data-id="${esc(tool.id)}">${toolIcon(tool.name)}<span class="nm">${esc(tool.name)}</span><span class="sm">${esc(tool.summary)}</span>${st}</button>`;
+  const row = `<button class="tool" data-act="tool" data-id="${esc(tool.id)}" aria-expanded="${open}">${toolIcon(tool.name)}<span class="nm">${esc(tool.name)}</span><span class="sm">${esc(tool.summary)}</span>${st}</button>`;
   if (!open) return row;
   const fetched = ui.expanded.get(tool.id);
-  const body = fetched ?? (tool.result ? (typeof tool.result.text === "string" ? tool.result.text : t("tool.loading")) : "");
-  return row + (body ? `<div class="tool-out">${esc(body)}</div>` : "");
+  const body = fetched ?? [tool.input ? textOf(tool.input) : "", tool.result ? textOf(tool.result.text) : ""].filter(Boolean).join("\n\n────\n\n");
+  return row + (body ? `<details class="tool-details"><summary>${esc(t("perm.showAll"))}</summary><div class="tool-out">${esc(body)}</div></details><div class="tool-preview tool-out">${esc(body.slice(0, 1200).split("\n").slice(0, 12).join("\n"))}${body.length > 1200 || body.split("\n").length > 12 ? "\n…" : ""}</div>` : "");
 }
 
 export function item(it: Item, ui: UI): string {

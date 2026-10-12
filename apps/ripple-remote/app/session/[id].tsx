@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, ScrollView, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -22,7 +22,11 @@ export default function Session() {
   const history = state.histories[id];
   const view = reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder);
   const readOnly = session?.readOnly === true && session?.origin !== 'desktop';
-  useEffect(() => { remote.open(id); }, [id]);
+  const scroll = useRef<ScrollView>(null);
+  const pinned = useRef(true);
+  const dragging = useRef(false);
+  const follow = () => { if (pinned.current) scroll.current?.scrollToEnd({ animated: false }); };
+  useEffect(() => { pinned.current = true; dragging.current = false; remote.open(id); }, [id]);
   const send = async () => { const value = text.trim(); if (!value) return; try { await remote.queue({ t: 'send', session: id, text: value }); setText(''); } catch (e) { remote.report(e); } };
   const link = state.status;
   const live = link?.state === 'open';
@@ -55,7 +59,15 @@ export default function Session() {
       {cell(t('band.fiveHour'), pct(f.fiveHourPct), f.fiveHourPct ?? null, false, true)}
     </View>}
     <ConnectionBanner />
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 16, gap: 14 }} keyboardShouldPersistTaps="handled">
+    <ScrollView key={id} ref={scroll} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 16, gap: 14 }} keyboardShouldPersistTaps="handled"
+      onContentSizeChange={follow} onLayout={follow} scrollEventThrottle={16}
+      onScrollBeginDrag={() => { dragging.current = true; }}
+      onScrollEndDrag={() => { dragging.current = false; }}
+      onMomentumScrollBegin={() => { dragging.current = true; }}
+      onMomentumScrollEnd={() => { dragging.current = false; }}
+      onScroll={({ nativeEvent: e }) => {
+        if (dragging.current) pinned.current = e.contentSize.height - e.contentOffset.y - e.layoutMeasurement.height < 80;
+      }}>
       {history?.hasOlder && <Button title={t('history.loading')} ghost onPress={() => { try { remote.older(id); } catch (e) { remote.report(e); } }} />}
       {view.items.map(item => <TimelineItem key={item.key} item={item} session={id} readOnly={readOnly} />)}
     </ScrollView>

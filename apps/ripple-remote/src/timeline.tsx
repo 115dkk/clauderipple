@@ -13,8 +13,13 @@ export function EventText({ value, session, markdown = false, mono: monoText = f
   const { c } = useStyles();
   const [full, setFull] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const draw = (text: string) => markdown ? <Markdown text={text} caret={streaming} /> : <Text selectable style={monoText ? { fontFamily: mono, fontSize: 12.5, lineHeight: 19, color: c.ink2 } : { fontSize: 16, lineHeight: 25.6, color: c.ink }}>{text}</Text>;
-  if (typeof value === 'string') return value || streaming ? draw(value) : null;
+  if (typeof value === 'string') {
+    if (!value && !streaming) return null;
+    const long = !markdown && (value.length > 1200 || value.split('\n').length > 12);
+    return <View style={{ gap: 6 }}>{draw(long && !expanded ? value.slice(0, 1200).split('\n').slice(0, 12).join('\n') + '\n…' : value)}{long && <Pressable accessibilityRole="button" onPress={() => setExpanded(!expanded)}><Text style={{ fontSize: 13, fontWeight: '600', color: c.accent, paddingVertical: 4 }}>{expanded ? t('tool.less') : t('perm.showAll')}</Text></Pressable>}</View>;
+  }
   const load = async () => {
     setBusy(true);
     try {
@@ -37,13 +42,16 @@ function ToolRow({ tool, session }: { tool: Extract<Item, { type: 'assistant' }>
   const [open, setOpen] = useState(false);
   const status = !tool.result ? <Icon name="clock" size={15} color={c.faint} /> : tool.result.ok ? <Icon name="check" size={15} color={c.ok} /> : <Icon name="x" size={15} color={c.bad} />;
   return <View style={{ gap: 4 }}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`${tool.name} ${tool.summary}`} onPress={() => setOpen(!open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${tool.name} ${tool.summary}`} accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
       <Icon name={toolIconName(tool.name)} size={16} color={c.ink2} />
       <Text style={{ fontSize: 13.5, fontWeight: '700', color: c.ink }}>{tool.name}</Text>
       <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontFamily: mono, fontSize: 12.5, color: c.muted }}>{tool.summary}</Text>
       {status}
     </Pressable>
-    {open && tool.result && <View style={{ marginTop: 2, marginBottom: 4, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: c.sunk }}><EventText value={tool.result.text} session={session} mono /></View>}
+    {open && <View style={{ marginTop: 2, marginBottom: 4, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: c.sunk, gap: 12 }}>
+      {tool.input && <EventText value={tool.input} session={session} mono />}
+      {tool.result && <View style={{ borderTopWidth: tool.input ? 1 : 0, borderTopColor: c.line2, paddingTop: tool.input ? 10 : 0 }}><EventText value={tool.result.text} session={session} mono /></View>}
+    </View>}
   </View>;
 }
 

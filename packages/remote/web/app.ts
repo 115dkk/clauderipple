@@ -58,6 +58,8 @@ export class App {
   private renderedScreen = "";
   private composerMode = "";
   private lastOpenPerm = "";
+  private pinned = true;
+  private timelineSize: ResizeObserver | null = null;
 
   constructor(link: LinkStatus) {
     this.ui = {
@@ -344,12 +346,19 @@ export class App {
     const key = this.screen.name === "session" ? `s:${this.screen.id}` : this.screen.name;
     if (key !== this.renderedScreen) {
       this.renderedScreen = key;
+      this.pinned = true;
       this.composerMode = "";
       root.dataset.screen = this.screen.name;
       root.innerHTML = this.screen.name === "pair"
         ? `<main class="scroll">${V.pairScreen()}</main>`
         : `<header class="top" id="top"></header><div id="pre"></div><main class="scroll" id="main">${this.screen.name === "session" ? `<div class="loading-older" id="older" hidden>${t("history.loading")}</div><div class="tl" id="tl"></div>` : ""}</main><footer class="dock"><div id="dock-extra"></div><div id="dock-input"></div></footer><div id="sheet"></div><div id="toast"></div>`;
-      if (this.screen.name === "session") requestAnimationFrame(() => this.scrollToBottom());
+      this.timelineSize?.disconnect();
+      if (this.screen.name === "session") {
+        this.timelineSize = new ResizeObserver(() => { if (this.pinned) this.scrollToBottom(); });
+        this.timelineSize.observe($("#tl"));
+        this.timelineSize.observe($("main"));
+        requestAnimationFrame(() => { if (this.pinned) this.scrollToBottom(); });
+      }
     }
     if (this.screen.name === "pair") return;
     if (this.screen.name === "home") {
@@ -399,7 +408,7 @@ export class App {
     this.lastOpenPerm = openId;
     if (chromeOnly) return;
     const main = $("main");
-    const stick = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+    const stick = this.pinned;
     patchList<Item>($("#tl"), view.items, (it) => V.item(it, this.ui));
     const c = this.cache(id);
     $("#older").hidden = !c.loadingOlder;
@@ -511,7 +520,9 @@ export class App {
     });
     root.addEventListener("scroll", (ev) => {
       const main = ev.target as HTMLElement;
-      if (main.id !== "main" || this.screen.name !== "session" || main.scrollTop > 240) return;
+      if (main.id !== "main" || this.screen.name !== "session") return;
+      this.pinned = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
+      if (main.scrollTop > 240) return;
       const c = this.cache(this.screen.id);
       if (!c.hasOlder || c.loadingOlder || !c.events.length) return;
       if (this.link?.send({ t: "history", session: this.screen.id, beforeSeq: c.events[0]!.seq, reqId: uid() })) { c.loadingOlder = true; $("#older").hidden = false; }
@@ -605,14 +616,25 @@ export class App {
     if (this.screen.name !== "session") return;
     const view = this.view(this.screen.id);
     const tool = view.items.flatMap((i) => (i.type === "assistant" ? i.tools : [])).find((x) => x.id === id);
-    const text = tool?.result?.text;
-    if (text && typeof text !== "string") {
-      try {
-        const chunk = await this.req<BlobChunk>({ op: "blob", session: this.screen.id, id: text.blob });
-        this.ui.expanded.set(id, chunk.text + (chunk.next !== null ? "\n…" : ""));
-      } catch { this.ui.expanded.set(id, text.preview); }
-      this.rerenderItems();
-    }
+    const session = this.screen.id;
+    const values = [tool?.input, tool?.result?.text].filter((v) => v !== undefined);
+    if (!values.some(v => typeof v !== "string")) return;
+    try {
+      const parts: string[] = [];
+      for (const value of values) {
+        if (typeof value === "string") { parts.push(value); continue; }
+        let offset = 0, text = "";
+        for (;;) {
+          const chunk = await this.req<BlobChunk>({ op: "blob", session, id: value.blob, offset });
+          text += chunk.text;
+          if (chunk.next === null) break;
+          offset = chunk.next;
+        }
+        parts.push(text);
+      }
+      if (this.ui.expanded.has(id)) this.ui.expanded.set(id, parts.filter(Boolean).join("\n\n────\n\n"));
+    } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
+    if (this.isCurrent(session)) this.rerenderItems();
   }
 
   private rerenderItems(): void {
