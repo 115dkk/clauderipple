@@ -53,6 +53,27 @@ ordering hint, never a gate) and cost class: cheapest capable model on low, stro
 Each tier shows its pick and can be overridden with one select (model · effort). No presets, no
 fields, no backups — a missing model falls to the next tier up, then the session model.
 
+## Operating modes
+
+For stretches like "burn the GPT quota before it resets" or "keep Claude for orchestrating only".
+**No mode is built in**: the user names and makes their own; the default is none (tiers as set).
+A mode is:
+
+- **Name** — anything the user types.
+- **Target** — one or more providers or models.
+- **Action** — *prefer*: fill every tier the target can serve with it (strongest of the target on
+  max, cheapest on low), other models only where it has nothing; *avoid*: drop the target from the
+  worker tiers (the main chat still runs on whatever the session uses).
+- **Delegation** — normal or eager. Eager adds one hidden note beside the prompt
+  (`prompt.submit` `context`, packages/mod/.claude-plugin/types/claude-code/index.d.ts:7752):
+  "Delegate everything except judgment and final review to ripple:low/medium/high/max." Sent on
+  the first prompt after the mode turns on and after each compaction, not every turn.
+- **Until** (optional) — a time, or the target provider's next quota reset where the router knows
+  it (ChatGPT windows); then the mode turns itself off and says so.
+
+One mode is active at a time. Unavailable target models fall back as tiers do (up, then session
+model). The band shows the active mode's name; every `worker pick:` line carries it.
+
 ## Screens
 
 **Dashboard `#mod` → Workers card:**
@@ -60,7 +81,10 @@ fields, no backups — a missing model falls to the next tier up, then the sessi
 2. 쓸 모델: checkboxes, grouped by provider, billing tag beside each.
 3. Four rows 로우·미디움·하이·맥스: one-line meaning, the current pick, "바꾸기" select.
 
-**In-session quick settings:** the four rows only.
+4. 모드: the user's modes (add / edit / delete: name, target, action, delegation, until) and which
+   one is on.
+
+**In-session quick settings:** the active mode select, and the four rows.
 
 ## Migration
 
