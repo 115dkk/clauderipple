@@ -297,7 +297,7 @@ export class App {
 
   submit(text: string): void {
     const body = text.trim();
-    if (!body) return;
+    if (!body || (this.screen.name === "session" && this.summary(this.screen.id)?.readOnly)) return;
     const clientMsgId = uid();
     if (this.screen.name === "home" || (this.screen.name === "session" && this.screen.id.startsWith("local:"))) {
       const d = this.ui.draft;
@@ -385,11 +385,14 @@ export class App {
     if (!top) return;
     setHTML(top, V.sessionTop(this.ui, s, view));
     setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
-    const perm = V.permCard(view, this.ui);
-    setHTML($("#dock-extra"), perm + (perm ? "" : V.workingLine(view, this.ui)));
+    const perm = s?.readOnly ? "" : V.permCard(view, this.ui);
+    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly"))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui)));
     // Stop only when the host can hear it; offline the button sends (queues) instead.
     const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
-    this.renderComposer(t("composer.reply"), running && !perm && this.ui.link.state === "open" ? "stop" : "send");
+    if (s?.readOnly) {
+      setHTML($("#dock-input"), "");
+      this.composerMode = "read-only";
+    } else this.renderComposer(t("composer.reply"), running && !perm && this.ui.link.state === "open" ? "stop" : "send");
     const openId = view.open[0]?.id ?? "";
     if (openId && openId !== this.lastOpenPerm) navigator.vibrate?.(30);
     this.lastOpenPerm = openId;
@@ -467,6 +470,7 @@ export class App {
 
   openModelSheet(forSession: string | null): void {
     const s = forSession ? this.summary(forSession) : undefined;
+    if (s?.readOnly) return;
     const v = forSession ? this.view(forSession) : null;
     const model = (v?.model ?? s?.model) ?? this.ui.draft.model;
     const effort = (v?.effort ?? s?.effort) ?? this.ui.draft.effort;
@@ -516,6 +520,7 @@ export class App {
   async act(act: string, el: HTMLElement): Promise<void> {
     const id = el.dataset.id ?? "";
     const session = this.screen.name === "session" ? this.screen.id : "";
+    if (session && this.summary(session)?.readOnly && ["send", "stop", "allow", "deny", "always", "pick-model-session"].includes(act)) return;
     switch (act) {
       case "retry": this.link?.nudge(); break;
       case "pair-link": {

@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { DesktopSessions } from "./desktop.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
@@ -67,6 +68,8 @@ export interface SessionsOptions {
   onSessions: () => void;
   now?: () => number;
   coalesceMs?: number;
+  /** Enabled by main; tests can use an isolated synthetic projects directory. */
+  desktopProjects?: string;
 }
 
 /** An async iterable the SDK reads user messages from; a session's query lives as long as it. */
@@ -147,12 +150,17 @@ export class Sessions {
   private creating = new Map<string, Promise<string>>();
   private file: string;
   private now: () => number;
+  private desktop: DesktopSessions | null;
 
   constructor(opts: SessionsOptions) {
     this.opts = opts;
     this.now = opts.now ?? Date.now;
     this.file = path.join(opts.dir, "sessions.json");
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
+    this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
+      projects: opts.desktopProjects, now: this.now, summarize,
+      excluded: () => new Set(Array.from(this.records.values()).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
+    });
   }
 
   /** After a host restart: no query survived, so say so in every session that was mid-turn, and close what it was asking. */
@@ -169,10 +177,15 @@ export class Sessions {
   }
 
   list(): SessionSummary[] {
-    return Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
+    const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
+    return [...host, ...(this.desktop?.list() ?? [])];
   }
 
-  has(id: string): boolean { return this.records.has(id); }
+  has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
+
+  private assertWritable(id: string): void {
+    if (this.desktop?.has(id)) throw new Error("desktop session is read-only");
+  }
 
   /** A turn is in progress somewhere (including one waiting on the phone for a permission). */
   busy(): boolean {
@@ -187,10 +200,14 @@ export class Sessions {
 
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
-    return { id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state: r.state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state: r.state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
+    if (!this.records.has(id)) {
+      if (this.desktop?.has(id)) return this.desktop.log(id);
+      throw new Error("no such session");
+    }
     let log = this.logs.get(id);
     if (!log) { log = EventLog.open({ dir: path.join(this.opts.dir, "sessions", id), now: this.now }); this.logs.set(id, log); }
     return log;
@@ -257,6 +274,7 @@ export class Sessions {
 
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live. */
   send(id: string, clientMsgId: string, text: string): void {
+    this.assertWritable(id);
     const r = this.records.get(id);
     if (!r) throw new Error("no such session");
     if (this.seen(id, clientMsgId)) return;
@@ -286,12 +304,14 @@ export class Sessions {
   }
 
   decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny"): boolean {
+    this.assertWritable(id);
     const p = this.opts.permissions.get(permId);
     if (!p || p.session !== id) return false;
     return this.opts.permissions.decide(permId, decision) !== null;
   }
 
   async interrupt(id: string): Promise<void> {
+    this.assertWritable(id);
     const live = this.live.get(id);
     if (!live) return;
     // Open requests resolve as expired; their canUseTool continuation writes the event.
@@ -305,6 +325,7 @@ export class Sessions {
   }
 
   async setModel(id: string, model: string, effort: Effort | null): Promise<void> {
+    this.assertWritable(id);
     const r = this.records.get(id);
     if (!r) throw new Error("no such session");
     const changedModel = r.model !== model;
@@ -334,6 +355,7 @@ export class Sessions {
   shutdown(): void {
     for (const id of Array.from(this.live.keys())) this.stop(id);
     for (const log of this.logs.values()) log.close();
+    this.desktop?.close();
   }
 
   // ---- the query ----------------------------------------------------------------------------

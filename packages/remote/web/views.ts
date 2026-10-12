@@ -103,9 +103,11 @@ function sessionRow(s: SessionSummary, ui: UI): string {
 }
 
 export function homeMain(ui: UI): string {
-  const waiting = ui.sessions.filter((s) => s.pending > 0);
-  const active = ui.sessions.filter((s) => s.pending === 0 && (s.state === "running" || s.state === "starting"));
-  const rest = ui.sessions.filter((s) => s.pending === 0 && s.state !== "running" && s.state !== "starting");
+  const host = ui.sessions.filter(s => s.origin !== "desktop");
+  const desktop = ui.sessions.filter(s => s.origin === "desktop");
+  const waiting = host.filter((s) => s.pending > 0);
+  const active = host.filter((s) => s.pending === 0 && (s.state === "running" || s.state === "starting"));
+  const rest = host.filter((s) => s.pending === 0 && s.state !== "running" && s.state !== "starting");
   // While the link is down the states below are the last ones seen, and look it.
   const stale = ui.link.state === "open" ? "" : " stale";
   const sec = (title: string, list: SessionSummary[], cls = "", count = false): string =>
@@ -113,7 +115,7 @@ export function homeMain(ui: UI): string {
   const empty = ui.sessions.length === 0
     ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body"))}</p><div class="hint">${icon.down(22)}</div></div>`
     : "";
-  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sec(t("home.waiting"), waiting, "waiting", true)}${sec(t("home.active"), active)}${sec(t("home.recent"), rest)}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
+  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sec(t("home.waiting"), waiting, "waiting", true)}${sec(t("home.active"), active)}${sec(t("home.recent"), rest)}${sec(t("home.desktop"), desktop)}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
 }
 
 /** Below the list, near the thumb: turn notifications on, or what it takes on this phone. Gone once on or dismissed. */
@@ -149,6 +151,7 @@ export function sessionTop(ui: UI, s: SessionSummary | undefined, view: SessionV
   const model = view.model ?? s?.model ?? null;
   const eff = view.effort ?? s?.effort ?? null;
   const state = view.open.length ? "waiting" : view.state ?? s?.state ?? "stopped";
+  if (s?.readOnly) return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(folderName(s.cwd, ui.home))}</b><span>${esc(modelName(ui.models, model))}</span></div>${stateRing("stopped", 24)}`;
   return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s ? folderName(s.cwd, ui.home) : "")}</b><button data-act="pick-model-session"><span>${esc(modelName(ui.models, model))}${eff ? ` · ${esc(effortLabel(eff))}` : ""}</span>${icon.down(14)}</button></div><span class="icon-btn${ui.link.state === "open" ? "" : " stale"}" aria-label="${esc(t(`state.${state}` as Key))}">${stateRing(state, 24)}</span>`;
 }
 
