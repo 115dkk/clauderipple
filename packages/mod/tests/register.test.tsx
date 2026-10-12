@@ -78,6 +78,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
     if ('value' in result && result.value?.isSet) resolvedLanguage = e.value
     return result
   })
+  on('session.cwd', () => ({ value: '/work' }))
   on('process.run', ($, e) => {
     processes.push({ argv: e.argv, timeoutMs: e.init?.timeoutMs })
     if (['open', 'xdg-open', 'cmd'].includes(e.argv[0] ?? '') && options.browserFailure) {
@@ -1390,21 +1391,50 @@ test('known agents show waiting after an eight-second tool and finish with cost'
   expect(await ui.find({ type: 'Text', text: /≈4/ })).toBeDefined()
 })
 
-test('full handoff uses configured skill, captures its answer and clears before confirm', async ($, on) => {
+/** The claude:// link a handoff opened, and its query. */
+function opened(b: { processes: { argv: readonly string[] }[] }): URLSearchParams | undefined {
+  const link = b.processes.map(p => p.argv.at(-1) ?? '').find(arg => arg.startsWith('claude://code/new?'))
+  return link ? new URLSearchParams(link.slice('claude://code/new?'.length)) : undefined
+}
+
+// 2026-10-13: "Confirm first" cleared the chat at once (it only told the new chat to wait), and
+// the owner lost the chat to it. A handoff now never clears: it opens a new session in the folder.
+test('full handoff with Ask first stops on a card, then opens a new session in the folder without clearing', async ($, on) => {
   const b = boundaries(on, { handoffSkill: 'custom-handoff', handoffAfter: 'confirm' })
   http(on)
   const commands: string[] = []
   on('command.run', { command: 'custom-handoff' }, () => { commands.push('skill'); return {} })
-  on('command.run', { command: 'clear' }, async () => { commands.push('clear'); await $.classic.SessionStart({ source: 'clear' }); return {} })
+  on('command.run', { command: 'clear' }, () => { commands.push('clear'); return {} })
   await start($)
   await command($, 'handoff full')
   await b.clock.advance(15000)
   expect(commands).toEqual(['skill'])
   await complete($, undefined, 'Saved /work/HANDOFF.md; verify the pending tests.')
   await b.clock.advance(15000)
-  expect(commands).toEqual(['skill', 'clear'])
-  expect(b.submitted[0]).toContain('First read the saved handoff files')
-  expect(b.submitted[0]).toContain('wait for my confirmation')
+  expect(opened(b)).toBeUndefined()
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: 'Handoff ready' })).toBeDefined()
+  await ui.press({ key: 'open-new' })
+  const query = opened(b)
+  expect(query?.get('folder')).toBe('/work')
+  expect(query?.get('q')).toContain('First read the saved handoff files')
+  expect(query?.get('q')).toContain('verify the pending tests')
+  expect(commands).toEqual(['skill'])
+  // Nothing is sent here: the continuation waits in the new session's prompt box.
+  expect(b.submitted).toEqual([])
+})
+
+test('quick handoff with New session now opens the new session at once, this chat kept', async ($, on) => {
+  const b = boundaries(on, { handoffAfter: 'continue' })
+  http(on)
+  const commands: string[] = []
+  on('command.run', { command: 'clear' }, () => { commands.push('clear'); return {} })
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'Resume: the band fix is half done.', usage: { input_tokens: 1, output_tokens: 1 } } }) as never)
+  await start($)
+  await command($, 'handoff')
+  await b.clock.advance(15000)
+  expect(opened(b)?.get('q')).toContain('the band fix is half done')
+  expect(commands).toEqual([])
 })
 
 test('failed quick fork uses an ordinary summary turn and copy falls back to prompt fill', async ($, on) => {

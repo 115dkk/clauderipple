@@ -279,7 +279,7 @@ const ALERTS: AlertView[] = [
 
 test('every alert draws on both surfaces', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  const actions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
   ALERTS.forEach((alert, i) => drawPane(on, 'alert-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, actions)))
   for (const surface of SURFACES) {
     for (let i = 0; i < ALERTS.length; i++) {
@@ -294,7 +294,7 @@ test('alert choices reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = {
     compact: fn('compact'), handoff: fn('handoff'), dismiss: fn('dismiss'), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'),
-    setHandoffKind: fn('kind'), setHandoffAfter: fn('after'), go: fn('go'), copy: fn('copy'),
+    setHandoffKind: fn('kind'), setHandoffAfter: fn('after'), go: fn('go'), copy: fn('copy'), openNew: fn('open-new'),
   }
   drawPane(on, 'cold', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[0]!, actions))
   drawPane(on, 'hot', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[2]!, actions))
@@ -329,7 +329,7 @@ function mascots(tree: unknown): Drawn[] {
 
 test('each alert shows 리플이 with the face of its state, its gauge in 5% steps; the terminal keeps a text mark', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  const actions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
   const variants: [string, AlertView][] = [
     ['swamp-59', { kind: 'swamp', percent: 59, tokens: 118_000 }],
     ['swamp-61', { kind: 'swamp', percent: 61, tokens: 122_000 }],
@@ -620,7 +620,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
   // over it (kit.tsx), never from a blank button over nothing.
   const noop = () => undefined
   const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
-  const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
   const cases: [string, Draw][] = [
     ['one-quick', (el, surface) => renderSettings(el, frameOf(surface, 64, 30), { settings: { ...SETTINGS, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
     ...([1, 2, 3, 4] as const).map((step): [string, Draw] => ['one-setup-' + step, (el, surface) => renderSetup(el, frameOf(surface, 64, 30), { step, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, setupActions)]),
@@ -640,7 +640,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
 
 test('a card says one thing: at most one main action, the others quiet, one way to let it go', async ($, on) => {
   const noop = () => undefined
-  const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
+  const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
   const all: AlertView[] = [...ALERTS, { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }]
   all.forEach((alert, i) => drawPane(on, 'say-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, alertActions)))
   for (let i = 0; i < all.length; i++) {
@@ -677,7 +677,7 @@ test('no drawing cuts its text: no truncating Text on any surface', async ($, on
     ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { toggleDone: noop })],
     ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop })],
     ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
-    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop })]),
+    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop })]),
   ]
   for (const [id, draw] of cases) drawPane(on, id, draw)
   for (const surface of SURFACES) {

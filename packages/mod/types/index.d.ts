@@ -273,9 +273,10 @@ export type Stats = {
 }
 
 export type HandoffKind = 'quick' | 'full'
-export type HandoffStage = 'writing' | 'clearing' | 'done' | 'copied' | 'failed'
+/** `ready`: written, waiting on Confirm first's card; `opened`: a new session was opened with it. */
+export type HandoffStage = 'writing' | 'clearing' | 'done' | 'ready' | 'opened' | 'copied' | 'failed'
 export type SetupStep = 1 | 2 | 3 | 4
-export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'handingOff' | 'handoffReady' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 export type JevState = {
   source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }

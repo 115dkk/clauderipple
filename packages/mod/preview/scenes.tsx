@@ -75,6 +75,7 @@ const SCENES: Scene[] = [
   { name: 'alert-compact', draw: alert({ kind: 'compactNote', draft: '' }) },
   { name: 'alert-handoff', draw: alert({ kind: 'handoffChoice', handoffKind: 'quick', after: 'continue' }) },
   { name: 'alert-handing', draw: alert({ kind: 'result', stage: 'handingOff', handoffKind: 'full' }) },
+  { name: 'alert-ready', draw: alert({ kind: 'result', stage: 'handoffReady', handoffKind: 'quick' }) },
   { name: 'alert-compacted', draw: alert({ kind: 'result', stage: 'compacted' }) },
   { name: 'setup', draw: (el, f) => renderSetup(el, f, { step: 1, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, noop) },
   { name: 'setup-2', draw: (el, f) => renderSetup(el, f, { step: 2, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, noop) },

@@ -171,18 +171,23 @@ async function adminUrl($: EngineInterface): Promise<string> {
   const port = typeof admin === 'number' ? admin : (typeof listen === 'number' ? listen : 8791) + 1
   return `http://127.0.0.1:${port}`
 }
+/** Opens a URL with the system's opener (a browser page, or a claude:// link the desktop app takes); throws when it cannot. */
+async function openUrl($: EngineInterface, url: string): Promise<void> {
+  let argv: string[]
+  // cmd reads & as a command separator: escaped, a link's query reaches start whole.
+  if (await $.env.get('OS') === 'Windows_NT') argv = ['cmd', '/c', 'start', '', url.replace(/&/g, '^&')]
+  else {
+    const platform = await $.process.run(['uname', '-s'], { timeoutMs: 2000 })
+    if (platform.exitCode !== 0) throw new Error(platform.stderr || 'uname failed')
+    argv = [platform.stdout.trim() === 'Darwin' ? 'open' : 'xdg-open', url]
+  }
+  const result = await $.process.run(argv, { timeoutMs: 2000 })
+  if (result.exitCode !== 0) throw new Error(result.stderr || `opener exited ${result.exitCode}`)
+}
 async function openAllSettings($: EngineInterface): Promise<void> {
   const url = `${await adminUrl($)}/#mod`
   try {
-    let argv: string[]
-    if (await $.env.get('OS') === 'Windows_NT') argv = ['cmd', '/c', 'start', '', url]
-    else {
-      const platform = await $.process.run(['uname', '-s'], { timeoutMs: 2000 })
-      if (platform.exitCode !== 0) throw new Error(platform.stderr || 'uname failed')
-      argv = [platform.stdout.trim() === 'Darwin' ? 'open' : 'xdg-open', url]
-    }
-    const result = await $.process.run(argv, { timeoutMs: 2000 })
-    if (result.exitCode !== 0) throw new Error(result.stderr || `browser exited ${result.exitCode}`)
+    await openUrl($, url)
   } catch (error) {
     await report($, 'open mod settings', error)
     await $.ui.toast(url)
@@ -806,18 +811,47 @@ async function copyHandoff($: EngineInterface): Promise<void> {
   }
   await update($, handoff, () => ({ ...value, stage: 'copied' }))
 }
+/**
+ * The summary is written: Copy only copies it; Confirm first stops on a card that asks before
+ * moving; Continue moves to a new session at once. This chat is never cleared (2026-10-13: the
+ * owner read "Confirm first" as asking before the clear, and lost the chat to it).
+ */
 async function finishHandoff($: EngineInterface): Promise<void> {
   const value = await read($, handoff)
   if (!value?.text || value.stage !== 'writing') return
-  const s = await currentSettings($)
   const after = await read($, handoffChoiceAfter)
   if (after === 'copy') { await copyHandoff($); return }
-  const text = wrapForNewChat(value.text, after, value.kind, !!s.handoffSkill)
-  await update($, handoff, () => ({ ...value, stage: 'clearing' }))
-  await $.command.run({ command: 'clear', args: '' })
-  // clear resets atoms; this timer owns the captured continuation and restores the result card.
-  await update($, handoff, () => ({ ...value, stage: 'done' }))
-  await $.prompt.submit({ text })
+  if (after === 'confirm') { await update($, handoff, () => ({ ...value, stage: 'ready' })); return }
+  await moveToNewSession($)
+}
+/** A summary longer than this goes to a file the new session reads; the app takes ~14k characters in a link. */
+const LINK_TEXT = 12_000
+/**
+ * Opens a new Code session in this session's folder with the handoff in its prompt box
+ * (claude://code/new?folder=…&q=…, the desktop app's own link: it fills the box and waits for
+ * Enter, never sends by itself). A long summary is saved under ~/.clauderipple/handoffs and the box
+ * says to read it. Where no link can be opened, the text is copied instead.
+ */
+async function moveToNewSession($: EngineInterface): Promise<void> {
+  const value = await read($, handoff)
+  if (!value?.text) return
+  const language = await read($, lang)
+  let text = wrapForNewChat(value.text, 'continue', value.kind, !!(await currentSettings($)).handoffSkill)
+  try {
+    if (text.length > LINK_TEXT) {
+      const path = `${await rippleHome($)}/handoffs/handoff-${await $.clock.now()}.md`
+      await $.fs.write(path, text + '\n')
+      text = t(language, 'alerts.readHandoffFile', { path })
+    }
+    const folder = await $.session.cwd()
+    const url = 'claude://code/new?' + new URLSearchParams({ ...(folder ? { folder } : {}), q: text, source: 'services' }).toString()
+    await openUrl($, url)
+    await update($, handoff, () => ({ ...value, stage: 'opened' }))
+  } catch (error) {
+    await report($, 'open new session', error)
+    await copyHandoff($)
+    await $.ui.toast(t(language, 'toasts.newSessionFallback'))
+  }
 }
 async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult | null> {
   const epoch = generation
@@ -1027,7 +1061,12 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
   if (which === 'handoff') return { kind: 'handoffChoice', handoffKind: await read($, handoffChoiceKind), after: await read($, handoffChoiceAfter) }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
-  if (which === 'result') return writing ? { kind: 'result', stage: ['writing', 'clearing'].includes(writing.stage) ? 'handingOff' : writing.stage === 'failed' ? 'failed' : 'handoffDone', handoffKind: writing.kind, ...(writing.stage === 'copied' ? { detail: t(language, 'alerts.copied') } : {}) } : { kind: 'result', ...result! }
+  if (which === 'result') {
+    if (!writing) return { kind: 'result', ...result! }
+    const stage = ['writing', 'clearing'].includes(writing.stage) ? 'handingOff' : writing.stage === 'failed' ? 'failed' : writing.stage === 'ready' ? 'handoffReady' : 'handoffDone'
+    const detail = writing.stage === 'copied' ? t(language, 'alerts.copied') : writing.stage === 'opened' ? t(language, 'alerts.openedBody') : undefined
+    return { kind: 'result', stage, handoffKind: writing.kind, ...(detail ? { detail } : {}) }
+  }
   if (which === 'cold') return { kind: 'cold', tokens: d === 'cold' ? 180000 : c!.tokens, idleMinutes: m ? Math.round((now - m.lastReplyAt) / 60000) : 61 }
   if (which === 'swamp') return { kind: 'swamp', percent: d === 'swamp' ? 65 : c!.percent, tokens: d === 'swamp' ? 160000 : c!.tokens }
   return null
@@ -1072,7 +1111,7 @@ function setupActions($: EngineInterface): SetupActions {
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
   return { compact: note => runCompact($, note), handoff: () => openHandoff($), dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
-    noteInput: text => update($, compactNote, () => text), setHandoffKind: kind => update($, handoffChoiceKind, () => kind), setHandoffAfter: after => update($, handoffChoiceAfter, () => after), go: () => queueHandoff($), copy: () => copyHandoff($) }
+    noteInput: text => update($, compactNote, () => text), setHandoffKind: kind => update($, handoffChoiceKind, () => kind), setHandoffAfter: after => update($, handoffChoiceAfter, () => after), go: () => queueHandoff($), copy: () => copyHandoff($), openNew: () => moveToNewSession($) }
 }
 function toolLine(e: ToolCallInput): string {
   const fields = object(e)

@@ -108,7 +108,7 @@ export type BandActions = {
 
 // ---- Alerts and cards ------------------------------------------------------------------------
 
-export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'handingOff' | 'handoffReady' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 
 export type AlertView =
   /** The cache expired on a big chat: the next prompt re-reads it all. */
@@ -139,6 +139,8 @@ export type AlertActions = {
   go: () => void
   /** Copies a handoff's text again (result card, after: copy). */
   copy: () => void
+  /** Opens a new session in this folder with the written handoff (Confirm first's card). */
+  openNew: () => void
 }
 
 // ---- Settings and setup ----------------------------------------------------------------------

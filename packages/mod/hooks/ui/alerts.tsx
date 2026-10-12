@@ -124,6 +124,16 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
   switch (alert.stage) {
     case 'handingOff':
       return { key: 'result', face: 'going', title: t(L, 'alerts.handingOff'), body: alert.detail ?? (alert.handoffKind === 'full' ? t(L, 'alerts.fullProgress') : t(L, 'alerts.quickProgress')) }
+    case 'handoffReady':
+      return {
+        key: 'result',
+        face: 'asking',
+        title: t(L, 'alerts.handoffReady'),
+        body: t(L, 'alerts.handoffReadyBody'),
+        main: { key: 'open-new', label: t(L, 'alerts.openNew'), hotkey: 'g', onPress: a.openNew },
+        quiet: [{ key: 'copy', label: t(L, 'alerts.copyText'), hotkey: 'y', onPress: a.copy }],
+        close: { key: 'dismiss', label: t(L, 'alerts.cancel'), hotkey: 'x', onPress: a.dismiss },
+      }
     case 'handoffDone':
       return { key: 'result', face: 'pleased', title: t(L, 'alerts.handoffDone'), body: alert.detail ?? t(L, 'alerts.summaryReady'), quiet: [{ key: 'copy', label: t(L, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }], close }
     case 'compacting':
@@ -175,6 +185,7 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
       <Box key="choices" flexDirection="column">
         {line('kind', t(frame.lang, 'alerts.kind'), segmented(el, frame, 'kind', kinds, alert.handoffKind, k => a.setHandoffKind(k)))}
         {line('after', t(frame.lang, 'alerts.then'), segmented(el, frame, 'after', afters, alert.after, k => a.setHandoffAfter(k)))}
+        <Text dimColor wrap="wrap">{afterHint(frame, alert.after)}</Text>
       </Box>,
     ]
   }
@@ -207,6 +218,7 @@ function seaOf(card: Card, alert: AlertView): Omit<Sea, 'at'> {
       const stage = alert.kind === 'result' ? alert.stage : 'failed'
       if (stage === 'handingOff' || stage === 'compacting') return { tone: 'violet', ripples: 'busy', current: true }
       if (stage === 'failed') return { tone: 'red', weather: 'static' }
+      if (stage === 'handoffReady') return { tone: 'violet', weather: 'sparkles', ripples: 'calm' }
       return { tone: 'green', tick: true, weather: 'sparkles' }
     }
   }
@@ -264,8 +276,16 @@ function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions, t
     <Box key="choices" flexDirection="column" rowGap={1}>
       {line('kind', names[0]!, drawnSegmented(el, 'kind', kinds, alert.handoffKind, k => a.setHandoffKind(k), tone))}
       {line('after', names[1]!, drawnSegmented(el, 'after', afters, alert.after, k => a.setHandoffAfter(k), tone))}
+      <Box paddingLeft={nameCells + 2}>
+        <Text color={MUTE} wrap="wrap">{afterHint(frame, alert.after)}</Text>
+      </Box>
     </Box>,
   ]
+}
+
+/** What the chosen "then" does, in a line: the names alone were read the wrong way (2026-10-13). */
+function afterHint(frame: Frame, after: Settings['handoffAfter']): string {
+  return t(frame.lang, after === 'continue' ? 'alerts.continueHint' : after === 'confirm' ? 'alerts.confirmHint' : 'alerts.copyHint')
 }
 
 function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): RenderNode {
