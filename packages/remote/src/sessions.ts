@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { DesktopSessions } from "./desktop.ts";
+import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
@@ -39,6 +40,8 @@ interface SessionRecord {
   state: SessionState;
   createdBy: string;
   contextWindow: number | null;
+  /** Missing on older host records; desktop continuations are explicitly excluded. */
+  desktopHandoff?: "pending" | "attempted" | "excluded";
 }
 
 interface Live {
@@ -56,6 +59,7 @@ interface Live {
   restartAfterTurn: boolean;
   retried: boolean;
   interrupted: boolean;
+  pendingTurns: number;
 }
 
 export interface SessionsOptions {
@@ -64,6 +68,8 @@ export interface SessionsOptions {
   permissions: PermissionQueue;
   queryFn: QueryFn;
   claudePath?: string;
+  handoff?: HandoffRunner;
+  log?: (line: string) => void;
   onEvent: (session: string, event: SessionEvent) => void;
   onSessions: () => void;
   now?: () => number;
@@ -149,6 +155,8 @@ export class Sessions {
   private figuresAt = new Map<string, number>();
   private lastFigures = new Map<string, string>();
   private creating = new Map<string, Promise<string>>();
+  private handingOff = new Map<string, { messages: SdkUserMessage[] }>();
+  private shuttingDown = false;
   private file: string;
   private now: () => number;
   private desktop: DesktopSessions | null;
@@ -193,7 +201,7 @@ export class Sessions {
     if (!this.desktop) throw new Error("no such session");
     const { summary: s, open } = this.desktop.continuation(id);
     const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
-    const r: SessionRecord = { id, sdkSessionId: id, cwd: s.cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null };
+    const r: SessionRecord = { id, sdkSessionId: id, cwd: s.cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
     Object.assign(r, this.desktopModels.get(id));
     this.desktopModels.delete(id);
     this.logs.set(id, log);
@@ -280,7 +288,7 @@ export class Sessions {
     const cwd = path.resolve(req.cwd);
     if (!(await isDirectory(cwd))) throw new Error(`not a folder: ${cwd}`);
     const now = this.now();
-    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null };
+    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
@@ -296,14 +304,17 @@ export class Sessions {
     if (this.seen(id, clientMsgId)) return id;
     this.append(id, { kind: "user", text, clientMsgId });
     let live = this.live.get(id);
-    if (!live) live = this.start(r);
+    const handoff = this.handingOff.get(id);
+    if (!live && !handoff) live = this.start(r);
     // A message sent while a turn runs is queued by the CLI and starts no turn of its own yet.
     if (r.state !== "running" && r.state !== "waiting") {
-      live.turnStart = this.now();
+      if (live) live.turnStart = this.now();
       this.append(id, { kind: "turn", model: r.model, effort: r.effort });
       this.setState(r, "running");
     }
-    live.input.push({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } });
+    const message: SdkUserMessage = { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } };
+    if (handoff) handoff.messages.push(message);
+    else if (live) { live.pendingTurns++; live.input.push(message); }
     return id;
   }
 
@@ -372,6 +383,7 @@ export class Sessions {
   }
 
   shutdown(): void {
+    this.shuttingDown = true;
     for (const id of Array.from(this.live.keys())) this.stop(id);
     for (const log of this.logs.values()) log.close();
     this.desktop?.close();
@@ -389,6 +401,7 @@ export class Sessions {
     const m = modelArg(r.model, r.effort);
     const options: Record<string, unknown> = {
       cwd: r.cwd,
+      ...(!r.sdkSessionId ? { title: r.title } : {}),
       model: m.model,
       ...(m.effort ? { effort: m.effort } : {}),
       includePartialMessages: true,
@@ -400,7 +413,7 @@ export class Sessions {
       ...(r.sdkSessionId ? { resume: r.sdkSessionId } : {}),
       ...(this.opts.claudePath ? { pathToClaudeCodeExecutable: this.opts.claudePath } : {}),
     };
-    const live: Live = { query: null as unknown as SdkQuery, input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false };
+    const live: Live = { query: null as unknown as SdkQuery, input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingTurns: 0 };
     this.live.set(r.id, live);
     void this.opts.router.status().then((s) => {
       // The router's own word on where its proxy and CA are wins over whatever this process inherited.
@@ -495,13 +508,15 @@ export class Sessions {
         return;
       }
       case "result": {
+        live.pendingTurns = Math.max(0, live.pendingTurns - 1);
         this.flush(r.id, live);
         live.current = null;
         live.retried = false;
         if (live.interrupted) {
           // The person pressed Stop; the "interrupted" notice already says so. A failed-turn line would not be true.
           live.interrupted = false;
-          this.setState(r, "idle");
+          this.setState(r, live.pendingTurns > 0 ? "running" : "idle");
+          if (live.pendingTurns === 0) this.handoff(r);
           if (live.restartAfterTurn) this.stop(r.id);
           return;
         }
@@ -511,7 +526,8 @@ export class Sessions {
         if (win) r.contextWindow = win;
         const error = ok ? undefined : String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error")).slice(0, 500);
         this.append(r.id, { kind: "result", ok, ...(error ? { error } : {}), ms: typeof msg.duration_ms === "number" ? msg.duration_ms : this.now() - live.turnStart, turns: typeof msg.num_turns === "number" ? msg.num_turns : 0 });
-        this.setState(r, ok ? "idle" : "error");
+        this.setState(r, live.pendingTurns > 0 ? "running" : ok ? "idle" : "error");
+        if (live.pendingTurns === 0) this.handoff(r);
         void this.refreshFigures(r, true);
         if (live.restartAfterTurn) this.stop(r.id);
         return;
@@ -519,6 +535,32 @@ export class Sessions {
       default:
         return;
     }
+  }
+
+  private handoff(r: SessionRecord): void {
+    const runner = this.opts.handoff;
+    if (!runner || !r.sdkSessionId || r.desktopHandoff !== "pending") return;
+    r.desktopHandoff = "attempted";
+    this.save();
+    const transfer = { messages: [] as SdkUserMessage[] };
+    this.handingOff.set(r.id, transfer);
+    // Defer past result handling so the SDK can finish its result continuation first.
+    void new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
+      if (this.shuttingDown) { this.handingOff.delete(r.id); return; }
+      try {
+        const result = await runner({ sessionId: r.sdkSessionId!, title: r.title, cwd: r.cwd });
+        (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] ${result}`);
+      } catch (error) {
+        (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] failed: ${(error as Error).message}`);
+      } finally {
+        this.handingOff.delete(r.id);
+        if (transfer.messages.length && !this.shuttingDown) {
+          const writer = this.live.get(r.id) ?? this.start(r);
+          writer.pendingTurns += transfer.messages.length;
+          for (const message of transfer.messages) writer.input.push(message);
+        }
+      }
+    });
   }
 
   private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {

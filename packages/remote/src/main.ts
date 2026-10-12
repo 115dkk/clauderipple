@@ -30,6 +30,7 @@ import { RouterClient } from "./router.ts";
 import { HostServer } from "./server.ts";
 import { agentStatus, findClaude, install, paths, plist, specFor, uninstall } from "./service.ts";
 import { Sessions } from "./sessions.ts";
+import { desktopHandoff } from "./handoff.ts";
 import type { QueryFn } from "./sessions.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -115,7 +116,8 @@ async function runHost(): Promise<void> {
     dir, router, permissions,
     desktopProjects: path.join(os.homedir(), ".claude", "projects"),
     queryFn: query as unknown as QueryFn,
-    ...(claudePath ? { claudePath } : {}),
+    ...(claudePath ? { claudePath, ...(process.platform === "darwin" ? { handoff: desktopHandoff(claudePath) } : {}) } : {}),
+    log,
     onEvent: (id, event) => { server?.onEvent(id); void notifier.onEvent(id, event); void expoNotifier.onEvent(id, event); },
     onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },
   });

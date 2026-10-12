@@ -206,6 +206,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   if (mode !== "recent") fs.utimesSync(file, new Date(Date.now() - 120_000), new Date(Date.now() - 120_000));
   const original = fs.readFileSync(file, "utf8");
   const options: Record<string, unknown>[] = [];
+  let handoffs = 0;
   let turns = 0;
   const sessions = new Sessions({ dir: f.root, desktopProjects: f.projects, desktopProcesses: () => mode === "process" ? `42 claude --resume=${id}` : "", permissions: PermissionQueue.open(path.join(f.root, "permissions.json")), router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } }, queryFn: params => {
     options.push(params.options);
@@ -219,7 +220,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
         }
       }, interrupt: async () => {}, setModel: async () => {}, close: () => {},
     };
-  }, onEvent: () => {}, onSessions: () => {} });
+  }, handoff: async () => { handoffs++; return "unexpected"; }, onEvent: () => {}, onSessions: () => {} });
   t.after(async () => { for (const s of sessions.list()) sessions.stop(s.id); await new Promise(resolve => setImmediate(resolve)); sessions.shutdown(); });
   assert.equal(sessions.list()[0]?.origin, "desktop");
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
@@ -228,6 +229,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   assert.equal(sessions.send(id, "first-phone", "continue"), host);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(options[0]?.resume, id);
+  assert.equal(handoffs, 0, "desktop continuations are never handed off again");
   assert.equal(options[0]?.cwd, user.cwd);
   assert.equal(options[0]?.model, "chosen-model@high");
   assert.equal(options[0]?.forkSession, undefined);

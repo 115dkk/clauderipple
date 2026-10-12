@@ -56,7 +56,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: string } = {
   return { queryFn, options, users, answers, suggestions, spies };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Pick<SessionsOptions, "handoff" | "log"> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -64,7 +64,7 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   const permissions = PermissionQueue.open(permissionsFile);
   const fake = scriptedQuery(script);
   const events: { session: string; event: SessionEvent }[] = [];
-  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5,
+  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, ...extra,
     onEvent: (session, event) => events.push({ session, event }), onSessions: () => {},
   });
   const instances = [sessions];
@@ -246,6 +246,68 @@ test("large SDK tool output is stored as a BlobRef and round-trips in full", { t
   assert.equal(result.text.bytes, Buffer.byteLength(text));
   assert.equal(result.text.preview, text.slice(0, 400));
   assert.equal(f.sessions.log(id).blob(result.text.blob), text);
+});
+
+test("desktop handoff waits for idle, holds new input, persists once and names the SDK session", async t => {
+  const calls: { sessionId: string; title: string; cwd: string }[] = [];
+  let finish: (() => void) | undefined;
+  const logs: string[] = [];
+  const f = fixture(t, { permission: true }, {
+    handoff: async request => { calls.push(request); await new Promise<void>(resolve => { finish = resolve; }); return "opened"; },
+    log: line => logs.push(line),
+  });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  assert.equal(calls.length, 0);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => calls.length === 1);
+  assert.deepEqual(calls[0], { sessionId: "sdk-1", title: "ping", cwd: f.cwd });
+  assert.equal(f.fake.options[0]?.title, "ping");
+  f.sessions.send(id, "during-handoff", "again");
+  await nextTick();
+  assert.equal(f.fake.users.length, 1);
+  finish!();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.fake.users.length, 2);
+  assert.equal(calls.length, 1);
+  assert.match(logs[0]!, /opened/);
+  f.sessions.shutdown();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.fake.queryFn,
+    handoff: async request => { calls.push(request); return "opened"; }, onEvent: () => {}, onSessions: () => {} });
+  f.instances.push(recovered);
+  recovered.send(id, "after-handoff-restart", "continue");
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  recovered.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => recovered.summaryOf(id)?.state === "idle");
+  assert.equal(calls.length, 1);
+});
+
+test("desktop handoff waits until already queued turns finish", async t => {
+  const counts: number[] = [];
+  const f = fixture(t, { permission: true }, { handoff: async () => { counts.push(f.fake.users.length); return "opened"; }, log: () => {} });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.send(id, "queued", "second turn");
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.fake.users.length === 2 && f.permissions.pending(id).length === 1);
+  assert.deepEqual(counts, []);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => counts.length === 1);
+  assert.deepEqual(counts, [2]);
+});
+
+test("desktop handoff failure is logged and never retried", async t => {
+  let calls = 0;
+  const logs: string[] = [];
+  const f = fixture(t, {}, { handoff: async () => { calls++; throw new Error("timeout"); }, log: line => logs.push(line) });
+  const id = await f.create();
+  await waitFor(() => logs.length === 1);
+  f.sessions.send(id, "retry-turn", "again");
+  await waitFor(() => f.fake.users.length === 2 && f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(calls, 1);
+  assert.match(logs[0]!, /failed: timeout/);
 });
 
 test("summarize uses Bash's first line, cwd-relative Read paths and Grep pattern plus path", () => {
