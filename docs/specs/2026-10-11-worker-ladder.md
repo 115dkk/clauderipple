@@ -1,6 +1,6 @@
 # Worker ladder — design (2026-10-11)
 
-Status: **design, not built.** Replaces the Worker Auto settings of docs/specs/2026-10-10-ripple-mod.md
+Status: **superseded by docs/specs/2026-10-12-worker-tiers.md.** Replaced the Worker Auto settings of docs/specs/2026-10-10-ripple-mod.md
 §2 as the default; Auto stays as an option.
 
 ## Why
