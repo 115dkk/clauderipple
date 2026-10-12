@@ -1,7 +1,7 @@
 // Shared building blocks. Styling follows packages/remote/web/style.css class by class; every
 // colour, radius and font comes from ./theme.
 import React, { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { Keyboard, Platform, Pressable, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type ViewStyle } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { remote } from './client';
@@ -133,10 +133,15 @@ export function useStyles() {
 // ---- frame ----------------------------------------------------------------------------------
 
 /** The whole screen: respects the status bar and home indicator, centres on wide displays. */
-export function Frame({ children, bottom = false }: { children: React.ReactNode; bottom?: boolean }) {
+export function Frame({ children, bottom = false, avoidKeyboard = false }: { children: React.ReactNode; bottom?: boolean; avoidKeyboard?: boolean }) {
   const { s } = useStyles();
   const insets = useSafeAreaInsets();
-  return <View style={[s.frame, { paddingTop: insets.top, paddingBottom: bottom ? insets.bottom : 0 }]}><View style={s.inner}>{children}</View></View>;
+  const keyboard = useKeyboardOpen();
+  // Keep the avoiding view at the screen origin: RN compares its parent-relative
+  // layout with keyboard screen coordinates. Safe-area padding belongs inside it.
+  return <KeyboardAvoidingView style={s.frame} enabled={avoidKeyboard} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <View style={[s.inner, { paddingTop: insets.top, paddingBottom: bottom && !keyboard ? insets.bottom : 0 }]}>{children}</View>
+  </KeyboardAvoidingView>;
 }
 
 export function IconButton({ name, label, onPress, size = 22, tint }: { name: React.ComponentProps<typeof Icon>['name']; label: string; onPress?: () => void; size?: number; tint?: string }) {

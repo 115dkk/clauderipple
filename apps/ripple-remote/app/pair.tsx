@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, Text, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Keyboard, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Linking from 'expo-linking';
@@ -12,6 +12,11 @@ import { t } from '../../../packages/remote/web/i18n.ts';
 export default function Pair() {
   const { c, s } = useStyles();
   const insets = useSafeAreaInsets();
+  const scroll = useRef<ScrollView>(null);
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () => scroll.current?.scrollToEnd({ animated: false }));
+    return () => shown.remove();
+  }, []);
   const [link, setLink] = useState('');
   const [scanning, setScanning] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
@@ -34,8 +39,8 @@ export default function Pair() {
     <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: c.accentSoft, alignItems: 'center', justifyContent: 'center' }}><Text style={{ color: c.accent, fontWeight: '700', fontSize: 14 }}>{n}</Text></View>
     <View style={{ flex: 1, minWidth: 0 }}>{children}</View>
   </View>;
-  return <Frame><KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-    <ScrollView contentContainerStyle={{ paddingTop: 40, paddingHorizontal: 28, paddingBottom: insets.bottom + 24, alignItems: 'center' }} keyboardShouldPersistTaps="handled">
+  return <Frame>
+    <ScrollView ref={scroll} style={{ flex: 1 }} automaticallyAdjustKeyboardInsets contentContainerStyle={{ paddingTop: 40, paddingHorizontal: 28, paddingBottom: insets.bottom + 24, alignItems: 'center' }} keyboardShouldPersistTaps="handled">
       <Ripple face="calm" size={96} />
       <Text style={{ fontSize: 26, fontWeight: '700', letterSpacing: -0.5, color: c.ink, marginTop: 18, marginBottom: 22, textAlign: 'center' }}>{t('pair.title')}</Text>
       <View style={{ width: '100%', gap: 14 }}>
@@ -53,5 +58,5 @@ export default function Pair() {
         {error ? <Text style={[s.bannerSmall, { color: c.bad }]}>{error}</Text> : null}
       </View>
     </ScrollView>
-  </KeyboardAvoidingView></Frame>;
+  </Frame>;
 }

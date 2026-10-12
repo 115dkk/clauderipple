@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, Text, View } from 'react-native';
+import { Keyboard, ScrollView, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { remote } from '../../src/client';
@@ -27,6 +27,14 @@ export default function Session() {
   const dragging = useRef(false);
   const follow = () => { if (pinned.current) scroll.current?.scrollToEnd({ animated: false }); };
   useEffect(() => { pinned.current = true; dragging.current = false; remote.open(id); }, [id]);
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () => {
+      pinned.current = true;
+      dragging.current = false;
+      scroll.current?.scrollToEnd({ animated: false });
+    });
+    return () => shown.remove();
+  }, []);
   const send = async () => { const value = text.trim(); if (!value) return; try { await remote.queue({ t: 'send', session: id, text: value }); setText(''); } catch (e) { remote.report(e); } };
   const link = state.status;
   const live = link?.state === 'open';
@@ -43,7 +51,7 @@ export default function Session() {
     {bar && <View style={{ height: 3, borderRadius: 3, backgroundColor: c.sunk, marginTop: 4, overflow: 'hidden' }}><View style={{ height: '100%', width: `${pct === null ? 0 : Math.min(100, Math.max(2, pct))}%`, backgroundColor: tone(pct), borderRadius: 3 }} /></View>}
   </View>;
   const pct = (v: number | null | undefined) => v === null || v === undefined ? null : `${Math.round(v)}%`;
-  return <Frame><KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+  return <Frame avoidKeyboard>
     <View style={s.top}>
       <IconButton name="back" label={t('a11y.back')} onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
       <View style={s.topTitle}>
@@ -80,5 +88,5 @@ export default function Session() {
       {!readOnly && session && <Composer testID="session-composer" value={text} onChangeText={setText} placeholder={t('composer.reply')} canSend={!!text.trim()} onSend={() => { void send(); }}
         onStop={['running', 'starting', 'waiting'].includes(session.state) ? () => { try { remote.send({ t: 'interrupt', session: id }); } catch (e) { remote.report(e); } } : undefined} />}
     </View>
-  </KeyboardAvoidingView></Frame>;
+  </Frame>;
 }
