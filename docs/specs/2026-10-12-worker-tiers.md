@@ -1,6 +1,6 @@
 # Worker tiers — design (2026-10-12)
 
-Status: **design, not built.** Supersedes docs/specs/2026-10-11-worker-ladder.md (presets, field
+Status: **built 2026-10-12 (commits d231fde, ba4d1a8, 7160945, 9b3529e).** Supersedes docs/specs/2026-10-11-worker-ladder.md (presets, field
 overrides and "더 세밀하게" go away; the four rungs survive under new names).
 
 ## Why

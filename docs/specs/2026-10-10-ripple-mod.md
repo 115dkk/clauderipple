@@ -128,26 +128,8 @@ prose when they disagree.
   wins; generated-agent names also accepted), then configured `fallback`, built-in Sonnet,
   finally another enabled generated worker. If none can run, refuse. Apply the resolved rule's
   effort offset, floor and ceiling. A usable explicit Pin wins over preference.
-- **Auto:** `autoFloors:{light:20,standard:45,deep:50}`, `autoTieBand:2` by default. Light was
-  30 until 2026-10-11: GPT-6 Luna medium scores 29.9, so every light task — "reply OK" included —
-  went to Luna high, the cheapest variant at or above 30. Light work is renames, lookups and
-  one-line answers; 20 lets it reach the low variants (Luna low 21.5, $0.0045 a task).
-  - candidates = readable `generated-agents.json` workers and exact file models intersected with
-    the router's declared model/provider catalogue × measured effort variants from
-    GET `/api/model-scores`. Scores live in a session atom for 10 minutes; retrieval failure logs
-    and retains the previous cache (or no data), never calls AA or needs an AA key in the mod;
-  - drop off/out-of-quota providers and workers outside the rule's allow-list. Drop variants outside
-    effort floor/ceiling; positive offset permits only efforts at/above the offset-adjusted judged
-    effort, negative offset only at/below it. Offset zero imposes no judged-effort restriction.
-    Never change a selected measured effort afterwards while claiming the old score. A null-effort
-    single variant uses the calibrated judged effort without pretending AA measured that effort;
-  - among variants with intelligence ≥ the level's floor, anchor on lowest costPerTask, then allow
-    preference to win only within `autoTieBand` index points of that anchor AND ≤125% of its cost.
-    Equal preferences resolve by cost, then intelligence, then model id; an expensive preference
-    cannot defeat the budget bound. Runner-up is the cheapest other floor-qualified variant;
-  - no variant reaches the floor → highest intelligence available, then cost. No usable AA data →
-    general Pin, or default general Pin if general is Auto; preserve on/off, availability, allow-list
-    and the Auto rule's effort calibration. Report the fallback reason. No enabled target → refuse.
+- **Auto:** removed 2026-10-12, together with field rules and `/api/model-scores`. Routing is
+  the four workers — see docs/specs/2026-10-12-worker-tiers.md.
 - **UI (revised 2026-10-10; the router's web page uses the same structure):** Workers settings
   and setup step 2 share one card.
   1. *How workers are picked*: **Auto (recommended)** / **Fixed** — the main choice.
@@ -180,8 +162,8 @@ prose when they disagree.
 - **Data:** a daily GitHub Action (`.github/workflows/aa-data.yml`, secret `AA_API_KEY`) reads the
   AA API (index, prices per variant) and each tracked variant's model page (its embedded record's
   `intelligenceIndexCostPerTask.cost.total`; the free API has no cost per task), and force-pushes
-  one `aa-models.json` to the orphan branch `data`. Routers fetch that file at most daily and
-  serve `/api/model-scores`; users need no AA key. Attribution "Data: Artificial Analysis" shows
+  one `aa-models.json` to the orphan branch `data`. Routers fetch that file at most daily (the
+  `/api/model-scores` endpoint was removed 2026-10-12 with Auto); users need no AA key. Attribution "Data: Artificial Analysis" shows
   wherever the numbers do. Measured 2026-10-10: GPT-6.1 Sol high — index 50.2, $0.319/task; GPT-6
   Astra medium — 49.6 with 5× Sol's output price.
 

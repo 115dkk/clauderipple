@@ -313,7 +313,9 @@ The extraction marker `canonicalIntelligenceIndexTokenCount` is a private page-f
 anchor, not an output metric: no token counts are stored. `--limit N` caps page fetches
 for a local smoke run; use `--output <path>` and never publish capped output.
 
-`model-scores.ts` serves configured targets via `GET /api/model-scores`, with normalized
+Auto routing and field rules were removed 2026-10-12 (along with `GET /api/model-scores`);
+routing is the four workers (docs/specs/2026-10-12-worker-tiers.md). `model-scores.ts`
+remains as the admin's internal catalog for the mod's options, with normalized
 AA bases (decimal dots → hyphens, provider namespace/Claude snapshot date removed),
 variant intelligence/cost, attribution and generation time. The picker's five effort
 names are preserved; AA minimal/non-reasoning and single variants return null rather
