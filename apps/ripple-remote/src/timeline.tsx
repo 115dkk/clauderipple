@@ -91,6 +91,7 @@ function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; 
 export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; session: string; readOnly: boolean }) {
   const { c, s } = useStyles();
   const [expanded, setExpanded] = useState(false);
+  const host = remote.snapshot.host?.name ?? t('host.fallback');
   if (item.type === 'toolGroup') {
     const label = item.running ? item.latest : item.workers ? t('tool.groupWorkers', { n: item.tools, w: item.workers }) : t('tool.group', { n: item.tools });
     return <View style={{ gap: 4 }}>
@@ -125,7 +126,7 @@ export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; s
           <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontFamily: mono, fontSize: 12.5, color: c.muted }}>{item.summary}</Text>
           <Text style={{ fontSize: 13.5, color: item.decision === null ? c.warn : c.muted }}>{label}</Text>
         </View>
-        {why in dictionaries[lang()] && <Text style={{ fontSize: 12.5, color: c.muted }}>{t(why as Key)}</Text>}
+        {why in dictionaries[lang()] && <Text style={{ fontSize: 12.5, color: c.muted }}>{t(why as Key, { host })}</Text>}
       </View>;
     }
     return <View style={{ backgroundColor: c.surface, borderWidth: 1.5, borderColor: c.warnRing, borderRadius: 20, paddingTop: 14, paddingHorizontal: 14, paddingBottom: 12, ...shadow(c) }}>
@@ -145,5 +146,5 @@ export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; s
   if (item.type === 'subagent') return <Worker item={item} session={session} />;
   if (item.type === 'result') return <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: -6 }}>{!item.ok && <Icon name="x" size={14} color={c.bad} />}<Text style={{ fontSize: 12.5, color: item.ok ? c.muted : c.bad }}>{item.ok ? copy('작업을 마쳤습니다', 'Work finished') : t('turn.failed', { error: item.error ?? '' })} · {item.model} · {Math.round(item.ms / 1000)}s</Text></View>;
   const key = `notice.${item.code}`;
-  return <Text style={{ alignSelf: 'center', fontSize: 13, color: c.muted, backgroundColor: c.surface2, paddingVertical: 5, paddingHorizontal: 12, borderRadius: 99, overflow: 'hidden', textAlign: 'center', maxWidth: '92%' }}>{key in dictionaries[lang()] ? t(key as Key, { text: item.text ?? '' }) : item.text ?? item.code}</Text>;
+  return <Text style={{ alignSelf: 'center', fontSize: 13, color: c.muted, backgroundColor: c.surface2, paddingVertical: 5, paddingHorizontal: 12, borderRadius: 99, overflow: 'hidden', textAlign: 'center', maxWidth: '92%' }}>{key in dictionaries[lang()] ? t(key as Key, { text: item.text ?? '', host }) : item.text ?? item.code}</Text>;
 }

@@ -330,7 +330,10 @@ export class App {
   view(id: string): SessionView {
     const c = this.cache(id);
     const out = this.outbox.filter((o) => o.session === id || (id.startsWith("local:") && o.clientMsgId === id.slice(6)) || (o.create && this.created.get(o.clientMsgId) === id));
-    return reduce(c.events, out, c.events.length > 0 && !c.hasOlder);
+    const view = reduce(c.events, out, c.events.length > 0 && !c.hasOlder);
+    const summary = this.summary(id);
+    if (summary?.desktopBridge) view.state = summary.state;
+    return view;
   }
 
   summary(id: string): SessionSummary | undefined {
@@ -396,7 +399,7 @@ export class App {
     setHTML(top, V.sessionTop(this.ui, s, view));
     setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
     const perm = s?.readOnly ? "" : V.permCard(view, this.ui);
-    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly"))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui)));
+    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui)) + ((s?.tasks ?? 0) > 0 ? `<div class="tasks-chip" role="status">${esc(t("tasks.running", { n: s!.tasks! }))}</div>` : ""));
     // Stop only when the host can hear it; offline the button sends (queues) instead.
     const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
     if (s?.readOnly) {

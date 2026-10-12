@@ -6,7 +6,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
-export const DESKTOP_BLOCKED = "Mac 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
+export const DESKTOP_BLOCKED = "Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
 export interface BridgeAuth { accessToken: string; organizationUuid: string; expiresAt: number }
 class BridgeNetworkError extends Error {}
 export function object(value: unknown): Record<string, unknown> | null {
@@ -19,7 +19,7 @@ export function loadBridgeAuth(): BridgeAuth {
     const account = object(object(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8")))?.oauthAccount);
     if (typeof oauth?.accessToken !== "string" || typeof oauth.expiresAt !== "number" || typeof account?.organizationUuid !== "string") throw new Error();
     return { accessToken: oauth.accessToken, expiresAt: oauth.expiresAt, organizationUuid: account.organizationUuid };
-  } catch { throw new Error("맥의 Claude 로그인 정보를 읽을 수 없습니다."); }
+  } catch { throw new Error("이 컴퓨터의 Claude 로그인 정보를 읽을 수 없습니다."); }
 }
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
 export class BridgeClient {
@@ -31,7 +31,7 @@ export class BridgeClient {
   }
   private async request(id: string, suffix: string, options: RequestInit): Promise<Response> {
     const auth = this.auth();
-    if (auth.expiresAt <= Date.now()) throw new Error("맥의 Claude 로그인이 만료되었습니다. Mac 앱을 한 번 열어 주십시오.");
+    if (auth.expiresAt <= Date.now()) throw new Error("이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.");
     let response: Response;
     try {
       // The bridge treats a prompt as the user's own only from a person's app platform
@@ -40,11 +40,11 @@ export class BridgeClient {
       response = await this.fetchFn(`https://api.anthropic.com/v1/code/sessions/${encodeURIComponent(id)}${suffix}`, {
         ...options, redirect: "error", headers: { Authorization: `Bearer ${auth.accessToken}`, "anthropic-version": "2023-06-01", "anthropic-client-platform": "ios", "x-organization-uuid": auth.organizationUuid, "Content-Type": "application/json", "User-Agent": "RippleRemote/0.8.10" },
       });
-    } catch { throw new BridgeNetworkError("Mac 앱과 연결하지 못했습니다."); }
+    } catch { throw new BridgeNetworkError("Claude 앱과 연결하지 못했습니다."); }
     if (!response.ok) {
       await response.body?.cancel();
       // Do not expose server bodies (which may echo credentials), or retry rejected writes.
-      throw new Error(`Mac 앱이 메시지를 받지 않았습니다 (${response.status}).`);
+      throw new Error(`Claude 앱이 메시지를 받지 않았습니다 (${response.status}).`);
     }
     return response;
   }
@@ -57,6 +57,16 @@ export class BridgeClient {
   }
   interrupt(id: string): Promise<void> {
     return this.post(id, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
+  }
+  async session(id: string): Promise<{ worker_status: "running" | "idle" | "requires_action"; status?: string; status_bucket?: string; connection_status?: string }> {
+    const response = object(await (await this.request(id, "", { method: "GET", signal: AbortSignal.timeout(3000) })).json());
+    // CLI 2.1.296's single-session read uses response_shape ?? session.
+    const body = object(response?.response_shape ?? response?.session) ?? response;
+    const worker_status = body?.worker_status;
+    if (worker_status !== "running" && worker_status !== "idle" && worker_status !== "requires_action") throw new Error("Remote Control session has no valid worker status.");
+    return { worker_status, ...(typeof body?.status === "string" ? { status: body.status } : {}),
+      ...(typeof body?.status_bucket === "string" ? { status_bucket: body.status_bucket } : {}),
+      ...(typeof body?.connection_status === "string" ? { connection_status: body.connection_status } : {}) };
   }
   async events(id: string): Promise<Record<string, unknown>> {
     return object(await (await this.request(id, "/events?sort_order=asc", { signal: AbortSignal.timeout(15_000) })).json()) ?? {};

@@ -88,7 +88,7 @@ function printPairing(cfg: HostConfig, dir: string): void {
     url = pairingUrl(where.advertise, cfg.port, cfg.token);
     out(where.reachableFromPhone
       ? "\nDirect http: works on this network only, and without notifications (they need https: use --relay).\n"
-      : "\nOnly this Mac can reach it. For the phone, use --relay <url> (anywhere) or --bind lan / tailscale (same network).\n");
+      : "\nOnly this computer can reach it. For the phone, use --relay <url> (anywhere) or --bind lan / tailscale (same network).\n");
   }
   out(`\nScan with the phone's camera (the link carries the pairing key — do not share it):\n\n${qr(url)}\n\n${url}\n\n`);
 }

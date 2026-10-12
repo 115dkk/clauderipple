@@ -73,7 +73,7 @@ export default function Home() {
       <Section title={t('home.active')} sessions={active} now={now} stale={stale} />
       <Section title={t('home.recent')} sessions={rest} now={now} stale={stale} />
       <Section title={t('home.desktop')} sessions={desktop} now={now} stale={stale} />
-      {!desktop.length && <Text style={s.foot}>{copy('Mac 세션이 없습니다. 호스트 업데이트 후 최근 대화가 표시됩니다.', 'No Mac sessions. Recent conversations appear after the host is updated.')}</Text>}
+      {!desktop.length && <Text style={s.foot}>{copy('Claude 앱 세션이 없습니다.', 'No Claude app sessions.')}</Text>}
       {!state.sessions.length && <View style={s.empty}>
         <Ripple face="calm" size={84} />
         <Text style={s.emptyB}>{t('home.empty.title')}</Text>

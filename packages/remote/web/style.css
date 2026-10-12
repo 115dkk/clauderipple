@@ -1,5 +1,6 @@
 /* Ripple Remote. Tokens follow the mascot's palette (packages/mod/hooks/ui/theme.ts values);
    surfaces are warm neutrals so the accent is the only colour that speaks. */
+.tasks-chip { width: fit-content; margin: 0 6px 8px; padding: 6px 10px; border-radius: var(--r-sm); background: var(--surface-2); color: var(--muted); font-size: 13px; }
 :root {
   --bg: #f5f4f1;
   --surface: #ffffff;

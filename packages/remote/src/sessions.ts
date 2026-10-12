@@ -175,6 +175,27 @@ export class Sessions {
   private desktop: DesktopSessions | null;
   private desktopModels = new Map<string, { model: string; effort: Effort | null }>();
   private bridge: BridgeClient;
+  private bridgeStates = new Map<string, { at: number; state?: SessionState; pending?: Promise<void> }>();
+
+  private bridgeState(process: DesktopProcess): SessionState {
+    const cached = process.bridgeSessionId ? this.bridgeStates.get(process.bridgeSessionId)?.state : undefined;
+    return cached ?? (process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running");
+  }
+
+  private pollBridgeState(id: string): Promise<void> {
+    const cached = this.bridgeStates.get(id);
+    if (cached?.pending) return cached.pending;
+    if (cached && this.now() - cached.at < 3000) return Promise.resolve();
+    const entry: { at: number; state?: SessionState; pending?: Promise<void> } = { at: this.now(), ...(cached?.state ? { state: cached.state } : {}) };
+    this.bridgeStates.set(id, entry);
+    entry.pending = this.bridge.session(id).then(session => {
+      entry.state = session.worker_status === "requires_action" ? "waiting" : session.worker_status;
+    }).catch(error => {
+      delete entry.state; // The registry is the fallback only on a failed read.
+      (this.opts.log ?? console.error)(`[desktop state] ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => { delete entry.pending; this.opts.onSessions(); });
+    return entry.pending;
+  }
   private bridges = new Map<string, { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }>();
   private bridgeSends = new Map<string, Promise<string>>();
   /** uuids of prompts sent over Remote Control, so their transcript echo is not shown twice. */
@@ -212,11 +233,20 @@ export class Sessions {
 
   list(): SessionSummary[] {
     const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
-    return [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id)).map(s => ({ ...s, ...this.desktopModels.get(s.id) }))];
+    return [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id)).map(s => {
+      const process = this.desktop?.liveProcess(s.id);
+      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true } : {}) };
+    })];
   }
 
-  pollDesktop(): void {
+  async pollDesktop(): Promise<void> {
     if (this.desktop?.poll()) this.opts.onSessions();
+    const ids = new Set(this.list().flatMap(s => {
+      const process = this.desktop?.liveProcess(this.records.get(s.id)?.sdkSessionId ?? s.id);
+      return process?.bridgeSessionId ? [process.bridgeSessionId] : [];
+    }));
+    const reads = [...ids].map(id => this.pollBridgeState(id));
+    for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
       if (!this.desktop) continue;
       // A record the host once resumed, now open in the desktop app with Remote Control.
@@ -225,15 +255,21 @@ export class Sessions {
       }
       if (!r.desktopBridge) continue;
       try {
-        r.transcriptOffset = this.desktop.tail(r.id, r.transcriptOffset ?? 0, body => {
+        r.transcriptOffset = this.desktop.tail(r.sdkSessionId ?? r.id, r.transcriptOffset ?? 0, body => {
           if (body.kind !== "user" || !(this.seen(r.id, body.clientMsgId) || this.bridgeEchoes.has(body.clientMsgId))) this.append(r.id, body);
         });
         this.save();
-        const process = this.desktop.liveProcess(r.id);
-        this.setState(r, process ? process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running" : "stopped");
+        const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
+        this.setState(r, process ? this.bridgeState(process) : "stopped");
         if (process?.bridgeSessionId) this.ensureBridge(r.id, process.bridgeSessionId);
         else this.closeBridge(r.id);
       } catch (error) { this.bridgeFailure(r.id, error); }
+    }
+    await Promise.all(reads);
+    for (const r of this.records.values()) {
+      if (!r.desktopBridge) continue;
+      const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
+      this.setState(r, process ? this.bridgeState(process) : "stopped");
     }
   }
 
@@ -270,8 +306,8 @@ export class Sessions {
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
-    const state = process ? process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running" : r.desktopBridge ? "stopped" : r.state;
-    return { origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    const state = process ? this.bridgeState(process) : r.desktopBridge ? "stopped" : r.state;
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: this.desktop?.backgroundTasks(r.sdkSessionId ?? r.id) ?? 0 } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -556,7 +592,7 @@ export class Sessions {
   }
 
   async setModel(id: string, model: string, effort: Effort | null): Promise<void> {
-    if (this.desktop?.isOpen(this.records.get(id)?.sdkSessionId ?? id)) throw new Error("열려 있는 세션의 모델은 Mac 앱에서 변경해 주십시오. / Change this live session's model in the Mac app.");
+    if (this.desktop?.isOpen(this.records.get(id)?.sdkSessionId ?? id)) throw new Error("열려 있는 세션의 모델은 Claude 앱에서 변경해 주십시오. / Change this live session's model in the Claude app.");
     if (!this.records.has(id) && this.desktop?.has(id)) {
       this.desktopModels.set(id, { model, effort });
       this.opts.onSessions();

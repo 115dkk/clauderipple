@@ -119,8 +119,9 @@ export class HostServer {
 
   private pollDesktop(): void {
     if (!this.someoneLooking()) return;
-    try { this.opts.sessions.pollDesktop(); }
-    catch (error) { this.opts.log?.(`desktop poll failed: ${error instanceof Error ? error.message : String(error)}`); }
+    void this.opts.sessions.pollDesktop().catch(error => {
+      this.opts.log?.(`desktop poll failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   listen(): Promise<void> {

@@ -5,6 +5,25 @@ import { BridgeClient, decodeSse } from "../src/bridge-client.ts";
 const auth = () => ({ accessToken: "secret-not-for-phone", organizationUuid: "org", expiresAt: Date.now() + 60_000 });
 const frame = (sequence: number) => `event: client_event\r\ndata: ${JSON.stringify({ sequence_num: sequence, event_id: `e${sequence}`, source: "worker", payload: { type: "control_cancel_request", request_id: "r" } })}\r\n\r\n`;
 
+test("session reads use GET and decode both CLI envelopes, rejecting invalid worker state", async () => {
+  for (const worker_status of ["running", "idle", "requires_action"]) {
+    const session = { worker_status, status: "active", status_bucket: "working", connection_status: "connected" };
+    for (const body of [session, { session }, { response_shape: session }]) {
+      const client = new BridgeClient({ auth, fetch: async (url, options) => {
+        assert.equal(String(url), "https://api.anthropic.com/v1/code/sessions/bridge%2Fid");
+        assert.equal(options?.method, "GET");
+        assert.equal(options?.body, undefined);
+        return Response.json(body);
+      } });
+      assert.deepEqual(await client.session("bridge/id"), session);
+    }
+  }
+  for (const body of [null, {}, { session: { worker_status: "unknown" } }]) {
+    const client = new BridgeClient({ auth, fetch: async () => Response.json(body) });
+    await assert.rejects(client.session("bridge"), /valid worker status/);
+  }
+});
+
 test("client writes exact prompt, permission and interrupt envelopes, never worker registration", async () => {
   const calls: { url: string; options: RequestInit }[] = [];
   const client = new BridgeClient({ auth, fetch: async (url, options) => { calls.push({ url: String(url), options: options! }); return new Response("{}"); } });

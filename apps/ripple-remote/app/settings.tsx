@@ -27,7 +27,8 @@ export default function Settings() {
       setMessage(t('push.done'));
     } catch (e) { setMessage(e instanceof Error ? e.message : String(e)); }
   };
-  const unpair = () => Alert.alert(copy('Mac 연결을 해제하시겠습니까?', 'Unpair this Mac?'), copy('저장된 연결 키와 대기 메시지를 삭제합니다.', 'Deletes saved pairing keys and queued messages.'), [
+  const host = remote.snapshot.host?.name ?? t('host.fallback');
+  const unpair = () => Alert.alert(copy(`${host} 연결을 해제하시겠습니까?`, `Unpair ${host}?`), copy('저장된 연결 키와 대기 메시지를 삭제합니다.', 'Deletes saved pairing keys and queued messages.'), [
     { text: copy('취소', 'Cancel'), style: 'cancel' },
     { text: copy('연결 해제', 'Unpair'), style: 'destructive', onPress: () => { void remote.unpair().then(() => router.replace('/pair')).catch(e => setMessage(e instanceof Error ? e.message : String(e))); } },
   ]);
@@ -46,7 +47,7 @@ export default function Settings() {
       </View>
     </View>
     <Label>{copy('연결', 'Connection')}</Label>
-    <List><Opt first danger icon={<Icon name="x" size={20} color={c.bad} />} title={copy('Mac 연결 해제', 'Unpair Mac')} onPress={unpair} /></List>
+    <List><Opt first danger icon={<Icon name="x" size={20} color={c.bad} />} title={copy('연결 해제', 'Unpair')} onPress={unpair} /></List>
     <Text style={[s.foot, { marginTop: 24 }]}>Ripple Remote · 0.1.0</Text>
     <Text style={[s.foot, { marginTop: 4 }]}>{copy('Anthropic 또는 OpenAI와 제휴하지 않은 독립 앱입니다.', 'An independent app, not affiliated with Anthropic or OpenAI.')}</Text>
   </ScrollView></Frame>;

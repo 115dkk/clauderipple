@@ -6,6 +6,7 @@ import { remote } from '../../src/client';
 import { Button, Composer, ConnectionBanner, Frame, IconButton, copy, useKeyboardOpen, useNow, useRemote, useStyles } from '../../src/ui';
 import { StateRing } from '../../src/mascot';
 import { Icon } from '../../src/icons';
+import { radius } from '../../src/theme';
 import { TimelineItem } from '../../src/timeline';
 import { reduce, timelineItems } from '../../../../packages/remote/web/timeline.ts';
 import { t } from '../../../../packages/remote/web/i18n.ts';
@@ -40,8 +41,9 @@ export default function Session() {
   const live = link?.state === 'open';
   const model = view.model ?? session?.model ?? '';
   const effort = view.effort ?? session?.effort ?? null;
-  const sessionState = view.open.length ? 'waiting' : view.state ?? session?.state ?? 'stopped';
-  const running = view.state === 'running' || view.state === 'starting';
+  const mainState = session?.desktopBridge ? session.state : view.state ?? session?.state ?? 'stopped';
+  const sessionState = session?.desktopBridge ? mainState : view.open.length ? 'waiting' : mainState;
+  const running = mainState === 'running' || mainState === 'starting';
   const f = view.figures;
   const tone = (v: number | null) => v === null ? c.accent : v >= 85 ? c.bad : v >= 65 ? c.warn : c.accent;
   const cell = (label: string, value: string | null, pct: number | null, first = false, bar = false) => <View key={label} style={{ flex: 1, minWidth: 0, paddingTop: 7, paddingHorizontal: 10, paddingBottom: 8 }}>
@@ -80,10 +82,13 @@ export default function Session() {
       {timelineItems(view).map(item => <TimelineItem key={item.key} item={item} session={id} readOnly={readOnly} />)}
     </ScrollView>
     <View style={[s.dock, { paddingBottom: keyboard ? 10 : insets.bottom + 10 }]}>
-      {readOnly && <Text style={{ fontSize: 12.5, color: c.muted, textAlign: 'center', marginBottom: 2 }}>{copy('Mac에서 진행한 대화입니다. 이 앱에서는 읽기만 가능합니다.', 'This conversation ran on your Mac. It is read-only here.')}</Text>}
+      {readOnly && <Text style={{ fontSize: 12.5, color: c.muted, textAlign: 'center', marginBottom: 2 }}>{copy('이 대화는 여기서 읽기만 가능합니다.', 'This conversation is read-only here.')}</Text>}
       {!readOnly && running && !view.open.length && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 6, marginBottom: 8 }}>
         {live ? <StateRing state="running" size={16} spin /> : <Icon name="clock" size={16} color={c.warn} />}
         <Text style={{ fontSize: 13.5, color: live ? c.muted : c.warn }}>{live ? t('running.for', { t: duration(now - (view.turnStartedAt ?? now)) }) : t('running.lastSeen', { time: clock(link?.lastRx ?? now) })}</Text>
+      </View>}
+      {(session?.tasks ?? 0) > 0 && <View accessibilityRole="text" style={{ alignSelf: 'flex-start', marginHorizontal: 6, marginBottom: 8, paddingVertical: 6, paddingHorizontal: 10, borderRadius: radius.sm, backgroundColor: c.surface2 }}>
+        <Text style={{ color: c.muted, fontSize: 13 }}>{t('tasks.running', { n: session!.tasks! })}</Text>
       </View>}
       {!readOnly && session && <Composer testID="session-composer" value={text} onChangeText={setText} placeholder={t('composer.reply')} canSend={!!text.trim()} onSend={() => { void send(); }}
         onStop={['running', 'starting', 'waiting'].includes(session.state) ? () => { try { remote.send({ t: 'interrupt', session: id }); } catch (e) { remote.report(e); } } : undefined} />}

@@ -73,7 +73,7 @@ class RemoteClient {
   }
   async pair(text: string): Promise<void> {
     const parsed = parsePairing(text);
-    if (this.pairing && (this.pairing.url !== parsed.url || this.pairing.server !== parsed.server || this.pairing.hpk !== parsed.hpk)) throw new Error('Unpair the current Mac before pairing another Mac');
+    if (this.pairing && (this.pairing.url !== parsed.url || this.pairing.server !== parsed.server || this.pairing.hpk !== parsed.hpk)) throw new Error('Unpair the current computer before pairing another one');
     const pairing = { ...parsed, clientId: this.pairing?.clientId ?? id() };
     await SecureStore.setItemAsync('pairing', JSON.stringify(pairing));
     this.pairing = pairing;
@@ -109,13 +109,13 @@ class RemoteClient {
     link.start();
   }
   retry(): void { this.link?.nudge(); }
-  send(message: ClientMsg): void { if (!this.link?.send(message)) throw new Error('Mac is not connected'); }
+  send(message: ClientMsg): void { if (!this.link?.send(message)) throw new Error('The computer is not connected'); }
   request(op: ReqOp): Promise<unknown> {
     const reqId = id();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.requests.delete(reqId); reject(new Error('Mac request timed out')); }, 15_000);
+      const timer = setTimeout(() => { this.requests.delete(reqId); reject(new Error('The computer did not answer in time')); }, 15_000);
       this.requests.set(reqId, { resolve, reject, timer });
-      if (!this.link?.send({ t: 'req', reqId, op })) { clearTimeout(timer); this.requests.delete(reqId); reject(new Error('Mac is not connected')); }
+      if (!this.link?.send({ t: 'req', reqId, op })) { clearTimeout(timer); this.requests.delete(reqId); reject(new Error('The computer is not connected')); }
     });
   }
   async registerToken(token: string, lang: 'ko' | 'en'): Promise<void> {

@@ -22,24 +22,66 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
   const posts: Record<string, unknown>[] = [];
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   let queries = 0;
+  let now = Date.now(), workerStatus = "idle", stateReads = 0, stateFailure = false;
   const client = new BridgeClient({ auth: () => ({ accessToken: "private-token", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
     if (options?.method === "POST") {
       posts.push(JSON.parse(String(options.body)));
       return new Response("{}", { status: rejected ? 403 : 200 });
+    }
+    if (String(url).endsWith("/sessions/bridge")) {
+      stateReads++;
+      return stateFailure ? new Response("", { status: 503 }) : Response.json({ worker_status: workerStatus });
     }
     if (String(url).includes("/events?sort_order=desc")) return Response.json({ data: [] });
     assert.ok(String(url).includes("/events/stream?from_sequence_num="));
     return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; options?.signal?.addEventListener("abort", () => c.close(), { once: true }); } }));
   } });
   const permissions = PermissionQueue.open(path.join(root, "permissions.json"));
-  const sessions = new Sessions({ dir: path.join(root, "host"), desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client, permissions,
+  const sessions = new Sessions({ now: () => now, log() {}, dir: path.join(root, "host"), desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client, permissions,
     router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
     queryFn: () => { queries++; return { async *[Symbol.asyncIterator]() {}, interrupt: async () => {}, setModel: async () => {}, close() {} }; }, onEvent() {}, onSessions() {} });
   t.after(async () => { sessions.shutdown(); await tick(); fs.rmSync(root, { recursive: true, force: true }); });
   let sequence = 0;
   const emit = (payload: unknown, source = "worker") => controller!.enqueue(new TextEncoder().encode(`event: client_event\ndata: ${JSON.stringify({ source, event_id: `e${++sequence}`, sequence_num: sequence, payload })}\n\n`));
-  return { root, file, registry, sessions, posts, permissions, emit, queries: () => queries };
+  return { root, file, registry, sessions, posts, permissions, emit, queries: () => queries,
+    stateReads: () => stateReads, advance: () => { now += 3000; }, status: (value: string) => { workerStatus = value; }, failState: () => { stateFailure = true; } };
 }
+
+test("bridge worker state overrides busy registry for listed and opened sessions, caches and falls back on failure", async t => {
+  const f = fixture(t);
+  f.registry.get(id)!.status = "busy";
+  await Promise.all([f.sessions.pollDesktop(), f.sessions.pollDesktop()]);
+  assert.equal(f.sessions.list()[0]!.state, "idle");
+  assert.equal(f.stateReads(), 1);
+  f.sessions.log(id);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(id)!.state, "idle");
+  assert.equal(f.stateReads(), 1);
+  for (const [worker, state] of [["running", "running"], ["requires_action", "waiting"], ["idle", "idle"]]) {
+    f.advance(); f.status(worker!);
+    await f.sessions.pollDesktop();
+    assert.equal(f.sessions.summaryOf(id)!.state, state);
+  }
+  f.advance(); f.failState();
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(id)!.state, "running");
+});
+
+test("background counts reach listed and opened bridge summaries independently of the main state", async t => {
+  const f = fixture(t);
+  fs.appendFileSync(f.file, line({ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Agent", input: {} }] } }) +
+    line({ type: "user", toolUseResult: { isAsync: true, agentId: "worker" }, message: { content: [{ type: "tool_result", tool_use_id: "a", content: "async" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.list()[0]!.tasks, 1);
+  assert.equal(f.sessions.list()[0]!.state, "idle");
+  f.sessions.log(id);
+  assert.equal(f.sessions.summaryOf(id)!.tasks, 1);
+  fs.appendFileSync(f.file, line({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" } }));
+  f.advance();
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(id)!.tasks, 0);
+  assert.equal(f.sessions.summaryOf(id)!.state, "idle");
+});
 
 test("live registry verifies pid and procStart and ignores stale/non-desktop entries", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "registry-test-"));

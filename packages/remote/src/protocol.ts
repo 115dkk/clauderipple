@@ -91,6 +91,10 @@ export interface SessionSummary {
   model: string;
   effort: Effort | null;
   state: SessionState;
+  /** Main-turn state is authoritative for desktop Remote Control sessions. */
+  desktopBridge?: boolean;
+  /** Running background workers/shells, separate from the main turn. */
+  tasks?: number;
   /** open permission requests */
   pending: number;
   createdAt: number;

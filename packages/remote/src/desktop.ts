@@ -175,11 +175,55 @@ function missing(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "");
 }
 
+/** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks. */
+export class BackgroundTasks {
+  private tools = new Map<string, { name: string; background: boolean }>();
+  private active = new Set<string>();
+  private terminal = new Set<string>();
+  get count(): number { return this.active.size; }
+
+  accept(line: string): void {
+    const r = record(line);
+    if (!r || r.isSidechain === true) return;
+    const content = object(r.message)?.content;
+    const notification = text(content);
+    if (r.type === "user" && notification.startsWith("<task-notification>")) {
+      const id = /<task-id>([^<]+)<\/task-id>/.exec(notification)?.[1];
+      if (id && /<status>(completed|killed|failed)<\/status>/.test(notification)) {
+        this.active.delete(id);
+        this.terminal.add(id);
+      }
+      return;
+    }
+    for (const value of Array.isArray(content) ? content : []) {
+      const b = object(value);
+      if (r.type === "assistant" && b?.type === "tool_use" && typeof b.id === "string") {
+        const name = str(b.name);
+        if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: object(b.input)?.run_in_background === true });
+      }
+      if (r.type !== "user" || b?.type !== "tool_result" || b.is_error === true) continue;
+      const tool = this.tools.get(str(b.tool_use_id));
+      if (!tool) continue;
+      const result = object(r.toolUseResult);
+      const body = text(b.content);
+      let id = "";
+      if (tool.name === "Bash") {
+        id = str(result?.backgroundTaskId) || (tool.background ? /(?:ID|id):\s*([\w-]+)/.exec(body)?.[1] ?? "" : "");
+      } else if (result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(body)) {
+        id = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(body)?.[1] || "";
+      }
+      if (id && !this.terminal.has(id)) this.active.add(id);
+      this.tools.delete(str(b.tool_use_id));
+    }
+  }
+}
+
 export class DesktopSessions {
   private opts: DesktopOptions;
   private projects: string;
   private sources = new Map<string, Source>();
   private imported = new Map<string, Imported>();
+  private tasks = new Map<string, { file: string; offset: number; tracker: BackgroundTasks }>();
   private temp: string | null = null;
   private scannedAt = -Infinity;
   private checkedAt = -Infinity;
@@ -194,6 +238,7 @@ export class DesktopSessions {
     this.updateLive();
     const excluded = this.opts.excluded();
     return Array.from(this.sources.values()).filter(s => !excluded.has(s.summary.id)).map(s => {
+      if (this.liveProcess(s.summary.id)?.bridgeSessionId) s.summary = { ...s.summary, tasks: this.backgroundTasks(s.summary.id) };
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
         ? { ...s.summary, lastSeq: cached.log.lastSeq, epoch: cached.log.epoch } : s.summary;
@@ -203,7 +248,7 @@ export class DesktopSessions {
   poll(): boolean {
     const fingerprint = () => JSON.stringify(Array.from(this.sources.values())
       .filter(s => !this.opts.excluded().has(s.summary.id))
-      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title]));
+      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title, s.summary.tasks]));
     const before = fingerprint();
     this.list();
     return before !== fingerprint();
@@ -234,6 +279,22 @@ export class DesktopSessions {
       return scanLines(fd, size, line => {
         for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize).bodies) visit(body);
       }, offset);
+    } finally { fs.closeSync(fd); }
+  }
+
+  backgroundTasks(id: string): number {
+    const source = this.sources.get(id);
+    if (!source) return 0;
+    const fd = this.open(source.file);
+    try {
+      const size = fs.fstatSync(fd).size;
+      let cached = this.tasks.get(id);
+      if (!cached || cached.file !== source.file || size < cached.offset) {
+        cached = { file: source.file, offset: 0, tracker: new BackgroundTasks() };
+        this.tasks.set(id, cached);
+      }
+      cached.offset = scanLines(fd, size, line => cached!.tracker.accept(line), cached.offset);
+      return cached.tracker.count;
     } finally { fs.closeSync(fd); }
   }
 
@@ -323,6 +384,7 @@ export class DesktopSessions {
       if (source) next.set(id, source);
     }
     this.sources = next;
+    for (const id of this.tasks.keys()) if (!next.has(id)) this.tasks.delete(id);
     for (const [id, cached] of this.imported) if (!next.has(id)) { this.dispose(cached); this.imported.delete(id); }
   }
 

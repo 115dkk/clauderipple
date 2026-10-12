@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DesktopSessions, processHasSession, transcriptEvents } from "../src/desktop.ts";
+import { BackgroundTasks, DesktopSessions, processHasSession, transcriptEvents } from "../src/desktop.ts";
 import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
@@ -27,6 +27,52 @@ function fixture(t: import("node:test").TestContext) {
   t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, projects, project, desktop, excluded, advance: () => { now += 6000; } };
 }
+
+test("background task lifecycle counts async Agent/Task and Bash, not synchronous or sidechain work", () => {
+  const tasks = new BackgroundTasks();
+  const launch = (name: string, id: string, result: Record<string, unknown>, background = false) => {
+    tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name, id, input: { run_in_background: background } }] } }));
+    tasks.accept(line({ type: "user", toolUseResult: result, message: { content: [{ type: "tool_result", tool_use_id: id, content: "launch" }] } }));
+  };
+  assert.equal(tasks.count, 0);
+  launch("Agent", "sync", { agentId: "sync" });
+  assert.equal(tasks.count, 0);
+  launch("Agent", "a", { isAsync: true, agentId: "agent" });
+  launch("Task", "b", { isAsync: true, agentId: "agent" });
+  launch("Bash", "c", { backgroundTaskId: "shell" }, true);
+  assert.equal(tasks.count, 2);
+  tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", id: "fallback", name: "Agent", input: {} }] } }));
+  tasks.accept(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "fallback", content: "Async agent launched successfully. agentId: fallback-worker" }] } }));
+  assert.equal(tasks.count, 3);
+  tasks.accept(line({ type: "user", message: { content: "<task-notification><task-id>fallback-worker</task-id><status>killed</status></task-notification>" } }));
+  tasks.accept(line({ type: "result", subtype: "success" }));
+  assert.equal(tasks.count, 2, "main-turn completion does not complete background work");
+  for (const status of ["running", "completed", "killed", "failed"]) {
+    tasks.accept(line({ type: "user", isMeta: true, message: { content: `<task-notification><task-id>agent</task-id><status>${status}</status></task-notification>` } }));
+    assert.equal(tasks.count, status === "running" ? 2 : 1);
+  }
+  tasks.accept(line({ type: "user", message: { content: [{ type: "text", text: "<task-notification><task-id>shell</task-id><status>failed</status></task-notification>" }] } }));
+  launch("Agent", "late", { isAsync: true, agentId: "agent" });
+  assert.equal(tasks.count, 0);
+  tasks.accept("broken");
+  tasks.accept(line({ type: "assistant", isSidechain: true, message: { content: [{ type: "tool_use", name: "Agent", id: "nested" }] } }));
+  assert.equal(tasks.count, 0);
+});
+
+test("background tasks survive bounded summary tails and incremental partial records", t => {
+  const f = fixture(t);
+  const file = path.join(f.project, `${id}.jsonl`);
+  const launched = line({ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Agent", input: {} }] } }) +
+    line({ type: "user", toolUseResult: { isAsync: true, agentId: "worker" }, message: { content: [{ type: "tool_result", tool_use_id: "a", content: "async" }] } });
+  fs.writeFileSync(file, line(user) + launched + line({ type: "unknown", padding: "x".repeat(600_000) }));
+  f.desktop.list();
+  assert.equal(f.desktop.backgroundTasks(id), 1);
+  const done = line({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" } });
+  fs.appendFileSync(file, done.slice(0, -1));
+  assert.equal(f.desktop.backgroundTasks(id), 1);
+  fs.appendFileSync(file, "\n");
+  assert.equal(f.desktop.backgroundTasks(id), 0);
+});
 
 test("defensive transcript conversion preserves users, tools, failure and result", () => {
   const lines = [line(user), "not json", "null", line({ type: "unknown" }), line({ ...user, isSidechain: true }), line({ type: "assistant", message: { content: [null, 5, { type: "thinking", thinking: "not shown" }] } }), line(assistant), line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: [{ type: "text", text: "failed" }] }] } }), line({ type: "result", subtype: "success", duration_ms: 23, num_turns: 1 })];
@@ -226,7 +272,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   assert.equal(sessions.list()[0]?.origin, "desktop");
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
   if (mode === "process") {
-    await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Mac 앱/);
+    await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Claude 앱/);
     assert.throws(() => sessions.send(id, "first-phone", "continue"), /지금은 보낼 수 없습니다/);
     assert.equal(options.length, 0);
     assert.equal(sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "first-phone"), false);

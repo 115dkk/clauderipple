@@ -219,7 +219,7 @@ export function Composer({ value, onChangeText, placeholder, onSend, onStop, can
 
 const DOWN: LinkStatus = { state: 'connecting', attempt: 0, nextAt: null, lastRx: null, downSince: null };
 
-/** The top-left pill: dot, Mac name, what is true right now. */
+/** The top-left pill: dot, host name, what is true right now. */
 export function LinkPill() {
   const { c, s } = useStyles();
   const state = useRemote();
@@ -232,9 +232,9 @@ export function LinkPill() {
     : link.state === 'waiting' && link.nextAt ? t('conn.retryIn', { s: Math.max(1, Math.ceil((link.nextAt - now) / 1000)) })
     : link.attempt > 0 ? t('conn.retrying') : t('conn.connecting');
   const tone = kind === 'open' ? [c.ok, c.okSoft] : kind === 'offline' || kind === 'denied' || kind === 'lost' ? [c.bad, c.badSoft] : [c.warn, c.warnSoft];
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${state.host?.name ?? 'Mac'} ${label}`} onPress={() => remote.retry()} style={s.link}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${state.host?.name ?? t('host.fallback')} ${label}`} onPress={() => remote.retry()} style={s.link}>
     <View style={[s.dotHalo, { backgroundColor: tone[1] }]}><View style={[s.dot, { backgroundColor: tone[0] }]} /></View>
-    <Text style={s.linkHost}>{state.host?.name ?? 'Mac'}</Text><Text style={s.linkText}>{label}</Text>
+    <Text style={s.linkHost}>{state.host?.name ?? t('host.fallback')}</Text><Text style={s.linkText}>{label}</Text>
   </Pressable>;
 }
 

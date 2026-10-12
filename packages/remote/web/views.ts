@@ -59,9 +59,14 @@ export function linkKind(link: LinkStatus, now: number): "open" | "connecting" |
   return link.state;
 }
 
+/** What copy calls the connected computer: its name once known, the neutral fallback before that. */
+export function hostName(ui: UI): string {
+  return ui.host?.name ?? t("host.fallback");
+}
+
 export function linkPill(ui: UI): string {
   const kind = linkKind(ui.link, ui.now);
-  const host = ui.host?.name ?? "Mac";
+  const host = hostName(ui);
   let label: string;
   if (kind === "open") label = t("conn.open");
   else if (kind === "offline") label = t("conn.offline");
@@ -76,18 +81,18 @@ export function banner(ui: UI): string {
   const kind = linkKind(ui.link, ui.now);
   const seen = ui.link.lastRx ? t("conn.lastSeen", { time: clock(ui.link.lastRx) }) : "";
   if (kind === "open") {
-    if (ui.host && !ui.host.routerOk) return `<div class="banner warn">${ripple("uneasy", 34)}<div class="txt">${esc(t("conn.router"))}</div></div>`;
+    if (ui.host && !ui.host.routerOk) return `<div class="banner warn">${ripple("uneasy", 34)}<div class="txt">${esc(t("conn.router", { host: hostName(ui) }))}</div></div>`;
     return "";
   }
   if (kind === "denied") {
-    return `<div class="banner bad">${ripple("sorry", 40)}<div class="txt"><b>${esc(t("conn.denied.title"))}</b>${esc(t("conn.denied.body"))}</div></div>`;
+    return `<div class="banner bad">${ripple("sorry", 40)}<div class="txt"><b>${esc(t("conn.denied.title"))}</b>${esc(t("conn.denied.body", { host: hostName(ui) }))}</div></div>`;
   }
   if (kind === "offline") {
     return `<div class="banner bad">${ripple("sleepy", 40)}<div class="txt"><b>${esc(t("conn.offline.title"))}</b>${esc(t("conn.offline.body"))}${seen ? `<small>${esc(seen)}</small>` : ""}</div></div>`;
   }
   if (kind === "lost") {
     const ago = duration(ui.now - (ui.link.downSince ?? ui.now));
-    return `<div class="banner bad">${ripple("sleepy", 40)}<div class="txt"><b>${esc(t("conn.lost.title"))}</b>${esc(t("conn.lost.body", { ago }))}${seen ? `<small>${esc(seen)}</small>` : ""}<div class="act"><button class="btn primary" data-act="retry">${esc(t("conn.retryNow"))}</button></div></div></div>`;
+    return `<div class="banner bad">${ripple("sleepy", 40)}<div class="txt"><b>${esc(t("conn.lost.title", { host: hostName(ui) }))}</b>${esc(t("conn.lost.body", { ago, host: hostName(ui) }))}${seen ? `<small>${esc(seen)}</small>` : ""}<div class="act"><button class="btn primary" data-act="retry">${esc(t("conn.retryNow"))}</button></div></div></div>`;
   }
   if (ui.link.attempt === 0) return "";
   return `<div class="banner slim">${icon.clock(16)}<span>${esc(ui.link.lastRx ? t("conn.stale", { time: clock(ui.link.lastRx) }) : t("conn.connecting"))}</span></div>`;
@@ -113,7 +118,7 @@ export function homeMain(ui: UI): string {
   const sec = (title: string, list: SessionSummary[], cls = "", count = false): string =>
     list.length ? `<div class="sec">${esc(title)}${count ? `<span class="count">${list.length}</span>` : ""}</div><div class="list ${cls}${stale}">${list.map((s) => sessionRow(s, ui)).join("")}</div>` : "";
   const empty = ui.sessions.length === 0
-    ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body"))}</p><div class="hint">${icon.down(22)}</div></div>`
+    ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body", { host: hostName(ui) }))}</p><div class="hint">${icon.down(22)}</div></div>`
     : "";
   return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sec(t("home.waiting"), waiting, "waiting", true)}${sec(t("home.active"), active)}${sec(t("home.recent"), rest)}${sec(t("home.desktop"), desktop)}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
 }
@@ -123,7 +128,7 @@ export function pushCard(ui: UI): string {
   const p = ui.push;
   if (!p || p === "on" || p === "unsupported" || ui.pushLater) return "";
   const later = `<button class="btn ghost" data-act="push-later">${esc(t("push.later"))}</button>`;
-  const body = p === "off" ? t("push.body") : p === "install" ? t("push.install") : p === "denied" ? t("push.denied") : t("push.insecure");
+  const body = p === "off" ? t("push.body") : p === "install" ? t("push.install") : p === "denied" ? t("push.denied") : t("push.insecure", { host: hostName(ui) });
   const action = p === "off" ? `<button class="btn primary" data-act="push-on">${icon.bell(18)}${esc(t("push.on"))}</button>` : "";
   return `<div class="banner push">${icon.bell(22)}<div class="txt"><b>${esc(t("push.title"))}</b>${esc(body)}<div class="act">${action}${later}</div></div></div>`;
 }
@@ -150,7 +155,7 @@ export function composer(placeholder: string, mode: "send" | "stop", value = "")
 export function sessionTop(ui: UI, s: SessionSummary | undefined, view: SessionView): string {
   const model = view.model ?? s?.model ?? null;
   const eff = view.effort ?? s?.effort ?? null;
-  const state = view.open.length ? "waiting" : view.state ?? s?.state ?? "stopped";
+  const state = s?.desktopBridge ? s.state : view.open.length ? "waiting" : view.state ?? s?.state ?? "stopped";
   if (s?.readOnly) return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(folderName(s.cwd, ui.home))}</b><span>${esc(modelName(ui.models, model))}</span></div>${stateRing("stopped", 24)}`;
   return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s ? folderName(s.cwd, ui.home) : "")}</b><button data-act="pick-model-session"><span>${esc(modelName(ui.models, model))}${eff ? ` · ${esc(effortLabel(eff))}` : ""}</span>${icon.down(14)}</button></div><span class="icon-btn${ui.link.state === "open" ? "" : " stale"}" aria-label="${esc(t(`state.${state}` as Key))}">${stateRing(state, 24)}</span>`;
 }
@@ -220,14 +225,14 @@ export function item(it: TimelineItem, ui: UI): string {
       if (it.decision === null) return `<div class="perm-done open">${icon.shield(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(t("state.waiting"))}</span></div>`;
       const label = it.decision === "allow" ? t("perm.allowed") : it.decision === "allow_always" ? t("perm.allowedAlways") : it.decision === "deny" ? t("perm.denied") : t("perm.expired");
       const cls = it.decision === "allow_always" ? "allow" : it.decision;
-      const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key))}</span>` : "";
+      const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</span>` : "";
       return `<div class="perm-done ${cls}">${it.decision === "allow" || it.decision === "allow_always" ? icon.check(16) : icon.x(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(label)}</span></div>${why ? `<div class="foot">${why}</div>` : ""}`;
     }
     case "result":
       if (!it.ok) return `<div class="foot bad">${icon.x(14)}${esc(t("turn.failed", { error: it.error ?? "" }))}</div>`;
       return `<div class="foot">${esc(t("turn.footer", { model: modelName(ui.models, it.model), effort: effortLabel(it.effort) || "—", dur: duration(it.ms) }))}</div>`;
     case "notice":
-      return `<div class="notice">${esc(t(`notice.${it.code}` as Key, { text: it.text ?? "" }))}</div>`;
+      return `<div class="notice">${esc(t(`notice.${it.code}` as Key, { text: it.text ?? "", host: hostName(ui) }))}</div>`;
   }
 }
 
