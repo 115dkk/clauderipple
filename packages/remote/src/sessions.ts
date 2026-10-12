@@ -402,6 +402,9 @@ export class Sessions {
     // A turn the desktop app finished while no phone was polling left the record "running";
     // without a fresh state event the phone would time this turn from that old one.
     if (r.state === "running" || r.state === "waiting") this.setState(r, "idle");
+    // Phones time a turn from its turn event; a desktop transcript's last turn has no result
+    // event to end it, so without this one the clock would run from that earlier turn.
+    this.append(id, { kind: "turn", model: r.model, effort: r.effort });
     this.setState(r, "running");
     return id;
   }
