@@ -212,6 +212,7 @@ export class App {
             this.renderedScreen = "";
           }
         }
+        this.cache(m.session).attached = false;
         this.dropOutbox(m.clientMsgId);
         this.attachCurrent();
         this.render();
@@ -332,7 +333,7 @@ export class App {
 
   summary(id: string): SessionSummary | undefined {
     const s = this.ui.sessions.find((x) => x.id === id);
-    if (s || !id.startsWith("local:")) return s;
+    if (s || !id.startsWith("local:")) return s?.origin === "desktop" ? { ...s, readOnly: false } : s;
     const o = this.outbox.find((x) => x.clientMsgId === id.slice(6));
     if (!o?.create) return undefined;
     return { id, title: o.text, cwd: o.create.cwd, model: o.create.model, effort: o.create.effort, state: "starting", pending: 0, createdAt: o.at, updatedAt: o.at, lastSeq: 0, epoch: "" };

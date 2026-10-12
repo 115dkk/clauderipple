@@ -267,8 +267,10 @@ export class HostServer {
         return;
       case "send":
         try {
-          s.send(msg.session, msg.clientMsgId, msg.text);
-          this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: msg.session });
+          const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
+          const id = s.send(msg.session, msg.clientMsgId, msg.text);
+          this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
+          if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
           this.send(c, { t: "error", code: "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
         }

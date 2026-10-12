@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DesktopSessions, transcriptEvents } from "../src/desktop.ts";
+import { DesktopSessions, processHasSession, transcriptEvents } from "../src/desktop.ts";
 import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
@@ -48,7 +48,7 @@ test("listing uses bounded windows, own title, cwd and last model without import
   assert.equal(s?.cwd, user.cwd);
   assert.equal(s?.model, "test-model");
   assert.equal(s?.origin, "desktop");
-  assert.equal(s?.readOnly, true);
+  assert.equal(s?.readOnly, false);
   assert.equal(s?.lastSeq, 0);
   assert.equal(s?.epoch, "");
   const log = f.desktop.log(id);
@@ -114,17 +114,69 @@ test("large timeline outputs are blobs and paged below the frame cap", t => {
   assert.equal(count, 22);
 });
 
-test("session integration rejects every write and produces a readable timeline", async t => {
+test("open detection matches exact session flags in fake ps output", () => {
+  for (const flag of [`--resume=${id}`, `--session-id ${id}`, `--session-id=${id}`, `--resume ${id}`]) {
+    assert.equal(processHasSession(` PID COMMAND\n 42 /path with spaces/claude ${flag} --model test\n`, id), true);
+  }
+  for (const args of [`--resume=${other}`, `--resume=${id}x`, `--prompt ${id}`, `--other=${id}`, ""]) {
+    assert.equal(processHasSession(`42 claude ${args}`, id), false);
+  }
+  assert.equal(processHasSession(`42 claude --resume=invalid`, "invalid"), false);
+});
+
+for (const mode of ["resume", "process", "recent"] as const) test(`desktop continuation: ${mode}`, async t => {
   const f = fixture(t);
-  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user) + line(assistant));
-  const sessions = new Sessions({ dir: f.root, desktopProjects: f.projects, permissions: PermissionQueue.open(path.join(f.root, "permissions.json")), router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } }, queryFn: () => { throw new Error("must never start SDK"); }, onEvent: () => {}, onSessions: () => {} });
-  t.after(() => sessions.shutdown());
-  assert.equal(sessions.has(id), true);
-  assert.throws(() => sessions.send(id, "write", "no"), /read-only/);
-  assert.throws(() => sessions.decide(id, "permission", "allow"), /read-only/);
-  await assert.rejects(sessions.interrupt(id), /read-only/);
-  await assert.rejects(sessions.setModel(id, "new", null), /read-only/);
-  assert.throws(() => sessions.log("../../escape"), /no such session/);
+  const file = path.join(f.project, `${id}.jsonl`);
+  fs.writeFileSync(file, line(user) + line(assistant));
+  if (mode !== "recent") fs.utimesSync(file, new Date(Date.now() - 120_000), new Date(Date.now() - 120_000));
+  const original = fs.readFileSync(file, "utf8");
+  const options: Record<string, unknown>[] = [];
+  let turns = 0;
+  const sessions = new Sessions({ dir: f.root, desktopProjects: f.projects, desktopProcesses: () => mode === "process" ? `42 claude --resume=${id}` : "", permissions: PermissionQueue.open(path.join(f.root, "permissions.json")), router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } }, queryFn: params => {
+    options.push(params.options);
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "system", subtype: "init", session_id: params.options.sessionId ?? params.options.resume ?? id };
+        for await (const input of params.prompt) {
+          turns++;
+          yield { type: "assistant", message: { id: `reply-${turns}`, model: "test-model", content: [{ type: "text", text: input.message.content }] } };
+          yield { type: "result", subtype: "success", num_turns: 1 };
+        }
+      }, interrupt: async () => {}, setModel: async () => {}, close: () => {},
+    };
+  }, onEvent: () => {}, onSessions: () => {} });
+  t.after(async () => { for (const s of sessions.list()) sessions.stop(s.id); await new Promise(resolve => setImmediate(resolve)); sessions.shutdown(); });
   assert.equal(sessions.list()[0]?.origin, "desktop");
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
+  await sessions.setModel(id, "chosen-model", "high");
+  const host = sessions.send(id, "first-phone", "continue");
+  assert.equal(sessions.send(id, "first-phone", "continue"), host);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options[0]?.resume, id);
+  assert.equal(options[0]?.cwd, user.cwd);
+  assert.equal(options[0]?.model, "chosen-model@high");
+  assert.equal(options[0]?.forkSession, undefined);
+  assert.equal(options[0]?.sessionId, undefined);
+  assert.equal(host, id);
+  assert.equal(turns, 1);
+  assert.deepEqual(sessions.list().map(s => s.origin), ["host"]);
+  const events = sessions.log(host).tail().events;
+  assert.deepEqual(events.slice(0, 2).map(e => e.kind), ["user", "assistant"]);
+  assert.equal(events[0]?.at, Date.parse(user.timestamp));
+  assert.ok(events.some(e => e.kind === "notice" && e.code === (mode === "resume" ? "desktop_resumed" : "desktop_open")));
+  assert.equal(fs.readFileSync(file, "utf8"), original);
+  sessions.stop(host);
+  await new Promise(resolve => setImmediate(resolve));
+  sessions.send(host, "second-phone", "again");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options[1]?.resume, host);
+  assert.equal(options[1]?.forkSession, undefined);
+  assert.throws(() => sessions.log("../../escape"), /no such session/);
+  sessions.stop(host);
+  await new Promise(resolve => setImmediate(resolve));
+  const restored = new Sessions({ dir: f.root, desktopProjects: f.projects, desktopProcesses: () => "", permissions: PermissionQueue.open(path.join(f.root, "permissions.json")), router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } }, queryFn: () => { throw new Error("retry must not start SDK"); }, onEvent: () => {}, onSessions: () => {} });
+  try {
+    assert.equal(restored.send(id, "first-phone", "continue"), host);
+    assert.deepEqual(restored.list().map(s => s.origin), ["host"]);
+  } finally { restored.shutdown(); }
 });

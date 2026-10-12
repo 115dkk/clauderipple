@@ -178,6 +178,7 @@ class RemoteClient {
         this.update({ pending: this.snapshot.pending.filter(p => p.message.clientMsgId !== msg.clientMsgId) });
         void this.persist().catch(e => this.report(e));
         if (pending?.message.t === 'create') { this.open(msg.session); this.onCreated?.(msg.session); }
+        if (pending?.message.t === 'send' && this.active === msg.session) this.attach(msg.session);
         break;
       }
       case 'res': {

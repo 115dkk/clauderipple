@@ -161,7 +161,7 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
 }
 
-test("desktop sessions use ready, attach, paged history and blob requests, rejecting writes", async t => {
+test("desktop sessions use ready, history, blobs and continue through a same-session ACK", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-wire-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const project = path.join(root, "project");
@@ -176,7 +176,7 @@ test("desktop sessions use ready, attach, paged history and blob requests, rejec
   const peer = await f.connect();
   peer.send({ t: "hello", token, clientId: "desktop-reader" });
   const ready = await peer.take("ready");
-  assert.equal(ready.msg.sessions[0]?.readOnly, true);
+  assert.equal(ready.msg.sessions[0]?.readOnly, false);
   peer.send({ t: "attach", session: id });
   const tail = await peer.take("events");
   assert.equal(tail.msg.tail?.hasOlder, true);
@@ -190,17 +190,24 @@ test("desktop sessions use ready, attach, paged history and blob requests, rejec
   peer.send({ t: "req", reqId: "blob", op: { op: "blob", session: id, id: large.text.blob } });
   const blob = await peer.take("res");
   assert.equal(blob.msg.ok && (blob.msg.data as BlobChunk).text, "z".repeat(60_000));
-  for (const msg of [
-    { t: "send", session: id, clientMsgId: "no-write", text: "no" },
-    { t: "set_model", session: id, model: "no", effort: null },
-    { t: "interrupt", session: id },
-    { t: "decide", session: id, id: "none", decision: "allow" },
-  ] satisfies ClientMsg[]) {
-    peer.send(msg);
-    const error = await peer.take("error");
-    assert.match(error.msg.message, /read-only/);
-  }
-  assert.equal(f.fake.options.length, 0);
+  peer.send({ t: "send", session: id, clientMsgId: "continue-wire", text: "continue" });
+  const ack = await peer.take("ack");
+  assert.equal(ack.msg.session, id);
+  peer.send({ t: "attach", session: ack.msg.session });
+  const continued = await peer.take("events", msg => msg.session === ack.msg.session && !!msg.tail);
+  assert.ok(continued.msg.events.some(e => e.kind === "notice" && e.code === "desktop_open"));
+  const imported = continued.msg.events.find(e => e.kind === "assistant" && e.msg === "large");
+  assert.ok(imported?.kind === "assistant" && typeof imported.text !== "string");
+  peer.send({ t: "req", reqId: "continued-blob", op: { op: "blob", session: ack.msg.session, id: imported.text.blob } });
+  const copiedBlob = await peer.take("res", msg => msg.reqId === "continued-blob");
+  assert.equal(copiedBlob.msg.ok && (copiedBlob.msg.data as BlobChunk).text, "z".repeat(60_000));
+  peer.send({ t: "send", session: id, clientMsgId: "continue-wire", text: "continue" });
+  assert.equal((await peer.take("ack")).msg.session, ack.msg.session);
+  await waitFor(() => f.fake.users.length === 1);
+  assert.equal(f.fake.options.length, 1);
+  assert.equal(f.fake.options[0]?.resume, id);
+  assert.equal(f.fake.options[0]?.forkSession, undefined);
+  assert.equal(f.sessions.list().length, 1);
   assert.equal(fs.readFileSync(path.join(project, `${id}.jsonl`), "utf8"), data);
 });
 

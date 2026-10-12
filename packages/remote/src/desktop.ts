@@ -1,6 +1,7 @@
 // Claude Code's top-level transcripts are a read-only source. Discovery is bounded;
 // only opening a timeline scans the transcript, into the same capped event log as host sessions.
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
@@ -18,6 +19,17 @@ export interface DesktopOptions {
   now?: () => number;
   summarize: Summarize;
   excluded: () => Set<string>;
+  processes?: () => string;
+}
+
+/** Match session flags, not UUIDs appearing in a prompt or another flag's value. */
+export function processHasSession(output: string, id: string): boolean {
+  if (!UUID.test(id)) return false;
+  return output.split("\n").some(line => {
+    const args = line.trim().split(/\s+/);
+    return args.some((arg, i) => arg === `--resume=${id}` || arg === `--session-id=${id}` ||
+      ((arg === "--session-id" || arg === "--resume") && args[i + 1] === id));
+  });
 }
 
 function object(value: unknown): RecordValue | null {
@@ -123,6 +135,39 @@ export class DesktopSessions {
     return this.sources.has(id);
   }
 
+  continuation(id: string): { summary: SessionSummary; open: boolean } {
+    if (!this.has(id)) throw new Error("no such session");
+    const source = this.sources.get(id)!;
+    const fd = this.open(source.file);
+    try {
+      const stat = fs.fstatSync(fd);
+      const current = this.readSummary(id, source.file, stat);
+      if (!current) throw new Error("transcript has no working folder");
+      const processes = this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+      return { summary: current.summary, open: processHasSession(processes, id) || stat.mtimeMs >= (this.opts.now ?? Date.now)() - 60_000 };
+    } finally { fs.closeSync(fd); }
+  }
+
+  /** Convert directly into the durable host log, preserving timestamps and externalized blobs. */
+  importInto(id: string, dir: string, now: () => number): EventLog {
+    if (!this.has(id)) throw new Error("no such session");
+    const source = this.sources.get(id)!;
+    const fd = this.open(source.file);
+    let at = source.summary.createdAt;
+    let importing = true;
+    const log = EventLog.open({ dir, now: () => importing ? at : now() });
+    try {
+      scanLines(fd, fs.fstatSync(fd).size, line => {
+        const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize);
+        at = parsed.at ?? at;
+        for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
+      });
+      importing = false;
+      return log;
+    } catch (error) { log.close(); throw error; }
+    finally { fs.closeSync(fd); }
+  }
+
   private refresh(): void {
     const now = (this.opts.now ?? Date.now)();
     if (now - this.scannedAt < 5000) return;
@@ -181,7 +226,7 @@ export class DesktopSessions {
         if (Number.isFinite(at)) createdAt = Math.min(createdAt, at);
       }
       if (!cwd) return null;
-      return { file, size: stat.size, mtime: stat.mtimeMs, summary: { id, title: ownTitle || firstPrompt || id, cwd, model, effort: null, state: "stopped", pending: 0, createdAt, updatedAt: stat.mtimeMs, lastSeq: 0, epoch: "", origin: "desktop", readOnly: true } };
+      return { file, size: stat.size, mtime: stat.mtimeMs, summary: { id, title: ownTitle || firstPrompt || id, cwd, model, effort: null, state: "stopped", pending: 0, createdAt, updatedAt: stat.mtimeMs, lastSeq: 0, epoch: "", origin: "desktop", readOnly: false } };
     } finally { fs.closeSync(fd); }
   }
 
@@ -196,17 +241,9 @@ export class DesktopSessions {
       if (cached) { this.dispose(cached); this.imported.delete(id); }
       this.temp ??= fs.mkdtempSync(path.join(os.tmpdir(), "ripple-desktop-"));
       const dir = fs.mkdtempSync(path.join(this.temp, "snapshot-"));
-      let at = source.summary.createdAt;
-      const log = EventLog.open({ dir, now: () => at });
-      try {
-        scanLines(fd, stat.size, line => {
-          const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize);
-          at = parsed.at ?? at;
-          for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
-        });
-        this.imported.set(id, { size: stat.size, mtime: stat.mtimeMs, log, dir });
-        return log;
-      } catch (error) { log.close(); fs.rmSync(dir, { recursive: true, force: true }); throw error; }
+      const log = this.importInto(id, dir, this.opts.now ?? Date.now);
+      this.imported.set(id, { size: stat.size, mtime: stat.mtimeMs, log, dir });
+      return log;
     } finally { fs.closeSync(fd); }
   }
 

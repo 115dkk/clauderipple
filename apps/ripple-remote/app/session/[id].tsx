@@ -21,7 +21,7 @@ export default function Session() {
   const session = state.sessions.find(s => s.id === id);
   const history = state.histories[id];
   const view = reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder);
-  const readOnly = session?.readOnly === true || session?.origin === 'desktop';
+  const readOnly = session?.readOnly === true && session?.origin !== 'desktop';
   useEffect(() => { remote.open(id); }, [id]);
   const send = async () => { const value = text.trim(); if (!value) return; try { await remote.queue({ t: 'send', session: id, text: value }); setText(''); } catch (e) { remote.report(e); } };
   const link = state.status;

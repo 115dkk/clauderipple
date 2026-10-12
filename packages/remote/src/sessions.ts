@@ -70,6 +70,7 @@ export interface SessionsOptions {
   coalesceMs?: number;
   /** Enabled by main; tests can use an isolated synthetic projects directory. */
   desktopProjects?: string;
+  desktopProcesses?: () => string;
 }
 
 /** An async iterable the SDK reads user messages from; a session's query lives as long as it. */
@@ -151,6 +152,7 @@ export class Sessions {
   private file: string;
   private now: () => number;
   private desktop: DesktopSessions | null;
+  private desktopModels = new Map<string, { model: string; effort: Effort | null }>();
 
   constructor(opts: SessionsOptions) {
     this.opts = opts;
@@ -158,7 +160,7 @@ export class Sessions {
     this.file = path.join(opts.dir, "sessions.json");
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
-      projects: opts.desktopProjects, now: this.now, summarize,
+      projects: opts.desktopProjects, now: this.now, summarize, ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       excluded: () => new Set(Array.from(this.records.values()).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
     });
   }
@@ -178,13 +180,24 @@ export class Sessions {
 
   list(): SessionSummary[] {
     const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
-    return [...host, ...(this.desktop?.list() ?? [])];
+    return [...host, ...(this.desktop?.list() ?? []).map(s => ({ ...s, ...this.desktopModels.get(s.id) }))];
   }
 
   has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
 
-  private assertWritable(id: string): void {
-    if (this.desktop?.has(id)) throw new Error("desktop session is read-only");
+  private continueDesktop(id: string, clientMsgId: string): SessionRecord {
+    if (!this.desktop) throw new Error("no such session");
+    const { summary: s, open } = this.desktop.continuation(id);
+    const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
+    const r: SessionRecord = { id, sdkSessionId: id, cwd: s.cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null };
+    Object.assign(r, this.desktopModels.get(id));
+    this.desktopModels.delete(id);
+    this.logs.set(id, log);
+    this.records.set(id, r);
+    this.save();
+    this.append(id, { kind: "notice", code: open ? "desktop_open" : "desktop_resumed" });
+    this.opts.onSessions();
+    return r;
   }
 
   /** A turn is in progress somewhere (including one waiting on the phone for a permission). */
@@ -273,11 +286,10 @@ export class Sessions {
   }
 
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live. */
-  send(id: string, clientMsgId: string, text: string): void {
-    this.assertWritable(id);
-    const r = this.records.get(id);
-    if (!r) throw new Error("no such session");
-    if (this.seen(id, clientMsgId)) return;
+  send(id: string, clientMsgId: string, text: string): string {
+    const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
+    id = r.id;
+    if (this.seen(id, clientMsgId)) return id;
     this.append(id, { kind: "user", text, clientMsgId });
     let live = this.live.get(id);
     if (!live) live = this.start(r);
@@ -288,6 +300,7 @@ export class Sessions {
       this.setState(r, "running");
     }
     live.input.push({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } });
+    return id;
   }
 
   private seen(id: string, clientMsgId: string): boolean {
@@ -304,14 +317,12 @@ export class Sessions {
   }
 
   decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny"): boolean {
-    this.assertWritable(id);
     const p = this.opts.permissions.get(permId);
     if (!p || p.session !== id) return false;
     return this.opts.permissions.decide(permId, decision) !== null;
   }
 
   async interrupt(id: string): Promise<void> {
-    this.assertWritable(id);
     const live = this.live.get(id);
     if (!live) return;
     // Open requests resolve as expired; their canUseTool continuation writes the event.
@@ -325,7 +336,11 @@ export class Sessions {
   }
 
   async setModel(id: string, model: string, effort: Effort | null): Promise<void> {
-    this.assertWritable(id);
+    if (!this.records.has(id) && this.desktop?.has(id)) {
+      this.desktopModels.set(id, { model, effort });
+      this.opts.onSessions();
+      return;
+    }
     const r = this.records.get(id);
     if (!r) throw new Error("no such session");
     const changedModel = r.model !== model;
@@ -414,7 +429,11 @@ export class Sessions {
     const parent = (msg.parent_tool_use_id as string | null | undefined) ?? null;
     switch (msg.type) {
       case "system": {
-        if (msg.subtype === "init" && typeof msg.session_id === "string" && r.sdkSessionId !== msg.session_id) { r.sdkSessionId = msg.session_id; this.save(); }
+        if (msg.subtype === "init" && typeof msg.session_id === "string" && r.sdkSessionId !== msg.session_id) {
+          r.sdkSessionId = msg.session_id;
+          this.save();
+          this.opts.onSessions();
+        }
         if (msg.subtype === "api_retry" && !live.retried) { live.retried = true; this.append(r.id, { kind: "notice", code: "api_retry" }); }
         return;
       }
