@@ -20,6 +20,17 @@ export default function Session() {
   const state = useRemote();
   const [text, setText] = useState('');
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [commands, setCommands] = useState<string[] | null>(null);
+  // "/" at the start, before any space: the session's slash commands, as the app's composer offers them.
+  const slash = /^\/(\S*)$/.exec(text)?.[1]?.toLowerCase() ?? null;
+  const matches = slash === null || !commands ? [] : commands
+    .filter(name => name.toLowerCase().includes(slash))
+    .sort((a, b) => Number(!b.toLowerCase().startsWith(slash)) - Number(!a.toLowerCase().startsWith(slash)));
+  useEffect(() => { setCommands(null); }, [id]);
+  useEffect(() => {
+    if (slash === null || commands) return;
+    remote.request({ op: 'commands', session: id }).then(list => setCommands(Array.isArray(list) ? list as string[] : []), () => setCommands([]));
+  }, [slash === null, commands, id]);
   const session = state.sessions.find(s => s.id === id);
   const history = state.histories[id];
   const view = reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder);
@@ -102,6 +113,14 @@ export default function Session() {
           {!!session!.taskList?.length && <Icon name={tasksOpen ? 'down' : 'chevron'} size={14} color={c.muted} />}
         </Pressable>
       </>}
+      {!readOnly && matches.length > 0 && <View style={{ marginHorizontal: 6, marginBottom: 8, maxHeight: 264, borderRadius: radius.sm, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line, overflow: 'hidden' }}>
+        <ScrollView keyboardShouldPersistTaps="handled">
+          {matches.map((name, i) => <Pressable key={name} accessibilityRole="button" accessibilityLabel={`/${name}`} onPress={() => setText(`/${name} `)}
+            style={({ pressed }) => ({ paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: i ? 1 : 0, borderColor: c.line, backgroundColor: pressed ? c.surface2 : 'transparent' })}>
+            <Text numberOfLines={1} style={{ fontSize: 15, color: c.ink }}><Text style={{ color: c.muted }}>/</Text>{name}</Text>
+          </Pressable>)}
+        </ScrollView>
+      </View>}
       {!readOnly && session && <Composer testID="session-composer" value={text} onChangeText={setText} placeholder={t('composer.reply')} canSend={!!text.trim()} onSend={() => { void send(); }}
         onStop={['running', 'starting', 'waiting'].includes(session.state) ? () => { try { remote.send({ t: 'interrupt', session: id }); } catch (e) { remote.report(e); } } : undefined} />}
     </View>

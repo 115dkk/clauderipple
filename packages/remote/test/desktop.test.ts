@@ -340,3 +340,10 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
     assert.deepEqual(restored.list().map(s => s.origin), ["host"]);
   } finally { restored.shutdown(); }
 });
+
+test("the phone's slash menu drops the commands the init marks terminal-only", async () => {
+  const { slashCommands } = await import("../src/bridge-client.ts");
+  // Measured 2026-10-13 on a Mac session's Remote Control init: 85 commands, terminal_slash_commands ["focus"].
+  assert.deepEqual(slashCommands({ slash_commands: ["compact", "focus", "context", 3, ""], terminal_slash_commands: ["focus"] }), ["compact", "context"]);
+  assert.equal(slashCommands({}), null);
+});

@@ -11,7 +11,7 @@ import { messageContent } from "./images.ts";
 import type { ImagePart } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeClient, DESKTOP_BLOCKED, object, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeClient, DESKTOP_BLOCKED, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -163,6 +163,9 @@ export class Sessions {
   private records = new Map<string, SessionRecord>();
   private logs = new Map<string, EventLog>();
   private live = new Map<string, Live>();
+  /** Slash commands per session (its init event), and the latest seen anywhere for sessions with none yet. */
+  private commandLists = new Map<string, { at: number; list: string[] }>();
+  private lastCommands: string[] = [];
   private figuresAt = new Map<string, number>();
   private lastFigures = new Map<string, string>();
   private creating = new Map<string, Promise<string>>();
@@ -294,6 +297,21 @@ export class Sessions {
   }
 
   has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
+
+  /** The slash commands the phone offers after "/": a Mac session's from its Remote Control init (re-read
+   * after five minutes), a host session's from its own init; otherwise the latest list seen anywhere. */
+  async commands(id: string): Promise<string[]> {
+    if (!this.has(id)) throw new Error("no such session");
+    const cached = this.commandLists.get(id);
+    const bridgeId = this.desktop?.liveProcess(this.records.get(id)?.sdkSessionId ?? id)?.bridgeSessionId;
+    if (bridgeId && (!cached || this.now() - cached.at > 300_000)) {
+      try {
+        const list = await this.bridge.commands(bridgeId);
+        if (list) { this.commandLists.set(id, { at: this.now(), list }); this.lastCommands = list; return list; }
+      } catch (error) { (this.opts.log ?? console.error)(`[commands] ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    return cached?.list ?? this.lastCommands;
+  }
 
   private continueDesktop(id: string, clientMsgId: string, bridgeMode = false): SessionRecord {
     if (!this.desktop) throw new Error("no such session");
@@ -715,6 +733,10 @@ export class Sessions {
     const parent = (msg.parent_tool_use_id as string | null | undefined) ?? null;
     switch (msg.type) {
       case "system": {
+        if (msg.subtype === "init") {
+          const list = slashCommands(msg);
+          if (list) { this.commandLists.set(r.id, { at: this.now(), list }); this.lastCommands = list; }
+        }
         if (msg.subtype === "init" && typeof msg.session_id === "string" && r.sdkSessionId !== msg.session_id) {
           r.sdkSessionId = msg.session_id;
           this.save();

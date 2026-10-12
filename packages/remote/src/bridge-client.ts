@@ -22,6 +22,13 @@ export function loadBridgeAuth(): BridgeAuth {
   } catch { throw new Error("이 컴퓨터의 Claude 로그인 정보를 읽을 수 없습니다."); }
 }
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
+/** `slash_commands` minus `terminal_slash_commands`, which phone UIs should hide (SDK init docs). */
+export function slashCommands(init: Record<string, unknown>): string[] | null {
+  if (!Array.isArray(init.slash_commands)) return null;
+  const terminal = new Set(Array.isArray(init.terminal_slash_commands) ? init.terminal_slash_commands : []);
+  return init.slash_commands.filter((c): c is string => typeof c === "string" && !!c && !terminal.has(c));
+}
+
 export class BridgeClient {
   private fetchFn: typeof fetch;
   private loadAuth: () => BridgeAuth;
@@ -81,6 +88,15 @@ export class BridgeClient {
   }
   async events(id: string): Promise<Record<string, unknown>> {
     return object(await (await this.request(id, "/events?sort_order=asc", { signal: AbortSignal.timeout(15_000) })).json()) ?? {};
+  }
+  /** The session's slash commands, from the CLI's init event, without the terminal-only ones; null when it has none. */
+  async commands(id: string): Promise<string[] | null> {
+    const list = (await this.events(id)).data;
+    for (const value of Array.isArray(list) ? list : []) {
+      const payload = object(object(value)?.payload);
+      if (payload?.type === "system" && payload.subtype === "init") return slashCommands(payload);
+    }
+    return null;
   }
   /** The newest durable event's number; the stream starts there instead of replaying the whole session. */
   private async latest(id: string, signal: AbortSignal): Promise<number> {

@@ -313,6 +313,7 @@ export class HostServer {
         return recentFolders([...s.recentSources(), ...cli]);
       }
       case "browse": return browse(op.path, op.hidden ?? false);
+      case "commands": return s.commands(op.session);
       case "blob": {
         if (!s.has(op.session)) throw new Error("no such session");
         const text = s.log(op.session).blob(op.id);

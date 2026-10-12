@@ -152,6 +152,8 @@ export type ReqOp =
   | { op: "browse"; path?: string; hidden?: boolean }
   | { op: "blob"; session: string; id: string; offset?: number }
   | { op: "sub"; session: string; sub: string; afterSeq?: number }
+  /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
+  | { op: "commands"; session: string }
   /** The host's VAPID public key (base64url), for PushManager.subscribe's applicationServerKey. */
   | { op: "push_key" }
   | { op: "push_subscribe"; subscription: PushSubscriptionJSON; lang: "ko" | "en" }
