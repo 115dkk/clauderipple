@@ -40,7 +40,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame } from './view'
-import { EFFORTS, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, resetsLabel, seconds, compactNumber } from './view'
+import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, modelName, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -143,7 +143,7 @@ function effortFact(frame: Frame, view: DashboardView, onPress: () => void): Fac
   const value: Run = mode === 'deciding' ? { text: label, color: accent } : quiet ? { text: label, dim: true } : { text: label, bold: !rich }
   const tag = t(frame.lang, mode === 'auto' || mode === 'deciding' ? 'band.auto' : mode === 'manual' ? 'band.manual' : mode === 'paused' ? 'band.paused' : 'band.autoOff')
   const hint =
-    mode === 'paused' ? t(frame.lang, 'band.pausedHint') : mode === 'off' ? t(frame.lang, 'band.offHint') : mode === 'deciding' ? t(frame.lang, 'band.decidingHint') : why && !view.hide.includes('reason') ? why : ''
+    mode === 'paused' ? t(frame.lang, 'band.pausedHint') : mode === 'off' ? t(frame.lang, 'band.offHint') : mode === 'deciding' ? t(frame.lang, 'band.decidingHint') : why ?? ''
   // Terminal: glyph, a cell, the label. Desktop: the glyph, then the label's button, whose own
   // padding is the air on both sides.
   // The desktop names the slot instead of a glyph: a ripple a few pixels across read as noise, not
@@ -382,14 +382,6 @@ function bandSea(mood: BandMood): Omit<Sea, 'at'> {
   return { tone: 'violet', ripples: 'calm', motes: true, strength }
 }
 
-/** Who chose the effort and why, as "Jev: one small fix"; empty unless Auto chose it. */
-function reasonText(frame: Frame, view: DashboardView): string {
-  const { why, by, mode } = view.effort
-  if (!why || mode !== 'auto' || view.hide.includes('reason')) return ''
-  const who = by === 'jev' ? 'Jev' : by === 'haiku' ? 'Haiku' : by === 'model' ? t(frame.lang, 'band.router') : ''
-  return who ? who + ': ' + why : why
-}
-
 /** A fact's hover group: pointing at it shows its tip in the reason's place. */
 const tipScope = (key: string) => 'ripple-tip-' + key
 
@@ -494,6 +486,14 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
   return drawnFact(el, 'mode', 2 + Math.ceil(MODE_CELLS * 1.1), [<Text key="mode-mark" color={amber}>◆</Text>, <Text key="mode-name" color={amber}>{modeLabel(view.mode)}</Text>], t(frame.lang, 'band.modeTip', { name: view.mode }))
 }
 
+/**
+ * The routed model as the band names it: what was asked dropped, and Claude's ids by their
+ * family and version ("claude-opus-5-5" → "Opus 5.5"); the whole route is in the tip.
+ */
+function routeName(model: string): string {
+  return modelName(model.replace(/\s*\(.*\)$/, ''))
+}
+
 /** The last route: where it went (the provider's dot), the model, its cache hit; the way into the log. */
 function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   const { Box, Text } = el
@@ -515,7 +515,7 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
         {r.ok ? <Text color={r.resent ? MUTE : providerColor(r.provider)}>{r.resent ? '↻' : '•'}</Text> : <Text color={TONE.red.text}>✕</Text>}
       </Box>
       <Box flexShrink={1} minWidth={0}>
-        <Text color={SUB} wrap="truncate">{r.model}</Text>
+        <Text color={SUB} wrap="truncate">{routeName(r.model)}</Text>
       </Box>
       <Box flexShrink={0}>
         {!r.ok ? (
@@ -529,14 +529,16 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   )
 }
 
-/** The judge's reason in what the row leaves, and each fact's tip laid over it on hover. */
-function whyDrawn(el: Els, frame: Frame, view: DashboardView, tips: { key: string; text: string }[]): RenderNode {
+/**
+ * What the row leaves, blank, and each fact's or control's tip laid over it on hover. The judge's
+ * reason is no longer written here (cut to a word or two it said nothing, 2026-10-13); it is in the
+ * effort's tip.
+ */
+function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[]): RenderNode {
   const { Box, Text } = el
-  const reason = reasonText(frame, view)
   const width = Math.max(40, frame.columns) * CELL_PX
   return (
     <Box key="band-why" position="relative" flexDirection="row" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
-      {reason ? <Text color={MUTE} wrap="truncate">{reason}</Text> : null}
       {tips.map(tip => (
         <Box key={'tip-' + tip.key} position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
           <Box position="absolute" top={0} left={0}>
@@ -670,7 +672,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
         {facts.map(f => f.node)}
         {ruled && routeNode ? rule(el, 'route') : null}
         {routeNode}
-        {whyDrawn(el, frame, view, tips)}
+        {whyDrawn(el, frame, tips)}
       </Box>
       <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={0} marginLeft={1}>
         {controls.map(c => c.node)}

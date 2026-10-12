@@ -1689,7 +1689,7 @@ test('every band control changes the next drawing, and a toggle says its state o
     expect(await ui.find({ key: 'pick-low' })).toBeUndefined()
     if (surface === 'desktop') {
       // The route opens the log, shown as on at once.
-      expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol (gpt-6-1-sol)' })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol' })).toBeDefined()
       await ui.press({ key: 'route' })
       expect(b.panes.has('ripple-log')).toBe(true)
       await ui.press({ key: 'route' })
