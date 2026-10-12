@@ -86,6 +86,8 @@ export type DashboardView = {
   /** Optional chips switched on: 'context' | 'limits'. */
   extras: readonly string[]
   isWorking: boolean
+  /** The active operating mode's name; absent when none is on. */
+  mode?: string
 }
 
 export type BandActions = {
@@ -157,6 +159,8 @@ export type SettingsActions = {
   patch: (change: Partial<Settings>) => void
   /** Runs a rung of the main ladder on another model (a Select value); its effort stays. */
   setRung?: (rung: Rung, value: string) => void
+  /** Turns a mode on by id, or every mode off with ''. */
+  setMode?: (id: string) => void
   /** The Jev key typed into the field (Enter). */
   jevKey: (key: string) => void
   testJev: () => void

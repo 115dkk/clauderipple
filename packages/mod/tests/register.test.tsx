@@ -2,7 +2,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
-import { DEFAULTS, normalizeSettings } from '../hooks/settings'
+import { DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
 import type { ModSettingsSnapshot, Settings } from '../types'
 
@@ -114,11 +114,13 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('ui.open', ($, e) => { panes.add(e.id); return { value: { isPlaced: true } } })
   on('ui.close', ($, e) => { panes.delete(e.id); return { value: undefined } })
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['host drawing'] }))
-  on('prompt.submit', ($, e) => { submitted.push(e.text); return { text: e.text } })
+  // What the model reads beside each prompt, as the hooks attached it.
+  const contexts: (readonly string[])[] = []
+  on('prompt.submit', ($, e) => { submitted.push(e.text); contexts.push(e.context ?? []); return { text: e.text } })
   on('turn.complete', () => ({ text: '' }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
-  return { registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
+  return { registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, contexts, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
 }
 function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input: { url: string; init?: { body?: string; headers?: Readonly<Record<string, string>> } }) => void) {
   const urls: string[] = []
@@ -820,6 +822,96 @@ test('failed Haiku compaction falls back; precompute skips; subagent stays with 
   expect(calls.length).toBe(1)
   expect('skip' in skipped).toBe(true)
   expect(b.toasts.some(t => t.includes('session compactor'))).toBe(true)
+})
+
+// ---- Operating modes (docs/specs/2026-10-12-worker-tiers.md "Operating modes") -----------------
+
+const BURN = normalizeModes([{ id: 'burn', name: 'Burn GPT', targets: ['chatgpt'], action: 'prefer', delegation: 'eager' }])
+
+test('an eager mode notes the main chat once, and again after a compaction; its tiers route spawns and each pick names it', async ($, on) => {
+  const b = boundaries(on, { modes: BURN, activeMode: 'burn', activeSince: NOW, compactWith: 'session' })
+  http(on)
+  judgeStub(on)
+  const sent = spawnStub(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  await submit($)
+  await submit($)
+  // A slash command is not the user's prompt: no note, and the turn after it is still noted.
+  await submit($, '/model')
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  // A subagent's compaction is not the main chat's.
+  await submit($)
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'worker' })
+  await submit($)
+  const note = 'ClaudeRipple mode Burn GPT: delegate everything except judgment and final review to ripple:low/medium/high/max.'
+  expect(b.contexts).toEqual([[note], [], [], [note], []])
+  // Prefer ChatGPT: Low leaves DeepSeek for the cheaper of Sol and Astra (AA cost), at Low's effort.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@low' })
+  const pick = b.logs.find(text => text.startsWith('ClaudeRipple worker pick: '))!
+  expect(JSON.parse(pick.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ tier: 'low', rung: 'light', mode: 'Burn GPT' })
+  // The band names the mode.
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: 'Burn GPT' })).toBeDefined()
+})
+
+test('with no mode on, nothing is attached and picks name none', async ($, on) => {
+  const b = boundaries(on, { modes: BURN })
+  http(on)
+  judgeStub(on)
+  spawnStub(on)
+  await start($)
+  await submit($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:low' })
+  expect(b.contexts).toEqual([[]])
+  expect(JSON.parse(b.logs.find(text => text.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length)).mode).toBeUndefined()
+})
+
+test('a mode ends at its time and says so once; quick settings turn one on and off', async ($, on) => {
+  const modes = normalizeModes([{ id: 'hour', name: 'One minute', targets: ['chatgpt'], until: NOW + 60_000 }, ...BURN])
+  const b = boundaries(on, { modes, activeMode: 'hour', activeSince: NOW })
+  http(on)
+  await start($)
+  await b.clock.advance(30_000)
+  expect(b.router().settings.activeMode).toBe('hour')
+  await b.clock.advance(40_000)
+  expect(b.router().settings.activeMode).toBeUndefined()
+  expect(b.router().settings.modes).toEqual(modes)
+  expect(b.toasts.filter(text => text === 'The One minute mode has ended.').length).toBe(1)
+  await b.clock.advance(9000)
+  expect(b.toasts.filter(text => text === 'The One minute mode has ended.').length).toBe(1)
+  // The quick settings' one mode control: none, then each mode.
+  await command($, 'settings')
+  const ui = await band($, 'desktop')
+  const select = await ui.find({ type: 'Select', key: 'mode' })
+  expect((select?.props.options as { label: string }[]).map(o => o.label)).toEqual(['None', 'One minute', 'Burn GPT'])
+  await ui.select({ key: 'mode', value: 'burn' })
+  expect([b.router().settings.activeMode, b.router().settings.activeSince]).toEqual(['burn', NOW + 79_000])
+  await ui.select({ key: 'mode', value: '' })
+  expect(Object.hasOwn(b.router().settings, 'activeMode')).toBe(false)
+})
+
+test('a mode until the quota resets ends once every ChatGPT account\'s window has reset since it turned on', async ($, on) => {
+  const modes = normalizeModes([{ id: 'burn', name: 'Burn GPT', targets: ['gpt-6-astra'], action: 'prefer', until: 'reset' }])
+  const b = boundaries(on, { modes, activeMode: 'burn', activeSince: NOW })
+  const asked: string[] = []
+  on('http.fetch', { url: /\/api\/chatgpt-accounts/ }, ($, e) => {
+    asked.push(e.url)
+    const accounts = [{ state: 'ready', quota: { at: NOW, rate_limits: { primary: { used_percent: 10, window_minutes: 300, reset_at: (NOW + 30_000) / 1000 }, secondary: { used_percent: 60, window_minutes: 10080, reset_at: (NOW + 150_000) / 1000 } } } }]
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ provider: 'chatgpt', accounts }) } }
+  })
+  http(on)
+  await start($)
+  // The five-hour window resetting does not end it; the weekly one does.
+  await b.clock.advance(100_000)
+  expect(b.router().settings.activeMode).toBe('burn')
+  await b.clock.advance(100_000)
+  expect(b.router().settings.activeMode).toBeUndefined()
+  expect(b.toasts).toContain('The Burn GPT mode has ended.')
+  // The quota is read at most once a minute, for the provider the target model belongs to.
+  expect(asked.length).toBeLessThanOrEqual(4)
+  expect(asked.every(url => url.endsWith('/api/chatgpt-accounts?provider=chatgpt'))).toBe(true)
 })
 
 test('/ripple stats returns plain measured text', async ($, on) => {

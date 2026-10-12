@@ -121,6 +121,20 @@ export type WorkerOption = WorkerAgent & { aa?: AaScore & { effort: Effort | nul
 /** An agent to spawn: a dispatchable `subagentType`, and a model only for Claude's own agents. */
 export type TierTarget = { agent: string; model?: string }
 
+/**
+ * An operating mode the user made (docs/specs/2026-10-12-worker-tiers.md "Operating modes").
+ * `targets` are provider names or model keys as `allow` stores them; prefer fills the tiers with
+ * them, avoid takes them out. `until` is an epoch-ms time or the target's next quota reset.
+ */
+export type Mode = {
+  id: string
+  name: string
+  targets: string[]
+  action: 'prefer' | 'avoid'
+  delegation: 'normal' | 'eager'
+  until?: number | 'reset'
+}
+
 export type Settings = {
   effortAuto: boolean
   judge: JudgeKind
@@ -139,6 +153,15 @@ export type Settings = {
    * picks, only among these.
    */
   allow: string[]
+  /** The user's operating modes; none is built in. */
+  modes: Mode[]
+  /** The mode that is on, by id; absent when none is. */
+  activeMode?: string
+  /**
+   * When the active mode was turned on (epoch ms): a mode that runs until the quota resets ends at
+   * the first reset after this.
+   */
+  activeSince?: number
   providers: Record<string, boolean>
   preference: string[]
   autoFloors: Record<Level, number>
@@ -320,6 +343,8 @@ declare module 'claude-code' {
       modelScores: ScoreCache | null
       /** The router's rung choices and presets (GET /api/mod-options), for the quick settings. */
       ladderOptions: LadderOptions | null
+      /** The active mode the eager note was last sent for (`modes.ts modeKey`); cleared on compaction. */
+      modeNoted: string | null
       judgeDownHidden: string | null
       /** Judge failure reasons already said this session. */
       judgeSeen: string[]

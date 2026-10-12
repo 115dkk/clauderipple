@@ -1,4 +1,4 @@
-import type { Calibration, Domain, Effort, Level, Rule, Rung, Settings, SettingsChange, Step, TierTarget } from '../types/index.d.ts'
+import type { Calibration, Domain, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Step, TierTarget } from '../types/index.d.ts'
 
 export const DOMAINS: readonly Domain[] = ['general', 'design', 'frontend', 'backend', 'infra', 'data', 'test', 'docs', 'research']
 export const LEVELS: readonly Level[] = ['light', 'standard', 'deep']
@@ -26,7 +26,7 @@ export const DEFAULTS: Settings = {
     frontend: { mode: 'inherit' }, backend: { mode: 'inherit' }, infra: { mode: 'inherit' }, data: { mode: 'inherit' },
     test: { mode: 'inherit' }, docs: { mode: 'inherit' }, research: { mode: 'inherit' },
   },
-  allow: [],
+  allow: [], modes: [],
   providers: {}, preference: [], autoFloors: { light: 20, standard: 45, deep: 50 }, autoTieBand: 2,
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
@@ -196,6 +196,31 @@ export function hadRetiredRouting(raw: unknown): boolean {
   })
 }
 
+/** How long a mode's name may be: it shows in the band. */
+export const MODE_NAME_MAX = 40
+/** How many modes are kept. */
+export const MODES_MAX = 20
+
+/**
+ * The user's modes, validated: an entry needs an id (unique) and a name; targets are kept as names
+ * (a mode may have none yet); an unknown action or delegation takes the default; `until` is kept
+ * only as a time after the epoch or 'reset'.
+ */
+export function normalizeModes(raw: unknown): Mode[] {
+  if (!Array.isArray(raw)) return []
+  const out: Mode[] = []
+  for (const entry of raw) {
+    const v = object(entry)
+    const id = typeof v.id === 'string' ? v.id.trim().slice(0, 64) : ''
+    const name = typeof v.name === 'string' ? v.name.trim().slice(0, MODE_NAME_MAX) : ''
+    if (!id || !name || out.some(m => m.id === id)) continue
+    const until = v.until === 'reset' ? 'reset' as const : typeof v.until === 'number' && Number.isFinite(v.until) && v.until > 0 ? v.until : undefined
+    out.push({ id, name, targets: names(v.targets), action: v.action === 'avoid' ? 'avoid' : 'prefer', delegation: v.delegation === 'eager' ? 'eager' : 'normal', ...(until !== undefined ? { until } : {}) })
+    if (out.length === MODES_MAX) break
+  }
+  return out
+}
+
 /** The general pin every install had before the ladder: what stored `tiers` filled in. */
 const LEGACY_GENERAL: Readonly<Record<Level, TierTarget>> = { light: { agent: 'deepseek-v4-1-flash' }, standard: { agent: 'gpt-6-1-sol' }, deep: { agent: 'gpt-6-astra' } }
 
@@ -235,6 +260,12 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   if (typeof value.swampAt === 'number' && Number.isFinite(value.swampAt) && value.swampAt >= 0 && value.swampAt <= 100) result.swampAt = value.swampAt
   if (Array.isArray(value.hide)) result.hide = [...new Set(value.hide.filter((part): part is string => typeof part === 'string' && ['timer', 'reason', 'route', 'limits'].includes(part)))]
   result.fallback = target(value.fallback, DEFAULTS.fallback)!
+  result.modes = normalizeModes(value.modes)
+  // An active mode must be one of the modes; its start time stays only with it.
+  if (typeof value.activeMode === 'string' && result.modes.some(m => m.id === value.activeMode)) {
+    result.activeMode = value.activeMode
+    if (typeof value.activeSince === 'number' && Number.isFinite(value.activeSince) && value.activeSince > 0) result.activeSince = value.activeSince
+  }
   return result
 }
 

@@ -17,7 +17,7 @@ import type { Frame, SettingsActions, SettingsView } from './view'
 import { effortLabel, isRich, targetLabel, targetValue } from './view'
 
 /** Every name a row of quick settings or setup shows: the name column is the widest of them. */
-const ROW_NAMES = ['settings.effortAuto', 'settings.lean', 'settings.judge', 'settings.key', 'settings.keepWarm', 'settings.workers', 'band.effort', 'band.cache',
+const ROW_NAMES = ['settings.effortAuto', 'settings.lean', 'settings.judge', 'settings.key', 'settings.keepWarm', 'settings.workers', 'settings.mode', 'band.effort', 'band.cache',
   'workers.rung.light', 'workers.rung.standard', 'workers.rung.hard', 'workers.rung.plan'] as const
 
 /** The name column's width in cells: snug to this language's names, so controls sit close to them. */
@@ -162,6 +162,21 @@ export function ladderRows(el: Els, frame: Frame, view: SettingsView, a: Setting
   return out
 }
 
+/**
+ * The mode that is on, as one Select (none, then the user's modes); modes are made on the
+ * dashboard, so with none made there is no row.
+ */
+export function modeRows(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode[] {
+  const { Text } = el
+  if (!d.modes.length) return []
+  const items = [{ value: '', label: t(frame.lang, 'settings.modeNone') }, ...d.modes.map(m => ({ value: m.id, label: m.name }))]
+  const current = d.activeMode ?? ''
+  const control = 'Select' in el && a.setMode
+    ? <el.Select key="mode" options={items} value={current} onSelect={(value: string) => a.setMode!(value)} />
+    : <Text>{items.find(item => item.value === current)?.label ?? '—'}</Text>
+  return [row(el, frame, 'mode', t(frame.lang, 'settings.mode'), control)]
+}
+
 export function keepWarmRow(el: Els, frame: Frame, d: Settings, a: SettingsActions): RenderNode {
   return row(el, frame, 'warm', t(frame.lang, 'settings.keepWarm'), toggle(el, frame, 'set-warm', d.keepWarm ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.keepWarm, () => a.patch({ keepWarm: !d.keepWarm })), t(frame.lang, 'settings.keepWarmHint'))
 }
@@ -182,6 +197,7 @@ export function renderSettings(el: Els, frame: Frame, view: SettingsView, a: Set
       <Box key="controls" flexDirection="column" rowGap={rich ? 1 : 0}>
         {effortRows(el, frame, view.settings, a)}
         {judgeRows(el, frame, view, a)}
+        {modeRows(el, frame, view.settings, a)}
         {ladderRows(el, frame, view, a)}
         {keepWarmRow(el, frame, view.settings, a)}
       </Box>,

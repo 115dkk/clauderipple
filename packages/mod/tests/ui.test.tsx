@@ -14,7 +14,7 @@ import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
-import { BAND_RIPPLE, bandMood, besideBand, renderBand, renderFooter } from '../hooks/ui/band'
+import { BAND_RIPPLE, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
 import { rippleSource } from '../hooks/ui/parts'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
@@ -779,6 +779,33 @@ test('no value moves a neighbour: every slot keeps its width whatever it shows',
       const why = surface === 'terminal' ? ['fact-why'] : []
       expect(Object.keys(seen).sort()).toEqual(['agents', 'auto', 'fact-cache', 'fact-context', 'fact-effort', 'fact-route', ...why, ...(surface === 'terminal' ? ['log'] : []), 'settings', 'warm'])
     }
+  }
+})
+
+test('the band names the mode that is on, cut to a slot of its own that keeps its width', async ($, on) => {
+  expect(modeLabel('Burn GPT')).toBe('Burn GPT')
+  expect(modeLabel('Burn the GPT quota before it resets')).toBe('Burn the GP…')
+  expect(modeLabel('클로드는 지휘만 하기')).toBe('클로드는 지…')
+  const names = ['Burn GPT', 'Burn the GPT quota before it resets', '클로드는 지휘만 하기']
+  for (const surface of SURFACES) {
+    for (const [i, mode] of names.entries()) drawPane(on, 'mode-' + surface + '-' + i, el => renderBand(el, frameOf(surface), { ...DASH, mode }, BAND_ACTIONS))
+    drawPane(on, 'mode-' + surface + '-none', el => renderBand(el, frameOf(surface), DASH, BAND_ACTIONS))
+  }
+  for (const surface of SURFACES) {
+    const widths = new Set<unknown>()
+    for (const [i, name] of names.entries()) {
+      const ui = await mount($, 'mode-' + surface + '-' + i, surface)
+      const shown = surface === 'desktop' ? modeLabel(name) : 'Mode ' + modeLabel(name)
+      expect(await ui.find({ type: 'Text', text: shown }), surface + ' ' + name).toBeDefined()
+      // The whole name is in the hover card on the desktop.
+      if (surface === 'desktop') expect(await ui.find({ type: 'Text', text: 'Mode “' + name + '” is on: the workers follow it. Change it in quick settings.' })).toBeDefined()
+      widths.add(layoutOf(await ui.drawn())['fact-mode'])
+      await ui.unmount()
+    }
+    expect(widths.size, surface).toBe(1)
+    const none = await mount($, 'mode-' + surface + '-none', surface)
+    expect(layoutOf(await none.drawn())['fact-mode']).toBeUndefined()
+    await none.unmount()
   }
 })
 

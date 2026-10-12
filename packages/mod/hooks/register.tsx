@@ -2,13 +2,16 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerPick, WorkerVerdict } from '../types'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Rule, Rung, Settings, StatusRequest, Step, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { DEFAULTS, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { WORKER_JUDGE_SYSTEM, WORKER_TIERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, resolvedRule, resolveWorker, routerModelOptions, scoreModels, spawnModel, spawnTitle, takesOver, tierOf, workerCandidates, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
+import { modeRungs } from './ladder'
+import { activeModeOf, eagerNote, modeOver, modeProviders, quotaWindows } from './modes'
+import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
 import { bandPriority, coldAlert, hotAlert, hottest, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
@@ -82,6 +85,7 @@ const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const modelScores = atom({ plugin: 'ripple', key: 'modelScores' } as const, null)
 const ladderOptions = atom({ plugin: 'ripple', key: 'ladderOptions' } as const, null)
+const modeNoted = atom({ plugin: 'ripple', key: 'modeNoted' } as const, null)
 const demo = atom({ plugin: 'ripple', key: 'demo' } as const, null)
 
 /**
@@ -343,6 +347,7 @@ async function refreshRouter($: EngineInterface): Promise<void> {
     await syncPanes($)
     const admin = await adminUrl($)
     await settingsTask(() => syncSettings($, admin))
+    await endModeIfOver($)
     const open = await isLogUp($)
     if (!open && await read($, bandHidden)) { await update($, line, () => null); return }
     const session = await $.session.id()
@@ -440,6 +445,61 @@ async function setRung($: EngineInterface, rung: Rung, value: string): Promise<v
   const step = general.rungs[rung]
   const next: Step = { ...(step ?? { effort: RUNG_EFFORT[rung] }), target: targetOf(value) }
   await settingsActions($).patch({ rules: { ...s.rules, general: { mode: 'ladder', rungs: { ...general.rungs, [rung]: next } } } })
+}
+/** Turns a mode on (stamping when, for a mode that runs until the quota resets), or off with ''. */
+async function setMode($: EngineInterface, id: string): Promise<void> {
+  const change: Partial<Settings> = id ? { activeMode: id, activeSince: await $.clock.now() } : { activeMode: undefined, activeSince: undefined }
+  await settingsActions($).patch(change)
+}
+/**
+ * The settings a spawn routes on: with a mode on, the general ladder as the mode moves it (ladder.ts
+ * `modeRungs`) from the ticked models that can run now, read afresh; otherwise the settings as they are.
+ */
+async function routingSettings($: EngineInterface, s: Settings, known: readonly WorkerCandidate[]): Promise<Settings> {
+  const mode = activeModeOf(s)
+  if (!mode || s.rules.general.mode !== 'ladder') return s
+  await refreshLadder($)
+  const moved = modeRungs(s.rules.general.rungs, mode, (await read($, ladderOptions))?.choices ?? [], known)
+  return { ...s, rules: { ...s.rules, general: { mode: 'ladder', rungs: moved.rungs } } }
+}
+/** When the quota of a 'reset' mode was last read: once a minute is enough for a weekly window. */
+let modeQuotaAt = 0
+let endingMode = false
+/** The quota windows of the ChatGPT providers a mode names (GET /api/chatgpt-accounts); others have none. */
+async function modeWindows($: EngineInterface, targets: readonly string[]): Promise<QuotaWindow[]> {
+  const admin = await adminUrl($)
+  // A target model stands for its provider, which its worker file names (usable now or not).
+  const models = [...[...await workerFiles($)].flatMap(([agent, file]) => { const provider = agentProvider(file); return provider ? [{ target: { agent }, provider }] : [] }), ...claudeCandidates()]
+  const windows: QuotaWindow[] = []
+  for (const provider of modeProviders(targets, models)) {
+    const response = await $.http.fetch(`${admin}/api/chatgpt-accounts?provider=${encodeURIComponent(provider)}`)
+    if (!response.ok) continue
+    const body: unknown = JSON.parse(response.text)
+    // The router answers for its first ChatGPT provider when the name is not one: not this target.
+    if (object(body).provider === provider) windows.push(...quotaWindows(body))
+  }
+  return windows
+}
+/** A mode whose time is up turns itself off and says so (on each poll and prompt). */
+async function endModeIfOver($: EngineInterface): Promise<void> {
+  if (endingMode) return
+  endingMode = true
+  try {
+    const s = await currentSettings($)
+    const mode = activeModeOf(s)
+    if (!mode || mode.until === undefined) return
+    const now = await $.clock.now()
+    let windows: QuotaWindow[] = []
+    if (mode.until === 'reset') {
+      if (now - modeQuotaAt < 60_000) return
+      modeQuotaAt = now
+      windows = await modeWindows($, mode.targets)
+    }
+    if (!modeOver(mode, s.activeSince, now, windows)) return
+    await saveSettings($, { ...s, activeMode: undefined, activeSince: undefined }, s)
+    await $.ui.toast(t(await read($, lang), 'toasts.modeEnded', { name: mode.name }))
+  } catch (error) { await report($, 'mode end', error) }
+  finally { endingMode = false }
 }
 async function jevKey($: EngineInterface, jevSource?: Settings['jevSource']): Promise<string | undefined> {
   const selected = jevSource ?? normalizeSettings(await read($, settingsDraft) ?? await read($, settings)).jevSource
@@ -624,12 +684,15 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   }
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model)?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
-  const general = s.rules.general.mode === 'ladder' ? s.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
+  // An active mode moves the tiers; an explicit marker still names its own model.
+  const mode = activeModeOf(s)
+  const routing = await routingSettings($, s, pinnedCandidates)
+  const general = routing.rules.general.mode === 'ladder' ? routing.rules.general : DEFAULTS.rules.general as Extract<Rule, { mode: 'ladder' }>
   const resolved = forced
-    ? ladderPick(verdict, general, s, pinnedCandidates, usable, language, s.allow, forced.rung)
+    ? ladderPick(verdict, general, routing, pinnedCandidates, usable, language, routing.allow, forced.rung)
     : explicitCandidate && candidateUsable(explicitCandidate, s, usable)
       ? { target: target!, effort: verdict.effort }
-      : resolveWorker(verdict, s, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, s).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
+      : resolveWorker(verdict, routing, resolvedRule(verdict.domain, routing).mode === 'auto' && !target ? candidates : pinnedCandidates, resolvedRule(verdict.domain, routing).mode === 'auto' && !target ? await scores($) : [], usable, language, pinnedCandidates)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -640,7 +703,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, ...(tier ? { tier } : {}), rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(resolved.aa ? { aa: resolved.aa } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
+  await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify({ task: e.description, domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, ...(tier ? { tier } : {}), rung: value.rung, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(resolved.aa ? { aa: resolved.aa } : {}), ...(fallbackReason ? { fallbackReason } : {}) }), { to: 'debug' })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
@@ -938,6 +1001,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
     swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
+    ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
@@ -1003,6 +1067,7 @@ function settingsActions($: EngineInterface): SettingsActions {
     },
     jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
     setRung: (rung, value) => setRung($, rung, value),
+    setMode: id => setMode($, id),
     openAllSettings: () => openAllSettings($), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {
@@ -1116,6 +1181,8 @@ export const register: Register = on => {
   })
   on('prompt.submit', async ($, e, next) => {
     const sequence = ++judgeSequence
+    // The eager mode's note, beside this prompt only (modes.ts eagerNote).
+    let note: string | undefined
     try {
       const s = await currentSettings($)
       const model = await $.session.model()
@@ -1130,7 +1197,14 @@ export const register: Register = on => {
         hostCommand = !command || command.source === 'builtin' || name.startsWith('ripple')
       }
       const human = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
-      if (human && !hostCommand) await markSeen($)
+      if (human && !hostCommand) {
+        await markSeen($)
+        await endModeIfOver($)
+        const noted = await read($, modeNoted)
+        const eager = eagerNote(await currentSettings($), noted)
+        if (eager.noted !== noted) await update($, modeNoted, () => eager.noted)
+        note = eager.note
+      }
       if (human && !hostCommand && (e.text.trim() || e.attachments?.length) && (!isShortFollowUp(e.text) || !!e.attachments?.length)) {
         const count = await read($, promptCount) + 1
         await update($, promptCount, () => count)
@@ -1160,7 +1234,7 @@ export const register: Register = on => {
       if (!hostCommand && !await read($, busy)) await update($, busy, () => true)
     } catch (error) { await report($, 'prompt.submit', error) }
     finally { if (sequence === judgeSequence && await read($, deciding)) await update($, deciding, () => false) }
-    return next(e)
+    return next(note ? { ...e, context: [...(e.context ?? []), note] } : e)
   })
   on('turn.step', async function* ($, e, next) {
     const ownFork = forking && !e.agentId
@@ -1285,6 +1359,8 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     try {
       const language = await read($, lang)
+      // The summary drops the eager note: the first prompt after it carries it again.
+      if (!e.agentId && e.trigger !== 'precompute' && await read($, modeNoted) !== null) await update($, modeNoted, () => null)
       if (e.agentId || (await currentSettings($)).compactWith !== 'haiku') return next(e)
       if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }
       const transcript = serializeTranscript(e.messages.length ? e.messages : await $.session.messages())

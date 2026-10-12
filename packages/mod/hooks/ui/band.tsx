@@ -172,6 +172,29 @@ function effortFact(frame: Frame, view: DashboardView, onPress: () => void): Fac
   }
 }
 
+/** Cells a mode's name may take in the band; a longer one is cut with an ellipsis. */
+export const MODE_CELLS = 12
+
+/** The active mode's name as the band shows it: whole, or cut to its slot. */
+export function modeLabel(name: string): string {
+  return clip(name, MODE_CELLS)
+}
+
+/**
+ * The active operating mode, when one is on: "Mode Burn GPT" in the accent, its slot the same
+ * width whatever the name (cut past MODE_CELLS), the whole name in the hover card.
+ */
+function modeFact(frame: Frame, view: DashboardView): Fact | null {
+  if (!view.mode) return null
+  const rich = isRich(frame)
+  const name = t(frame.lang, 'band.mode')
+  const value: Run = { text: rich ? modeLabel(view.mode) : name + ' ' + modeLabel(view.mode), color: textTone(frame.appearance).accent }
+  const card = [t(frame.lang, 'band.modeTip', { name: view.mode })]
+  // Desktop: a cell is about a ch; Latin capitals run a little wider, so the slot takes 1.1 ch each.
+  if (rich) return { key: 'mode', width: Math.ceil(chOf(name) + 1 + MODE_CELLS * 1.1), label: { text: name, dim: true }, value, card }
+  return { key: 'mode', width: cells(frame, name) + 1 + MODE_CELLS, value, card }
+}
+
 /** The pie a share of the cache's life reads as. */
 function pie(frac: number): string {
   return frac > 0.875 ? '●' : frac > 0.625 ? '◕' : frac > 0.375 ? '◑' : frac > 0.125 ? '◔' : '○'
@@ -320,7 +343,7 @@ const span = (facts: readonly Fact[]) => facts.reduce((n, f) => n + f.width, 0) 
 
 /** The facts in order, the route in what the row leaves it. */
 function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room: number, drop: readonly string[] = []): Fact[] {
-  const fixed = [effortFact(frame, view, actions.toggleEffortMenu), contextFact(frame, view), cacheFact(frame, view), limitFact(frame, view)].filter(
+  const fixed = [effortFact(frame, view, actions.toggleEffortMenu), modeFact(frame, view), contextFact(frame, view), cacheFact(frame, view), limitFact(frame, view)].filter(
     (f): f is Fact => f !== null && !drop.includes(f.key),
   )
   const left = room - span(fixed) - (fixed.length ? GAP : 0)
@@ -443,7 +466,7 @@ function bandRich(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   const mood = bandMood(frame, view)
   const need = (facts: readonly Fact[]) => facts.filter(f => !f.grow).reduce((n, f) => n + f.width, 0) + GAP * Math.max(0, facts.length - 1) + (facts.some(f => f.grow) ? RICH_ROUTE_MIN : 0)
   let facts: Fact[] = []
-  for (const drop of [[], ['limit'], ['limit', 'context']]) {
+  for (const drop of [[], ['limit'], ['limit', 'context'], ['limit', 'context', 'mode']]) {
     facts = factsFor(frame, view, actions, room, drop)
     if (need(facts) <= room) break
   }
@@ -521,7 +544,7 @@ function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActio
     return { oneRow, facts: factsFor(frame, view, actions, room, drop), room }
   }
   let p = plan()
-  for (const key of ['limit', 'context', 'route', 'cache']) {
+  for (const key of ['limit', 'context', 'route', 'mode', 'cache']) {
     if ((p.oneRow ? 1 : 2) <= budget) break
     drop = [...drop, key]
     p = plan()
@@ -603,6 +626,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
       <Text color={mode === 'deciding' || mode === 'auto' ? tone.accent : undefined} dimColor={mode === 'paused' || mode === 'off'}>
         {effortText}
       </Text>
+      {view.mode ? <Text color={tone.accent}>{t(frame.lang, 'band.mode') + ' ' + modeLabel(view.mode)}</Text> : null}
       {view.context && view.extras.includes('context') ? (
         <Text dimColor color={ctxTone === 'ink' ? undefined : ctxTone === 'warn' ? WARN : BAD}>
           {t(frame.lang, 'band.footerContext', { percent: Math.round(view.context.percent) })}
