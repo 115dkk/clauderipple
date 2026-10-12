@@ -20,7 +20,7 @@ import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
 import { countdown, elapsed, minutesLeft, modelName, nextMinuteChange, resetsLabel, routeOf, seconds, targetOf, targetValue } from '../hooks/ui/view'
-import type { AlertView, DashboardView, Frame, JevState, SettingsActions, Surface } from '../hooks/ui/view'
+import type { AlertView, DashboardView, Frame, JevState, SettingsActions, SettingsSection, Surface } from '../hooks/ui/view'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const NOW = Date.parse('2026-10-10T13:20:00')
@@ -159,20 +159,19 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
       expect(await ui.find({ type: 'Button', key }), "ui { type: 'Button', key } " + surface).toBeDefined()
       await ui.press({ key })
     }
-    // One picture at most, 리플이, as a plain image: the desktop draws each answer afresh, and an
-    // interactive picture (a frame) reloads blank each time; an image of the same source does not.
+    // Every picture a plain image: the desktop draws each answer afresh, and an interactive picture
+    // (a frame) reloads blank each time; an image of the same source does not.
     const pictures = await ui.findAll({ type: 'Svg' })
-    expect(pictures.length).toBeLessThanOrEqual(1)
+    if (surface === 'terminal') expect(pictures.length).toBe(0)
     for (const picture of pictures) expect(picture.props.isInteractive).toBeFalsy()
     if (surface === 'terminal') {
       expect((await ui.find({ key: 'auto' }))?.props.hotkey).toBe('a')
       expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol' }), "ui { type: 'Text', text: 'gpt-6.1-sol' } " + surface).toBeDefined()
     } else {
       expect((await ui.find({ type: 'Button', key: 'route' }))?.props.label).toBe('gpt-6.1-sol')
-      expect((await ui.find({ type: 'Button', key: 'effort' }))?.props.label).toBe('High')
-      // What captions said is in the hover cards.
-      expect(await ui.find({ type: 'Text', text: 'Opus 5.5 · Auto' })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^Effort High — multi-file refactor/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: 'High' })).toBeDefined()
+      // What captions said is in the hover tips.
+      expect(await ui.find({ type: 'Text', text: /^Opus 5\.5 · Auto · Effort High — multi-file refactor/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /^Last route: gpt-6.1-sol via chatgpt, high, cache 96%/ })).toBeDefined()
       // The route opens the log too; the effort its menu.
       await ui.press({ key: 'route' })
@@ -186,9 +185,10 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
     await busy.press({ key: 'handoff' })
     await busy.press({ key: 'pick-low' })
     if (surface === 'desktop') {
-      expect((await busy.find({ type: 'Button', key: 'effort' }))?.props.label).toBe('Deciding…')
+      expect(await busy.find({ type: 'Text', text: 'Deciding…' })).toBeDefined()
       expect(await busy.find({ type: 'Text', text: /keep-warm on, 2 pings/ })).toBeDefined()
-      expect(await busy.find({ type: 'Text', text: '2' })).toBeDefined()
+      // The live agents' count, drawn in its badge.
+      expect((await busy.findAll({ type: 'Svg' })).some(svg => svg.props.alt === 'Agents 2')).toBe(true)
     } else {
       expect(await busy.find({ type: 'Text', text: /deciding/ }), "busy { type: 'Text', text: /deciding/ } " + surface).toBeDefined()
     }
@@ -250,9 +250,9 @@ test('a ko frame resolves temporary Korean text in labels and hover cards', asyn
     expect(await terminal.find({ type: 'Text', text: /높음/ })).toBeDefined()
     await terminal.unmount()
     const desktop = await mount($, 'ko-band', 'desktop')
-    expect((await desktop.find({ type: 'Button', key: 'effort' }))?.props.label).toBe('높음')
-    expect((await desktop.find({ type: 'Button', key: 'auto' }))?.props.label).toBe('자동')
-    expect(await desktop.find({ type: 'Text', text: /^강도 높음 — multi-file refactor · 선택$/ })).toBeDefined()
+    expect(await desktop.find({ type: 'Text', text: '높음' })).toBeDefined()
+    expect(await desktop.find({ type: 'Text', text: '자동' })).toBeDefined()
+    expect(await desktop.find({ type: 'Text', text: /강도 높음 — multi-file refactor · 선택$/ })).toBeDefined()
     await desktop.unmount()
   } finally { Object.assign(STRINGS.ko, original) }
 })
@@ -340,7 +340,7 @@ test('each alert shows 리플이 with the face of its state, its gauge in 5% ste
     const ui = await mount($, 'face-' + i, 'desktop')
     const found = mascots(await ui.drawn())
     expect(found.length, 'alert ' + i).toBe(1)
-    expect(found[0]!.props?.width).toBe(44)
+    expect(found[0]!.props?.width).toBe(24)
     // An image, not a frame: the desktop rebuilds a frame blank on each redraw.
     expect(found[0]!.props?.isInteractive, 'alert ' + i).toBeFalsy()
     sources.push(String(found[0]!.props?.source))
@@ -375,8 +375,8 @@ test('리플이 greets in setup and quick settings and waits in empty panes, nev
   drawPane(on, 'm-agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop }))
   drawPane(on, 'm-agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { toggleDone: noop }))
   drawPane(on, 'm-log-empty', (el, surface) => renderLog(el, frameOf(surface, 64), { rows: [], mineOnly: true }, { toggleScope: noop }))
-  // It greets and waits bigger (56 px) than it speaks on a card (44 px).
-  const expected: [string, number, string, number][] = [['m-setup-1', 1, 'var(--accent)', 56], ['m-setup-4', 1, 'var(--ok)', 56], ['m-quick', 1, 'var(--accent)', 44], ['m-agents', 0, '', 0], ['m-agents-empty', 1, 'var(--accent)', 56], ['m-log-empty', 1, 'var(--accent)', 56]]
+  // It greets and waits bigger (56 px) than it heads the quick settings (22 px).
+  const expected: [string, number, string, number][] = [['m-setup-1', 1, 'var(--accent)', 56], ['m-setup-4', 1, 'var(--ok)', 56], ['m-quick', 1, 'var(--accent)', 22], ['m-agents', 0, '', 0], ['m-agents-empty', 1, 'var(--accent)', 56], ['m-log-empty', 1, 'var(--accent)', 56]]
   for (const [id, count, tone, size] of expected) {
     const ui = await mount($, id, 'desktop', 64)
     const found = mascots(await ui.drawn())
@@ -392,21 +392,29 @@ test('리플이 greets in setup and quick settings and waits in empty panes, nev
 
 // ---- Settings and setup ------------------------------------------------------------------------
 
+/** The desktop's cards and the controls each opens; the terminal shows every control at once. */
+const SECTIONS: [SettingsSection, string[]][] = [['effort', ['set-auto', 'bias-2']], ['judge', ['judge-haiku', 'judge-jev', 'judge-model']], ['mode', []], ['warm', ['set-warm']]]
+
 test('quick settings draw on both surfaces with only session controls', async ($, on) => {
-  drawPane(on, 'quick', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS))
+  for (const [section] of SECTIONS) drawPane(on, 'quick-' + section, (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } }, section }, QUICK_ACTIONS))
   drawPane(on, 'quick-off', (el, surface) => renderSettings(el, frameOf(surface), { settings: { ...SETTINGS, effortAuto: false }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS))
   for (const surface of SURFACES) {
-    const ui = await mount($, 'quick', surface)
-    expect((await ui.find({ type: 'Text', text: 'ClaudeRipple' }))?.props.bold).toBe(true)
-    expect((await ui.find({ type: 'Text', text: 'Quick settings' }))?.props.dimColor).toBe(true)
-    for (const key of ['set-auto', 'bias-2', 'judge-haiku', 'judge-jev', 'judge-model', 'set-warm', 'all-settings', 'close']) expect(await ui.find({ key }), surface + ' ' + key).toBeDefined()
-    for (const key of ['save', 'tab-workers', 'floor', 'judge-model', 'jev-source', 'warm-hours', 'worker-next']) {
-      if (key === 'judge-model') expect(await ui.find({ type: 'Select', key })).toBeUndefined()
-      else expect(await ui.find({ key })).toBeUndefined()
+    for (const [section, keys] of SECTIONS) {
+      const ui = await mount($, 'quick-' + section, surface)
+      expect((await ui.find({ type: 'Text', text: 'ClaudeRipple' }))?.props.bold).toBe(true)
+      expect((await ui.find({ type: 'Text', text: 'Quick settings' }))?.props.dimColor).toBe(true)
+      const shown = surface === 'terminal' ? SECTIONS.flatMap(([, k]) => k) : [...keys, ...SECTIONS.map(([id]) => 'settings-card-' + id)]
+      for (const key of [...shown, 'all-settings', 'close']) expect(await ui.find({ key }), surface + ' ' + section + ' ' + key).toBeDefined()
+      // The desktop shows the open card's controls only.
+      if (surface === 'desktop') for (const key of SECTIONS.filter(([id]) => id !== section).flatMap(([, k]) => k)) expect(await ui.find({ key }), section + ' ' + key).toBeUndefined()
+      for (const key of ['save', 'tab-workers', 'floor', 'judge-model', 'jev-source', 'warm-hours', 'worker-next']) {
+        if (key === 'judge-model') expect(await ui.find({ type: 'Select', key })).toBeUndefined()
+        else expect(await ui.find({ key })).toBeUndefined()
+      }
+      expect(await ui.find({ type: 'Text', text: '● unsaved' })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
+      await ui.unmount()
     }
-    expect(await ui.find({ type: 'Text', text: '● unsaved' })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: 'not affiliated with Anthropic' })).toBeUndefined()
-    await ui.unmount()
     const off = await mount($, 'quick-off', surface)
     expect(await off.find({ key: 'bias-2' })).toBeUndefined()
     await off.unmount()
@@ -415,29 +423,35 @@ test('quick settings draw on both surfaces with only session controls', async ($
 
 test('quick settings controls reach their callbacks on both surfaces', async ($, on) => {
   const { calls, fn } = recorder()
-  const actions = { patch: fn('patch'), jevKey: fn('key'), testJev: fn('test'), openAllSettings: fn('all'), close: fn('close') }
-  drawPane(on, 'quick', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, actions))
+  const actions = { patch: fn('patch'), jevKey: fn('key'), testJev: fn('test'), openAllSettings: fn('all'), close: fn('close'), openSection: fn('section') }
+  for (const [section] of SECTIONS) drawPane(on, 'quick-' + section, (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } }, section }, actions))
   for (const surface of SURFACES) {
-    const ui = await mount($, 'quick', surface)
-    await ui.press({ key: 'set-auto' })
-    await ui.press({ key: 'bias-2' })
-    await ui.press({ key: 'judge-model' })
-    await ui.press({ key: 'set-warm' })
-    await ui.input({ key: 'jev-key', text: 'ts-key' })
-    await ui.press({ key: 'jev-test' })
-    await ui.press({ key: 'all-settings' })
-    await ui.press({ key: 'close' })
-    await ui.unmount()
+    const at = async (section: SettingsSection) => mount($, 'quick-' + (surface === 'terminal' ? 'effort' : section), surface)
+    const effort = await at('effort')
+    await effort.press({ key: 'set-auto' })
+    await effort.press({ key: 'bias-2' })
+    if (surface === 'desktop') await effort.press({ key: 'settings-card-judge' })
+    await effort.unmount()
+    const judge = await at('judge')
+    await judge.press({ key: 'judge-model' })
+    await judge.input({ key: 'jev-key', text: 'ts-key' })
+    await judge.press({ key: 'jev-test' })
+    await judge.unmount()
+    const warm = await at('warm')
+    await warm.press({ key: 'set-warm' })
+    await warm.press({ key: 'all-settings' })
+    await warm.press({ key: 'close' })
+    await warm.unmount()
   }
-  const once = ['patch:[{"effortAuto":false}]', 'patch:[{"bias":2}]', 'patch:[{"judge":"model"}]', 'patch:[{"keepWarm":true}]', 'key:["ts-key"]', 'test', 'all', 'close']
-  expect(calls).toEqual([...once, ...once])
+  const once = ['patch:[{"effortAuto":false}]', 'patch:[{"bias":2}]', 'patch:[{"judge":"model"}]', 'key:["ts-key"]', 'test', 'patch:[{"keepWarm":true}]', 'all', 'close']
+  expect(calls).toEqual([...once.slice(0, 2), ...once.slice(2), ...once.slice(0, 2), 'section:["judge"]', ...once.slice(2)])
 })
 
 test('Jev key and Test row appear only for TypeSafe Jev with no known key', async ($, on) => {
   const sources: JevState['source'][] = [null, 'zen', 'env', 'file', 'pasted']
   for (const judge of ['haiku', 'jev', 'model'] as const) {
     for (const jevSource of ['typesafe', 'zen'] as const) {
-      for (const source of sources) drawPane(on, [judge, jevSource, source].join('-'), (el, surface) => renderSettings(el, frameOf(surface), { settings: { ...SETTINGS, judge, jevSource }, jev: { source, test: { state: 'idle' } } }, QUICK_ACTIONS))
+      for (const source of sources) drawPane(on, [judge, jevSource, source].join('-'), (el, surface) => renderSettings(el, frameOf(surface), { settings: { ...SETTINGS, judge, jevSource }, jev: { source, test: { state: 'idle' } }, section: 'judge' }, QUICK_ACTIONS))
     }
   }
   for (const surface of SURFACES) {
@@ -577,23 +591,31 @@ function walk(node: unknown, visit: (n: Drawn) => void): void {
   visit(n)
   for (const child of n.children ?? []) walk(child, visit)
 }
-/** Each pressable chip: its picture's width and its blank hit label. */
-function chips(tree: unknown): { key: string; width: number; label: string }[] {
-  const out: { key: string; width: number; label: string }[] = []
-  walk(tree, n => {
-    const [picture, layer] = n.children ?? []
-    if (n.type !== 'Box' || (picture as Drawn)?.type !== 'Svg') return
-    walk(layer, b => {
-      const label = b.props?.label
-      if (b.type === 'Button' && typeof label === 'string' && /^\u00a0+$/.test(label)) out.push({ key: String(b.props?.key), width: Number((picture as Drawn).props?.width), label })
-    })
-  })
+const isBlank = (n: Drawn) => n.type === 'Button' && typeof n.props?.label === 'string' && /^ +$/.test(n.props.label)
+
+/**
+ * Each blank press and whether it lies over something drawn: the nearest Box around it (at most
+ * three levels up) that holds a picture or words besides the press itself.
+ */
+function presses(tree: unknown): { key: string; over: boolean }[] {
+  const out: { key: string; over: boolean }[] = []
+  const drawnIn = (n: unknown) => {
+    let found = false
+    walk(n, d => { if (d.type === 'Svg' || (d.type === 'Text' && (d.children ?? []).join('').trim())) found = true })
+    return found
+  }
+  const visit = (n: Drawn, up: Drawn[]) => {
+    if (isBlank(n)) out.push({ key: String(n.props?.key), over: up.slice(-4).some(a => drawnIn(a)) })
+    for (const child of n.children ?? []) if (child && typeof child === 'object') visit(child as Drawn, [...up, n])
+  }
+  visit(tree as Drawn, [])
   return out
 }
 
-test('리플이 is the one picture: every control is a native button, none a picture with a blank label over it', async ($, on) => {
-  // Each Svg is a new <img> or <iframe> on every desktop redraw (parts.tsx), and a blank label laid
-  // over a picture had to be sized against the host's font or it was cut to "…" (2026-10-10).
+test('every picture is a plain image, 리플이 the one face, and every blank press lies over a drawn control', async ($, on) => {
+  // Each Svg is a new <img> (or, interactive, a frame that reloads blank) on every desktop redraw
+  // (parts.tsx). A control is drawn (art.ts) and takes its press from a blank native button laid
+  // over it (kit.tsx), never from a blank button over nothing.
   const noop = () => undefined
   const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
   const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
@@ -607,16 +629,14 @@ test('리플이 is the one picture: every control is a native button, none a pic
   for (const [id] of cases) {
     const ui = await mount($, id, 'desktop', 64)
     const tree = await ui.drawn()
-    let pictures = 0
-    walk(tree, n => { if (n.type === 'Svg') pictures++ })
-    expect(pictures, id).toBe(1)
+    walk(tree, n => { if (n.type === 'Svg') expect(n.props?.isInteractive, id).toBeFalsy() })
     expect(mascots(tree).length, id).toBe(1)
-    expect(chips(tree), id).toEqual([])
+    for (const press of presses(tree)) expect(press.over, id + ' ' + press.key).toBe(true)
     await ui.unmount()
   }
 })
 
-test('a card says one thing: the title in ink, at most one main action, the others quiet, the host’s × to let it go', async ($, on) => {
+test('a card says one thing: at most one main action, the others quiet, the host’s × to let it go', async ($, on) => {
   const noop = () => undefined
   const alertActions = { compact: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop }
   const all: AlertView[] = [...ALERTS, { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }]
@@ -625,17 +645,17 @@ test('a card says one thing: the title in ink, at most one main action, the othe
     const ui = await mount($, 'say-' + i, 'desktop')
     const buttons: Drawn[] = []
     walk(await ui.drawn(), n => { if (n.type === 'Button') buttons.push(n) })
+    // The main action is a filled pill (a picture with its press); the rest are quiet words, the
+    // options drawn chips, the close the host's ×.
+    let pills = 0
+    walk(await ui.drawn(), n => { if (n.type === 'Box' && String(n.props?.key ?? '').startsWith('pill-')) pills++ })
     const main = buttons.filter(b => b.props?.variant === 'primary')
     const closes = buttons.filter(b => b.props?.role === 'dismiss')
-    const others = buttons.filter(b => b.props?.variant !== 'primary' && b.props?.role !== 'dismiss')
-    expect(main.length <= 1, 'alert ' + i).toBe(true)
+    const others = buttons.filter(b => b.props?.variant !== 'primary' && b.props?.role !== 'dismiss' && !isBlank(b))
+    expect(main.length + pills <= 1, 'alert ' + i).toBe(true)
     expect(closes.length <= 1, 'alert ' + i).toBe(true)
-    // Quiet: dim at rest; an option says whether it is chosen in its mark, not its dimness alone.
-    for (const b of others) expect(b.props?.dimColor === true || /^● /.test(String(b.props?.label)), 'alert ' + i + ' ' + String(b.props?.key)).toBe(true)
-    // The title (the first bold Text) takes no colour: 리플이's face is the card's colour.
-    let title: Drawn | undefined
-    walk(await ui.drawn(), n => { if (!title && n.type === 'Text' && n.props?.bold) title = n })
-    expect(title?.props?.color, 'alert ' + i).toBeUndefined()
+    // Quiet: dim at rest (the note's field submit is the host's own).
+    for (const b of others) expect(b.props?.dimColor === true, 'alert ' + i + ' ' + String(b.props?.key)).toBe(true)
     await ui.unmount()
   }
   // Save mode on: nothing left to press but turning it off, quietly.
@@ -808,29 +828,20 @@ test('the band names the mode that is on, cut to a slot of its own that keeps it
   }
 })
 
-test('the desktop band is one row at 700 px in Korean and Chinese, 770 px in English and Japanese, 870 px in Spanish and Portuguese, Handoff advised', async ($, on) => {
-  // 700 px is 79 ch of the host's 14 px sans; the close control beside the band takes its share.
-  // The facts' names (Effort, Cache) and the word Settings cost the Latin and kana labels the most.
-  // The row wraps only where the host's real widths leave the facts less than their group's least
-  // width: that least width plus the controls' cells must fit, and the route must be there.
-  // Narrower than that, the controls wrap under the facts.
+test('Handoff advised, the desktop band keeps the route and every control in one row at 700 px (Korean, Chinese), 770 px (English, Japanese), 870 px (Spanish, Portuguese)', async ($, on) => {
+  // The band counts every slot at a fixed width (never by value), drops the controls' words, then
+  // the quietest facts, until the route and the controls fit; the reason takes what is left.
   const busy: DashboardView = { ...DASH, effort: { level: 'xhigh', mode: 'manual' }, handoff: 'advised', agents: { live: 2, total: 3 }, warm: { on: true, pings: 3, cost: 0 } }
   const langs = Object.keys(STRINGS) as (keyof typeof STRINGS)[]
+  // Cells counted at 8.8 px (the 14 px measure the band used before, 2026-10-10): a margin over
+  // the host's 7.917 px for the site's padding and the band's own border.
+  const columns = (lang: string) => Math.floor((lang === 'es' || lang === 'pt' ? 870 : lang === 'en' || lang === 'ja' ? 770 : 700) / 8.8)
+  for (const lang of langs) drawPane(on, 'row-' + lang, el => renderBand(el, { ...frameOf('desktop', columns(lang)), lang }, busy, { ...BAND_ACTIONS, hide: () => undefined }))
   for (const lang of langs) {
-    const frame = { ...frameOf('desktop', 79), lang }
-    drawPane(on, 'row-' + lang, el => renderBand(el, { ...frame, columns: frame.columns - besideBand(frame) }, busy, BAND_ACTIONS))
-  }
-  for (const lang of langs) {
-    const ui = await mount($, 'row-' + lang, 'desktop', 79)
-    const least = Number((await ui.find({ type: 'Box', key: 'band-facts' }))?.props.minWidth)
-    // Each control: its label (Hangul and kana 1.36 ch, measured 2026-10-10), the host's padding
-    // (2), the gap (1); the agents' count slot (2).
-    let controls = 2
-    walk(await ui.drawn(), n => {
-      if (n.type === 'Button' && ['handoff', 'auto', 'warm', 'log', 'agents', 'settings'].includes(String(n.props?.key))) controls += [...String(n.props?.label)].reduce((w, c) => w + (/[ᄀ-ᇿ　-鿿가-힯＀-￯]/.test(c) ? 1.36 : 0.9), 0) + 3
-    })
-    expect(least + controls, lang).toBeLessThanOrEqual((lang === 'es' || lang === 'pt' ? 99 : lang === 'en' || lang === 'ja' ? 87 : 79) - 5)
+    const ui = await mount($, 'row-' + lang, 'desktop', columns(lang))
     expect(await ui.find({ type: 'Box', key: 'fact-route' }), lang).toBeDefined()
+    expect(await ui.find({ type: 'Box', key: 'fact-effort' }), lang).toBeDefined()
+    for (const key of ['handoff', 'auto', 'warm', 'agents', 'settings', 'hide']) expect(await ui.find({ type: 'Button', key }), lang + ' ' + key).toBeDefined()
     await ui.unmount()
   }
 })

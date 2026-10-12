@@ -1027,14 +1027,14 @@ test('a mode ends at its time and says so once; quick settings turn one on and o
   expect(b.toasts.filter(text => text === 'The One minute mode has ended.').length).toBe(1)
   await b.clock.advance(9000)
   expect(b.toasts.filter(text => text === 'The One minute mode has ended.').length).toBe(1)
-  // The quick settings' one mode control: none, then each mode.
+  // The quick settings' one mode control (the desktop's Mode card): none, then each mode.
   await command($, 'settings')
   const ui = await band($, 'desktop')
-  const select = await ui.find({ type: 'Select', key: 'mode' })
-  expect((select?.props.options as { label: string }[]).map(o => o.label)).toEqual(['Base', 'One minute', 'Burn GPT'])
-  await ui.select({ key: 'mode', value: 'burn' })
+  await ui.press({ key: 'settings-card-mode' })
+  for (const label of ['Base', 'One minute', 'Burn GPT']) expect(await ui.find({ type: 'Text', text: label }), label).toBeDefined()
+  await ui.press({ key: 'mode-burn' })
   expect([b.router().settings.activeMode, b.router().settings.activeSince]).toEqual(['burn', NOW + 79_000])
-  await ui.select({ key: 'mode', value: '' })
+  await ui.press({ key: 'mode-' })
   expect(Object.hasOwn(b.router().settings, 'activeMode')).toBe(false)
 })
 
@@ -1109,11 +1109,14 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick controls sav
   await ui.press({ key: 'set-auto' })
   expect(b.router().settings.effortAuto).toBe(true)
   expect(puts()).toBe(++count)
+  // The desktop shows one card's controls at a time.
+  if (surface === 'desktop') await ui.press({ key: 'settings-card-judge' })
   for (const judge of ['jev', 'model', 'haiku'] as const) {
     await ui.press({ key: 'judge-' + judge })
     expect(b.router().settings.judge).toBe(judge)
     expect(puts()).toBe(++count)
   }
+  if (surface === 'desktop') await ui.press({ key: 'settings-card-warm' })
   await ui.press({ key: 'set-warm' })
   expect(b.router().settings.keepWarm).toBe(true)
   expect(puts()).toBe(++count)
@@ -1135,14 +1138,21 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick settings sel
   await start($)
   const ui = await band($, surface)
   await ui.press({ key: 'settings' })
-  const control = await ui.find({ key: 'mode' })
-  expect(control?.type).toBe('Select')
-  expect((control?.props.options as { label: string }[]).map(o => o.label)).toEqual(['Base', 'Burn GPT'])
+  // The terminal's Select; the desktop's Mode card, a chip per mode.
+  if (surface === 'desktop') {
+    await ui.press({ key: 'settings-card-mode' })
+    for (const label of ['Base', 'Burn GPT']) expect(await ui.find({ type: 'Text', text: label }), label).toBeDefined()
+  } else {
+    const control = await ui.find({ key: 'mode' })
+    expect(control?.type).toBe('Select')
+    expect((control?.props.options as { label: string }[]).map(o => o.label)).toEqual(['Base', 'Burn GPT'])
+  }
   for (const rung of ['light', 'standard', 'hard', 'plan']) expect(await ui.find({ key: 'rung-' + rung })).toBeUndefined()
-  await ui.select({ key: 'mode', value: 'burn' })
+  const pick = (value: string) => surface === 'desktop' ? ui.press({ key: 'mode-' + value }) : ui.select({ key: 'mode', value })
+  await pick('burn')
   expect(b.router().settings.activeMode).toBe('burn')
   expect(b.router().settings.rules).toEqual(DEFAULTS.rules)
-  await ui.select({ key: 'mode', value: '' })
+  await pick('')
   expect(b.router().settings.activeMode).toBeUndefined()
   await ui.unmount()
 })
@@ -1612,8 +1622,8 @@ test('an idle band is asked again only when the minute it shows changes', async 
   expect(invalidates).toEqual([replied + 60_000, replied + 120_000, replied + 180_000])
   const after = JSON.stringify(await ui.drawn())
   expect(after).not.toBe(before)
-  // Only the countdown moved: its minutes (value and card) and the pie of its share.
-  const countdownless = (tree: string) => tree.replace(/"handle":\d+/g, '').replace(/\b\d+m\b/g, 'm').replace(/[●◕◑◔○]/g, 'o')
+  // Only the countdown moved: its minutes (value and tip) and the clock of its share.
+  const countdownless = (tree: string) => tree.replace(/"handle":\d+/g, '').replace(/\b\d+m\b/g, 'm').replace(/[●◕◑◔○]/g, 'o').replace(/"source":"(?:[^"\\]|\\.)*","alt":"Cache"/g, '"alt":"Cache"')
   expect(countdownless(after)).toBe(countdownless(before))
   await ui.unmount()
 })
@@ -1651,20 +1661,26 @@ test('every band control changes the next drawing, and a toggle says its state o
   http(on)
   await start($)
   await b.clock.advance(3000)
-  const state = (n: { props: Record<string, unknown> } | undefined, surface: string) =>
-    surface === 'desktop' ? (n?.props.variant === 'primary' ? 'on' : n?.props.plain === true && n?.props.dimColor === true ? 'off' : 'other') : /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other'
+  // The terminal says it in the label (● / ○); the desktop in the control's drawing: a switch's
+  // tinted track, an icon lit in the tint, or else the faint track and the muted icon.
+  const desktopState = (n: unknown) => {
+    const drawing = JSON.stringify(n ?? '')
+    return /url\(#on\)|stroke=\\"var\(--tint\)\\"/.test(drawing) ? 'on' : /var\(--faint\)|stroke=\\"var\(--muted\)\\"/.test(drawing) ? 'off' : 'other'
+  }
+  const state = async (ui: Awaited<ReturnType<typeof band>>, key: string, surface: string) =>
+    surface === 'desktop' ? desktopState(await ui.find({ type: 'Box', key: 'ctl-' + key })) : (n => /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other')(await ui.find({ type: 'Button', key }))
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await band($, surface)
     const drawn = async () => JSON.stringify(await ui.drawn()).replace(/"handle":\d+/g, '')
     for (const key of surface === 'terminal' ? ['auto', 'warm', 'log', 'agents'] : ['auto', 'warm', 'agents']) {
-      const before = state(await ui.find({ type: 'Button', key }), surface)
+      const before = await state(ui, key, surface)
       expect(before, surface + ' ' + key).not.toBe('other')
       const tree = await drawn()
       await ui.press({ key })
       expect(await drawn(), surface + ' ' + key).not.toBe(tree)
-      expect(state(await ui.find({ type: 'Button', key }), surface), surface + ' ' + key).toBe(before === 'on' ? 'off' : 'on')
+      expect(await state(ui, key, surface), surface + ' ' + key).toBe(before === 'on' ? 'off' : 'on')
       await ui.press({ key })
-      expect(state(await ui.find({ type: 'Button', key }), surface), surface + ' ' + key + ' again').toBe(before)
+      expect(await state(ui, key, surface), surface + ' ' + key + ' again').toBe(before)
     }
     // The effort opens its row of levels (the terminal's `e: Effort`, the desktop's level itself).
     expect(await ui.find({ key: 'pick-low' })).toBeUndefined()

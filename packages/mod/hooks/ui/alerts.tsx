@@ -12,11 +12,15 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
-import { action, actions, dismiss, segmented, speak } from './parts'
+import { textPx, tintText } from './art'
+import type { Motion, Tint } from './art'
+import { pill, segments, surface } from './kit'
+import type { SegmentOption } from './kit'
+import { action, actions, canDraw, dismiss, mascot, segmented, speak } from './parts'
 import type { Els } from './parts'
 import { FACE_TONE } from './ripple'
 import type { Face } from './ripple'
-import { textTone } from './theme'
+import { chOf, textTone } from './theme'
 import type { AlertActions, AlertView, Frame } from './view'
 import { compactNumber, isRich, limitName, resetsLabel } from './view'
 
@@ -177,8 +181,122 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
   return []
 }
 
+// ---- Desktop: the drawn card ---------------------------------------------------------------------
+//
+// The same card on a drawn surface (kit.tsx): its own wash and weather (frost and falling snow for a
+// cold cache, amber bubbles for a heavy chat, embers for a hot limit, a scanline for a broken judge,
+// sparkles while it asks, a sheen while it works, a tick drawn in when done), 리플이 at the start,
+// the title in the wash's colour, the why after it, then the quiet actions, the main one as a filled
+// pill, and the host's ×. One row when it all fits; else the why goes under the title.
+
+function lookOf(card: Card, alert: AlertView): { tint: Tint; motion: Motion } {
+  switch (card.key) {
+    case 'cold':
+      return { tint: 'ice', motion: { weather: 'snow' } }
+    case 'swamp':
+      return { tint: 'amber', motion: { weather: 'bubbles' } }
+    case 'hot':
+      return { tint: (card.percent ?? 0) >= 95 ? 'red' : 'ember', motion: { weather: 'embers' } }
+    case 'judge':
+      return { tint: 'red', motion: { weather: 'static' } }
+    case 'note':
+    case 'handoff':
+      return { tint: 'violet', motion: { weather: 'sparkles', ripples: 'calm' } }
+    default: {
+      const stage = alert.kind === 'result' ? alert.stage : 'failed'
+      if (stage === 'handingOff' || stage === 'compacting') return { tint: 'violet', motion: { ripples: 'busy', sheen: true } }
+      if (stage === 'failed') return { tint: 'red', motion: { weather: 'static' } }
+      return { tint: 'green', motion: { tick: true, weather: 'sparkles' } }
+    }
+  }
+}
+
+/** Mascot size on a drawn card, px. */
+const CARD_FACE = 24
+
+function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions, tint: Tint): RenderNode[] {
+  const { Box, Text } = el
+  if (alert.kind === 'compactNote' && 'Input' in el) return extras(el, frame, alert, a)
+  if (alert.kind !== 'handoffChoice') return []
+  const color = tintText(tint, frame.appearance)
+  const kinds: SegmentOption<HandoffKind>[] = [
+    { value: 'quick', label: t(frame.lang, 'alerts.quick') },
+    { value: 'full', label: t(frame.lang, 'alerts.full') },
+  ]
+  const afters: SegmentOption<Settings['handoffAfter']>[] = [
+    { value: 'continue', label: t(frame.lang, 'alerts.continue') },
+    { value: 'confirm', label: t(frame.lang, 'alerts.confirm') },
+    { value: 'copy', label: t(frame.lang, 'alerts.copy') },
+  ]
+  const names = [t(frame.lang, 'alerts.kind'), t(frame.lang, 'alerts.then')].map(n => n.trim())
+  const nameCells = Math.ceil(Math.max(...names.map(chOf))) + 1
+  const line = (key: string, name: string, control: RenderNode) => (
+    <Box key={key} flexDirection="row" alignItems="center" columnGap={2}>
+      <Box width={nameCells} flexShrink={0}>
+        <Text dimColor>{name}</Text>
+      </Box>
+      {control}
+    </Box>
+  )
+  return [
+    <Box key="choices" flexDirection="column" rowGap={1}>
+      {line('kind', names[0]!, segments(el, frame, 'kind', kinds, alert.handoffKind, k => a.setHandoffKind(k), tint, color))}
+      {line('after', names[1]!, segments(el, frame, 'after', afters, alert.after, k => a.setHandoffAfter(k), tint, color))}
+    </Box>,
+  ]
+}
+
+function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): RenderNode {
+  const { Box, Button, Text } = el
+  const card = cardOf(frame, alert, a)
+  const look = lookOf(card, alert)
+  const color = tintText(look.tint, frame.appearance)
+  const quiet = (card.quiet ?? []).map(c => <Button key={c.key} plain dimColor label={c.label} onPress={() => c.onPress()} />)
+  // The note's field has its own submit, which is the main action there.
+  const fieldSubmits = alert.kind === 'compactNote' && 'Input' in el
+  const main = card.main && !fieldSubmits ? pill(el, frame, card.main.key, card.main.label, 'fill', card.main.onPress, look.tint) : ''
+  const close = card.close ? <Button key={card.close.key} plain role="dismiss" label={card.close.label} onPress={() => card.close!.onPress()} /> : ''
+  const more = drawnExtras(el, frame, alert, a, look.tint)
+  // One row when the face, title, why and actions fit at their estimated widths.
+  const actionCells = (card.quiet ?? []).reduce((n, c) => n + Math.ceil(chOf(c.label) * (12 / 13)) + 3, 0) + (card.main ? Math.ceil(textPx(card.main.label) / 7.917 + 4) : 0) + (card.close ? 3 : 0)
+  const oneRow = !more.length && 4 + chOf(card.title) * 1.12 + 2 + chOf(card.body) + 2 + actionCells <= frame.columns - 2
+  const face = mascot(el, frame, card.key, card.face, card.title, CARD_FACE, card.percent)
+  const title = (
+    <Box key="title" flexShrink={0}>
+      <Text bold color={color}>{card.title}</Text>
+    </Box>
+  )
+  const body = <Text key="body" wrap="wrap">{card.body}</Text>
+  const buttons = (
+    <Box key="actions" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+      {quiet}
+      {main}
+      {close}
+    </Box>
+  )
+  const top = (
+    <Box key="top" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
+      {face}
+      {title}
+      <Box key="say" flexDirection="row" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
+        {oneRow ? body : null}
+      </Box>
+      {buttons}
+    </Box>
+  )
+  const indent = Math.ceil(CARD_FACE / 7.917) + 2
+  const below = oneRow ? [] : [
+    <Box key="below" flexDirection="column" rowGap={1} paddingLeft={indent} width="100%" minWidth={0}>
+      {body}
+      {more}
+    </Box>,
+  ]
+  return surface(el, frame, { key: 'alert-' + card.key, tint: look.tint, motion: look.motion, rows: oneRow ? 1.3 : 2.6 + (more.length ? 2.4 : 0), column: true, gap: oneRow ? 0 : 1, children: [top, ...below] })
+}
+
 /** One alert band, chosen by register.tsx from the priority list in the spec (§5 Bands). */
 export function renderAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): RenderNode {
+  if (canDraw(el, frame)) return drawnAlert(el, frame, alert, a)
   const card = cardOf(frame, alert, a)
   const rich = isRich(frame)
   const tone = FACE_TONE[card.face]

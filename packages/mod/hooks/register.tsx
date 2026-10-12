@@ -78,6 +78,7 @@ const settingsDraft = atom({ plugin: 'ripple', key: 'settingsDraft' } as const, 
 const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
+const settingsSection = atom({ plugin: 'ripple', key: 'settingsSection' } as const, 'effort')
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
@@ -1001,7 +1002,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
-  return { settings: await currentSettings($), jev: await read($, jev), ladder: await read($, ladderOptions) }
+  return { settings: await currentSettings($), jev: await read($, jev), ladder: await read($, ladderOptions), section: await read($, settingsSection) }
 }
 async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)
@@ -1062,7 +1063,7 @@ function settingsActions($: EngineInterface): SettingsActions {
       if (!saved) await $.ui.toast(t(await read($, lang), 'band.routerDown'))
     },
     jevKey: async key => { try { await saveJevKey($, key) } catch (error) { await $.ui.toast(t(await read($, lang), 'toasts.error', { reason: reason(error) })) } }, testJev: () => testJudge($),
-    setMode: id => setMode($, id),
+    setMode: id => setMode($, id), openSection: section => update($, settingsSection, () => section),
     openAllSettings: () => openAllSettings($), close: async () => { await update($, panel, () => null); await update($, settingsDraft, () => null); await update($, settingsBase, () => null) } }
 }
 function setupActions($: EngineInterface): SetupActions {
@@ -1434,7 +1435,11 @@ export const register: Register = on => {
       if (s.layout === 'minimal') return next(e)
       const { Box, Button, Text } = el
       const actions = bandActions($, e.surface)
-      // No title line: the band is the row of facts and controls, its close control at the end.
+      // The desktop draws the band as one surface with its × inside; the terminal keeps the row
+      // of facts and controls with the close control (and its effort button) after it.
+      if ((e.surface === 'desktop' || e.surface === 'vscode') && 'Svg' in el) {
+        return renderBand(el, frame, await dashboard($, e.props.isWorking), { ...actions, hide: () => { void toggleBar($) } }) as RenderElement
+      }
       return (
         <Box flexDirection="row" alignItems={e.surface === 'terminal' || e.surface === 'mobile' ? 'flex-start' : 'center'} columnGap={2}>
           <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>{renderBand(el, { ...frame, columns: frame.columns - besideBand(frame) }, await dashboard($, e.props.isWorking), actions)}</Box>

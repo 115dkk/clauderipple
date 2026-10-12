@@ -9,9 +9,11 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 import { RUNGS } from '../settings'
 
-import { GREET_SIZE, action, actions, speak } from './parts'
+import { tintText } from './art'
+import { pill, surface } from './kit'
+import { GREET_SIZE, action, actions, canDraw, mascot, speak } from './parts'
 import type { Els } from './parts'
-import { judgeRows, keepWarmRow, row } from './settings'
+import { drawnRows, judgeRows, keepWarmRow, row } from './settings'
 import type { Frame, SettingsActions, SettingsView, SetupActions, SetupView } from './view'
 import { targetLabel } from './view'
 
@@ -61,15 +63,56 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
         view.step > 1 ? action(el, frame, 'back', t(frame.lang, 'setup.back'), a.back, { hotkey: 'b' }) : '',
         action(el, frame, 'skip', t(frame.lang, 'setup.skip'), a.skip, { hotkey: 'k' }),
       ]
+  const face = done ? 'pleased' : view.step === 1 ? 'asking' : 'calm'
+  // It greets first; the first step's question is its one row (who judges).
+  const title = done ? t(frame.lang, 'setup.ready') : view.step === 1 ? t(frame.lang, 'setup.welcome') : t(frame.lang, step!.title)
+  const line = done ? t(frame.lang, 'setup.changeDashboard') : t(frame.lang, step!.blurb)
+  if (canDraw(el, frame)) {
+    // The desktop: a drawn surface, its controls the quick settings' own (judge chips, the keep-warm
+    // switch), Next a filled pill and the rest quiet.
+    const rows = done ? body : view.step === 1 ? drawnRows(el, frame, asSettings, asActions, 'judge') : view.step === 3 ? drawnRows(el, frame, asSettings, asActions, 'warm') : []
+    const quiet = (key: string, label: string, onPress: () => void) => <el.Button key={key} plain dimColor label={label} onPress={() => onPress()} />
+    const next = done ? pill(el, frame, 'finish', t(frame.lang, 'setup.start'), 'fill', a.finish, 'green') : pill(el, frame, 'next', view.step === 3 ? t(frame.lang, 'setup.finish') : t(frame.lang, 'setup.next'), 'fill', a.next)
+    return surface(el, frame, {
+      key: 'setup',
+      tint: done ? 'green' : 'violet',
+      motion: done ? { tick: true, weather: 'sparkles' } : { weather: 'sparkles', ripples: 'slow' },
+      rows: 6 + rows.length,
+      column: true,
+      gap: 1,
+      children: [
+        <Box key="setup-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
+          {mascot(el, frame, 'setup', face, title, GREET_SIZE)}
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+            <Box flexDirection="row" columnGap={2} flexWrap="wrap">
+              <Text bold color={tintText(done ? 'green' : 'violet', frame.appearance)} wrap="wrap">{title}</Text>
+              {done ? null : <Text dimColor>{dots(view.step)}</Text>}
+            </Box>
+            <Text dimColor wrap="wrap">{line}</Text>
+          </Box>
+        </Box>,
+        rows.length ? (
+          <Box key="body" flexDirection="column" rowGap={1} paddingX={1}>
+            {rows}
+          </Box>
+        ) : '',
+        <Box key="actions" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+          {next}
+          {!done && view.step === 2 ? quiet('all-settings', t(frame.lang, 'settings.openAll'), a.openAllSettings) : null}
+          {done || view.step > 1 ? quiet('back', t(frame.lang, 'setup.back'), a.back) : null}
+          {done ? null : quiet('skip', t(frame.lang, 'setup.skip'), a.skip)}
+        </Box>,
+      ],
+    })
+  }
   return speak(el, frame, {
     key: 'setup',
-    face: done ? 'pleased' : view.step === 1 ? 'asking' : 'calm',
+    face,
     // It greets here, the first thing a new session shows: at its greeting size.
     size: GREET_SIZE,
-    // It greets first; the first step's question is its one row (who judges).
-    title: done ? t(frame.lang, 'setup.ready') : view.step === 1 ? t(frame.lang, 'setup.welcome') : t(frame.lang, step!.title),
+    title,
     aside: done ? '' : dots(view.step),
-    line: done ? t(frame.lang, 'setup.changeDashboard') : t(frame.lang, step!.blurb),
+    line,
     blocks: [
       body.length ? (
         <Box key="body" flexDirection="column">

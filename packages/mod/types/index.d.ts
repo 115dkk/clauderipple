@@ -330,6 +330,8 @@ declare module 'claude-code' {
       setupStep: SetupStep
       compactNote: string
       effortMenuOpen: boolean
+      /** The quick settings' open card (desktop). */
+      settingsSection: 'effort' | 'judge' | 'mode' | 'warm'
       agentsOpen: boolean
       agentsShowDone: boolean
       jev: JevState

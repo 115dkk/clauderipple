@@ -1,8 +1,9 @@
 // The pieces every drawing is made of: the element table, 리플이, the way it speaks (its face on
 // the left, what it says in one column beside it), and the controls of the cards and panels.
 //
-// One picture per surface, the rest native: 리플이 is the only Svg, every control a host Button.
-// Engine and host facts behind that (Claude Code 2.1.293, the desktop app's assets, 2026-10-10):
+// These are the terminal's pieces and 리플이 everywhere; the desktop's drawn surfaces and controls
+// (2026-10-12) are art.ts and kit.tsx, which build on the facts below.
+// Engine and host facts (Claude Code 2.1.293, the desktop app's assets, 2026-10-10):
 // - The desktop draws every answer as a new DOM tree, each Svg a new element. What blinked was the
 //   interactive Svg: isInteractive makes it a sandboxed <iframe srcdoc>, which the host rebuilds
 //   blank on every redraw. A plain Svg is an <img> of a data URL; it does not blink across
@@ -11,10 +12,10 @@
 //   flicker; Effortless animates its band the same way). So 리플이 is always a plain image, never
 //   interactive. A redraw still starts its motion over, so every loop opens on a natural pose
 //   (ripple.ts).
-// - A Button's label is text only and its colours are the host's. Styled chips were an Svg with a
-//   blank native button laid over it, and that blank label had to be sized against the host's font
-//   or the host cut it to an ellipsis (seen 2026-10-10 as "자동 (권장) …"). Native buttons have
-//   neither problem, and they sit in the host's own idiom.
+// - A Button's label is text only and its colours are the host's. A drawn control takes its press
+//   from a blank native button laid over it, and that blank label has to be sized a little short
+//   of the drawing and made of no-break spaces, or the host cuts it to an ellipsis or folds it to
+//   nothing (seen 2026-10-10 as "자동 (권장) …"); kit.tsx `blank` does both.
 // - A plain Button under the pointer turns full ink on a ghost fill, dimmed or not, so a state told
 //   by dimness alone looks the same on and off right after the click. A chosen option therefore
 //   says so in its shape: ● chosen, ○ not (the terminal's marks too), the unchosen also dimmed.
