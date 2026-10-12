@@ -113,7 +113,7 @@ class Peer {
   }
 }
 
-async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, desktopProjects?: string) {
+async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, desktopProjects?: string, desktopProcesses?: () => string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-server-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -123,7 +123,7 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   const diagnostics: string[] = [];
   let server: HostServer | undefined;
   let closing = false;
-  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, ...(desktopProjects ? { desktopProjects } : {}),
+  const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, ...(desktopProjects ? { desktopProjects, desktopProcesses: desktopProcesses ?? (() => ""), ...(extra.now ? { now: extra.now } : {}) } : {}),
     onEvent: session => { if (!closing) server?.onEvent(session); },
     onSessions: () => { if (!closing) server?.onSessions(); },
   });
@@ -160,6 +160,42 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   };
   return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
 }
+
+test("desktop polling broadcasts changed lists only to an authenticated visible connection", { timeout: 15_000 }, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-live-wire-"));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = path.join(project, `${id}.jsonl`);
+  let now = Date.now();
+  let processes = "";
+  let calls = 0;
+  fs.writeFileSync(file, JSON.stringify({ type: "user", cwd: project, message: { content: "synthetic prompt" } }) + "\n");
+  const f = await fixture(t, { now: () => now }, root, () => { calls++; return processes; });
+  const peer = await f.auth();
+  const baseline = calls;
+  processes = `42 claude --resume=${id}`;
+  now += 3000;
+  await delay(3100);
+  assert.equal(calls, baseline, "no presence, no ps polling");
+  peer.send({ t: "presence", visible: true });
+  await peer.barrier();
+  await delay(3100);
+  const active = await peer.take("sessions", msg => msg.sessions.some(s => s.id === id && s.state === "running"));
+  assert.equal(active.msg.sessions[0]?.pending, 0);
+  const unchanged = peer.received.filter(f => f.msg.t === "sessions").length;
+  now += 3000;
+  await delay(3100);
+  assert.equal(peer.received.filter(f => f.msg.t === "sessions").length, unchanged, "unchanged state is not broadcast");
+  peer.send({ t: "presence", visible: false });
+  await peer.barrier();
+  const hidden = calls;
+  processes = "";
+  now += 3000;
+  await delay(3100);
+  assert.equal(calls, hidden, "hidden phone stops polling");
+});
 
 test("desktop sessions use ready, history, blobs and continue through a same-session ACK", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-wire-"));

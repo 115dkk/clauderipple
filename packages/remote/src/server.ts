@@ -117,6 +117,12 @@ export class HostServer {
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
+  private pollDesktop(): void {
+    if (!this.someoneLooking()) return;
+    try { this.opts.sessions.pollDesktop(); }
+    catch (error) { this.opts.log?.(`desktop poll failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
   listen(): Promise<void> {
     return new Promise((resolve, reject) => {
       this.http.once("error", reject);
@@ -124,6 +130,7 @@ export class HostServer {
         this.http.off("error", reject);
         this.timers.push(setInterval(() => this.reapStale(), PING_MS));
         this.timers.push(setInterval(() => void this.checkRouter(), 15_000));
+        this.timers.push(setInterval(() => this.pollDesktop(), 3000));
         void this.checkRouter();
         resolve();
       });
@@ -132,6 +139,8 @@ export class HostServer {
 
   close(): Promise<void> {
     for (const t of this.timers) clearInterval(t);
+    if (this.sessionsTimer) clearTimeout(this.sessionsTimer);
+    this.sessionsTimer = null;
     for (const c of this.clients) c.ws.terminate();
     return new Promise((resolve) => this.http.close(() => resolve()));
   }

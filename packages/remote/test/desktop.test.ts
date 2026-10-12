@@ -22,7 +22,7 @@ function fixture(t: import("node:test").TestContext) {
   fs.mkdirSync(project, { recursive: true });
   const excluded = new Set<string>();
   let now = Date.now();
-  const desktop = new DesktopSessions({ projects, summarize, excluded: () => excluded, now: () => now });
+  const desktop = new DesktopSessions({ projects, summarize, excluded: () => excluded, now: () => now, processes: () => "" });
   t.after(() => { desktop.close(); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, projects, project, desktop, excluded, advance: () => { now += 6000; } };
 }
@@ -37,6 +37,28 @@ test("defensive transcript conversion preserves users, tools, failure and result
   assert.equal(result?.kind === "tool_result" && result.ok, false);
   assert.deepEqual(transcriptEvents(line({ type: "system", subtype: "turn_duration", durationMs: 99 }), "", summarize).bodies, [{ kind: "result", ok: true, ms: 99, turns: 1 }]);
   assert.equal(transcriptEvents(line({ ...user, isMeta: true }), "", summarize).bodies.length, 0);
+});
+
+test("desktop Agent and Task calls preserve prompts behind compact descriptions", () => {
+  for (const name of ["Agent", "Task"]) {
+    const prompt = "First paragraph\nSecond line\n\n1. First step\n2. Second step";
+    const parsed = transcriptEvents(line({ ...assistant, message: { ...assistant.message, content: [{ type: "tool_use", id: "worker", name, input: { description: "Review timeline", model: "sol", prompt } }] } }), user.cwd, summarize);
+    const event = parsed.bodies[0];
+    assert.equal(event?.kind, "assistant");
+    if (event?.kind !== "assistant") throw new Error("missing assistant");
+    assert.equal(event.text, "");
+    assert.equal(event.tools[0]?.summary, "Review timeline · sol");
+    assert.equal(event.tools[0]?.input, prompt);
+    const result = transcriptEvents(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "worker", content: prompt }] } }), user.cwd, summarize);
+    const view = reduce([...parsed.bodies, ...result.bodies].map((b, i) => ({ ...b, seq: i + 1, at: 0 })));
+    assert.equal(view.items.length, 1);
+    assert.equal(view.items[0]?.type === "assistant" && view.items[0].tools[0]?.result?.text, prompt);
+    const notification = transcriptEvents(line({ type: "user", message: { content: `<task-notification>\n<tool-use-id>worker</tool-use-id>\n<status>completed</status>\n<result>${prompt}</result>\n</task-notification>` } }), user.cwd, summarize);
+    assert.deepEqual(notification.bodies, [{ kind: "tool_result", toolUseId: "worker", ok: true, text: prompt }]);
+    const completed = reduce([...parsed.bodies, ...notification.bodies].map((b, i) => ({ ...b, seq: i + 1, at: 0 })));
+    assert.equal(completed.items.length, 1);
+    assert.equal(completed.items[0]?.type === "assistant" && completed.items[0].tools[0]?.result?.text, prompt);
+  }
 });
 
 test("listing uses bounded windows, own title, cwd and last model without importing", t => {
@@ -122,6 +144,59 @@ test("open detection matches exact session flags in fake ps output", () => {
     assert.equal(processHasSession(`42 claude ${args}`, id), false);
   }
   assert.equal(processHasSession(`42 claude --resume=invalid`, "invalid"), false);
+});
+
+test("live desktop states use fake ps and bounded cached filesystem reads", t => {
+  const f = fixture(t);
+  let now = Date.now();
+  let ps = `42 claude --resume=${id}`;
+  let calls = 0;
+  const desktop = new DesktopSessions({ projects: f.projects, summarize, excluded: () => f.excluded,
+    now: () => now, processes: () => { calls++; return ps; } });
+  t.after(() => desktop.close());
+  const file = path.join(f.project, `${id}.jsonl`);
+  const write = (records: unknown[], age = 20_000) => {
+    fs.writeFileSync(file, records.map(line).join(""));
+    fs.utimesSync(file, new Date(now - age), new Date(now - age));
+    now += 3000;
+  };
+  const completed = { type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] } };
+  write([user, completed], 0);
+  assert.equal(desktop.list()[0]?.state, "running");
+  assert.equal(calls, 1);
+  const reads = t.mock.method(fs, "readSync");
+  assert.equal(desktop.poll(), false);
+  assert.equal(calls, 1);
+  now += 8000;
+  assert.equal(desktop.poll(), true);
+  assert.equal(desktop.list()[0]?.state, "stopped");
+  assert.equal(reads.mock.callCount(), 0, "unchanged transcripts are not read");
+  for (const records of [[user], [user, assistant], [user, assistant, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }],
+    [user, { type: "assistant", message: { stop_reason: null, content: [{ type: "text", text: "partial" }] } }]]) {
+    write([...records, { type: "cost-state" }, { type: "bridge-session" }]);
+    desktop.poll();
+    assert.equal(desktop.list()[0]?.state, "running");
+  }
+  for (const ending of [completed, { type: "system", subtype: "turn_duration" }, { type: "result", subtype: "success" },
+    { type: "system", subtype: "stop_hook_summary", preventedContinuation: false },
+    { type: "user", message: { content: "[Request interrupted by user]" } }]) {
+    write([user, assistant, ending, { type: "custom-title", customTitle: "new title" }, { ...user, isSidechain: true }, { ...user, isMeta: true }]);
+    desktop.poll();
+    assert.equal(desktop.list()[0]?.state, "stopped");
+    assert.equal(desktop.list()[0]?.title, "new title");
+  }
+  write([user], 0);
+  ps = "";
+  desktop.poll();
+  assert.equal(desktop.list()[0]?.state, "stopped", "recent and unfinished is not working without an open process");
+  ps = `42 claude --session-id ${id}`;
+  now += 3000;
+  assert.equal(desktop.poll(), true);
+  assert.equal(desktop.list()[0]?.state, "running");
+  fs.unlinkSync(file);
+  now += 3000;
+  assert.equal(desktop.poll(), true);
+  assert.deepEqual(desktop.list(), []);
 });
 
 for (const mode of ["resume", "process", "recent"] as const) test(`desktop continuation: ${mode}`, async t => {

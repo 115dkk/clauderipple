@@ -12,7 +12,7 @@ const WINDOW = 256 * 1024;
 const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
-interface Source { file: string; size: number; mtime: number; summary: SessionSummary }
+interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
 interface Imported { size: number; mtime: number; log: EventLog; dir: string }
 export interface DesktopOptions {
   projects?: string;
@@ -66,7 +66,14 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
   const message = object(r.message);
   if (r.type === "user") {
     const p = prompt(r);
-    if (p) bodies.push({ kind: "user", text: p, clientMsgId: str(r.uuid) });
+    const notification = /^<task-notification>[\s\S]*<\/task-notification>$/.test(p);
+    if (notification) {
+      const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(p)?.[1];
+      const result = /<result>([\s\S]*)<\/result>/.exec(p)?.[1];
+      const status = /<status>([^<]+)<\/status>/.exec(p)?.[1];
+      // A notification without its tool call has nothing to attach to; it is not the user's words.
+      if (toolUseId) bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? p });
+    } else if (p) bodies.push({ kind: "user", text: p, clientMsgId: str(r.uuid) });
     for (const value of Array.isArray(message?.content) ? message.content : []) {
       const b = object(value);
       if (b?.type === "tool_result" && typeof b.tool_use_id === "string") {
@@ -79,7 +86,11 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       const b = object(value);
       if (b?.type !== "tool_use" || typeof b.id !== "string" || typeof b.name !== "string") continue;
       const input = object(b.input) ?? {};
-      tools.push({ id: b.id, name: b.name, summary: summarize(b.name, input, cwd), input: JSON.stringify(input, null, 2) });
+      const worker = b.name === "Agent" || b.name === "Task";
+      const summary = summarize(b.name, input, cwd);
+      tools.push({ id: b.id, name: b.name,
+        summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
+        input: worker && typeof input.prompt === "string" ? input.prompt : JSON.stringify(input, null, 2) });
     }
     const body = text(message.content);
     if (body || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), text: body, tools });
@@ -90,6 +101,35 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
     bodies.push({ kind: "result", ok: true, ms: r.durationMs, turns: 1 });
   }
   return { at, bodies };
+}
+
+/** Conversation records, not trailing bridge/cost/title bookkeeping, determine turn completion.
+ * Desktop tails (2026-10-12): assistant.message.stop_reason=end_turn; user tool_result
+ * blocks carry tool_use_id; system stop_hook_summary follows the final assistant.
+ * A tool result finishes a tool, not the turn: the model still owes its next reply.
+ */
+function unfinishedTurn(lines: string[]): boolean {
+  let unfinished = false;
+  for (const line of lines) {
+    const r = record(line);
+    if (!r || r.isSidechain === true || r.isMeta === true) continue;
+    if (r.type === "result" || (r.type === "system" && r.subtype === "turn_duration")) {
+      unfinished = false;
+    } else if (r.type === "system" && r.subtype === "stop_hook_summary") {
+      unfinished = r.preventedContinuation === true;
+    } else if (r.type === "user") {
+      const content = object(r.message)?.content;
+      if (typeof content === "string" && /^\[Request interrupted/.test(content)) unfinished = false;
+      else if (prompt(r) || (Array.isArray(content) && content.some(b => object(b)?.type === "tool_result"))) unfinished = true;
+    } else if (r.type === "assistant") {
+      const message = object(r.message);
+      if (!message || !Array.isArray(message.content)) continue;
+      unfinished = message.content.some(b => object(b)?.type === "tool_use") ||
+        (message.stop_reason !== "end_turn" && message.stop_reason !== "stop_sequence" &&
+          ("stop_reason" in message || !message.content.some(b => object(b)?.type === "text")));
+    }
+  }
+  return unfinished;
 }
 
 /** Complete lines only: a partial head/tail record must not be interpreted. */
@@ -113,6 +153,7 @@ export class DesktopSessions {
   private imported = new Map<string, Imported>();
   private temp: string | null = null;
   private scannedAt = -Infinity;
+  private checkedAt = -Infinity;
 
   constructor(opts: DesktopOptions) {
     this.opts = opts;
@@ -121,12 +162,22 @@ export class DesktopSessions {
 
   list(): SessionSummary[] {
     this.refresh();
+    this.updateLive();
     const excluded = this.opts.excluded();
     return Array.from(this.sources.values()).filter(s => !excluded.has(s.summary.id)).map(s => {
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
         ? { ...s.summary, lastSeq: cached.log.lastSeq, epoch: cached.log.epoch } : s.summary;
     });
+  }
+
+  poll(): boolean {
+    const fingerprint = () => JSON.stringify(Array.from(this.sources.values())
+      .filter(s => !this.opts.excluded().has(s.summary.id))
+      .map(s => [s.summary.id, s.summary.state, s.summary.updatedAt, s.summary.title]));
+    const before = fingerprint();
+    this.list();
+    return before !== fingerprint();
   }
 
   has(id: string): boolean {
@@ -168,9 +219,29 @@ export class DesktopSessions {
     finally { fs.closeSync(fd); }
   }
 
+  /** One ps snapshot and stats of the capped list; unchanged files are never reread. */
+  private updateLive(): void {
+    const now = (this.opts.now ?? Date.now)();
+    if (now - this.checkedAt < 3000) return;
+    const processes = this.sources.size ? this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }) : "";
+    for (const [id, previous] of this.sources) {
+      let stat: fs.Stats;
+      try { stat = fs.lstatSync(previous.file); }
+      catch (error) { if (!missing(error)) throw error; this.sources.delete(id); continue; }
+      if (!stat.isFile()) { this.sources.delete(id); continue; }
+      const source = previous.size === stat.size && previous.mtime === stat.mtimeMs
+        ? previous : this.readSummary(id, previous.file, stat);
+      if (!source) { this.sources.delete(id); continue; }
+      source.summary = { ...source.summary, state: processHasSession(processes, id) &&
+        (now - source.mtime <= 10_000 || source.unfinished) ? "running" : "stopped" };
+      this.sources.set(id, source);
+    }
+    this.checkedAt = now;
+  }
+
   private refresh(): void {
     const now = (this.opts.now ?? Date.now)();
-    if (now - this.scannedAt < 5000) return;
+    if (now - this.scannedAt < 30_000) return; // Discovery is slower than the cheap live-state poll.
     this.scannedAt = now;
     const candidates: { id: string; file: string; stat: fs.Stats }[] = [];
     const excluded = this.opts.excluded();
@@ -192,7 +263,9 @@ export class DesktopSessions {
     for (const { id, file, stat } of candidates) {
       if (next.size >= 50) break;
       if (next.has(id)) continue;
-      const source = this.readSummary(id, file, stat);
+      const cached = this.sources.get(id);
+      const source = cached?.file === file && cached.size === stat.size && cached.mtime === stat.mtimeMs
+        ? cached : this.readSummary(id, file, stat);
       if (source) next.set(id, source);
     }
     this.sources = next;
@@ -213,7 +286,8 @@ export class DesktopSessions {
     try {
       let cwd = "", model = "", ownTitle = "", firstPrompt = "";
       let createdAt = stat.birthtimeMs;
-      for (const line of [...windowLines(fd, stat.size, false), ...windowLines(fd, stat.size, true)]) {
+      const tail = windowLines(fd, stat.size, true);
+      for (const line of [...windowLines(fd, stat.size, false), ...tail]) {
         const r = record(line);
         if (!r || r.isSidechain === true) continue;
         if (!cwd && typeof r.cwd === "string") cwd = r.cwd;
@@ -226,7 +300,7 @@ export class DesktopSessions {
         if (Number.isFinite(at)) createdAt = Math.min(createdAt, at);
       }
       if (!cwd) return null;
-      return { file, size: stat.size, mtime: stat.mtimeMs, summary: { id, title: ownTitle || firstPrompt || id, cwd, model, effort: null, state: "stopped", pending: 0, createdAt, updatedAt: stat.mtimeMs, lastSeq: 0, epoch: "", origin: "desktop", readOnly: false } };
+      return { file, size: stat.size, mtime: stat.mtimeMs, unfinished: unfinishedTurn(tail), summary: { id, title: ownTitle || firstPrompt || id, cwd, model, effort: null, state: "stopped", pending: 0, createdAt, updatedAt: stat.mtimeMs, lastSeq: 0, epoch: "", origin: "desktop", readOnly: false } };
     } finally { fs.closeSync(fd); }
   }
 

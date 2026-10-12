@@ -183,6 +183,10 @@ export class Sessions {
     return [...host, ...(this.desktop?.list() ?? []).map(s => ({ ...s, ...this.desktopModels.get(s.id) }))];
   }
 
+  pollDesktop(): void {
+    if (this.desktop?.poll()) this.opts.onSessions();
+  }
+
   has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
 
   private continueDesktop(id: string, clientMsgId: string): SessionRecord {
