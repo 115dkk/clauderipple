@@ -2,7 +2,38 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classify, CredentialPool, retryAfterMs, targets, type Credential } from "../src/pool.ts";
 
+import { ProviderHealth, providerExhaustion } from "../src/health.ts";
+
 const creds = (...ids: string[]): Credential[] => ids.map((id) => ({ id, headers: { "x-api-key": id } }));
+
+test("provider exhaustion is remembered with a reason, expires, and a successful request clears it", () => {
+  const health = new ProviderHealth();
+  const now = 1_000_000;
+  const mark = providerExhaustion(402, "Insufficient Balance", undefined, now);
+  health.observe("deepseek", 402, mark);
+  assert.deepEqual(health.snapshot(now), { deepseek: { reason: "insufficient_balance", at: now, until: now + 1_800_000 } });
+  health.observe("other", 200);
+  health.observe("deepseek", 503);
+  assert.ok(health.snapshot(now).deepseek);
+  health.observe("deepseek", 200);
+  assert.deepEqual(health.snapshot(now), {});
+  health.observe("deepseek", 402, providerExhaustion(402, "", 3000, now));
+  assert.ok(health.snapshot(now + 2999).deepseek);
+  assert.deepEqual(health.snapshot(now + 3000), {});
+});
+
+test("explicit billing/quota errors mark exhaustion; transient 429 and unrelated errors never do", () => {
+  for (const text of ['{"error":{"code":"insufficient_quota"}}', 'billing_hard_limit_reached', 'balance exhausted', 'usage_limit_reached']) {
+    assert.ok(providerExhaustion(429, text), text);
+  }
+  for (const text of ['rate_limit_exceeded', 'RESOURCE_EXHAUSTED', 'Too many requests. See billing documentation.', 'quota per minute exceeded']) {
+    const health = new ProviderHealth();
+    health.observe("p", 429, providerExhaustion(429, text, 2000));
+    assert.deepEqual(health.snapshot(), {}, text);
+  }
+  for (const status of [400, 401, 403, 500, 503]) assert.equal(providerExhaustion(status, 'insufficient_quota billing limit'), undefined);
+  assert.equal(providerExhaustion(402)?.reason, 'billing_exhausted');
+});
 
 /** A clock the test drives, so cooldowns are asserted rather than waited for. */
 function clock(start = 1_000_000) {

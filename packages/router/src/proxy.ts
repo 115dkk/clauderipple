@@ -22,7 +22,7 @@ import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
 import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
-import { UpstreamHealth } from "./health.ts";
+import { ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, withAgentAliases } from "./agents.ts";
@@ -239,6 +239,7 @@ export class Proxy {
    * its quarantine again on the first request.
    */
   private readonly pool = new CredentialPool();
+  readonly providerHealth = new ProviderHealth();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
@@ -815,6 +816,7 @@ export class Proxy {
           // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
           // here fails over once every account is out (chooseTarget asks the adapter).
           const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
+          if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
           finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
@@ -839,6 +841,7 @@ export class Proxy {
         try {
           const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
           this.recordOutcome(route.provider, o.status);
+          if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
           this.recordOutcome(route.provider, 0);
@@ -866,6 +869,7 @@ export class Proxy {
         try {
           const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
           this.recordOutcome(route.provider, o.status);
+          if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
         } catch (e) {
           this.recordOutcome(route.provider, 0);
@@ -1326,6 +1330,10 @@ export class Proxy {
         observedUsage = observed.usage;
         observedStopReason = observed.stopReason;
         res.end();
+        const errorBody = status >= 400 ? decodeBodyToText(Buffer.concat(errorHead), upRes.headers["content-encoding"]) : "";
+        if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
+          this.providerHealth.observe(route.provider, status, providerExhaustion(status, errorBody, retryAfterMs(upRes.headers)));
+        }
         const note = status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], [...errorSecrets], upRes.headers["content-type"])}` : undefined;
         // Anthropic forgets a conversation's server-side thread after a few idle minutes, and the CLI
         // answers the 404 by replaying the whole conversation, which hits the prompt cache. From CLI

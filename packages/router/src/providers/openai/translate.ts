@@ -356,7 +356,7 @@ export class OpenAiStreamMapper {
   private sawCompletion = false;
 
   /** The error `fail` reported, so a non-streaming caller can answer with it instead of a 200. */
-  failure: { type: string; message: string } | undefined;
+  failure: { type: string; message: string; code?: string } | undefined;
 
   start(): AnthropicEvent[] {
     if (this.started) return [];
@@ -588,7 +588,7 @@ export class OpenAiStreamMapper {
     // `overloaded_error` is the one mid-stream error Claude Code retries on its own (CLI 2.1.278
     // matches `"type":"overloaded_error"` in the message); `api_error` ends the turn for good.
     const type = code === "rate_limit_exceeded" ? "rate_limit_error" : code === "server_is_overloaded" ? "overloaded_error" : "api_error";
-    this.failure = { type, message };
+    this.failure = { type, message, ...(code ? { code } : {}) };
     return [...this.start(), ...this.closeBlock(), { event: "error", data: { type: "error", error: { type, message } } }];
   }
 

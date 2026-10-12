@@ -152,6 +152,7 @@ proxy
       log: log!,
       stats: () => proxy.stats,
       health: () => health.consecutiveFailures,
+      providerHealth: () => proxy.providerHealth.snapshot(),
       version: VERSION,
       requests,
       chatgpt: () => ({

@@ -12,7 +12,7 @@ import tls from "node:tls";
 
 import { CertStore } from "../src/certs.ts";
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
-import { UpstreamHealth } from "../src/health.ts";
+import { providerExhaustion, UpstreamHealth, type ProviderExhaustion } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy, errorSnippet } from "../src/proxy.ts";
 import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
@@ -48,8 +48,8 @@ async function forwardedHeaders(providerHeaders: Record<string, string>): Promis
 async function roundTrip(
   providerHeaders: Record<string, string>,
   reply: ProviderReply,
-  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown> } = {},
-): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; providerCalls: number }> {
+  options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean } = {},
+): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; providerCalls: number; health: Record<string, ProviderExhaustion> }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -90,6 +90,7 @@ async function roundTrip(
     home,
     requests,
   });
+  if (options.exhausted) proxy.providerHealth.observe("p", 402, providerExhaustion(402, "Insufficient Balance"));
   await proxy.listen();
 
   const sock = net.connect(proxyPort, "127.0.0.1");
@@ -121,8 +122,27 @@ async function roundTrip(
   await new Promise<void>((r) => provider.close(() => r()));
   const records = requests.list(10);
   fs.rmSync(home, { recursive: true, force: true });
-  return { seen, seenBody, records, clientStatus, clientBody, providerCalls };
+  return { seen, seenBody, records, clientStatus, clientBody, providerCalls, health: proxy.providerHealth.snapshot() };
 }
+
+test("routed 402 and billing 429 teach provider health, but transient 429 does not; success clears it", async () => {
+  for (const [status, message, exhausted] of [[402, 'Insufficient Balance', true], [429, 'insufficient_quota', true], [429, 'rate_limit_exceeded', false]] as const) {
+    const result = await roundTrip({}, { status, headers: { 'content-type': 'application/json', 'retry-after': '2' }, body: Buffer.from(JSON.stringify({ error: { message } })) });
+    assert.equal(result.clientStatus, status);
+    assert.equal(!!result.health.p, exhausted);
+    if (exhausted) assert.equal(result.health.p!.until - result.health.p!.at, 2000);
+  }
+  const recovered = await roundTrip({}, OK_REPLY, { exhausted: true });
+  assert.equal(recovered.clientStatus, 200);
+  assert.deepEqual(recovered.health, {});
+  // A translated adapter maps 402 to a client 400, but must retain its actual meaning.
+  const translated = await roundTrip({}, { status: 402, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"error":{"message":"Insufficient Balance"}}') }, { provider: { type: 'openai-compatible' } });
+  assert.equal(translated.health.p?.reason, 'insufficient_balance');
+  for (const code of ['insufficient_quota', 'rate_limit_exceeded']) {
+    const streamed = await roundTrip({}, { status: 200, headers: { 'content-type': 'text/event-stream' }, body: Buffer.from(`data: ${JSON.stringify({ error: { code, message: 'request refused' } })}\n\n`) }, { provider: { type: 'openai-compatible' } });
+    assert.equal(!!streamed.health.p, code === 'insufficient_quota');
+  }
+});
 
 test("an x-api-key provider never receives the caller's authorization header", async () => {
   const seen = await forwardedHeaders({ "x-api-key": "PROVIDER-KEY" });
