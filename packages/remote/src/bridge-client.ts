@@ -34,8 +34,11 @@ export class BridgeClient {
     if (auth.expiresAt <= Date.now()) throw new Error("맥의 Claude 로그인이 만료되었습니다. Mac 앱을 한 번 열어 주십시오.");
     let response: Response;
     try {
+      // The bridge treats a prompt as the user's own only from a person's app platform
+      // (ios, android, web_claude_ai, desktop_app in CLI 2.1.296); any claude_code_* platform
+      // is demoted to "a message from another Claude session". These prompts are typed on a phone.
       response = await this.fetchFn(`https://api.anthropic.com/v1/code/sessions/${encodeURIComponent(id)}${suffix}`, {
-        ...options, redirect: "error", headers: { Authorization: `Bearer ${auth.accessToken}`, "anthropic-version": "2023-06-01", "anthropic-client-platform": "claude_code_remote", "x-organization-uuid": auth.organizationUuid, "Content-Type": "application/json", "User-Agent": "RippleRemote/0.8.10" },
+        ...options, redirect: "error", headers: { Authorization: `Bearer ${auth.accessToken}`, "anthropic-version": "2023-06-01", "anthropic-client-platform": "ios", "x-organization-uuid": auth.organizationUuid, "Content-Type": "application/json", "User-Agent": "RippleRemote/0.8.10" },
       });
     } catch { throw new BridgeNetworkError("Mac 앱과 연결하지 못했습니다."); }
     if (!response.ok) {
