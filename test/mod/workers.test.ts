@@ -30,6 +30,14 @@ test('judge separates domain and level, rejects mixed-tier legacy verdicts', () 
   assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"ponder","effort":"high"}')?.kind, 'do')
   for (const text of ['', '{}', '{"tier":"design","effort":"high"}', '{"domain":"bad","level":"light","effort":"low"}']) assert.equal(parseWorkerVerdict(text), undefined)
 })
+test('judge reserves plan for pure planning deliverables, never implementation after reading a spec', () => {
+  assert.match(WORKER_JUDGE_SYSTEM, /deliverable is a decision, design, specification, or review verdict, NOT implemented code/)
+  assert.match(WORKER_JUDGE_SYSTEM, /implemented code, files, builds or fixes is do/)
+  for (const example of ['"implement host listing of sessions" => do', '"build an iOS app" => do', '"read the spec first, then implement it" => do']) assert.ok(WORKER_JUDGE_SYSTEM.includes(example))
+  assert.match(WORKER_JUDGE_SYSTEM, /If planning and implementation are mixed, choose do/)
+  assert.match(WORKER_JUDGE_SYSTEM, /Writing a design\/spec document alone remains plan/)
+})
+
 test('markers and frontmatter provider retain existing parsing semantics', () => {
   assert.deepEqual(readMarker('context\n[[ ripple : GPT-6.1-SOL @ HIGH ]]'), { name: 'gpt-6.1-sol', level: 'high' })
   assert.equal(agentProvider('---\ndescription: Executor via chatgpt.\n---\n'), 'chatgpt')
