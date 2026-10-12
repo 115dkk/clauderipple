@@ -17,6 +17,8 @@ import type { Els } from '../hooks/ui/parts'
 
 const LANG = 'ko'
 const ONLY: string[] = []
+/** The composer's width in a wide window, 768 px, in the desktop's cells. */
+const WIDTH = 94
 const NOW = Date.parse('2026-10-12T13:20:00')
 const noop = new Proxy({}, { get: () => () => undefined }) as never
 
@@ -84,7 +86,7 @@ const SCENES: Scene[] = [
 test('scenes', async ($, on) => {
   const shown = SCENES.filter(scene => !ONLY.length || ONLY.includes(scene.name))
   for (const scene of shown) {
-    const columns = scene.columns ?? 110
+    const columns = scene.columns ?? WIDTH
     on('ui.render', { component: 'Pane', requestId: scene.name }, ($, e) => {
       const frame: Frame = { surface: 'desktop', columns, maxRows: 12, now: NOW, appearance: 'auto', lang: LANG }
       const tree = scene.draw($.ui.resolve(e), frame)
@@ -93,7 +95,7 @@ test('scenes', async ($, on) => {
     })
   }
   for (const scene of shown) {
-    const columns = scene.columns ?? 110
+    const columns = scene.columns ?? WIDTH
     const props = { title: 'ui', isFocused: true, bodyColumns: columns, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } as RenderPropsOf['Pane']
     const ui = await $.ui.mount({ plugin: 'test', surface: 'desktop', component: 'Pane', requestId: scene.name, props, viewport: { columns, rows: 40 } })
     await ui.unmount()
