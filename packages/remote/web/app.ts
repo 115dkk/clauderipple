@@ -73,7 +73,7 @@ export class App {
   start(): void {
     if (savePairing(location.hash)) history.replaceState(null, "", location.pathname);
     const token = store.get<string | null>("rr.token", null);
-    if (!token) { this.screen = { name: "pair" }; this.render(); return; }
+    if (!token) { this.screen = { name: "pair" }; this.bind(); this.render(); return; }
     this.screen = this.routeFromHash();
     window.addEventListener("hashchange", () => { this.screen = this.routeFromHash(); this.ui.sheet = null; this.render(); this.attachCurrent(); });
     const clientId = store.get<string>("rr.clientId", "") || uid();
