@@ -119,14 +119,15 @@ export type TierTarget = { agent: string; model?: string }
 /**
  * An operating mode the user made (docs/specs/2026-10-12-worker-tiers.md "Operating modes").
  * Each rung is an ordered worker list, independent of the base ladder, sharing its ticked models.
- * `until` is an epoch-ms time, the next known quota reset, or no automatic end.
+ * `until` is an epoch-ms time, the named provider's next known quota reset ('chatgpt' or another
+ * ChatGPT provider, or 'anthropic' for Claude), or no automatic end.
  */
 export type Mode = {
   id: string
   name: string
   rungs: Rungs
   delegation: 'normal' | 'eager'
-  until: 'none' | number | 'reset'
+  until: 'none' | number | { reset: string }
 }
 
 export type Settings = {

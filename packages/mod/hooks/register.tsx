@@ -9,7 +9,7 @@ import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { WORKER_JUDGE_SYSTEM, WORKER_TIERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, tierOf, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
-import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, modeProviders, quotaWindows, routingSettings } from './modes'
+import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
@@ -429,21 +429,14 @@ let modeQuotaAt = 0
 let modeQuotaKey: string | null = null
 let modeQuotaWindows: QuotaWindow[] = []
 let endingMode = false
-/** Claude uses the band's binding limit; ChatGPT uses its account quota API. */
-async function modeWindows($: EngineInterface, rungs: Settings['rules']['general']['rungs']): Promise<QuotaWindow[]> {
-  const admin = await adminUrl($)
-  // A target model stands for its provider, which its worker file names (usable now or not).
-  const models = [...[...await workerFiles($)].flatMap(([agent, file]) => { const provider = agentProvider(file); return provider ? [{ target: { agent }, provider }] : [] }), ...claudeCandidates()]
-  const windows: QuotaWindow[] = []
-  for (const provider of modeProviders(rungs, models)) {
-    if (provider === 'anthropic') { windows.push(...claudeWindow(await read($, limit))); continue }
-    const response = await $.http.fetch(`${admin}/api/chatgpt-accounts?provider=${encodeURIComponent(provider)}`)
-    if (!response.ok) continue
-    const body: unknown = JSON.parse(response.text)
-    // The router answers for its first ChatGPT provider when the name is not one: not this target.
-    if (object(body).provider === provider) windows.push(...quotaWindows(body))
-  }
-  return windows
+/** The chosen provider's windows: Claude uses the band's binding limit; ChatGPT its account quota API. */
+async function modeWindows($: EngineInterface, provider: string): Promise<QuotaWindow[]> {
+  if (provider === 'anthropic') return claudeWindow(await read($, limit))
+  const response = await $.http.fetch(`${await adminUrl($)}/api/chatgpt-accounts?provider=${encodeURIComponent(provider)}`)
+  if (!response.ok) return []
+  const body: unknown = JSON.parse(response.text)
+  // The router answers for its first ChatGPT provider when the name is not one: not this provider.
+  return object(body).provider === provider ? quotaWindows(body) : []
 }
 /** A mode whose time is up turns itself off and says so (on each poll and prompt). */
 async function endModeIfOver($: EngineInterface): Promise<void> {
@@ -457,11 +450,12 @@ async function endModeIfOver($: EngineInterface): Promise<void> {
     if (!mode || mode.until === 'none') return
     const now = await $.clock.now()
     let windows = modeQuotaWindows
-    if (mode.until === 'reset') {
-      const providers = modeProviders(mode.rungs, claudeCandidates())
-      windows = [...windows, ...(providers.includes('anthropic') ? claudeWindow(await read($, limit)) : [])]
+    const provider = resetProvider(mode)
+    if (provider) {
+      // Claude's limit arrives with the session; read it on every check, not once a minute.
+      if (provider === 'anthropic') windows = [...windows, ...claudeWindow(await read($, limit))]
       if (!modeOver(mode, s.activeSince, now, windows) && now - modeQuotaAt >= 60_000) {
-        const fresh = await modeWindows($, mode.rungs)
+        const fresh = await modeWindows($, provider)
         modeQuotaAt = now
         // Keep only the earliest observed deadline after activation, plus current snapshots.
         const first = [...windows, ...fresh].filter(w => w.at > (s.activeSince ?? now)).sort((a, b) => a.at - b.at)[0]

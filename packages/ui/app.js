@@ -2742,7 +2742,8 @@ function modRetiredNote() {
 //
 // A tab edits a saved worker set; activation is always an explicit, separate action.
 let modModeTab = "";
-let modResetProviders = new Set();
+/** Providers a mode can end at the reset of, known now: ChatGPT ones, then Claude ('anthropic'). */
+let modResetProviders = [];
 
 /** Only actual future reset timestamps enable the option, never a provider type alone. */
 function modQuotaKnown(accounts, binding = false) {
@@ -2760,25 +2761,25 @@ function modQuotaKnown(accounts, binding = false) {
   });
 }
 async function modLoadResets() {
-  const known = new Set();
-  await Promise.all(((modState.options && modState.options.providers) || []).map(async (provider) => {
-    if (provider.type === "anthropic") {
-      if (modQuotaKnown(status && status.claude && status.claude.accounts, true)) { known.add(provider.name); known.add("anthropic"); }
-      return;
-    }
-    if (provider.type !== "chatgpt") return;
+  const providers = (modState.options && modState.options.providers) || [];
+  const chatgpt = await Promise.all(providers.filter((provider) => provider.type === "chatgpt").map(async (provider) => {
     try {
       const body = await api(`/api/chatgpt-accounts?provider=${encodeURIComponent(provider.name)}`);
-      if (body.provider === provider.name && modQuotaKnown(body.accounts)) known.add(provider.name);
-    } catch (error) { console.warn("Mode quota unavailable", provider.name, error.message); }
+      return body.provider === provider.name && modQuotaKnown(body.accounts) ? [provider.name] : [];
+    } catch (error) { console.warn("Mode quota unavailable", provider.name, error.message); return []; }
   }));
-  modResetProviders = known;
+  // The mod reads Claude's reset from the band's binding limit, under the name 'anthropic'.
+  const claude = providers.some((provider) => provider.type === "anthropic") && modQuotaKnown(status && status.claude && status.claude.accounts, true);
+  modResetProviders = [...chatgpt.flat(), ...(claude ? ["anthropic"] : [])];
 }
-function modResetKnown(rungs) {
-  return Object.values(rungs).some((steps) => steps.some((step) => {
-    const choice = modChoiceOf(step.target);
-    return choice && modResetProviders.has(choice.provider);
-  }));
+/** The name a reset provider goes by: Claude, ChatGPT, or another ChatGPT provider's own name. */
+function modResetLabel(provider) {
+  return provider === "anthropic" ? "Claude" : provider === "chatgpt" ? "ChatGPT" : provider;
+}
+/** Choosing reset starts on a known provider the mode's workers use, else the first known one. */
+function modResetDefault(rungs) {
+  const used = new Set(Object.values(rungs).flatMap((steps) => steps.map((step) => { const choice = modChoiceOf(step.target); return choice && choice.provider; })));
+  return modResetProviders.find((provider) => used.has(provider)) || modResetProviders[0];
 }
 function modUpdateMode(id, change) {
   modPatch({ modes: modState.settings.modes.map((mode) => mode.id === id ? { ...mode, ...change } : mode) });
@@ -2830,12 +2831,13 @@ function modModeSection(mode) {
     if (!name.value.trim()) { name.value = mode.name; toast(t("mod.modeNameRequired"), true); return; }
     modUpdateMode(mode.id, { name: name.value.trim() });
   });
-  const known = modResetKnown(mode.rungs);
-  const kind = typeof mode.until === "number" ? "time" : mode.until || "none";
+  const known = modResetProviders.length > 0;
+  const kind = typeof mode.until === "number" ? "time" : mode.until && typeof mode.until === "object" ? "reset" : "none";
+  const untilOf = (value) => value === "time" ? Date.now() + 3 * 3_600_000 : value === "reset" ? { reset: modResetDefault(mode.rungs) } : value;
   const until = modSegmented("mode-until", [
     { value: "none", label: t("mod.modeUntilNone") }, { value: "time", label: t("mod.modeUntilTime") },
     { value: "reset", label: t("mod.modeUntilResetChoice"), disabled: !known },
-  ], kind, t("mod.modeUntil"), (value) => modUpdateMode(mode.id, { until: value === "time" ? Date.now() + 3 * 3_600_000 : value }));
+  ], kind, t("mod.modeUntil"), (value) => modUpdateMode(mode.id, { until: untilOf(value) }));
   const reset = until.querySelector('[data-key="mode-until:reset"]');
   if (!known) {
     reset.setAttribute("aria-describedby", "mode-reset-reason");
@@ -2851,11 +2853,19 @@ function modModeSection(mode) {
     });
     endControls.push(at);
   }
+  if (kind === "reset") {
+    // Only providers whose reset is known now; a saved one that is not stays shown as unavailable.
+    const label = (provider) => t("mod.modeUntilResetOf", { provider: modResetLabel(provider) });
+    const items = modResetProviders.map((provider) => ({ value: provider, label: label(provider) }));
+    if (!modResetProviders.includes(mode.until.reset)) items.unshift({ value: mode.until.reset, label: `${label(mode.until.reset)}${t("mod.unavailable")}` });
+    endControls.push(modSelect("mode-until-reset", items, mode.until.reset, t("mod.modeResetProvider"), (reset) => modUpdateMode(mode.id, { until: { reset } })));
+  }
+  const endHelp = kind === "reset" ? t("mod.modeResetHelp", { provider: modResetLabel(mode.until.reset) }) : null;
   return modSection(null, [
     cell(t("mod.modeName"), name),
     ...modRungRows(mode),
     cell(t("mod.modeDelegation"), modSegmented("mode-delegation", [{ value: "normal", label: t("mod.modeNormal") }, { value: "eager", label: t("mod.modeEager") }], mode.delegation, t("mod.modeDelegation"), (delegation) => modUpdateMode(mode.id, { delegation })), null, "wide"),
-    cell(t("mod.modeUntil"), el("div", { class: "mode-until" }, endControls), known ? t("mod.modeResetHelp") : null, "wide"),
+    cell(t("mod.modeUntil"), el("div", { class: "mode-until" }, endControls), endHelp, "wide"),
     cell(t("mod.modeActive"), [
       el("button", { type: "button", class: "btn compact", "data-key": "mode-toggle", text: t(on ? "mod.modeTurnOff" : "mod.modeTurnOn"), onclick: () => modSetActive(on ? "" : mode.id) }),
       el("button", { type: "button", class: "btn secondary compact", "data-key": `mode-remove:${mode.id}`, text: t("common.remove"), onclick: () => modRemoveMode(mode) }),

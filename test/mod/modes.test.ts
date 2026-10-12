@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { activeModeOf, claudeWindow, eagerNote, modeKey, modeNote, modeOver, modeProviders, quotaWindows, routingSettings } = await import('../../packages/mod/hooks/modes.ts')
+const { activeModeOf, claudeWindow, eagerNote, modeKey, modeNote, modeOver, quotaWindows, resetProvider, routingSettings } = await import('../../packages/mod/hooks/modes.ts')
 const { ladderPick } = await import('../../packages/mod/hooks/workers.ts')
 
 const gpt = (agent: string, model: string, cost?: number): LadderChoice => ({ target: { agent }, model, provider: 'chatgpt', billing: 'subscription', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], ...(cost !== undefined ? { cost } : {}) })
@@ -39,7 +39,7 @@ test('modes load validated: no mode is built in, bad entries are dropped, the ac
     'not a mode',
   ])
   assert.deepEqual(modes, [
-    { id: 'burn', name: 'Burn GPT', rungs: USER, delegation: 'eager', until: 'reset' },
+    { id: 'burn', name: 'Burn GPT', rungs: USER, delegation: 'eager', until: { reset: 'chatgpt' } },
     { id: 'keep', name: 'Keep Claude', rungs: USER, delegation: 'normal', until: 1_800_000_000_000 },
     { id: 'odd', name: 'Odd', rungs: USER, delegation: 'normal', until: 'none' },
   ])
@@ -54,6 +54,27 @@ test('modes load validated: no mode is built in, bad entries are dropped, the ac
   assert.equal(Object.hasOwn(off, 'activeMode'), false)
   assert.equal(Object.hasOwn(off, 'activeSince'), false)
   assert.deepEqual(off.modes, modes)
+})
+
+test('a mode ends at one named provider\'s reset; the old any-provider reset names ChatGPT, then Claude', () => {
+  const gptRung = { light: [{ target: { agent: 'gpt-6-luna' }, effort: 'low' }], plan: [{ target: opus, effort: 'high' }] }
+  const claudeRung = { light: [{ target: sonnet, effort: 'high' }], plan: [{ target: opus, effort: 'high' }] }
+  const modes = normalizeModes([
+    { id: 'gpt', name: 'GPT', rungs: gptRung, until: 'reset' },
+    { id: 'claude', name: 'Claude', rungs: claudeRung, until: 'reset' },
+    { id: 'kept', name: 'Kept', rungs: gptRung, until: { reset: ' anthropic ' } },
+    { id: 'blank', name: 'Blank', until: { reset: '  ' } },
+    { id: 'odd', name: 'Odd', until: { reset: 3 } },
+  ])
+  assert.deepEqual(modes.map(m => m.until), [{ reset: 'chatgpt' }, { reset: 'anthropic' }, { reset: 'anthropic' }, 'none', 'none'])
+  assert.deepEqual(modes.map(m => resetProvider(m)), ['chatgpt', 'anthropic', 'anthropic', undefined, undefined])
+  assert.equal(resetProvider({ until: 1_800_000_000_000 }), undefined)
+  // Migrated once: saving and loading again keeps the named provider.
+  const s = normalizeSettings({ modes })
+  assert.deepEqual(normalizeSettings(JSON.parse(JSON.stringify(s))).modes, modes)
+  // Another surface's provider change merges like any other edit.
+  const next = normalizeSettings({ ...s, modes: s.modes.map(m => m.id === 'gpt' ? { ...m, until: { reset: 'anthropic' } } : m) })
+  assert.deepEqual(applySettingsChanges(s, settingsChanges(s, next)).modes[0]!.until, { reset: 'anthropic' })
 })
 
 test('old modes copy the actual base ladder; single steps become independent ordered lists', () => {
@@ -88,21 +109,22 @@ test('a mode ends at its time, or the first known quota reset after activation',
   assert.equal(modeOver({ until: since + 3_600_000 }, since, since + 3_600_000), true)
   assert.equal(modeOver({ until: 'none' }, since, since + 1e12), false)
   // Reset: unknown windows, or no start, never end it.
-  assert.equal(modeOver({ until: 'reset' }, since, since + 1e12, []), false)
-  assert.equal(modeOver({ until: 'reset' }, undefined, since + 1e12, [{ at: since + 1 }]), false)
+  const chatgpt = { until: { reset: 'chatgpt' } }, claude = { until: { reset: 'anthropic' } }
+  assert.equal(modeOver(chatgpt, since, since + 1e12, []), false)
+  assert.equal(modeOver(chatgpt, undefined, since + 1e12, [{ at: since + 1 }]), false)
   const week = 7 * 86_400_000
   const pending = [{ at: since + 86_400_000, windowMs: week }]
-  assert.equal(modeOver({ until: 'reset' }, since, since + 3_600_000, pending), false)
-  assert.equal(modeOver({ until: 'reset' }, since, since + 86_400_000, pending), true)
+  assert.equal(modeOver(chatgpt, since, since + 3_600_000, pending), false)
+  assert.equal(modeOver(chatgpt, since, since + 86_400_000, pending), true)
   // A fresh snapshot after the reset shows the next one; the window it started began after `since`.
-  assert.equal(modeOver({ until: 'reset' }, since, since + 2 * 86_400_000, [{ at: since + 86_400_000 + week, windowMs: week }]), true)
-  // The first known account/provider reset ends it, not the last.
-  assert.equal(modeOver({ until: 'reset' }, since, since + 86_400_000, [...pending, { at: since + 3 * 86_400_000, windowMs: week }]), true)
+  assert.equal(modeOver(chatgpt, since, since + 2 * 86_400_000, [{ at: since + 86_400_000 + week, windowMs: week }]), true)
+  // The first known account reset ends it, not the last.
+  assert.equal(modeOver(chatgpt, since, since + 86_400_000, [...pending, { at: since + 3 * 86_400_000, windowMs: week }]), true)
   for (const kind of ['five_hour', 'seven_day']) {
     const windows = claudeWindow({ kind, percent: 90, resetsAt: new Date(since + 600_000).toISOString() })
-    assert.equal(modeOver({ until: 'reset' }, since, since + 599_999, windows), false)
-    assert.equal(modeOver({ until: 'reset' }, since, since + 600_000, windows), true)
-    assert.equal(modeOver({ until: 'reset' }, since + 600_000, since + 700_000, windows), false)
+    assert.equal(modeOver(claude, since, since + 599_999, windows), false)
+    assert.equal(modeOver(claude, since, since + 600_000, windows), true)
+    assert.equal(modeOver(claude, since + 600_000, since + 700_000, windows), false)
   }
   assert.deepEqual(claudeWindow(null), [])
   assert.deepEqual(claudeWindow({ kind: 'five_hour', percent: 80, resetsAt: 'invalid' }), [])
@@ -115,8 +137,6 @@ test('a mode ends at its time, or the first known quota reset after activation',
   ] }
   assert.deepEqual(quotaWindows(body), [{ at: since + 3_600_000, windowMs: 300 * 60_000 }, { at: since + 86_400_000, windowMs: week }, { at: since + 600_000, windowMs: 300 * 60_000 }])
   assert.deepEqual(quotaWindows({}), [])
-  // The providers a mode's targets name: model keys stand for theirs.
-  assert.deepEqual(modeProviders({ hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }, { target: opus, effort: 'max' }] }, LIVE), ['chatgpt', 'anthropic'])
 })
 
 test('the eager note goes with the first prompt after the mode turns on and after each compaction, not every turn', () => {

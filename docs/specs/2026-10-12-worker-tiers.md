@@ -64,18 +64,27 @@ its name; `기본` (Base) means the base worker set, not a saved mode.
 - **Name** — user-typed, up to 40 characters.
 - **Rungs** — its own light/standard/hard/plan ordered lists (로우/미디움/하이/맥스), the same
   `Step[]` shape and ticked-model/effort options as Base. New modes copy Base, without aliasing it.
-- **Delegation** — `normal` or `eager` (보통 / 적극 — 클로드는 지휘만). Eager adds the existing
+- **Delegation** — `normal` or `eager` (보통 / 적극 — 메인 대화는 지휘만). The main chat may run on
+  any model, so no string names Claude as the one directing. Eager adds the existing
   hidden `prompt.submit` context note: "Delegate everything except judgment and final review to
   ripple:low/medium/high/max." First prompt after activation and after main-chat compaction only.
-- **End** — `until: 'none' | number | 'reset'`: until turned off, epoch-ms time, or the first
-  known quota reset **after activation** among providers used anywhere in its rung lists.
-  ChatGPT uses signed-in, unpaused accounts' primary/secondary windows from `/api/chatgpt-accounts`.
-  Claude uses the mod's received `SessionRateLimit.resetsAt`: the five-hour or seven-day window
-  with the highest `percentUsed`, exactly as the band chooses its binding limit (input order
-  breaks ties). Do not extrapolate Claude's lazily started five-hour windows. Previously observed
-  deadlines are checked before replacing a rolled-forward snapshot. Unknown resets never end a mode.
-  The dashboard offers reset whenever at least one used provider has a known future reset; otherwise
-  the choice remains visible but disabled, with the reason directly beside it, not a floating note.
+- **End** — `until: 'none' | number | { reset: '<provider>' }`: until turned off, epoch-ms time,
+  or the named provider's first known quota reset **after activation** (끄기 전까지 / 시각 지정 /
+  한도 초기화 때). Only that provider's reset counts, whatever the rung lists use.
+  `'anthropic'` is Claude: the mod's received `SessionRateLimit.resetsAt`, the five-hour or
+  seven-day window with the highest `percentUsed`, exactly as the band chooses its binding limit
+  (input order breaks ties); do not extrapolate Claude's lazily started five-hour windows. Any
+  other name is a ChatGPT provider: its signed-in, unpaused accounts' primary/secondary windows
+  from `/api/chatgpt-accounts?provider=<name>`. Previously observed deadlines are checked before
+  replacing a rolled-forward snapshot. Unknown resets never end a mode. Stored `'reset'` (before
+  2026-10-12: any used provider's) loads as `{ reset: 'chatgpt' }` when any rung entry is a worker
+  rather than Claude's own, else `{ reset: 'anthropic' }` — settings carry no worker provider, and
+  ChatGPT is the only worker provider with a known reset.
+  The dashboard: choosing 한도 초기화 때 shows a provider menu of only the providers whose future
+  reset is known now (ChatGPT ones, then Claude), labelled "ChatGPT 한도 초기화 때" / "Claude 한도
+  초기화 때"; the line under 종료 시점 names the chosen provider. It starts on a known provider the
+  mode's workers use, else the first known. With none known, the choice remains visible but
+  disabled, with the reason directly beside it, not a floating note.
 
 Only one mode is active. Its lists replace Base's for routing; the same ordered fallback applies.
 Explicit markers remain explicit. The band and every worker-pick log show the active mode name.

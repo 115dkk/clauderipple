@@ -1,8 +1,7 @@
 // Operating modes in the session (docs/specs/2026-10-12-worker-tiers.md "Operating modes"): which
 // mode is on, when it ends by itself, and the eager-delegation note. Pure; register.tsx wires them.
 
-import type { Hot, Mode, Rungs, Settings, TierTarget } from '../types'
-import { candidateKey } from './settings'
+import type { Hot, Mode, Settings } from '../types'
 
 /** The mode that is on, if the settings name one that exists. */
 export function activeModeOf(s: Pick<Settings, 'modes' | 'activeMode'>): Mode | undefined {
@@ -36,12 +35,9 @@ export function routingSettings(s: Settings): Settings {
   return mode ? { ...s, rules: { general: { mode: 'ladder', rungs: mode.rungs } } } : s
 }
 
-/** Every provider used by any entry of the saved worker set; unknown workers have no known reset. */
-export function modeProviders(rungs: Rungs, models: readonly { target: TierTarget; provider: string }[]): string[] {
-  return [...new Set(Object.values(rungs).flatMap(steps => steps.flatMap(step => {
-    const provider = models.find(m => candidateKey(m.target) === candidateKey(step.target))?.provider
-    return provider ? [provider] : []
-  })))]
+/** The provider whose quota reset ends the mode: 'anthropic' is Claude, any other a ChatGPT provider. */
+export function resetProvider(mode: Pick<Mode, 'until'>): string | undefined {
+  return typeof mode.until === 'object' ? mode.until.reset : undefined
 }
 
 /** Same binding limit as the band: highest percent used, input order breaking ties. */
@@ -84,13 +80,14 @@ export function quotaWindows(body: unknown): QuotaWindow[] {
 }
 
 /**
- * End at the first known reset after activation, not after every provider/account resets.
- * ChatGPT's fixed window length also identifies a reset when a fresh snapshot has rolled forward.
- * Claude windows are not extrapolated: the five-hour window can start lazily after idle.
+ * End at the first known reset after activation of the mode's chosen provider (`windows` are only
+ * that provider's), not after every account resets. ChatGPT's fixed window length also identifies a
+ * reset when a fresh snapshot has rolled forward. Claude windows are not extrapolated: the
+ * five-hour window can start lazily after idle.
  */
 export function modeOver(mode: Pick<Mode, 'until'>, since: number | undefined, now: number, windows: readonly QuotaWindow[] = []): boolean {
   if (typeof mode.until === 'number') return now >= mode.until
-  if (mode.until !== 'reset' || since === undefined || !windows.length) return false
+  if (!resetProvider(mode) || since === undefined || !windows.length) return false
   const passed = (at: number) => at > since && at <= now
   return windows.some(w => passed(w.at) || (w.windowMs !== undefined && passed(w.at - w.windowMs)))
 }

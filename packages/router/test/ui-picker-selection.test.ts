@@ -80,14 +80,16 @@ test("mode editor keeps reset disabled with an adjacent reason, and enabled cont
   const el = (tag: string, attrs: Record<string, unknown> = {}, children: Node[] = []): Node => ({ tag, attrs, children, value: '', addEventListener() {}, appendChild(child) { this.children.push(child); }, setAttribute(key, value) { this.attrs[key] = value; }, querySelector(selector) { return find(this, /data-key="([^"]+)"/.exec(selector)?.[1] ?? ''); } });
   const segment = source.slice(source.indexOf('function modSegmented('), source.indexOf('/** A pop-up menu.'));
   const section = source.slice(source.indexOf('function modModeSection('), source.indexOf('function modWorkersCard('));
-  const build = new Function('el', 'known', `
-    const t = key => key, modState = {settings:{}};
-    const modResetKnown = () => known, modRungRows = () => [];
-    const modUpdateMode = () => {}, modSetActive = () => {}, modRemoveMode = () => {};
-    const cell = (label, controls) => el('cell', {}, Array.isArray(controls) ? controls : [controls]);
+  const build = new Function('el', 'known', 'until', `
+    const t = (key, vars) => vars ? key + JSON.stringify(vars) : key, modState = {settings:{}};
+    const modResetProviders = known ? ['chatgpt', 'anthropic'] : [], modRungRows = () => [];
+    const modResetLabel = provider => provider === 'anthropic' ? 'Claude' : 'ChatGPT', modResetDefault = () => modResetProviders[0];
+    const modSelect = (key, items, value, label) => el('select', { 'data-key': key, items, value, 'aria-label': label });
+    const modUpdateMode = () => {}, modSetActive = () => {}, modRemoveMode = () => {}, modLocalTime = () => '';
+    const cell = (label, controls, help) => el('cell', { help }, Array.isArray(controls) ? controls : [controls]);
     const modSection = (title, rows) => el('section', {}, rows);
-    ${segment}\n${section}\nreturn modModeSection({id:'test',name:'Test',rungs:{},until:'none',delegation:'normal'});
-  `) as (make: typeof el, known: boolean) => Node;
+    ${segment}\n${section}\nreturn modModeSection({id:'test',name:'Test',rungs:{},until:until ?? 'none',delegation:'normal'});
+  `) as (make: typeof el, known: boolean, until?: unknown) => Node;
   const disabled = build(el, false);
   const reset = find(disabled, 'mode-until:reset')!;
   assert.equal(Object.hasOwn(reset.attrs, 'disabled'), true);
@@ -98,6 +100,19 @@ test("mode editor keeps reset disabled with an adjacent reason, and enabled cont
   assert.equal(group.children.at(-1)?.attrs.text, 'mod.modeResetUnknown');
   assert.equal(Object.hasOwn(find(disabled, 'mode-until:time')!.attrs, 'disabled'), false);
   assert.equal(Object.hasOwn(find(build(el, true), 'mode-until:reset')!.attrs, 'disabled'), false);
+  assert.equal(find(build(el, true), 'mode-until-reset'), undefined);
+  // Reset names its provider: a menu of the known ones, and the line under 종료 시점 names the chosen one.
+  const claude = build(el, true, { reset: 'anthropic' });
+  const select = find(claude, 'mode-until-reset')!;
+  assert.equal(select.attrs.value, 'anthropic');
+  assert.deepEqual((select.attrs.items as { value: string; label: string }[]).map(item => [item.value, item.label]), [
+    ['chatgpt', 'mod.modeUntilResetOf{"provider":"ChatGPT"}'], ['anthropic', 'mod.modeUntilResetOf{"provider":"Claude"}'],
+  ]);
+  const help = (node: Node): unknown => node.attrs.help ?? node.children.map(help).find(Boolean);
+  assert.equal(help(claude), 'mod.modeResetHelp{"provider":"Claude"}');
+  // A saved provider whose reset is not known now stays chosen, marked unavailable.
+  const gone = find(build(el, false, { reset: 'chatgpt' }), 'mode-until-reset')!;
+  assert.deepEqual((gone.attrs.items as { value: string; label: string }[]).map(item => [item.value, item.label]), [['chatgpt', 'mod.modeUntilResetOf{"provider":"ChatGPT"}mod.unavailable']]);
 });
 
 const { applyPickerSelections: apply, pickerSelectionsExcept: except } = loadPickerBlock();

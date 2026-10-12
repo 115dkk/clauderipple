@@ -204,6 +204,22 @@ export const MODE_NAME_MAX = 40
 /** How many modes are kept. */
 export const MODES_MAX = 20
 
+/** How long a mode's reset provider name may be. */
+const PROVIDER_NAME_MAX = 64
+
+/**
+ * A mode's end: a time, one provider's next quota reset, or none. Until 2026-10-12 `'reset'` meant
+ * any used provider's; it becomes the first that could have offered it, ChatGPT then Claude. Settings
+ * do not carry a worker's provider, and ChatGPT is the only worker provider with a known reset, so
+ * any worker that is not Claude's own stands for ChatGPT.
+ */
+function modeUntil(raw: unknown, rungs: Rule['rungs']): Mode['until'] {
+  if (typeof raw === 'number') return Number.isFinite(raw) && raw > 0 ? raw : 'none'
+  if (raw === 'reset') return { reset: Object.values(rungs).some(steps => steps?.some(step => step.target.agent !== 'general-purpose')) ? 'chatgpt' : 'anthropic' }
+  const reset = object(raw).reset
+  return typeof reset === 'string' && reset.trim() ? { reset: reset.trim().slice(0, PROVIDER_NAME_MAX) } : 'none'
+}
+
 /**
  * Saved worker sets. Old prefer/avoid modes copy the base ladder on load, dropping their policy.
  * Every entry owns its lists: later base edits cannot mutate a saved mode.
@@ -216,9 +232,8 @@ export function normalizeModes(raw: unknown, base: Rule['rungs'] = DEFAULTS.rule
     const id = typeof v.id === 'string' ? v.id.trim().slice(0, 64) : ''
     const name = typeof v.name === 'string' ? v.name.trim().slice(0, MODE_NAME_MAX) : ''
     if (!id || !name || out.some(m => m.id === id)) continue
-    const until = v.until === 'reset' ? 'reset' as const : typeof v.until === 'number' && Number.isFinite(v.until) && v.until > 0 ? v.until : 'none' as const
     const rungs = ladderRungs(v.rungs === undefined ? base : v.rungs)
-    out.push({ id, name, rungs, delegation: v.delegation === 'eager' ? 'eager' : 'normal', until })
+    out.push({ id, name, rungs, delegation: v.delegation === 'eager' ? 'eager' : 'normal', until: modeUntil(v.until, rungs) })
     if (out.length === MODES_MAX) break
   }
   return out

@@ -917,7 +917,7 @@ test('a mode ends at its time and says so once; quick settings turn one on and o
 })
 
 test('a mode ends at the first ChatGPT reset after activation', async ($, on) => {
-  const modes = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] }, until: 'reset' }])
+  const modes = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] }, until: { reset: 'chatgpt' } }])
   const b = boundaries(on, { modes, activeMode: 'burn', activeSince: NOW })
   const asked: string[] = []
   on('http.fetch', { url: /\/api\/chatgpt-accounts/ }, ($, e) => {
@@ -938,9 +938,17 @@ test('a mode ends at the first ChatGPT reset after activation', async ($, on) =>
 })
 
 for (const binding of ['five_hour', 'seven_day']) test('reset mode follows the band binding Claude limit: ' + binding, async ($, on) => {
-  const modes = normalizeModes([{ id: 'claude', name: 'Claude work', rungs: { light: [{ target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' }] }, until: 'reset' }])
+  // A ChatGPT worker in the lists does not make ChatGPT's earlier reset end a Claude-reset mode.
+  const rungs = { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }, { target: { agent: 'general-purpose', model: 'opus' }, effort: 'high' }] }
+  const modes = normalizeModes([{ id: 'claude', name: 'Claude work', rungs, until: { reset: 'anthropic' } }])
   const limits = ['five_hour', 'seven_day'].map(kind => ({ kind, percentUsed: kind === binding ? 90 : 20, resetsAt: new Date(NOW + (kind === binding ? 30_000 : 10_000)).toISOString() }))
   const b = boundaries(on, { modes, activeMode: 'claude', activeSince: NOW }, { limits })
+  const asked: string[] = []
+  on('http.fetch', { url: /\/api\/chatgpt-accounts/ }, ($, e) => {
+    asked.push(e.url)
+    const accounts = [{ state: 'ready', quota: { at: NOW, rate_limits: { primary: { used_percent: 10, window_minutes: 300, reset_at: (NOW + 5_000) / 1000 } } } }]
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ provider: 'chatgpt', accounts }) } }
+  })
   http(on)
   await start($)
   await b.clock.advance(20_000)
@@ -948,6 +956,7 @@ for (const binding of ['five_hour', 'seven_day']) test('reset mode follows the b
   await b.clock.advance(20_000)
   expect(b.router().settings.activeMode).toBeUndefined()
   expect(b.toasts.filter(text => text === 'The Claude work mode has ended.').length).toBe(1)
+  expect(asked).toEqual([])
 })
 
 test('/ripple stats returns plain measured text', async ($, on) => {
