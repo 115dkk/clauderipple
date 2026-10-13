@@ -238,8 +238,8 @@ export class Sessions {
     }
     for (const r of this.records.values()) {
       if (r.state === "running" || r.state === "starting" || r.state === "waiting") {
-        this.append(r.id, { kind: "notice", code: "host_restarted" });
-        this.setState(r, "stopped");
+        this.append(r.id, { kind: "notice", code: "host_restarted" }, false);
+        this.setState(r, "stopped", undefined, false);
       }
     }
   }
@@ -283,7 +283,7 @@ export class Sessions {
         }, data => this.log(r.id).image(data));
         this.save();
         const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
-        this.setState(r, process ? this.bridgeState(process) : "stopped");
+        this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
         if (process?.bridgeSessionId) this.ensureBridge(r.id, process.bridgeSessionId);
         else this.closeBridge(r.id);
       } catch (error) { this.bridgeFailure(r.id, error); }
@@ -292,7 +292,7 @@ export class Sessions {
     for (const r of this.records.values()) {
       if (!r.desktopBridge) continue;
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
-      this.setState(r, process ? this.bridgeState(process) : "stopped");
+      this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
     }
   }
 
@@ -385,18 +385,19 @@ export class Sessions {
     writeFileAtomic(this.file, JSON.stringify(Array.from(this.records.values()), null, 1));
   }
 
-  private append(id: string, body: EventBody): SessionEvent {
+  /** `touch` false: the host noticing a session is no longer live is not the session being used (a restart moved every old one to "now"). */
+  private append(id: string, body: EventBody, touch = true): SessionEvent {
     const event = this.log(id).append(body);
     const r = this.records.get(id);
-    if (r) r.updatedAt = this.now();
+    if (r && touch) r.updatedAt = this.now();
     this.opts.onEvent(id, event);
     return event;
   }
 
-  private setState(r: SessionRecord, state: SessionState, detail?: string): void {
+  private setState(r: SessionRecord, state: SessionState, detail?: string, touch = true): void {
     if (r.state === state && !detail) return;
     r.state = state;
-    this.append(r.id, { kind: "state", state, ...(detail ? { detail } : {}) });
+    this.append(r.id, { kind: "state", state, ...(detail ? { detail } : {}) }, touch);
     this.save();
     this.opts.onSessions();
   }

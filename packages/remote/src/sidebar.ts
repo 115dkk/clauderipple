@@ -13,7 +13,8 @@ const array = (v: unknown): unknown[] => Array.isArray(v) ? v : [];
 export const UNGROUPED = "sidebar:ungrouped";
 export const PHONE_GROUP = "sidebar:phone";
 export interface SidebarSession { cliSessionId: string; sessionId: string; title: string; unread: boolean; archived: boolean; group: string; order: number; activity: number; created: number }
-export interface SidebarSnapshot { groups: { name: string; sessions: string[] }[]; sessions: Map<string, SidebarSession> }
+/** `superseded`: CLI session ids an app session has moved on from (resume, compact, handoff); its row is the one that lists. */
+export interface SidebarSnapshot { groups: { name: string; sessions: string[] }[]; sessions: Map<string, SidebarSession>; superseded: Set<string> }
 export interface SidebarOptions { root?: string; now?: () => number; onError?: (error: unknown) => void }
 
 export class DesktopSidebar {
@@ -21,7 +22,7 @@ export class DesktopSidebar {
   private storage: SidebarStorage;
   private cache = new Map<string, { stamp: string; value: unknown }>();
   private at = -Infinity;
-  private current: SidebarSnapshot = { groups: [], sessions: new Map() };
+  private current: SidebarSnapshot = { groups: [], sessions: new Map(), superseded: new Set() };
   private opts: SidebarOptions;
   constructor(opts: SidebarOptions = {}) {
     this.opts = opts;
@@ -66,7 +67,7 @@ export class DesktopSidebar {
       .filter(k => k.split("/").every(v => UUID.test(v)) && k.split("/").length === 2 && (!account || k.startsWith(account + "/")));
     const unreadState = object(object(this.storage.read("epitaxy-unread-v1"))?.state);
     const unread = new Set(array(unreadState?.unreadIds).filter((v): v is string => typeof v === "string"));
-    const result: SidebarSnapshot = { groups: [], sessions: new Map() };
+    const result: SidebarSnapshot = { groups: [], sessions: new Map(), superseded: new Set() };
     for (const scope of scopeKeys) this.scope(scope, object(scopes?.[scope]), object(sections?.[scope]), epitaxy, unread, result);
     this.current = result; this.at = now; return result;
   }
@@ -84,6 +85,7 @@ export class DesktopSidebar {
       const v = object(this.json(path.join(dir, name)));
       if (!v || !UUID.test(string(v.cliSessionId))) continue;
       const sessionId = string(v.sessionId) || name.slice(0, -5), group = string(assignments?.[`code:${sessionId}`]);
+      for (const prior of array(v.priorCliSessionIds)) if (typeof prior === "string" && UUID.test(prior)) result.superseded.add(prior);
       const routine = typeof v.scheduledTaskId === "string" && v.scheduledTaskId.length > 0;
       // The app persists its unread set to Local Storage late; a session focused in the app after
       // its last activity is read even while the stored set still lists it (2026-10-13: 데이리플
@@ -129,6 +131,9 @@ export class DesktopSidebar {
     return sessions.flatMap(s => {
       const row = sidebar.sessions.get(cliId(s.id));
       if (row?.archived) return [];
+      // The host keeps one record per CLI session id; an app session that has moved on from one
+      // (2026-10-13: 클로드리플 and 클로드리플2 each listed twice, the old half stuck at "42 min").
+      if (!row && sidebar.superseded.has(cliId(s.id))) return [];
       if (!row) return [{ ...s, group: s.origin === "desktop" ? UNGROUPED : PHONE_GROUP }];
       return [{ ...s, title: row.title || s.title, unread: row.unread, group: row.group, order: row.order, updatedAt: row.activity }];
     });

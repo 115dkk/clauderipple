@@ -138,3 +138,9 @@ test("missing desktop data preserves legacy list; invalid JSON is surfaced, not 
   fs.writeFileSync(path.join(f.root, "claude_desktop_config.json"), "broken"); f.advance();
   assert.throws(() => f.sidebar.read(), SyntaxError);
 });
+test("a CLI id the app session has moved on from is not listed beside it", t => {
+  const f = fixture(t), old = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  f.session(id, 100, { priorCliSessionIds: [old] }); f.advance();
+  const joined = f.sidebar.join([summary(id, "host"), summary(old, "host"), summary("phone", "host")], s => s);
+  assert.deepEqual(joined.map(s => s.id), [id, "phone"]);
+});
