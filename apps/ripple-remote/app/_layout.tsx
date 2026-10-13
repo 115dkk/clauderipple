@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { remote } from '../src/client';
 import { ErrorToast, useRemote } from '../src/ui';
 import { usePalette } from '../src/theme';
+import { loadAppearance } from '../src/appearance';
 import { pickLang, setLang } from '../../../packages/remote/web/i18n.ts';
 Notifications.setNotificationHandler({ handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }) });
 export default function Layout() {
@@ -15,7 +16,8 @@ export default function Layout() {
   const c = usePalette();
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    void AsyncStorage.getItem('language').then(stored => { setLang(pickLang(Localization.getLocales().map(l => l.languageTag), stored)); setReady(true); }).catch(e => remote.report(e));
+    // The look is applied before the first frame, so a pinned light or dark never flashes the other.
+    void Promise.all([AsyncStorage.getItem('language'), loadAppearance()]).then(([stored]) => { setLang(pickLang(Localization.getLocales().map(l => l.languageTag), stored)); setReady(true); }).catch(e => remote.report(e));
     void remote.initialize();
     remote.onCreated = session => router.push({ pathname: '/session/[id]', params: { id: session } });
     const open = (response: Notifications.NotificationResponse) => {
