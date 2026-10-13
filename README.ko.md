@@ -29,8 +29,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다."></a><br>
-  <sub>실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다.</sub>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="1분 둘러보기: Claude Desktop의 모델 메뉴에 다른 모델이 들어가고, 프롬프트마다 추론 강도를 정하고, 서브에이전트는 맞는 모델로 보냅니다. 누르면 전체 영상이 열립니다."></a><br>
+  <sub>1분 둘러보기: Claude Desktop의 모델 메뉴에 다른 모델이 들어가고, 프롬프트마다 추론 강도를 정하고, 서브에이전트는 맞는 모델로 보냅니다. 누르면 전체 영상이 열립니다.</sub>
 </p>
 
 <table align="center">

@@ -22,8 +22,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="真实录屏：GPT-6 Astra 在 Code 标签页修复 bug，DeepSeek 和 GLM 子代理并行审查。点击观看完整视频。"></a><br>
-  <sub>真实录屏：GPT-6 Astra 在 Code 标签页修复 bug，DeepSeek 和 GLM 子代理并行审查。点击观看完整视频。</sub>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="一分钟概览：其他模型出现在 Claude Desktop 自带的模型菜单里，每条提示设定推理强度，子代理分派给合适的模型。点击观看完整视频。"></a><br>
+  <sub>一分钟概览：其他模型出现在 Claude Desktop 自带的模型菜单里，每条提示设定推理强度，子代理分派给合适的模型。点击观看完整视频。</sub>
 </p>
 
 <table align="center">

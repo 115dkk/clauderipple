@@ -21,8 +21,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="実際の録画：CodeタブでGPT-6 Astraがバグを直し、DeepSeekとGLMのサブエージェントがレビューします。クリックで全編を再生。"></a><br>
-  <sub>実際の録画：CodeタブでGPT-6 Astraがバグを直し、DeepSeekとGLMのサブエージェントがレビューします。クリックで全編を再生。</sub>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="1分ツアー：Claude Desktop自身のモデルメニューに他のモデルが並び、プロンプトごとに推論強度を決め、サブエージェントは合うモデルに振り分けます。クリックで全編を再生。"></a><br>
+  <sub>1分ツアー：Claude Desktop自身のモデルメニューに他のモデルが並び、プロンプトごとに推論強度を決め、サブエージェントは合うモデルに振り分けます。クリックで全編を再生。</sub>
 </p>
 
 <table align="center">

@@ -22,8 +22,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="Gravação real: o GPT-6 Astra corrige um bug na aba Code e depois DeepSeek e GLM revisam como subagentes. Clique para ver o vídeo completo."></a><br>
-  <sub>Gravação real: o GPT-6 Astra corrige um bug na aba Code e depois DeepSeek e GLM revisam como subagentes. Clique para ver o vídeo completo.</sub>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="Tour de um minuto: outros modelos no próprio menu de modelos do Claude Desktop, o esforço ajustado a cada prompt e cada subagente enviado ao modelo certo. Clique para ver o vídeo completo."></a><br>
+  <sub>Tour de um minuto: outros modelos no próprio menu de modelos do Claude Desktop, o esforço ajustado a cada prompt e cada subagente enviado ao modelo certo. Clique para ver o vídeo completo.</sub>
 </p>
 
 <table align="center">
