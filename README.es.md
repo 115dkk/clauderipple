@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="Grabación real: GPT-6 Astra corrige un error en la pestaña Code y luego DeepSeek y GLM lo revisan como subagentes. Haz clic para ver el vídeo completo."></a><br>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="Grabación real: GPT-6 Astra corrige un error en la pestaña Code y luego DeepSeek y GLM lo revisan como subagentes. Haz clic para ver el vídeo completo."></a><br>
   <sub>Grabación real: GPT-6 Astra corrige un error en la pestaña Code y luego DeepSeek y GLM lo revisan como subagentes. Haz clic para ver el vídeo completo.</sub>
 </p>
 

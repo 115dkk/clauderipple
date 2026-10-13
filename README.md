@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="A real recording: GPT-6 Astra fixes a bug in the Code tab, then DeepSeek and GLM review it as subagents. Click for the full video."></a><br>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="A real recording: GPT-6 Astra fixes a bug in the Code tab, then DeepSeek and GLM review it as subagents. Click for the full video."></a><br>
   <sub>A real recording: GPT-6 Astra fixes a bug in the Code tab, then DeepSeek and GLM review it as subagents. Click for the full video.</sub>
 </p>
 

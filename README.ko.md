@@ -29,7 +29,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.gif" width="880" alt="실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다."></a><br>
+  <a href="https://github.com/PBJ-2/clauderipple/releases/download/v0.9.0/clauderipple-demo.mp4"><img src="docs/media/demo.webp" width="880" alt="실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다."></a><br>
   <sub>실제 녹화: Code 탭에서 GPT-6 Astra가 버그를 고치고, DeepSeek와 GLM 서브에이전트가 검토합니다. 누르면 전체 영상이 열립니다.</sub>
 </p>
 
