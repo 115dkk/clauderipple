@@ -305,8 +305,11 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
   const oneRow = !more.length && faceCells + chOf(card.title) * 1.12 + 2 + chOf(card.body) + 2 + actionCells <= room
   // Too narrow to keep the actions beside the words: they go under them.
   const actionsBelow = !oneRow && room - faceCells - actionCells < 30
+  // Beside a title and a why of two lines, the actions sit at the card's middle, not on the title's
+  // line (2026-10-13: they rode high). Beside the handoff's options they stay by the title, the ×
+  // where a way out is looked for.
   const buttons = (
-    <Box key="actions" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} flexWrap="wrap" rowGap={1}>
+    <Box key="actions" flexDirection="row" alignItems="center" alignSelf={more.length ? 'flex-start' : 'center'} columnGap={1} flexShrink={0} flexWrap="wrap" rowGap={1}>
       {quiet.map(c => pill(el, c.key, c.label, 'ghost', c.onPress, tone))}
       {main ? pill(el, main.key, main.label, 'primary', main.onPress, tone) : null}
       {card.close ? closeButton(el, card.close.key, card.close.label, card.close.onPress) : null}
