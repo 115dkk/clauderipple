@@ -32,7 +32,7 @@ import { isRich } from './view'
 import { GAUGE_FACES, GRID, detailOf, gaugeStep, rippleBody, rippleCss } from './ripple'
 import type { Face } from './ripple'
 import { svgDoc } from './theme'
-import type { Appearance } from './theme'
+import type { Appearance, Palette } from './theme'
 
 export type Els = ElementTable
 
@@ -45,16 +45,17 @@ const sources = new Map<string, string>()
 
 /**
  * 리플이's SVG document: `face` at `size` px (the mini drawing below 34 px), the gauge in its 5%
- * steps, dimmed or not. One fixed string per state, built once: the host is handed the same
- * source until the state changes.
+ * steps, dimmed or not; in `palette` (named `paletteName` for the cache) instead of the theme's
+ * when a skin has one of its own. One fixed string per state, built once: the host is handed the
+ * same source until the state changes.
  */
-export function rippleSource(face: Face, size: number, appearance: Appearance, percent?: number, dim = false): string {
+export function rippleSource(face: Face, size: number, appearance: Appearance, percent?: number, dim = false, palette?: Palette, paletteName = ''): string {
   const step = percent !== undefined && GAUGE_FACES.includes(face) ? gaugeStep(percent) : undefined
-  const key = [face, size, appearance, step ?? '', dim ? 'dim' : ''].join('|')
+  const key = [face, size, appearance, step ?? '', dim ? 'dim' : '', paletteName].join('|')
   let source = sources.get(key)
   if (!source) {
     const detail = detailOf(size)
-    source = svgDoc(size, size, appearance, rippleBody(face, step, detail), rippleCss(face, step, detail) + (dim ? 'svg>g{opacity:.5}' : ''), '0 0 ' + GRID + ' ' + GRID)
+    source = svgDoc(size, size, appearance, rippleBody(face, step, detail), rippleCss(face, step, detail) + (dim ? 'svg>g{opacity:.5}' : ''), '0 0 ' + GRID + ' ' + GRID, palette)
     sources.set(key, source)
   }
   return source

@@ -1,0 +1,145 @@
+// The skin (2026-10-14): which pictures the desktop draws with and what colours its host Text takes.
+// Three skins, one seam. The deep (art.ts) is the first look: dark water on either theme, 리플이's
+// glow, drawn controls in glass. Flat (flat.ts) is the app's own surfaces: a hairline card that
+// follows the theme, the host's own ink, the accent only where something is on. The matrix
+// (matrix.ts) is an instrument panel: near-black, phosphor green, square corners. A skin changes
+// paint alone: every size is art.ts's and every cell count the same under all three, so band.tsx's
+// arithmetic and the blank presses laid over the pictures (kit.tsx) hold whatever the skin. The
+// terminal draws text and knows nothing of skins.
+
+import type { Skin } from '../../types'
+import * as deep from './art'
+import type { Glyph, Icon, PillLook, Sea, TileArt, Tone } from './art'
+import { flatPictures } from './flat'
+import { MATRIX, MATRIX_PALETTE, matrixPictures, matrixTone } from './matrix'
+import type { Corner } from './matrix'
+import { rippleSource } from './parts'
+import type { Face } from './ripple'
+import { textTone } from './theme'
+import type { Appearance } from './theme'
+import type { Frame } from './view'
+
+/** Props a host Text takes for a role on a capsule: a colour of ours, or the host's own ink. */
+export type Word = { color?: string; dimColor?: boolean }
+
+/** Props a Box takes: a capsule, a tile, a control lit under the pointer. */
+export type Surface = { borderStyle?: string; borderColor?: string; backgroundColor?: string; hover?: { borderColor?: string; backgroundColor?: string } }
+
+/** The pictures a skin paints, each at art.ts's size. */
+export type Paint = {
+  /** Every capsule's backdrop, `width` × `height` px; '' when the skin paints none and the Box's own colour shows. */
+  sea: (width: number, height: number, sea: Sea) => string
+  /** A corner of a capsule or a tile, CORNER_PX square, when the skin frames them itself. */
+  corner?: (at: Corner) => string
+  plate: (width: number, height: number) => string
+  switch: (on: boolean, busy?: boolean) => string
+  word: (label: string, on: boolean, busy?: boolean) => { source: string; cells: number }
+  extraHover: (widthPx: number) => string
+  pill: (label: string, look: PillLook, tone?: Tone, glyph?: Glyph) => { source: string; cells: number }
+  segmented: (labels: readonly string[], cells: readonly number[], chosen: number, tone?: Tone, colors?: readonly string[]) => string
+  slider: (count: number, cellsPerStop: number, chosen: number) => string
+  well: (width: number, height: number) => string
+  close: (lit?: boolean) => string
+  meter: (lit: number, look: 'auto' | 'manual' | 'quiet' | 'deciding') => string
+  ring: (percent: number, tone: Tone | 'ink') => string
+  clock: (share: number, tone: Tone | 'soft') => string
+  gauge: (kind: string) => string
+  icon: (icon: Icon, on: boolean, tone?: Tone) => string
+  agents: (count: number, on: boolean) => string
+  rule: () => string
+  tile: (art: TileArt) => string
+  beads: (step: number, total: number) => { source: string; width: number }
+}
+
+export { CORNER_PX } from './matrix'
+export type { Corner } from './matrix'
+
+export type Pictures = Paint & {
+  /** 리플이's document at `size` px, in the skin's palette (parts.tsx `rippleSource`). */
+  mascot: (face: Face, size: number, percent?: number, dim?: boolean) => string
+}
+
+export type Look = {
+  skin: Skin
+  /** Host Text on a capsule: bright for values, soft for names, quiet for asides. */
+  ink: Word
+  sub: Word
+  mute: Word
+  /** The text colour of a tone: a card's title in its light, a figure gone amber. */
+  tone: (tone: Tone) => string
+  capsule: Surface
+  tile: Surface
+  /** A control under the pointer (kit.tsx `lit`): its hover alone. */
+  lit: Surface
+  art: Pictures
+}
+
+const DEEP_PAINT: Paint = {
+  sea: deep.seaArt, plate: deep.plateArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
+  pill: deep.pillArt, segmented: deep.segmentedArt, slider: deep.sliderArt, well: deep.wellArt, close: deep.closeArt,
+  meter: deep.meterArt, ring: deep.ringArt, clock: deep.clockArt, gauge: deep.gaugeArt, icon: deep.iconArt,
+  agents: deep.agentsArt, rule: deep.ruleArt, tile: deep.tileArt, beads: deep.beadsArt,
+}
+
+/** The deep: the capsule's edge a warm grey that reads on a light page and a dark one alike, lights white on the water. */
+const DEEP: Look = {
+  skin: 'deep',
+  ink: { color: deep.INK },
+  sub: { color: deep.SUB },
+  mute: { color: deep.MUTE },
+  tone: tone => deep.TONE[tone].text,
+  capsule: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.55)' },
+  tile: { borderStyle: 'round', borderColor: 'rgba(255,255,255,0.1)', backgroundColor: 'rgba(255,255,255,0.045)', hover: { borderColor: 'rgba(255,255,255,0.26)', backgroundColor: 'rgba(255,255,255,0.075)' } },
+  lit: { borderStyle: 'round', borderColor: 'rgba(0,0,0,0)', hover: { backgroundColor: 'rgba(255,255,255,0.09)', borderColor: 'rgba(255,255,255,0.16)' } },
+  // 리플이 drawn for the deep: the dark palette, light ink and lavender tone, whatever the theme.
+  art: { ...DEEP_PAINT, mascot: (face, size, percent, dim) => rippleSource(face, size, 'dark', percent, dim) },
+}
+
+/**
+ * Flat: a Box of the host's, edged and tinted in a grey that sits on the light page and the dark
+ * one (the host paints both with the theme), the host's own ink for every word (`dimColor` for the
+ * quiet ones), and the pictures in the theme's palette. One per appearance, since the palette and
+ * the semantic colours of host Text follow it.
+ */
+const FLATS = new Map<Appearance, Look>()
+
+function flat(appearance: Appearance): Look {
+  let look = FLATS.get(appearance)
+  if (look) return look
+  const text = textTone(appearance)
+  look = {
+    skin: 'flat',
+    ink: {},
+    sub: { dimColor: true },
+    mute: { dimColor: true },
+    // One accent: the deep's decorative tones (the judge's teal, the mode's amber) are the accent
+    // here, and amber, red and green stay what they mean.
+    tone: tone => (tone === 'amber' || tone === 'ember' ? text.warn : tone === 'red' ? text.bad : tone === 'green' ? text.ok : text.accent),
+    capsule: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.38)', backgroundColor: 'rgba(128,124,116,0.07)' },
+    tile: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.3)', backgroundColor: 'rgba(128,124,116,0.05)', hover: { borderColor: 'rgba(128,124,116,0.5)', backgroundColor: 'rgba(128,124,116,0.09)' } },
+    lit: { borderStyle: 'round', borderColor: 'rgba(0,0,0,0)', hover: { backgroundColor: 'rgba(128,124,116,0.14)', borderColor: 'rgba(0,0,0,0)' } },
+    art: { ...flatPictures(appearance), mascot: (face, size, percent, dim) => rippleSource(face, size, appearance, percent, dim) },
+  }
+  FLATS.set(appearance, look)
+  return look
+}
+
+/** The matrix: always dark, like the deep, so every colour is its own; its frames are its corners. */
+const MATRIX_LOOK: Look = {
+  skin: 'matrix',
+  ink: { color: MATRIX.ink },
+  sub: { color: MATRIX.sub },
+  mute: { color: MATRIX.mute },
+  tone: tone => matrixTone(tone).text,
+  capsule: {},
+  tile: { backgroundColor: 'rgba(77,255,134,0.035)', hover: { backgroundColor: 'rgba(77,255,134,0.07)' } },
+  lit: { hover: { backgroundColor: 'rgba(77,255,134,0.1)' } },
+  art: { ...matrixPictures(), mascot: (face, size, percent, dim) => rippleSource(face, size, 'dark', percent, dim, MATRIX_PALETTE, 'matrix') },
+}
+
+/** The look a frame draws in. */
+export function lookOf(frame: Frame): Look {
+  if (frame.skin === 'flat') return flat(frame.appearance)
+  if (frame.skin === 'matrix') return MATRIX_LOOK
+  return DEEP
+}

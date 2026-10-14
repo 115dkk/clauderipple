@@ -139,13 +139,15 @@ export function v(key: keyof Palette): string {
 const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif"
 
 /**
- * One SVG document. The palette is set as CSS variables on the root: fixed for dark or light, and
- * for auto switched by the frame's `prefers-color-scheme`. `viewBox` draws a grid of its own at
+ * One SVG document. The palette is set as CSS variables on the root: fixed for dark or light, for
+ * auto switched by the frame's `prefers-color-scheme`, or `palette` whatever the theme. `viewBox` draws a grid of its own at
  * this size (the mascot's 56 units); absent, one unit is one pixel.
  */
-export function svgDoc(width: number, height: number, appearance: Appearance, body: string, css = '', viewBox = '0 0 ' + width + ' ' + height): string {
-  const vars =
-    appearance === 'dark'
+export function svgDoc(width: number, height: number, appearance: Appearance, body: string, css = '', viewBox = '0 0 ' + width + ' ' + height, palette?: Palette): string {
+  // A palette of a skin's own (the matrix's phosphor) is fixed whatever the theme.
+  const vars = palette
+    ? 'svg{' + varsOf(palette) + '}'
+    : appearance === 'dark'
       ? 'svg{' + varsOf(DARK) + '}'
       : appearance === 'light'
         ? 'svg{' + varsOf(LIGHT) + '}'

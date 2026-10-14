@@ -9,7 +9,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 
-import type { AgentRec, Settings, StatusRequest } from '../types'
+import type { AgentRec, Settings, Skin, StatusRequest } from '../types'
 import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
@@ -30,8 +30,8 @@ function paneProps(columns: number, rows = 30): RenderPropsOf['Pane'] {
   return { title: 'ui', isFocused: true, bodyColumns: columns, placement: 'inline', scroll: { offset: 0, bodyRows: rows }, view: {} } as RenderPropsOf['Pane']
 }
 
-function frameOf(surface: Surface, columns = 140, maxRows = 12): Frame {
-  return { surface, columns, maxRows, now: NOW, appearance: 'auto', lang: 'en' }
+function frameOf(surface: Surface, columns = 140, maxRows = 12, skin: Skin = 'deep'): Frame {
+  return { surface, columns, maxRows, now: NOW, appearance: 'auto', skin, lang: 'en' }
 }
 
 /** Records which callback ran, with what. */
@@ -453,6 +453,65 @@ test('quick settings controls reach their callbacks on both surfaces', async ($,
   }
   const once = ['patch:[{"effortAuto":false}]', 'patch:[{"bias":2}]', 'patch:[{"judge":"model"}]', 'key:["ts-key"]', 'test', 'patch:[{"keepWarm":true}]', 'all', 'close']
   expect(calls).toEqual([...once, ...once])
+})
+
+// ---- Skins (look.ts) ---------------------------------------------------------------------------
+
+const SKINS: readonly Skin[] = ['deep', 'flat', 'matrix']
+
+test('the skin tile offers deep, flat and matrix on the desktop alone, and a pick patches the setting', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { ...QUICK_ACTIONS, patch: fn('patch') }
+  drawPane(on, 'skin', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, actions))
+  const desktop = await mount($, 'skin', 'desktop')
+  for (const skin of SKINS) expect(await desktop.find({ key: 'skin-' + skin }), skin).toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: 'Skin' })).toBeDefined()
+  await desktop.press({ key: 'skin-flat' })
+  await desktop.unmount()
+  // The terminal draws text whatever the skin, so it does not offer one.
+  const terminal = await mount($, 'skin', 'terminal')
+  for (const skin of SKINS) expect(await terminal.find({ key: 'skin-' + skin })).toBeUndefined()
+  await terminal.unmount()
+  expect(calls).toEqual(['patch:[{"skin":"flat"}]'])
+})
+
+/** The deep's three inks for host Text (art.ts): a skin that is not the deep uses none of them. */
+const DEEP_INKS = ['#f2f0eb', '#cbc8bf', '#9c988e']
+
+test('every skin draws the band, the quick settings and a card on the desktop; flat leaves the words to the host and paints no backdrop', async ($, on) => {
+  const noop = () => undefined
+  const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
+  const alertActions = { compact: noop, clear: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
+  const full: DashboardView = { ...DASH, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, save: true }, handoff: 'advised', effortMenu: true, warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, mode: 'Burn GPT' }
+  for (const skin of SKINS) {
+    drawPane(on, skin + '-band', el => renderBand(el, frameOf('desktop', 100, 12, skin), full, bandActions))
+    drawPane(on, skin + '-quick', el => renderSettings(el, frameOf('desktop', 140, 12, skin), { settings: { ...SETTINGS, skin, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'fail', message: 'no' } } }, QUICK_ACTIONS))
+    drawPane(on, skin + '-card', el => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'handoffChoice', handoffKind: 'quick', after: 'continue' }, alertActions))
+    drawPane(on, skin + '-setup', el => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 1, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }))
+  }
+  for (const skin of SKINS) {
+    for (const what of ['band', 'quick', 'card', 'setup']) {
+      const ui = await mount($, skin + '-' + what, 'desktop')
+      const svgs = await ui.findAll({ type: 'Svg' })
+      expect(svgs.length, skin + ' ' + what + ' pictures').toBeGreaterThan(3)
+      for (const svg of svgs) expect(String(svg.props.source), skin + ' ' + what + ' ' + svg.props.alt).not.toMatch(/NaN|undefined/)
+      // The capsule's backdrop: a picture as wide as the frame; flat is the Box's own colour instead.
+      const backdrop = svgs.some(svg => svg.props.alt === 'ClaudeRipple' && Number(svg.props.width) > 300)
+      expect(backdrop, skin + ' ' + what + ' backdrop').toBe(skin !== 'flat')
+      // The matrix frames itself: four corners; the others leave the frame to the host's border.
+      const corners = svgs.filter(svg => Number(svg.props.width) === 10 && Number(svg.props.height) === 10).length
+      expect(corners > 0, skin + ' ' + what + ' corners').toBe(skin === 'matrix')
+      const colours = new Set((await ui.findAll({ type: 'Text' })).map(text => String(text.props.color ?? '')))
+      if (skin === 'deep') expect(DEEP_INKS.some(ink => colours.has(ink)), skin + ' ' + what + ' ink').toBe(true)
+      else for (const ink of DEEP_INKS) expect(colours.has(ink), skin + ' ' + what + ' ' + ink).toBe(false)
+      if (skin === 'flat') {
+        // The host's own ink for the words: quiet ones dimmed, none in a colour but the semantic ones.
+        const texts = await ui.findAll({ type: 'Text' })
+        expect(texts.some(text => text.props.dimColor === true), skin + ' ' + what + ' dim words').toBe(true)
+      }
+      await ui.unmount()
+    }
+  }
 })
 
 test('Jev key and Test row appear only for TypeSafe Jev with no known key', async ($, on) => {

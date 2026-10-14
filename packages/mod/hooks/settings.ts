@@ -1,4 +1,4 @@
-import type { Calibration, Domain, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Step, TierTarget } from '../types/index.d.ts'
+import type { Calibration, Domain, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Skin, Step, TierTarget } from '../types/index.d.ts'
 
 /** Bump whenever a writer's normalization can lose another format's fields. */
 export const MOD_SETTINGS_SCHEMA_VERSION = 1
@@ -31,8 +31,11 @@ export const DEFAULTS: Settings = {
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: 'haiku', handoffSkill: '', handoffAfter: 'continue', handoffButton: 'advised',
-  swampAt: 50, swampAlert: false, layout: 'dashboard', appearance: 'auto', language: 'auto', hide: ['reason'], extras: [], setupDone: false,
+  swampAt: 50, swampAlert: false, layout: 'dashboard', appearance: 'auto', skin: 'deep', language: 'auto', hide: ['reason'], extras: [], setupDone: false,
 }
+
+/** The desktop's skins, in the order the panel offers them. */
+export const SKINS: readonly Skin[] = ['deep', 'flat', 'matrix']
 
 /** Band chips that show only when switched on in Look. */
 export const EXTRAS: readonly string[] = ['context', 'limits']
@@ -272,7 +275,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
     judge: ['haiku', 'jev', 'model'], jevSource: ['typesafe', 'zen'], bias: [-2, -1, 0, 1, 2], floor: EFFORTS,
     ceiling: EFFORTS, agentAuto: ['off', 'auto', 'all'], keepWarmHours: [1, 2, 4, 8], compactWith: ['haiku', 'session'],
     handoffAfter: ['continue', 'confirm', 'copy'], handoffButton: ['advised', 'always'], layout: ['dashboard', 'minimal'],
-    appearance: ['auto', 'dark', 'light'], language: ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt'],
+    appearance: ['auto', 'dark', 'light'], skin: SKINS, language: ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt'],
   } as const
   for (const key of Object.keys(choices) as (keyof typeof choices)[]) if ((choices[key] as readonly unknown[]).includes(value[key])) Object.assign(result, { [key]: value[key] })
   if (typeof value.judgeModel === 'string' && value.judgeModel.trim()) result.judgeModel = value.judgeModel.trim()

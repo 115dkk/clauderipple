@@ -33,7 +33,9 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, clockArt, gaugeArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, ROW_PX, textPx } from './art'
+import { lookOf } from './look'
+import type { Word } from './look'
 import type { Sea, Tone } from './art'
 import { CLOSE_CELLS, capsule, closeButton, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
@@ -406,12 +408,14 @@ function drawnFact(el: Els, key: string, cells: number, children: RenderNode[], 
 }
 
 /** A figure's colour by its tone: bright ink while all is well, amber, then red. */
-function figure(tone: 'ink' | 'ok' | 'warn' | 'bad'): string {
-  return tone === 'warn' ? TONE.amber.text : tone === 'bad' ? TONE.red.text : INK
+function figure(frame: Frame, tone: 'ink' | 'ok' | 'warn' | 'bad'): Word {
+  const k = lookOf(frame)
+  return tone === 'warn' ? { color: k.tone('amber') } : tone === 'bad' ? { color: k.tone('red') } : k.ink
 }
 
 function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): DrawnFact {
   const { Box, Text } = el
+  const k = lookOf(frame)
   const { level, mode } = view.effort
   const idx = effortIndex(level)
   const word = mode === 'deciding' ? t(frame.lang, 'band.deciding') : level ? effortName(level, frame.lang) : '—'
@@ -425,9 +429,9 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
     'effort',
     cells,
     [
-      pic(el, 'meter', meterArt(mode === 'deciding' ? 5 : idx + 1, look), t(frame.lang, 'band.effort'), METER_W, METER_H),
+      pic(el, 'meter', k.art.meter(mode === 'deciding' ? 5 : idx + 1, look), t(frame.lang, 'band.effort'), METER_W, METER_H),
       <Box key="effort-word" flexShrink={0}>
-        <Text bold color={mode === 'deciding' ? TONE.violet.text : look === 'quiet' ? MUTE : INK}>{word}</Text>
+        <Text bold {...(mode === 'deciding' ? { color: k.tone('violet') } : look === 'quiet' ? k.mute : k.ink)}>{word}</Text>
       </Box>,
       press(el, 'effort', cells * CELL_PX, actions.toggleEffortMenu),
     ],
@@ -443,8 +447,8 @@ function contextDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | n
   const tip = contextFact(frame, view)?.card?.join(' · ')
   const cells = Math.ceil((16 + CELL_PX + textPx('100%')) / CELL_PX)
   return drawnFact(el, 'context', cells, [
-    pic(el, 'ring', ringArt(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16),
-    <Text key="ctx-value" color={figure(tone)}>{Math.round(ctx.percent) + '%'}</Text>,
+    pic(el, 'ring', lookOf(frame).art.ring(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16),
+    <Text key="ctx-value" {...figure(frame, tone)}>{Math.round(ctx.percent) + '%'}</Text>,
   ], tip)
 }
 
@@ -455,6 +459,7 @@ function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   const left = cache ? cache.expiresAt - frame.now : 0
   const shown = cache && left > 0 ? Math.ceil(left / 60_000) : 0
   const held = view.warm.on && !view.warm.stopped
+  const k = lookOf(frame)
   const drowsy = !!cache && shown > 0 && !held && shown * 60_000 <= Math.min(DROWSY_MS, cache.ttlMs / 5)
   const tone: Tone | 'soft' = shown === 0 ? 'soft' : drowsy ? 'amber' : held ? 'violet' : 'soft'
   const text = cache ? minutesLeft(left, frame.lang) : '—'
@@ -462,8 +467,8 @@ function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   const cells = Math.ceil((16 + CELL_PX + Math.max(...words.map(textPx))) / CELL_PX)
   const tip = cacheFact(frame, view)?.card?.join(' · ')
   return drawnFact(el, 'cache', cells, [
-    pic(el, 'clock', clockArt(cache ? (shown * 60_000) / cache.ttlMs : 0, tone), t(frame.lang, 'band.cache'), 16, 16),
-    <Text key="cache-value" color={drowsy ? TONE.amber.text : shown === 0 ? MUTE : held ? TONE.violet.text : INK}>{text}</Text>,
+    pic(el, 'clock', k.art.clock(cache ? (shown * 60_000) / cache.ttlMs : 0, tone), t(frame.lang, 'band.cache'), 16, 16),
+    <Text key="cache-value" {...(drowsy ? { color: k.tone('amber') } : shown === 0 ? k.mute : held ? { color: k.tone('violet') } : k.ink)}>{text}</Text>,
   ], tip)
 }
 
@@ -478,9 +483,9 @@ function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   // band near 95 columns (2026-10-14).
   const cells = Math.ceil((16 + CELL_PX + textPx('100%') + (limit.save ? CELL_PX + textPx(save) : 0)) / CELL_PX)
   return drawnFact(el, 'limit', cells, [
-    pic(el, 'limit', gaugeArt(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
-    <Text key="limit-value" color={figure(limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
-    limit.save ? <Text key="limit-save" color={TONE.violet.text}>{save}</Text> : '',
+    pic(el, 'limit', lookOf(frame).art.gauge(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
+    <Text key="limit-value" {...figure(frame, limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
+    limit.save ? <Text key="limit-save" color={lookOf(frame).tone('violet')}>{save}</Text> : '',
   ], limitFact(frame, view)?.card?.join(' · '))
 }
 
@@ -488,7 +493,7 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
   if (!view.mode) return null
   const { Text } = el
   // One slot whatever the name (cut past MODE_CELLS; Latin capitals run ~1.1 ch).
-  const amber = TONE.amber.text
+  const amber = lookOf(frame).tone('amber')
   return drawnFact(el, 'mode', 2 + Math.ceil(MODE_CELLS * 1.1), [<Text key="mode-mark" color={amber}>◆</Text>, <Text key="mode-name" color={amber}>{modeLabel(view.mode)}</Text>], t(frame.lang, 'band.modeTip', { name: view.mode }))
 }
 
@@ -509,25 +514,26 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
     if (!view.notice) return ''
     return (
       <Box key="fact-route" position="relative" flexShrink={1} minWidth={0} overflow="hidden">
-        <Text color={MUTE} wrap="truncate">{view.notice.replace(/^ClaudeRipple:\s*/, '')}</Text>
+        <Text {...lookOf(frame).mute} wrap="truncate">{view.notice.replace(/^ClaudeRipple:\s*/, '')}</Text>
       </Box>
     )
   }
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   const tip = routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ')
+  const k = lookOf(frame)
   return (
     <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
       <Box flexShrink={0}>
-        {r.ok ? <Text color={r.resent ? MUTE : providerColor(r.provider)}>{r.resent ? '↻' : '•'}</Text> : <Text color={TONE.red.text}>✕</Text>}
+        {r.ok ? <Text {...(r.resent ? k.mute : { color: providerColor(r.provider) })}>{r.resent ? '↻' : '•'}</Text> : <Text color={k.tone('red')}>✕</Text>}
       </Box>
       <Box flexShrink={1} minWidth={0}>
-        <Text color={SUB} wrap="truncate">{routeName(r.model)}</Text>
+        <Text {...k.sub} wrap="truncate">{routeName(r.model)}</Text>
       </Box>
       <Box flexShrink={0}>
         {!r.ok ? (
-          <Text color={r.resent ? MUTE : TONE.red.text}>{r.resent ? t(frame.lang, 'band.resent', { status: r.status }) : r.status}</Text>
+          <Text {...(r.resent ? k.mute : { color: k.tone('red') })}>{r.resent ? t(frame.lang, 'band.resent', { status: r.status }) : r.status}</Text>
         ) : r.cachePct !== undefined ? (
-          <Text color={tone === 'ok' ? TONE.green.text : figure(tone === 'warn' ? 'warn' : 'bad')}>{r.cachePct + '%'}</Text>
+          <Text {...(tone === 'ok' ? { color: k.tone('green') } : figure(frame, tone === 'warn' ? 'warn' : 'bad'))}>{r.cachePct + '%'}</Text>
         ) : null}
       </Box>
       {press(el, 'route', Math.max(40, frame.columns) * CELL_PX * 0.4, actions.toggleLog)}
@@ -558,11 +564,11 @@ function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], 
       {tips.map(tip => (
         <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
           <Box position="absolute" top={0} left={0}>
-            {pic(el, 'tip-plate-' + tip.key, plateArt(width, ROW_PX), tip.text, width, ROW_PX)}
+            {pic(el, 'tip-plate-' + tip.key, lookOf(frame).art.plate(width, ROW_PX), tip.text, width, ROW_PX)}
           </Box>
           <Box position="relative" flexShrink={1} minWidth={0}>
             {lift(el)}
-            <Text color={INK} wrap="truncate">{tip.text}</Text>
+            <Text {...lookOf(frame).ink} wrap="truncate">{tip.text}</Text>
           </Box>
         </Box>
       ))}
@@ -571,11 +577,11 @@ function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], 
 }
 
 /** A thin rule between the band's groups. */
-function rule(el: Els, key: string): RenderNode {
+function rule(el: Els, frame: Frame, key: string): RenderNode {
   const { Box } = el
   return (
     <Box key={'rule-' + key} width={RULE_CELLS} flexShrink={0} alignItems="center">
-      {pic(el, 'rule-' + key, ruleArt(), '|', 9, 16)}
+      {pic(el, 'rule-' + key, lookOf(frame).art.rule(), '|', 9, 16)}
     </Box>
   )
 }
@@ -583,7 +589,7 @@ function rule(el: Els, key: string): RenderNode {
 type DrawnControl = { key: string; cells: number; node: RenderNode; tip: string }
 
 /** An icon control, lit under the pointer: its picture, its word when the band has room, its press. */
-function iconControl(el: Els, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, color = SUB): DrawnControl {
+function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word): DrawnControl {
   const { Text } = el
   const pad = label ? 0.5 : 0.25
   const cells = Math.ceil((artPx + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2)
@@ -591,7 +597,7 @@ function iconControl(el: Els, key: string, source: string, artPx: number, alt: s
     key,
     cells,
     tip,
-    node: lit(el, key, cells, [pic(el, key, source, alt, artPx, 16), label ? <Text key={key + '-word'} color={color}>{label}</Text> : '', press(el, key, cells * CELL_PX, onPress)], pad, tipScope(key)),
+    node: lit(el, frame, key, cells, [pic(el, key, source, alt, artPx, 16), label ? <Text key={key + '-word'} {...(word ?? lookOf(frame).sub)}>{label}</Text> : '', press(el, key, cells * CELL_PX, onPress)], pad, tipScope(key)),
   }
 }
 
@@ -599,30 +605,31 @@ function iconControl(el: Els, key: string, source: string, artPx: number, alt: s
 function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions, words: readonly string[]): DrawnControl[] {
   const L = frame.lang
   const out: DrawnControl[] = []
+  const k = lookOf(frame)
   const state = (on: boolean) => t(L, on ? 'band.on' : 'band.off')
   if (view.handoff !== 'off') {
     const advised = view.handoff === 'advised'
     const label = t(L, 'band.handoff')
     const look = advised ? 'primary' : 'ghost'
-    out.push({ key: 'handoff', cells: pillArt(label, look, 'violet').cells + 1, node: pill(el, 'handoff', label, look, actions.handoff, 'violet'), tip: t(L, 'alerts.handoffTitle') })
+    out.push({ key: 'handoff', cells: k.art.pill(label, look, 'violet').cells + 1, node: pill(el, frame, 'handoff', label, look, actions.handoff, 'violet'), tip: t(L, 'alerts.handoffTitle') })
   }
   // Auto's word is the control (art.ts `wordArt`): lit violet while on, a quiet ghost while off,
   // pulsing while the judge decides. No switch: the state is in the word's own light (2026-10-14).
   const autoLabel = t(L, 'band.auto')
   const autoTip = t(L, 'band.effortAutoAlt', { state: state(view.auto) }) + ' · ' + t(L, 'settings.autoLine')
-  out.push({ key: 'auto', cells: wordCells(autoLabel), node: word(el, 'auto', view.auto, autoLabel, actions.toggleAuto, view.effort.mode === 'deciding', tipScope('auto')), tip: autoTip })
+  out.push({ key: 'auto', cells: wordCells(frame, autoLabel), node: word(el, frame, 'auto', view.auto, autoLabel, actions.toggleAuto, view.effort.mode === 'deciding', tipScope('auto')), tip: autoTip })
   const warmLabel = t(L, 'band.warm')
-  out.push(iconControl(el, 'warm', iconArt('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, view.warm.here ? 'band.warmHere' : 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? TONE.amber.text : SUB))
+  out.push(iconControl(el, frame, 'warm', k.art.icon('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, view.warm.here ? 'band.warmHere' : 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? { color: k.tone('amber') } : k.sub))
   const agentsLabel = t(L, 'band.agents')
   const live = view.agents.live
   // The live count sits on the icon's shoulder, in one picture of one width: no width change.
-  out.push(iconControl(el, 'agents', agentsArt(live, view.agentsOpen || live > 0), AGENTS_W, live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? INK : SUB))
+  out.push(iconControl(el, frame, 'agents', k.art.agents(live, view.agentsOpen || live > 0), AGENTS_W, live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? k.ink : k.sub))
   const compactLabel = t(L, 'band.compact')
-  out.push(iconControl(el, 'compact', iconArt('compact', false), ICON_PX, compactLabel, t(L, 'band.compactAlt'), actions.compact, words.includes('compact') ? compactLabel : undefined))
+  out.push(iconControl(el, frame, 'compact', k.art.icon('compact', false), ICON_PX, compactLabel, t(L, 'band.compactAlt'), actions.compact, words.includes('compact') ? compactLabel : undefined))
   const clearLabel = t(L, 'band.clear')
-  out.push(iconControl(el, 'clear', iconArt('clear', false), ICON_PX, clearLabel, t(L, 'band.clearAlt'), actions.clear, words.includes('clear') ? clearLabel : undefined))
+  out.push(iconControl(el, frame, 'clear', k.art.icon('clear', false), ICON_PX, clearLabel, t(L, 'band.clearAlt'), actions.clear, words.includes('clear') ? clearLabel : undefined))
   const settingsLabel = t(L, 'band.settings')
-  out.push(iconControl(el, 'settings', iconArt('gear', false), ICON_PX, settingsLabel, t(L, 'band.settingsAlt'), actions.openSettings, words.includes('settings') ? settingsLabel : undefined))
+  out.push(iconControl(el, frame, 'settings', k.art.icon('gear', false), ICON_PX, settingsLabel, t(L, 'band.settingsAlt'), actions.openSettings, words.includes('settings') ? settingsLabel : undefined))
   return out
 }
 
@@ -631,8 +638,8 @@ function effortMenuDrawn(el: Els, frame: Frame, view: DashboardView, actions: Ba
   const current = view.effort.mode === 'manual' || view.effort.mode === 'off' ? view.effort.level : null
   return (
     <Box key="effort-menu" flexDirection="row" alignItems="center" flexWrap="wrap" columnGap={2} rowGap={1} paddingTop={1} paddingLeft={CREST_CELLS}>
-      {word(el, 'pick-auto', view.auto, t(frame.lang, 'band.auto'), actions.toggleAuto)}
-      {segmented(el, 'pick', EFFORTS.map(effort => ({ value: effort, label: effortName(effort, frame.lang) })), current, effort => actions.pickEffort(effort), 'violet', DEPTH)}
+      {word(el, frame, 'pick-auto', view.auto, t(frame.lang, 'band.auto'), actions.toggleAuto)}
+      {segmented(el, frame, 'pick', EFFORTS.map(effort => ({ value: effort, label: effortName(effort, frame.lang) })), current, effort => actions.pickEffort(effort), 'violet', DEPTH)}
     </Box>
   )
 }
@@ -687,7 +694,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
     <Box key="band-crest" width={CREST_CELLS} flexShrink={0} alignItems="center">
-      {ripple(el, 'band-' + mood.face + (mood.dim ? '-dim' : ''), mood.face, 'ClaudeRipple', BAND_RIPPLE, undefined, mood.dim)}
+      {ripple(el, frame, 'band-' + mood.face + (mood.dim ? '-dim' : ''), mood.face, 'ClaudeRipple', BAND_RIPPLE, undefined, mood.dim)}
     </Box>
   )
   const routeNode = route > 0 ? routeDrawn(el, frame, view, actions, route) : ''
@@ -696,15 +703,15 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
       <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
         {crest}
         {effort.node}
-        {ruled && facts.length ? rule(el, 'facts') : null}
+        {ruled && facts.length ? rule(el, frame, 'facts') : null}
         {facts.map(f => f.node)}
-        {ruled && routeNode ? rule(el, 'route') : null}
+        {ruled && routeNode ? rule(el, frame, 'route') : null}
         {routeNode}
         {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP)}
       </Box>
       <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.15} flexShrink={0} marginLeft={0.5}>
         {controls.map(c => c.node)}
-        {actions.hide ? closeButton(el, 'hide', t(frame.lang, 'band.hideBand'), () => actions.hide!(), tipScope('hide')) : null}
+        {actions.hide ? closeButton(el, frame, 'hide', t(frame.lang, 'band.hideBand'), () => actions.hide!(), tipScope('hide')) : null}
       </Box>
     </Box>
   )

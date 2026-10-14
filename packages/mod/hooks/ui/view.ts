@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, Pick, Settings, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, Pick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -19,6 +19,8 @@ export type Frame = {
   /** Epoch ms when drawn; countdowns are computed from it. */
   now: number
   appearance: Appearance
+  /** The desktop's skin (look.ts); the terminal draws text whatever it is. */
+  skin: Skin
   lang: Lang
 }
 
