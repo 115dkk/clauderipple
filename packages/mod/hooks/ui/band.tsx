@@ -539,14 +539,24 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
  * What the row leaves, blank, and each fact's or control's tip laid over it on hover. The judge's
  * reason is no longer written here (cut to a word or two it said nothing, 2026-10-13); it is in the
  * effort's tip.
+ *
+ * The layer is placed absolutely over the facts (columns `left` to the facts' right edge, which is
+ * just before the controls) rather than drawn in what the row leaves free: at the band's real width
+ * (2026-10-14: 100 columns with every fact and control drawn) nothing is left free, and a tip drawn
+ * in a zero-width box never showed. Covering the facts while a tip shows is expected. The tips rest
+ * `display: "none"` (so they take no pointer) and carry no `key`: a keyed Box drawn `display: "none"`
+ * is refused as a hover scope (the pointer could never be over it), so each tip reveals through its
+ * own `hover.scope`, which the fact's or control's hover lights.
  */
-function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[]): RenderNode {
+function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], at: number): RenderNode {
   const { Box, Text } = el
+  // Placed Box offsets are whole cells; the layer starts at the first cell past 리플이 and the effort.
+  const left = Math.ceil(at)
   const width = Math.max(40, frame.columns) * CELL_PX
   return (
-    <Box key="band-why" position="relative" flexDirection="row" flexGrow={1} flexShrink={1} width={0} minWidth={0} overflow="hidden">
+    <Box key="band-why" position="absolute" top={0} bottom={0} left={left} right={0} minWidth={0} overflow="hidden">
       {tips.map(tip => (
-        <Box key={'tip-' + tip.key} position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
+        <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
           <Box position="absolute" top={0} left={0}>
             {pic(el, 'tip-plate-' + tip.key, plateArt(width, ROW_PX), tip.text, width, ROW_PX)}
           </Box>
@@ -690,7 +700,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
         {facts.map(f => f.node)}
         {ruled && routeNode ? rule(el, 'route') : null}
         {routeNode}
-        {whyDrawn(el, frame, tips)}
+        {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP)}
       </Box>
       <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.15} flexShrink={0} marginLeft={0.5}>
         {controls.map(c => c.node)}

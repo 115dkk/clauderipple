@@ -10,6 +10,10 @@
   }
   let uid = 0
   const css = []
+  // Hover groups: a `hover.scope` names a group of this page's elements (the app: every element of
+  // one plugin's with the same string, in any site, lights while any is hovered). :has() is the one
+  // CSS way to say "any member hovered restyles this member"; the preview runs in Chrome.
+  const groups = new Map()
 
   const cells = n => (typeof n === 'number' ? n * CH + 'px' : n)
   const rows = n => (typeof n === 'number' ? n * LH + 'px' : n)
@@ -53,16 +57,31 @@
     }
     if (p.backgroundColor) s.backgroundColor = color(p.backgroundColor, t)
     if (p.overflow === 'hidden') s.overflow = 'hidden'
+    // A placed Box is not a hover target of its own: "the pointer on it is on its parent" (the Box
+    // position docs), so it lets the pointer through to what lies beneath — a tip layer over the
+    // facts must not eat the facts' own hovers. Only what a person acts on (a press, a field) keeps
+    // the pointer; everything else placed is paint.
+    if (p.position === 'absolute' && !holdsPressable(p.__children)) s.pointerEvents = 'none'
     return s
+  }
+
+  /** Whether a subtree holds a native control (a piece the person acts on). */
+  function holdsPressable(children) {
+    for (const c of children || []) {
+      if (!c || typeof c !== 'object') continue
+      if (Array.isArray(c)) { if (holdsPressable(c)) return true; continue }
+      if (c.type === 'Button' || c.type === 'Input' || c.type === 'Select') return true
+      if (holdsPressable(c.children)) return true
+    }
+    return false
   }
 
   function apply(el, s) {
     for (const [k, v] of Object.entries(s)) el.style[k] = v
   }
 
-  function hoverRule(scopeId, el, hover, t) {
-    if (!hover || !scopeId) return
-    el.id = el.id || 'e' + ++uid
+  function hoverRule(scopeId, el, hover, t, prefix) {
+    if (!hover) return
     const decl = []
     if (hover.display) decl.push('display:' + hover.display)
     if (hover.color) decl.push('color:' + color(hover.color, t))
@@ -71,10 +90,28 @@
     if (hover.bold) decl.push('font-weight:580')
     if (hover.underline) decl.push('text-decoration:underline')
     if (hover.dimColor === false) decl.push('color:' + t.ink)
-    if (decl.length) css.push('#' + scopeId + ':hover #' + el.id + (scopeId === el.id ? '' : '') + '{' + decl.map(d => d + ' !important').join(';') + '}')
+    if (!decl.length && !hover.scope) return
+    const decls = decl.map(d => d + ' !important').join(';')
+    // A hover with a `scope` applies while any element of its group is hovered (never by the keyed
+    // Box above it: that would light every tip as soon as the pointer was anywhere on the band);
+    // :has() is the one CSS way to say "any member hovered restyles this member". The group name is
+    // per scene, as each scene here is a site of its own and a scope never crosses sites.
+    if (hover.scope) {
+      const cls = 'g' + prefix + '-' + String(hover.scope).replace(/[^A-Za-z0-9_-]/g, '_')
+      el.classList.add(cls)
+      if (decl.length) {
+        el.id = el.id || 'e' + ++uid
+        css.push('html:has(.' + cls + ':hover) #' + el.id + '{' + decls + '}')
+      }
+      return
+    }
+    // No scope: the hover applies while the pointer is over the nearest keyed Box around it (the
+    // unkeyed hidden layer the close button reveals itself with).
+    el.id = el.id || 'e' + ++uid
+    if (scopeId) css.push('#' + scopeId + ':hover #' + el.id + (scopeId === el.id ? '' : '') + '{' + decls + '}')
   }
 
-  function text(node, t, scope, inline) {
+  function text(node, t, scope, inline, prefix) {
     const p = node.hover ? { ...node.props, hover: node.hover } : node.props || {}
     const el = document.createElement('span')
     el.style.display = inline ? 'inline' : 'block'
@@ -89,13 +126,13 @@
     if (p.strikethrough) el.style.textDecoration = 'line-through'
     for (const c of node.children || []) {
       if (typeof c === 'string' || typeof c === 'number') el.appendChild(document.createTextNode(String(c)))
-      else if (c && c.type === 'Text') el.appendChild(text(c, t, scope, true))
+      else if (c && c.type === 'Text') el.appendChild(text(c, t, scope, true, prefix))
     }
-    hoverRule(scope, el, p.hover, t)
+    hoverRule(scope, el, p.hover, t, prefix)
     return el
   }
 
-  function button(node, t, scope) {
+  function button(node, t, scope, prefix) {
     const p = node.hover ? { ...node.props, hover: node.hover } : node.props || {}
     const b = document.createElement('button')
     b.type = 'button'
@@ -119,16 +156,16 @@
     apply(s, { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
     s.textContent = p.role === 'dismiss' ? '×' : label
     b.appendChild(s)
-    hoverRule(scope, s, p.hover, t)
+    hoverRule(scope, s, p.hover, t, prefix)
     return b
   }
 
-  function draw(node, t, scope) {
+  function draw(node, t, scope, prefix) {
     if (node === null || node === undefined || node === false || node === true || node === '') return null
-    if (typeof node === 'string' || typeof node === 'number') return text({ props: {}, children: [String(node)] }, t, scope, false)
+    if (typeof node === 'string' || typeof node === 'number') return text({ props: {}, children: [String(node)] }, t, scope, false, prefix)
     if (Array.isArray(node)) {
       const f = document.createDocumentFragment()
-      for (const c of node) { const d = draw(c, t, scope); if (d) f.appendChild(d) }
+      for (const c of node) { const d = draw(c, t, scope, prefix); if (d) f.appendChild(d) }
       return f
     }
     const p = node.hover ? { ...node.props, hover: node.hover } : node.props || {}
@@ -138,14 +175,14 @@
         apply(el, styleBox({ ...p, __children: (node.children || []).flat(Infinity) }, t))
         let inner = scope
         if (p.key) { el.id = 'e' + ++uid; inner = el.id }
-        hoverRule(scope === inner ? scope : inner, el, p.hover, t)
-        for (const c of node.children || []) { const d = draw(c, t, inner); if (d) el.appendChild(d) }
+        hoverRule(scope === inner ? scope : inner, el, p.hover, t, prefix)
+        for (const c of node.children || []) { const d = draw(c, t, inner, prefix); if (d) el.appendChild(d) }
         return el
       }
       case 'Text':
-        return text(node, t, scope, false)
+        return text(node, t, scope, false, prefix)
       case 'Button':
-        return button(node, t, scope)
+        return button(node, t, scope, prefix)
       case 'Svg': {
         const img = document.createElement('img')
         img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(p.source)
@@ -164,7 +201,7 @@
         i.value = p.value ?? ''
         apply(i, { flexGrow: 1, background: 'transparent', border: 'none', color: t.ink, font: 'inherit', outline: 'none' })
         el.appendChild(i)
-        if (p.submitLabel) el.appendChild(button({ props: { label: p.submitLabel } }, t, scope))
+        if (p.submitLabel) el.appendChild(button({ props: { label: p.submitLabel } }, t, scope, prefix))
         return el
       }
       case 'Select': {
@@ -181,7 +218,7 @@
       }
       default: {
         const f = document.createDocumentFragment()
-        for (const c of node.children || []) { const d = draw(c, t, scope); if (d) f.appendChild(d) }
+        for (const c of node.children || []) { const d = draw(c, t, scope, prefix); if (d) f.appendChild(d) }
         return f
       }
     }
@@ -210,7 +247,9 @@
       frame.appendChild(cap)
       const site = document.createElement('div')
       apply(site, { width: scene.columns * CH + 16 + 'px', padding: '8px', borderRadius: '10px', background: t.site, minHeight: '40px', boxSizing: 'border-box' })
-      const d = draw(scene.tree, t, null)
+      // Scenes are separate sites, and a hover scope never crosses plugins (nor scenes here).
+      const prefix = scene.name.replace(/[^A-Za-z0-9]/g, '_')
+      const d = draw(scene.tree, t, null, prefix)
       if (d) site.appendChild(d)
       frame.appendChild(site)
       grid.appendChild(frame)

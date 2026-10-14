@@ -895,3 +895,53 @@ test('at 94 columns with Handoff advised the limit is drawn beside the new contr
   for (const key of ['handoff', 'auto', 'warm', 'agents', 'compact', 'clear', 'settings', 'hide']) expect(await ui.find({ type: 'Button', key }), key + ' at 94').toBeDefined()
   await ui.unmount()
 })
+
+/** Every tip as drawn: the words it shows, and the hover that reveals it. */
+function tipsOf(tree: unknown): { text: string; display: unknown; scope: string | undefined }[] {
+  const out: { text: string; display: unknown; scope: string | undefined }[] = []
+  walk(tree, n => {
+    const hover = (n as Drawn & { hover?: { scope?: string; display?: string } }).hover
+    if (n.type !== 'Box' || n.props?.display !== 'none' || hover?.display !== 'flex' || !hover.scope) return
+    const shown = [...walkText(n)]
+    out.push({ text: shown.join(''), display: n.props?.display, scope: hover?.scope })
+  })
+  return out
+}
+function* walkText(node: unknown): Generator<string> {
+  if (typeof node === 'string') { yield node; return }
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) { for (const c of node) yield* walkText(c); return }
+  const n = node as Drawn
+  if (n.type === 'Text') yield (n.children ?? []).join('')
+  for (const c of n.children ?? []) yield* walkText(c)
+}
+
+// 2026-10-14: at the band's real width (100 columns) every slot is drawn and the row leaves nothing
+// free, so a tip must not depend on that free room; each rests hidden (and carries no `key`: a keyed
+// Box drawn display "none" is refused as a hover scope) and reveals through the scope its fact or
+// control joins, so a control's tip shows in a full band.
+test('a control\'s tip is drawn in a full band, hidden and revealed by its scope', async ($, on) => {
+  const busy: DashboardView = { ...DASH, limit: { kind: 'seven_day', percent: 42, resetsAt: '2026-10-10T15:40:00', save: false }, handoff: 'advised', extras: ['context', 'limits'] }
+  drawPane(on, 'n100', el => renderBand(el, frameOf('desktop', 100), busy, { ...BAND_ACTIONS, hide: () => undefined }))
+  const ui = await mount($, 'n100', 'desktop', 100)
+  const tree = await ui.drawn()
+  const tips = tipsOf(tree)
+  // One tip per fact and control (the effort, the context, the cache, the limit, the route, and
+  // every control but Handoff, which names itself in its pill) plus the way out — the row is full
+  // and all are drawn.
+  expect(tips.length, 'tips: ' + tips.map(t => t.text.slice(0, 14)).join(' / ')).toBe(12)
+  const words = (start: string) => tips.find(tip => tip.text.startsWith(start))
+  for (const start of ['Opus 5.5 · Auto', 'Context 38%', 'Prompt cache', 'Weekly limit 42%', 'Last route', 'Effort Auto', 'Keep cache warm', 'Agents:', 'Compact — ', 'New start (/clear) — ', 'Ripple settings', 'Hide the band']) {
+    expect(words(start), start).toBeDefined()
+  }
+  for (const tip of tips) {
+    expect(tip.display, tip.text).toBe('none')
+    expect(typeof tip.scope, tip.text).toBe('string')
+  }
+  // Hovering the compact control (its own hover carries the same scope) reveals the compact tip.
+  const compact = words('Compact — ')!
+  const joined = JSON.stringify(tree).includes('"scope":"' + compact.scope + '"')
+  expect(joined, 'the compact control joins its tip\'s scope').toBe(true)
+  expect(await ui.find({ type: 'Button', key: 'compact' })).toBeDefined()
+  await ui.unmount()
+})

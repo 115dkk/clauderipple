@@ -567,10 +567,10 @@ const ICON: Record<Icon, string> = {
   gear: '<circle cx="8" cy="8" r="2.3"/><path d="M8 1.7v1.8M8 12.5v1.8M1.7 8h1.8M12.5 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M3.5 12.5l1.3-1.3M11.2 4.8l1.3-1.3"/><circle cx="8" cy="8" r="4.8"/>',
   agents: '<circle cx="4.8" cy="5" r="2.1"/><circle cx="11.4" cy="5" r="2.1"/><path d="M1.6 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6M8.2 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6"/>',
   log: '<path d="M2.4 3.8h11.2M2.4 8h11.2M2.4 12.2h6.8"/>',
-  // Two arrows leaning inward over a base: the chat drawn down into itself.
-  compact: '<path d="M4.6 3.4L8 6.8l3.4-3.4M8 6.8V1.9M4.6 12.6L8 9.2l3.4 3.4M8 9.2v4.9M2.2 8h11.6"/>',
-  // A broom sweeping into nothing: the chat is started over, nothing kept.
-  clear: '<path d="M9.8 2.2l4 4M11.4 5.4L6.6 10.2a1.2 1.2 0 0 1-1.7 0L3.8 9.1a1.2 1.2 0 0 1 0-1.7L8.6 2.6a1.2 1.2 0 0 1 1.7 0zM5.2 10.6L2.6 13.2M6.8 6.6L4 9.4"/>',
+  // Two arrows coming in from the corners to the middle: the chat drawn down into itself.
+  compact: '<path d="M3.2 3.2L7.1 7.1M7.1 7.1H4.9M7.1 7.1V4.9M12.8 12.8L8.9 8.9M8.9 8.9h2.2M8.9 8.9v2.2"/>',
+  // An eraser laid on its edge, the sleeve band bold, a short line being swept away below.
+  clear: '<path d="M1.33 8.69L5.8 4.94L9.01 8.77L4.55 12.52Z" fill="#fff" fill-opacity=".4" stroke="none"/><path d="M9.45 1.88L12.67 5.71L4.55 12.52L1.33 8.69Z"/><path d="M9.01 8.77L5.8 4.94"/><path d="M3.45 14.3h9.1"/>',
 }
 
 /**
