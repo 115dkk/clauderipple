@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.9.4 — 2026-10-14
+
+### Fixed
+
+- **Reasoning models are no longer cut off after five minutes of thinking.** Node's `fetch` dropped a
+  response that sent nothing for 300 seconds. Muse Spark 1.3 at xhigh thinks for minutes in silence
+  on a large context, so long steps failed with 529 at 303–305 seconds and started over. The router
+  now waits up to 15 minutes. OpenCode's own CLI had no such limit, which is why the same model
+  worked there.
+- **OpenCode Go and Zen models get their real context window.** They fell back to the global
+  258,400, so Claude Code compacted DeepSeek V4.1 Flash, GLM-5.3 and Muse Spark 1.3 at a quarter of
+  their 1M windows. The router now reads the window from the same models.dev catalogue OpenCode's
+  CLI uses, and fills models already saved without one.
+- **A ChatGPT account whose limit was reset or topped up is usable again right away.** It stayed
+  "cooling" until the old reset time, so the app could not switch to GPT models.
+- **Adding an OpenAI-compatible provider such as B.ai works.** The connection check asked for one
+  token, which some vendors refuse ("max_tokens must be greater than 2", #57).
+- **The plan limit shows on the band**, and every control's tip shows on hover even when the band
+  is full.
+
+### Changed
+
+- **The band:** Auto is a word that lights when on, instead of a switch. Compact and Clear (with a
+  confirm) sit beside settings. The limit draws as a small gauge and its percent.
+- **Workers read and edit with the dedicated tools.** Generated worker agents are told to read files
+  with Read and change them with Edit, not with `sed`/`cat` through Bash.
+- `/ripple debug` also shows the model, the limit and the host's rate limits.
+
 ## 0.9.3 — 2026-10-14
 
 ### Fixed
