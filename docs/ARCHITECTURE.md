@@ -731,8 +731,13 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
   - `WebFetch` needs none of this: the CLI fetches the URL itself (its own transport, cache and
     preflight; there is no `web_fetch` server tool in the binary) and has the session's model read
     the text. It works on any provider.
-  - Cache-safety decisions: thinking blocks are dropped from replayed history;
-    no reasoning `include`; identity line and `instructionsAppend` are constant
+  - Cache-safety decisions: a translated provider's own reasoning that comes back with the
+    request is sent back **byte-identically, in its original position** — that is what the
+    vendor's native clients do, and it is not a `cache_control` breakpoint; the forbidden
+    thing is *altering or re-signing* reasoning, which is what cost 12–20% cache (2026-09-20).
+    A thinking block of ours that names no vendor model, or another model than this request's,
+    is dropped (§5, "Muse workers"); foreign thinking of any other kind is dropped from
+    replayed history; identity line and `instructionsAppend` are constant
     text; `prompt_cache_key` = sha256(metadata.user_id + first user message),
     and sha256(system prompt) for a request that carries no `metadata.user_id`
     and one lone user turn — see the conversation-key note in §4.
@@ -1061,9 +1066,11 @@ what we do not have yet — so that adding a provider does not start with readin
   config still written as three providers is folded on the way in and its `direct` and
   `routes` references follow; nothing is rewritten on disk, so it stays readable by an
   older router until the GUI saves it.
-- Translation deliberately strips `thinking`, `context_management`, `thread`,
+- Translation deliberately strips `context_management`, `thread`,
   `diagnostics`, and `container`; `thread:continue` is refused exactly as in §4a so
-  the CLI resends a full stateless history. The per-turn
+  the CLI resends a full stateless history. Thinking is stripped by default too —
+  except the reasoning this adapter itself handed out, which returns as the vendor's
+  own item (see the reasoning-replay note below). The per-turn
   `x-anthropic-billing-header` system block is also stripped because its changing
   value breaks every vendor's stable-prefix cache opportunity. Orphan tool results
   are sent as user text, not a tool result with no antecedent call.
@@ -1085,6 +1092,50 @@ what we do not have yet — so that adding a provider does not start with readin
   before (`catalog.ts`, `capabilities.ts`). Chat wire
   forwards Anthropic `stop_sequences` as `stop`; Responses wire deliberately omits
   them because its common stateless schema has no corresponding universal field.
+- **Reasoning replay (both wires, 2026-10-14).** A reasoning model on either wire
+  expects its own previous reasoning back on the next turn of a tool loop, and does
+  badly without it. Measured on OpenCode Go's Muse at `xhigh`, same task, 3 runs
+  each: with no replay 9.5k–24.5k reasoning tokens per run (2,197 per step past 80k
+  context) and one run exhausted the context with no answer; with replay 3.2k–4.3k
+  per run (725 per step past 80k) and all three answered, 94% cached.
+  Native clients (OpenCode, the Codex CLI) do this by carrying the vendor's item in
+  their own transcript and putting it back byte-for-byte where it was.
+  Claude Code's transcript is the same medium, so the carrier is the **signature of a
+  thinking block**: `reasoning.ts` encodes `clauderipple.v1:` + base64url JSON
+  naming the wire, provider and model and the thing to restore — the vendor's whole
+  Responses item for the Responses wire, or just the field name
+  (`reasoning_content` / `reasoning`) for Chat. On the Responses wire the item is
+  `{type:"reasoning", id, summary, encrypted_content}` and the request asks for it
+  with `include:["reasoning.encrypted_content"]` (with `store:false` and
+  `reasoning.summary:"auto"`, both of which the chatgpt adapter already sent); the
+  block's text is the summary, or empty when the item had none. `include` is sent on
+  every turn to the ChatGPT backend (as Codex sends it) and to a preset marked
+  `sealedReasoning` (OpenCode Go, as OpenCode's own client sends it): a `store:false`
+  backend that is not asked hands back nothing, so asking only once a conversation
+  already carried reasoning would never start one. Any other Responses vendor is asked
+  only once its own reasoning is already being carried, so an unmeasured vendor keeps
+  its old request. Measured 2026-10-14 against OpenCode Go: the sealed item came back
+  with `include` and without it (1426 bytes either way), replaying it in place
+  answered 200, and the vendor tolerated both a tampered blob and a dropped item. On Chat the
+  block's own text *is* the reasoning and it is reassembled into the field it arrived
+  under on that assistant message — DeepSeek's docs make that mandatory whenever
+  `tools` is present (`https://api-docs.deepseek.com/guides/thinking_mode/`), and it
+  is harmless where a vendor ignores it, so this is not gated by an allowlist.
+  Restore happens only when the envelope names this request's provider and model
+  (model scope validation): another model's or account's `encrypted_content` is a
+  400, and the envelope says whose it is. This is not exposed as a setting, and it
+  does not weaken the cache lesson above — the vendor's bytes are re-sent unchanged,
+  never re-signed or edited. `opencodex` (github.com/lidge-jun/opencodex,
+  `devlog/_fin/260711_claude_inbound/003_evidence.md:93-118`) uses the same
+  envelope-in-the-transcript approach and measured that Claude Code replays thinking
+  blocks with their signature and does not validate it client-side; no code was
+  copied from it. A 4xx that names reasoning/encrypted/item is answered by asking
+  **once more without any replayed reasoning**, so an account switch that invalidates
+  `encrypted_content` costs a little cache and not the turn. `router.log` and
+  `requests.jsonl` carry `replayed=<n>` (items put back) and `reasoning=<n>` (items
+  handed to the client). Gemini and the other translators strip these blocks; a
+  conversation switched to a Claude model does too (`thinking.ts`), since Anthropic
+  would reject a foreign signature.
 - We do not assert a provider-wide cache hit rate: the adapter records
   `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens` when
   a vendor returns it, and otherwise logs zero cache read. The byte-stable
@@ -1386,6 +1437,7 @@ plan unless marked otherwise.
 | Adding a provider in the settings window restored three OpenCode effort ladders realigned by hand five hours earlier, so the app's effort menus for DeepSeek and GLM never narrowed (2026-10-02 23:13, found 10-05). `PUT /api/config` takes the whole config, and the screen built it from the copy it loaded at open and never re-read; the router itself also writes `config.json` (a measurement's results), so any of those was undone by the next unrelated save | Every GUI save fetches the router's config first and applies its own change to that. A provider form, which holds per-model fields (wire, ladder, window) from when it opened and has no control for them, takes a saved model's values from the router's copy. The provider and client screens re-read the config whenever they load. |
 | In picker mode, claude.ai requests failed as `502 … ECONNRESET` in under a second — 259 times in four days (2026-10-03..06), mostly `current_user_access`, `desktop/features` and `event_logging`. The kept-alive upstream socket had been closed by claude.ai as the next request was written on it, and Node does not resend | A GET/HEAD/OPTIONS whose reused socket resets before any response is sent again (twice at most), logged `STALE`. A POST is never resent: a reset does not prove the upstream did not act on it. Not yet shown to be the cause of the Windows "chat history loads forever" report (DC, 2026-10-06). |
 | An API-key provider with no declared effort ladder — DeepSeek, Kimi, GLM, MiniMax, Qwen, Groq, Mistral, a key and a URL — stripped every effort the user picked (`effort high→removed`) and the Claude app showed no effort menu for its models (DC reports, 2026-10-06). Declaring nothing was meant as "do not guess", but DeepSeek's API, for one, validates `output_config.effort` and maps it onto low/high/max | When nothing declares a ladder (no config ladder, no preset ladder, OpenAI-compatible `reasoning` not `effort` — the form writes `none` by default), a measurement sends a level no vendor defines first: accepted means the field is ignored (no effort, `[]`); refused means it is validated, and the levels the refusal names (else every known one) are sent one by one and the accepted ones become the model's ladder. A 429/5xx concludes nothing. The router runs this a minute after start for unsettled models, so existing providers need no re-save. The DeepSeek preset now declares low/high/max from its docs. |
+| Muse workers spent minutes per tool call, repeated the same reasoning every step, and one ended with no answer at all (2026-10-14). A reasoning model on a translated wire was getting its own previous reasoning dropped, so each step reasoned the whole problem again from scratch: measured at `xhigh` on OpenCode Go, 9.5k–24.5k reasoning tokens per run without replay against 3.2k–4.3k with it (3 runs each; 2,197 against 725 per step past 80k context; one no-replay run exhausted the context) | The vendor's reasoning is carried in the client's transcript and put back byte-identically at its original position: the Responses item whole, under `include:["reasoning.encrypted_content"]`, and on Chat its text as `reasoning_content`. `reasoning.ts` states the envelope; a block whose envelope names another provider or model is dropped, and a 4xx naming the reasoning is retried once without it. |
 | ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
 
 ## 6. Blocked paths (measured, do not retry)

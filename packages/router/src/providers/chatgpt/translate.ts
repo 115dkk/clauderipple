@@ -3,12 +3,16 @@
 // Prompt-cache rule: the Responses `input` we build must be a byte-stable prefix of the
 // next turn's `input`. Claude Code resends the whole history every turn, so the mapping
 // has to be deterministic and must not inject anything that varies (timestamps, salts,
-// re-signed reasoning). Thinking blocks from earlier assistant turns are dropped for the
-// same reason. `prompt_cache_key` is derived from the conversation's first user message — or,
+// re-signed reasoning). A reasoning item that came back from the backend is the exception
+// that proves the rule: it is put back exactly as it arrived, so the bytes are the
+// backend's own, and a turn that carried one maps the same way every time. Thinking
+// blocks with no stored item still have nothing to put back and are dropped as before.
+// `prompt_cache_key` is derived from the conversation's first user message — or,
 // for a request that is not a conversation at all, from its system prompt (see `conversationKey`).
 
 import crypto from "node:crypto";
 import { identityLine } from "../../identity.ts";
+import { encodeEnvelope, envelopeFor, isOurSignature, replayableReasoning, type Envelope, type ReplayedReasoning } from "../../reasoning.ts";
 
 // ---- Anthropic side -----------------------------------------------------------------
 
@@ -44,7 +48,8 @@ export type AnthropicRequest = {
 export type ResponsesInputItem =
   | { type: "message"; role: "user" | "assistant"; content: ({ type: "input_text" | "output_text"; text: string } | { type: "input_image"; image_url: string })[] }
   | { type: "function_call"; call_id: string; name: string; arguments: string }
-  | { type: "function_call_output"; call_id: string; output: string };
+  | { type: "function_call_output"; call_id: string; output: string }
+  | ReplayedReasoning;
 
 export type ResponsesRequest = {
   model: string;
@@ -54,6 +59,12 @@ export type ResponsesRequest = {
   tool_choice?: "auto" | "none" | "required" | { type: "function"; name: string };
   parallel_tool_calls?: boolean;
   reasoning: { effort: string; summary: "auto" };
+  /**
+   * `reasoning.encrypted_content` is what the backend seals a reasoning item into; asking for it is
+   * what lets the conversation carry its own reasoning back (see reasoning.ts). Codex's own requests
+   * carry it on every turn, and so does this adapter; only the retry after a refusal leaves it off.
+   */
+  include?: "reasoning.encrypted_content"[];
   text: { verbosity: "medium" };
   store: false;
   stream: true;
@@ -69,6 +80,28 @@ export type TranslateOptions = {
   effort: string;
   identity: boolean;
   instructionsAppend?: string;
+  /**
+   * Carry the conversation's reasoning back to the backend (see reasoning.ts). Default true — this is
+   * the native shape. A false value is the retry after a backend refused the carrier: no replayed
+   * items and no `include`, which is exactly the request this adapter sent before they existed.
+   */
+  replay?: boolean;
+  /**
+   * The provider and model this request is going to. The envelope names where a piece of reasoning
+   * came from, and reasoning is only replayed into the place that made it: a sealed blob minted by
+   * another model, or on another account, is the one thing a 400 is reliably about (see reasoning.ts).
+   */
+  env?: { p: string; m: string };
+  /** Filled in as the input is built: how many items were replayed, and how many were unreadable. */
+  carried?: { replayed: number; undecodable: number };
+  /** Names the reason a carrier was dropped. Absent in tests, where the counts are enough. */
+  log?: (line: string) => void;
+  /**
+   * Called as each replayed item is placed, with the tool call it arrived immediately after (the one
+   * it describes). The response path uses that to know which `response.output_item` carried it, so a
+   * fresh reasoning for the turn can be addressed to the same place next time.
+   */
+  onArrival?: (item: ReplayedReasoning, afterCallId: string | undefined) => void;
 };
 
 function blockText(c: string | AnthropicBlock[] | undefined): string {
@@ -293,6 +326,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   // whose call_id has no function_call in the same input ("No tool call found…", measured 2026-09-13).
   // Such results are sent as plain user text instead.
   const knownCalls = new Set<string>();
+  let lastCallId: string | undefined;
   for (const m of req.messages) {
     const role: "user" | "assistant" = m.role === "assistant" ? "assistant" : "user";
     if (typeof m.content === "string") {
@@ -306,6 +340,30 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
       pending = [];
     };
     for (const b of m.content) {
+      // The reasoning this turn came back with, put back exactly where it was: the CLI replays the
+      // block in front of the function calls it belongs to, so iterating in order reproduces the
+      // original positions, parallel calls included. `lastCallId` is the call the carrier arrived
+      // after — the response path addresses the next turn's summary to it (see `onArrival`) — and is
+      // undefined for a lead-in item, which is where such a summary belongs.
+      const decoded = envelopeFor(b, "responses", opts.env, (reason) => {
+        (opts.carried ?? (opts.carried = { replayed: 0, undecodable: 0 })).undecodable++;
+        if (opts.replay !== false) opts.log?.(`dropped a reasoning carrier: ${reason}`);
+      });
+      // A carrier for the other wire is not ours to touch and falls through to the drop below.
+      if (decoded) {
+        if (opts.replay !== false) {
+          const item = replayableReasoning(decoded.r);
+          if (item) {
+            flush();
+            input.push(item);
+            (opts.carried ?? (opts.carried = { replayed: 0, undecodable: 0 })).replayed++;
+            opts.onArrival?.(item, lastCallId);
+          } else {
+            (opts.carried ?? (opts.carried = { replayed: 0, undecodable: 0 })).undecodable++;
+          }
+        }
+        continue;
+      }
       switch (b.type) {
         case "text": {
           const t = (b as { text: string }).text;
@@ -324,6 +382,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
           flush();
           const tu = b as { id: string; name: string; input: unknown };
           knownCalls.add(tu.id);
+          lastCallId = tu.id;
           input.push({ type: "function_call", call_id: tu.id, name: toolNameForResponses(tu.name), arguments: typeof tu.input === "string" ? tu.input : JSON.stringify(tu.input ?? {}) });
           break;
         }
@@ -340,7 +399,8 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
           break;
         }
         default:
-          // thinking / redacted_thinking / unknown: dropped on purpose (see header comment)
+          // thinking, an unmarked redacted_thinking, anything unknown: no stored item to put back,
+          // so dropped as before (see header comment)
           break;
       }
     }
@@ -373,6 +433,10 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
     prompt_cache_key: conversationId(req),
     client_metadata: { session_id: conversationId(req), thread_id: conversationId(req), turn_id: crypto.randomUUID(), "x-codex-window-id": `${conversationId(req)}:0` },
   };
+  // On every turn, as Codex asks. With `store: false` the backend keeps nothing, and without
+  // `include` it hands back no sealed item either — so a conversation that waited until it already
+  // carried reasoning before asking would never carry any. Only the retry after a refusal leaves it off.
+  if (opts.replay !== false) out.include = ["reasoning.encrypted_content"];
   if (tools.length > 0) {
     out.tools = tools;
     out.parallel_tool_calls = !(tc?.disable_parallel_tool_use ?? false);
@@ -405,7 +469,8 @@ export type AnthropicEvent = { event: string; data: Record<string, unknown> };
 export class StreamMapper {
   private started = false;
   private blockIndex = -1;
-  private open: { kind: "text" | "thinking" | "tool"; itemId?: string } | null = null;
+  /** `signed` marks a thinking block that already carries its signature — the envelope we wrote. */
+  private open: { kind: "text" | "thinking" | "tool"; itemId?: string; signed?: boolean } | null = null;
   private sawToolCall = false;
   private finished = false;
   readonly messageId: string;
@@ -417,6 +482,15 @@ export class StreamMapper {
   /** Accumulated content for non-streaming responses. */
   readonly content: ({ type: "text"; text: string } | { type: "thinking"; thinking: string; signature: string } | { type: "tool_use"; id: string; name: string; input: unknown; _args?: string })[] = [];
   stopReason: "end_turn" | "tool_use" | "max_tokens" = "end_turn";
+  /**
+   * How many reasoning items this response carried whole — the ones the client will replay. The
+   * `reasoning=` figure the request log shows next to `replayed=`.
+   */
+  reasoningCount = 0;
+  /** The reasoning item being assembled: its identity so far and the call it followed. */
+  private pendingReasoning: { id?: string; summary?: unknown; encrypted?: string; text: string; callId: string | undefined } | null = null;
+  /** The most recent function_call item added, which is what a following reasoning item describes. */
+  private lastCallId: string | undefined;
 
   /** Input-token figure announced in message_start (the real one only arrives with response.completed). */
   private readonly startInput: number;
@@ -424,10 +498,18 @@ export class StreamMapper {
   /** Mangled tool name → the name Claude Code knows, from `toolNameRestoreMap`. */
   private readonly toolNames: ReadonlyMap<string, string>;
 
-  constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map()) {
+  /**
+   * The provider name that goes in each reasoning envelope (see reasoning.ts). A blob sealed here is
+   * only sent back here: reasoning outlives the request that made it, and a conversation moved to
+   * another provider must not carry this one's sealed state with it.
+   */
+  private readonly provider: string;
+
+  constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map(), provider = "") {
     this.model = model;
     this.startInput = startInput;
     this.toolNames = toolNames;
+    this.provider = provider;
     this.messageId = `msg_${crypto.randomBytes(12).toString("hex")}`;
   }
 
@@ -456,10 +538,16 @@ export class StreamMapper {
     ];
   }
 
+  /**
+   * A thinking block must carry a signature even when there is none to give — an unsigned one is
+   * refused the moment the session moves to a Claude model (`thinking.ts`) — so a block that was
+   * opened without one gets an empty `signature_delta` as it closes. A block that already carries
+   * the envelope is left alone: a second, empty delta would replace it on the client.
+   */
   private closeBlock(): AnthropicEvent[] {
     if (!this.open) return [];
     const evs: AnthropicEvent[] = [];
-    if (this.open.kind === "thinking") evs.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature: "" } } });
+    if (this.open.kind === "thinking" && !this.open.signed) evs.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature: "" } } });
     evs.push({ event: "content_block_stop", data: { type: "content_block_stop", index: this.blockIndex } });
     this.open = null;
     return evs;
@@ -473,6 +561,53 @@ export class StreamMapper {
     return evs;
   }
 
+  /**
+   * Finish the reasoning item being assembled and hand the client the block that carries it: a
+   * thinking block whose text is the summary (empty when the backend sent none — measured
+   * 2026-10-14: Claude Code keeps and replays such a block, signature and all) and whose signature
+   * is the envelope around the sealed reasoning.
+   *
+   * An item with nothing sealed is only worth its summary, and then only if it has one: there is
+   * nothing to replay, and an empty thinking block is refused by Anthropic the moment the session
+   * switches to a Claude model (`thinking.ts`).
+   */
+  private sealReasoning(): AnthropicEvent[] {
+    const pending = this.pendingReasoning;
+    if (!pending) return [];
+    this.pendingReasoning = null;
+    const text = pending.text.trim() || (typeof pending.summary === "string" ? pending.summary.trim() : "");
+    const events: AnthropicEvent[] = [];
+    if (!pending.encrypted) {
+      if (text) {
+        events.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
+        events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "thinking_delta", thinking: text } } });
+        events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature: "" } } });
+        events.push(...this.closeBlock());
+        this.content.push({ type: "thinking", thinking: text, signature: "" });
+      }
+      return events;
+    }
+    const item: ReplayedReasoning = { type: "reasoning", encrypted_content: pending.encrypted };
+    if (pending.id) item.id = pending.id;
+    if (Array.isArray(pending.summary)) item.summary = pending.summary;
+    const signature = encodeEnvelope(this.envelopeFor(item));
+    events.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
+    if (text) events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "thinking_delta", thinking: text } } });
+    // The signature must arrive on this very block: it is the carrier, and the client keeps the block
+    // whole or not at all. It goes last, after the text, which is the order Anthropic's own blocks use.
+    events.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "signature_delta", signature } } });
+    if (this.open) this.open.signed = true;
+    events.push(...this.closeBlock());
+    this.content.push({ type: "thinking", thinking: text, signature });
+    this.reasoningCount++;
+    return events;
+  }
+
+  /** Where this item's envelope says it came from — this adapter's own provider and model. */
+  private envelopeFor(item: ReplayedReasoning): Envelope {
+    return { w: "responses", p: this.provider, m: this.model, r: item as unknown as Record<string, unknown> };
+  }
+
   /** Map one upstream event. Returns Anthropic events to emit (possibly none). */
   feed(ev: Record<string, unknown>): AnthropicEvent[] {
     const type = ev.type as string;
@@ -482,18 +617,29 @@ export class StreamMapper {
         this.rateLimits = ev;
         break;
       case "response.output_item.added": {
-        const item = ev.item as { type: string; call_id?: string; name?: string; id?: string };
+        const item = ev.item as { type: string; call_id?: string; name?: string; id?: string; encrypted_content?: unknown; summary?: unknown };
         if (item.type === "function_call") {
           this.sawToolCall = true;
           const id = item.call_id ?? item.id ?? `call_${crypto.randomBytes(8).toString("hex")}`;
           // The model echoes the mangled name; Claude Code only recognises the original.
           const called = item.name ?? "tool";
           const name = this.toolNames.get(called) ?? called;
+          this.lastCallId = id;
           this.content.push({ type: "tool_use", id, name, input: {}, _args: "" });
           out.push(...this.openBlock("tool", { type: "tool_use", id, name, input: {} }, item.id));
         } else if (item.type === "reasoning") {
-          this.content.push({ type: "thinking", thinking: "", signature: "" });
-          out.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }, item.id));
+          // The item's reasoning is held until it is complete and handed over whole (see
+          // `sealReasoning`): one thinking block whose signature carries the envelope. The summary,
+          // when the backend sends one, is that block's text — and the summary deltas below fill it
+          // in. Passing the summary through `openBlock` here as well would split one item across two
+          // blocks, so this opens nothing.
+          this.pendingReasoning = {
+            ...(item.id ? { id: item.id } : {}),
+            ...(typeof item.encrypted_content === "string" && item.encrypted_content ? { encrypted: item.encrypted_content } : {}),
+            ...(item.summary !== undefined ? { summary: item.summary } : {}),
+            text: "",
+            callId: this.lastCallId,
+          };
         } else if (item.type === "message") {
           this.content.push({ type: "text", text: "" });
           out.push(...this.openBlock("text", { type: "text", text: "" }, item.id));
@@ -514,6 +660,13 @@ export class StreamMapper {
       case "response.reasoning_summary_text.delta":
       case "response.reasoning_text.delta": {
         const delta = String(ev.delta ?? "");
+        // The summary is the text of the reasoning item's block, and that block also carries the
+        // envelope — both are written when the item is done, so the block is not opened here. One
+        // item is one block; streaming the text into a block of its own would hand the client two.
+        if (this.pendingReasoning) {
+          this.pendingReasoning.text += delta;
+          break;
+        }
         if (!this.open || this.open.kind !== "thinking") {
           this.content.push({ type: "thinking", thinking: "", signature: "" });
           out.push(...this.openBlock("thinking", { type: "thinking", thinking: "" }));
@@ -544,7 +697,16 @@ export class StreamMapper {
         break;
       }
       case "response.output_item.done": {
+        const done = ev.item as { type?: unknown; encrypted_content?: unknown; summary?: unknown } | undefined;
+        // The backend may put `encrypted_content` only on the completed item, so the seal is taken
+        // here as well as from `response.output_item.added`, and the item is only handed over now
+        // anyway — a half-assembled reasoning block must not reach the client.
+        if (done?.type === "reasoning" && this.pendingReasoning) {
+          if (typeof done.encrypted_content === "string" && done.encrypted_content) this.pendingReasoning.encrypted = done.encrypted_content;
+          if (done.summary !== undefined) this.pendingReasoning.summary = done.summary;
+        }
         out.push(...this.closeBlock());
+        out.push(...this.sealReasoning());
         break;
       }
       case "response.completed":

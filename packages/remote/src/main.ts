@@ -108,10 +108,10 @@ async function runHost(): Promise<void> {
   let sessions: Sessions | null = null;
   const notifier = new Notifier({
     dir, send: webPushSender(vapid), log,
-    someoneLooking: () => server?.someoneLooking() ?? false,
+    seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
     summary: (id) => sessions?.summaryOf(id),
   });
-  const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log, someoneLooking: () => server?.someoneLooking() ?? false });
+  const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log, seenRecently: (id) => server?.sessionSeenRecently(id) ?? false });
   sessions = new Sessions({
     dir, router, permissions,
     desktopProjects: path.join(os.homedir(), ".claude", "projects"),

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { hottest, limitLabel, saveUntil, swamped, coldAlert, hotAlert, swampAlert, keptAlert, bandPriority, claudeLimitsFrom, CLAUDE_USAGE_STALE_MS } from '../../packages/mod/hooks/session.ts'
+import { hottest, limitLabel, saveUntil, swamped, coldAlert, hotAlert, hotWindowMoved, swampAlert, keptAlert, bandPriority, claudeLimitsFrom, CLAUDE_USAGE_STALE_MS } from '../../packages/mod/hooks/session.ts'
 const now = Date.parse('2026-10-10T00:00:00Z')
 const hot = { kind: 'five_hour', percent: 80, resetsAt: '2026-10-10T05:00:00Z' }
 
@@ -103,4 +103,18 @@ test('band priority is exactly panels, failure, hot, results, cold, swamp, kept,
   assert.equal(bandPriority({ kept: true }), 'kept')
   assert.equal(bandPriority({ swamp: true }), 'swamp')
   assert.equal(bandPriority({}), 'dashboard')
+})
+
+// A put-off hot card lasts until its window moves on. A missing reading (a routed model's session
+// carries no plan windows) or the same reset spelled by the other source is the same window: before,
+// either one brought the card back on every turn (2026-10-14, weekly at 87%).
+test('hotWindowMoved: only another window or a reset an hour later forgets a put-off', () => {
+  const weekly = { kind: 'seven_day', percent: 87, resetsAt: '2026-10-16T06:20:00.000Z' }
+  assert.equal(hotWindowMoved(weekly, null), false)
+  assert.equal(hotWindowMoved(null, weekly), false)
+  assert.equal(hotWindowMoved(weekly, { ...weekly, percent: 88, resetsAt: '2026-10-16T06:20:00Z' }), false)
+  assert.equal(hotWindowMoved(weekly, { ...weekly, resetsAt: '2026-10-16T06:20:59.000Z' }), false)
+  assert.equal(hotWindowMoved(weekly, { kind: 'seven_day', percent: 81 }), false)
+  assert.equal(hotWindowMoved(weekly, { ...weekly, resetsAt: '2026-10-23T06:20:00.000Z' }), true)
+  assert.equal(hotWindowMoved(weekly, { kind: 'five_hour', percent: 90, resetsAt: '2026-10-15T01:00:00.000Z' }), true)
 })

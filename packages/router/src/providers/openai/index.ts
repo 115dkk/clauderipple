@@ -11,7 +11,9 @@ import { retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
-import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest } from "./translate.ts";
+import { estimateTokens, formatSse, OpenAiStreamMapper, toOpenAiRequest, type ChatRequest, type ResponsesRequest } from "./translate.ts";
+import { refusesReplayedReasoning } from "../../reasoning.ts";
+import { PRESETS } from "../../presets.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap } from "../chatgpt/translate.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
 
@@ -149,15 +151,25 @@ export class OpenAiCompatibleAdapter {
     const serverTools = serverToolNames(json.tools);
     if (serverTools.size > 0) this.log.warn(`${this.tag} ${this.name}: dropped server tools for ${model}: ${[...serverTools].join(", ")} (Anthropic runs these; this provider cannot)`);
 
-    const upstreamRequest = toOpenAiRequest(json, {
+    // The conversation is the storage for a reasoning model's reasoning (reasoning.ts), so what to
+    // replay is read out of the request itself and the tally is reported in the request log. `env`
+    // names this provider and model: reasoning sealed by another model is never replayed here.
+    const carried = { replayed: 0, undecodable: 0 };
+    const translate = (replay = true): ChatRequest | ResponsesRequest => toOpenAiRequest(json, {
       model,
       wire,
       ...(effort ? { effort } : {}),
       caps,
+      replay,
+      env: { p: this.name, m: model },
+      ...(PRESETS.find((entry) => entry.id === this.cfg.preset)?.sealedReasoning ? { sealedReasoning: true } : {}),
+      carried,
+      log: (line) => this.log.info(`${this.tag} ${this.name}: ${line} (${model})`),
       ...(this.cfg.identity === undefined ? {} : { identity: this.cfg.identity }),
       ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
     });
-    const requestBody = JSON.stringify(upstreamRequest);
+    const upstreamRequest = translate();
+    let requestBody = JSON.stringify(upstreamRequest);
     // Some vendors key their prompt cache on a session header rather than on the request's own
     // shape, and hand a cold cache to anyone who does not send one. `conversationKey` is the value
     // this codebase already trusts to be stable for one conversation and different between two.
@@ -212,6 +224,17 @@ export class OpenAiCompatibleAdapter {
           upstream = new Response(refusal, { status: 401 });
         }
       }
+      // A 4xx that names reasoning is this vendor refusing the reasoning the conversation carried
+      // back — a field it does not take, or a value from another model. The turn goes again without
+      // it: replaying is an optimisation the user's turn must never depend on (reasoning.ts).
+      if (carried.replayed > 0 && refusesReplayedReasoning(upstream.status, await upstream.clone().text().catch(() => ""))) {
+        const refusal = await upstream.text().catch(() => "");
+        this.log.warn(`${this.tag} ${this.name}: upstream ${upstream.status} refused ${carried.replayed} replayed reasoning turn(s) for ${model}; asking again without them: ${refusal.replace(/\s+/g, " ").slice(0, 200)}`);
+        carried.replayed = 0;
+        carried.undecodable = 0;
+        requestBody = JSON.stringify(translate(false));
+        upstream = await ask();
+      }
     } catch (error) {
       res.off("close", onClose);
       if (controller.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
@@ -237,7 +260,8 @@ export class OpenAiCompatibleAdapter {
     }
 
     const wantStream = json.stream === true;
-    const mapper = new OpenAiStreamMapper(model, startInput, toolNameRestoreMap(json));
+    const mapper = new OpenAiStreamMapper(model, startInput, toolNameRestoreMap(json), { p: this.name, m: model });
+    mapper.wire = wire;
     mapper.redactError = redact;
     const parser = new SseParser();
     const reader = upstream.body.getReader();
@@ -303,8 +327,8 @@ export class OpenAiCompatibleAdapter {
       exhaustion: failure ? providerExhaustion(429, `${failure.code ?? ""} ${failure.message}`, retryAfterMs(Object.fromEntries(upstream.headers))) : undefined,
       bytes,
       note: failure
-        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens})`
-        : `in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} stop=${mapper.stopReason}`,
+        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} replayed=${carried.replayed} reasoning=${mapper.reasoningCount})`
+        : `in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} stop=${mapper.stopReason} replayed=${carried.replayed} reasoning=${mapper.reasoningCount}`,
       usage: { input: usage.input_tokens, cached: usage.cache_read_input_tokens, output: usage.output_tokens },
       stopReason: mapper.stopReason,
       ...(wantStream || !failure ? { messageId: mapper.messageId } : {}),

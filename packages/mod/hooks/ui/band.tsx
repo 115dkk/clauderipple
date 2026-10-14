@@ -38,7 +38,7 @@ import { boardBand } from './board'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
-import { CLOSE_CELLS, capsule, closeButton, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
+import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
@@ -520,10 +520,11 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
     )
   }
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
-  const tip = routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ')
   const k = lookOf(frame)
+  // The route is a button (it opens the log), so it lights under the pointer like the controls do.
+  // It has no tip: the light says it is a button, and its card is what the log shows (asked 2026-10-14).
   return (
-    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
+    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight(frame)}>
       <Box flexShrink={0}>
         {r.ok ? <Text {...(r.resent ? k.mute : { color: providerColor(r.provider) })}>{r.resent ? '↻' : '•'}</Text> : <Text color={k.tone('red')}>✕</Text>}
       </Box>
@@ -547,34 +548,34 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
  * reason is no longer written here (cut to a word or two it said nothing, 2026-10-13); it is in the
  * effort's tip.
  *
- * The layer is placed absolutely over the facts (columns `left` to the facts' right edge, which is
- * just before the controls) rather than drawn in what the row leaves free: at the band's real width
+ * Each tip is placed absolutely over the row from column `left` to `right` columns short of its end
+ * (just before the controls) rather than drawn in what the row leaves free: at the band's real width
  * (2026-10-14: 100 columns with every fact and control drawn) nothing is left free, and a tip drawn
- * in a zero-width box never showed. Covering the facts while a tip shows is expected. The tips rest
- * `display: "none"` (so they take no pointer) and carry no `key`: a keyed Box drawn `display: "none"`
- * is refused as a hover scope (the pointer could never be over it), so each tip reveals through its
- * own `hover.scope`, which the fact's or control's hover lights.
+ * in a zero-width box never showed. Covering the facts while a tip shows is expected.
+ *
+ * The tips are the row's own children with no Box spanning them: the pointer on an absolute Box is
+ * on its parent, so a standing layer over the facts took every hover and press from what lay under
+ * it (2026-10-14, the route stopped opening the log). A tip resting `display: "none"` takes no
+ * pointer. Tips carry no `key`: a keyed Box drawn `display: "none"` is refused as a hover scope (the
+ * pointer could never be over it), so each tip reveals through its own `hover.scope`, which the
+ * fact's or control's hover lights.
  */
-function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], at: number): RenderNode {
+function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], at: number, right: number): RenderNode[] {
   const { Box, Text } = el
-  // Placed Box offsets are whole cells; the layer starts at the first cell past 리플이 and the effort.
+  // Placed Box offsets are whole cells; a tip starts at the first cell past 리플이 and the effort.
   const left = Math.ceil(at)
   const width = Math.max(40, frame.columns) * CELL_PX
-  return (
-    <Box key="band-why" position="absolute" top={0} bottom={0} left={left} right={0} minWidth={0} overflow="hidden">
-      {tips.map(tip => (
-        <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
-          <Box position="absolute" top={0} left={0}>
-            {pic(el, 'tip-plate-' + tip.key, lookOf(frame).art.plate(width, ROW_PX), tip.text, width, ROW_PX)}
-          </Box>
-          <Box position="relative" flexShrink={1} minWidth={0}>
-            {lift(el)}
-            <Text {...lookOf(frame).ink} wrap="truncate">{tip.text}</Text>
-          </Box>
-        </Box>
-      ))}
+  return tips.map(tip => (
+    <Box position="absolute" top={0} bottom={0} left={left} right={Math.ceil(right)} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
+      <Box position="absolute" top={0} left={0}>
+        {pic(el, 'tip-plate-' + tip.key, lookOf(frame).art.plate(width, ROW_PX), tip.text, width, ROW_PX)}
+      </Box>
+      <Box position="relative" flexShrink={1} minWidth={0}>
+        {lift(el)}
+        <Text {...lookOf(frame).ink} wrap="truncate">{tip.text}</Text>
+      </Box>
     </Box>
-  )
+  ))
 }
 
 /** A thin rule between the band's groups. */
@@ -689,8 +690,6 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
-  const routeTip = route > 0 && view.route ? routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ') : undefined
-  if (routeTip) tips.push({ key: 'route', text: routeTip })
   for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
@@ -701,15 +700,25 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const routeNode = route > 0 ? routeDrawn(el, frame, view, actions, route) : ''
   const row = (
     <Box key="band-row" flexDirection="row" alignItems="center" width="100%" minWidth={0} height={rowsOf(ROW_H)}>
-      <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
+      {/* The facts keep their own width (the drop rules above already made them fit); the route
+          follows them directly, and what the row leaves free is after it, before the controls. The
+          route is what gives way, down to its own minimum, truncating the model's name: a facts box
+          allowed to shrink let the route draw over them, and a facts box that grew left a short
+          model name far right with a gap before it (2026-10-14). */}
+      <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexShrink={0}>
         {crest}
         {effort.node}
         {ruled && facts.length ? rule(el, frame, 'facts') : null}
         {facts.map(f => f.node)}
-        {ruled && routeNode ? rule(el, frame, 'route') : null}
-        {routeNode}
-        {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP)}
       </Box>
+      {routeNode ? (
+        <Box key="band-route" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} marginLeft={DRAWN_GAP} flexShrink={1} minWidth={0}>
+          {ruled ? rule(el, frame, 'route') : null}
+          {routeNode}
+        </Box>
+      ) : null}
+      <Box key="band-free" flexGrow={1} flexShrink={1} minWidth={0} />
+      {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP, controlCells + close + 0.5)}
       <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.15} flexShrink={0} marginLeft={0.5}>
         {controls.map(c => c.node)}
         {actions.hide ? closeButton(el, frame, 'hide', t(frame.lang, 'band.hideBand'), () => actions.hide!(), tipScope('hide')) : null}

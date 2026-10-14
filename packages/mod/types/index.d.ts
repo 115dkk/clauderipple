@@ -317,6 +317,8 @@ declare module 'claude-code' {
       context: { percent: number; tokens: number; window: number } | null
       hot: Hot | null
       hotHidden: number | null
+      /** The window the hot card was put off for: the put-off lasts until that window moves on. */
+      hotHiddenFor: Hot | null
       saveUntil: number | null
       swampHidden: number | null
       coldHidden: boolean

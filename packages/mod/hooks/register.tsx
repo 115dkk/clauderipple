@@ -13,7 +13,7 @@ import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, quotaWindows,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { bandPriority, claudeLimitsFrom, coldAlert, hotAlert, hottest, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { bandPriority, claudeLimitsFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
 import { addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, weighted } from './stats'
@@ -54,6 +54,7 @@ const context = atom({ plugin: 'ripple', key: 'context' } as const, null)
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
 const limit = atom({ plugin: 'ripple', key: 'limit' } as const, null)
 const hotHidden = atom({ plugin: 'ripple', key: 'hotHidden' } as const, null)
+const hotHiddenFor = atom({ plugin: 'ripple', key: 'hotHiddenFor' } as const, null)
 const saveUntil = atom({ plugin: 'ripple', key: 'saveUntil' } as const, null)
 const swampHidden = atom({ plugin: 'ripple', key: 'swampHidden' } as const, null)
 const coldHidden = atom({ plugin: 'ripple', key: 'coldHidden' } as const, false)
@@ -346,7 +347,15 @@ async function toggleLog($: EngineInterface): Promise<boolean> {
   const language = await read($, lang)
   const open = await isLogUp($)
   if (open) await $.ui.close({ id: LOG_PANE })
-  else await $.ui.open({ id: LOG_PANE, title: t(language, 'commands.logTitle') })
+  else {
+    // The surface may decline to draw the pane; say why rather than doing nothing on a press.
+    const opened = await $.ui.open({ id: LOG_PANE, title: t(language, 'commands.logTitle') })
+    if (!opened.isPlaced) {
+      const why = 'reason' in opened && opened.reason ? String(opened.reason) : 'not placed'
+      $.ui.toast(t(language, 'toasts.logNotPlaced', { reason: why }))
+      await report($, 'log pane', why)
+    }
+  }
   await syncPanes($)
   if (!open) await refreshRouter($)
   return !open
@@ -956,7 +965,13 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const rateLimits = own || !/^claude-/.test(await $.session.model()) ? usage.rateLimits : [...usage.rateLimits, ...await routerClaudeLimits($)]
   const h = hottest(rateLimits)
   const previous = await read($, hot)
-  if (previous && (!h || previous.kind !== h.kind || previous.resetsAt !== h.resetsAt)) await update($, hotHidden, () => null)
+  // A put-off lasts until the window it was put off for moves on (session.ts hotWindowMoved). A
+  // put-off from an older mod carries no window: it adopts the current one.
+  if (await read($, hotHidden) !== null) {
+    const putOffFor = await read($, hotHiddenFor)
+    if (!putOffFor) { if (h) await update($, hotHiddenFor, () => h) }
+    else if (hotWindowMoved(putOffFor, h)) { await update($, hotHidden, () => null); await update($, hotHiddenFor, () => null) }
+  }
   if (JSON.stringify(h) !== JSON.stringify(previous)) await update($, hot, () => h)
   const top = rateLimits.filter(l => ['five_hour', 'seven_day'].includes(l.kind)).sort((a, b) => b.percentUsed - a.percentUsed)[0]
   const l = top ? { kind: top.kind, percent: top.percentUsed, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}) } : null
@@ -1122,8 +1137,11 @@ async function markSeen($: EngineInterface): Promise<void> {
 }
 async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
   await update($, demo, () => null)
-  if (view.kind === 'hot') await update($, hotHidden, () => view.percent)
-  else if (view.kind === 'cold') await update($, coldHidden, () => true)
+  if (view.kind === 'hot') {
+    const current = await read($, hot)
+    await update($, hotHidden, () => view.percent)
+    await update($, hotHiddenFor, () => current)
+  } else if (view.kind === 'cold') await update($, coldHidden, () => true)
   else if (view.kind === 'kept') await update($, kept, () => null)
   else if (view.kind === 'swamp') await update($, swampHidden, () => view.percent)
   else if (view.kind === 'judgeDown') await update($, judgeDownHidden, () => view.reason)

@@ -130,40 +130,46 @@ const summary: SessionSummary = { id: "s1", title: "고쳐 줘 로그인 버그"
 const sub = (n: number): PushSubscriptionJSON => ({ endpoint: `https://push.example/${n}`, keys: { p256dh: "BPk", auth: "au" } });
 const perm: EventBody = { kind: "permission", id: "p1", tool: "Bash", title: "", summary: "rm -rf build", input: "rm -rf build", canAlways: false };
 
-test("the three moments make short Korean pushes that open the session; other events make none", () => {
+test("the three moments push only the session title plus fixed state words; other events make none", () => {
+  const secret = "rm -rf build";
   const p = pushFor(perm, summary, "ko")!;
-  assert.equal(p.title, "허락이 필요해요 · app");
-  assert.equal(p.body, "Bash: rm -rf build");
+  assert.equal(p.title, "고쳐 줘 로그인 버그");
+  assert.equal(p.body, "승인을 기다립니다");
   assert.equal(p.session, "s1");
-  assert.equal(pushFor({ kind: "result", ok: true, ms: 1, turns: 1 }, summary, "ko")!.title, "작업을 마쳤어요 · app");
+  assert.ok(!JSON.stringify(p).includes(secret));
+  assert.equal(pushFor({ kind: "result", ok: true, ms: 1, turns: 1 }, summary, "ko")!.body, "작업을 마쳤습니다");
   const failed = pushFor({ kind: "result", ok: false, error: "API Error: 529", ms: 1, turns: 0 }, summary, "ko")!;
-  assert.equal(failed.title, "작업이 멈췄어요 · app");
-  assert.match(failed.body, /API Error: 529/);
-  assert.equal(pushFor({ kind: "result", ok: true, ms: 1, turns: 1 }, summary, "en")!.title, "Finished · app");
+  assert.equal(failed.title, "고쳐 줘 로그인 버그");
+  assert.equal(failed.body, "작업이 실패했습니다");
+  assert.ok(!JSON.stringify(failed).includes("API Error: 529"));
+  assert.equal(pushFor({ kind: "result", ok: true, ms: 1, turns: 1 }, summary, "en")!.body, "Work finished");
+  assert.equal(pushFor(perm, summary, "en")!.body, "Waiting for approval");
   for (const e of [{ kind: "state", state: "idle" }, { kind: "notice", code: "interrupted" }, { kind: "delta", msg: "m", text: "x" }] as EventBody[]) assert.equal(pushFor(e, summary, "ko"), null);
 });
 
-function notifier(t: { after(fn: () => void): void }, send: Sender, looking = { v: false }) {
+function notifier(t: { after(fn: () => void): void }, send: Sender, seen = new Map<string, number>(), now = () => 1_000_000) {
   const dir = tmp(t);
   const logs: string[] = [];
-  const n = new Notifier({ dir, send, someoneLooking: () => looking.v, summary: (id) => (id === "s1" ? summary : undefined), log: (l) => logs.push(l) });
-  return { n, dir, logs, looking };
+  const n = new Notifier({ dir, send, seenRecently: (session) => now() - (seen.get(session) ?? 0) < 180_000, summary: (id) => (id === "s1" ? summary : undefined), log: (l) => logs.push(l) });
+  return { n, dir, logs, seen };
 }
 
-test("pushes go to every device only while nobody is looking", async (t) => {
-  const sent: { endpoint: string; payload: { title: string; session: string }; urgency: string }[] = [];
-  const { n, looking } = notifier(t, async (s, payload, o) => { sent.push({ endpoint: s.endpoint, payload: JSON.parse(payload), urgency: o.urgency }); });
+test("pushes go to every device only when nobody saw that session in the last 180 s", async (t) => {
+  const sent: { endpoint: string; payload: { title: string; body: string; session: string }; urgency: string }[] = [];
+  const { n, seen } = notifier(t, async (s, payload, o) => { sent.push({ endpoint: s.endpoint, payload: JSON.parse(payload), urgency: o.urgency }); });
   n.subscribe("phone-a", sub(1), "ko");
   n.subscribe("phone-b", sub(2), "en");
-  looking.v = true;
+  seen.set("s1", 1_000_000 - 179_000);
   await n.onEvent("s1", perm);
-  assert.equal(sent.length, 0, "a phone has the app in front: no push");
-  looking.v = false;
+  assert.equal(sent.length, 0, "a phone saw this session 179 s ago: no push");
+  seen.set("s1", 1_000_000 - 181_000);
   await n.onEvent("s1", perm);
   assert.deepEqual(sent.map((s) => s.endpoint).sort(), ["https://push.example/1", "https://push.example/2"]);
   assert.ok(sent.every((s) => s.urgency === "high" && s.payload.session === "s1"));
-  assert.equal(sent.find((s) => s.endpoint.endsWith("/2"))!.payload.title, "Needs your OK · app");
+  assert.equal(sent.find((s) => s.endpoint.endsWith("/2"))!.payload.body, "Waiting for approval");
   sent.length = 0;
+  // Another session the phone never saw still pushes: suppression is per session.
+  seen.set("other", 1_000_000);
   await n.onEvent("s1", { kind: "state", state: "idle" });
   await n.onEvent("nope", perm);
   assert.equal(sent.length, 0);

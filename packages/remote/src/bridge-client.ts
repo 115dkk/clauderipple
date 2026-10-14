@@ -98,13 +98,43 @@ export class BridgeClient {
     }
     return null;
   }
+  /**
+   * Authorization requests still open on the session, oldest first. The stream starts at the
+   * newest event (`latest` below), so attach and every reconnect replay this list from the start
+   * cursor instead — otherwise an approval requested before the stream connected never cards.
+   * A request followed by its control_response (answered from another client) or
+   * control_cancel_request (withdrawn) is not open and is left out.
+   */
+  async openRequests(id: string): Promise<{ requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }[]> {
+    const list = (await this.events(id)).data;
+    const open = new Map<string, { requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }>();
+    for (const value of Array.isArray(list) ? list : []) {
+      const item = object(value);
+      const payload = object(item?.payload);
+      if (!payload || typeof payload.request_id !== "string") continue;
+      // Stored prompts carry the same source as stream frames; accept a missing one, never a foreign one.
+      const source = (item as { source?: unknown } | null)?.source;
+      if (source !== undefined && source !== "worker") continue;
+      const requestId = payload.request_id;
+      if (payload.type === "control_request") {
+        const request = object(payload.request);
+        const input = object(request?.input);
+        if (request?.subtype === "can_use_tool" && typeof request.tool_name === "string" && input && typeof request.tool_use_id === "string") {
+          open.set(requestId, { requestId, tool: request.tool_name, input, toolUseId: request.tool_use_id });
+        }
+      } else if (payload.type === "control_response" || payload.type === "control_cancel_request") {
+        open.delete(requestId);
+      }
+    }
+    return [...open.values()];
+  }
   /** The newest durable event's number; the stream starts there instead of replaying the whole session. */
   private async latest(id: string, signal: AbortSignal): Promise<number> {
     const body = object(await (await this.request(id, "/events?sort_order=desc&limit=1", { signal })).json());
     const first = Array.isArray(body?.data) ? object(body.data[0]) : null;
     return sequenceOf(first?.sequence_num) ?? 0;
   }
-  async stream(id: string, signal: AbortSignal, handle: (frame: BridgeFrame) => void): Promise<void> {
+  async stream(id: string, signal: AbortSignal, handle: (frame: BridgeFrame) => void, onConnect?: () => void): Promise<void> {
     let sequence: number | null = null;
     while (!signal.aborted) {
       if (sequence === null) {
@@ -125,6 +155,9 @@ export class BridgeClient {
         continue;
       }
       if (!response.body) throw new Error("Remote Control stream is empty.");
+      // Connected (or reconnected): the caller replays approvals already waiting, which the
+      // newest-event cursor above would otherwise skip.
+      onConnect?.();
       let handling = false;
       try {
         for await (const frame of decodeSse(response.body)) {

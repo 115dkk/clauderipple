@@ -23,6 +23,8 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   let queries = 0;
   let now = Date.now(), workerStatus = "idle", stateReads = 0, stateFailure = false;
+  /** Stored session events (sort_order=asc): approvals requested before any stream connected. */
+  const history: unknown[] = [];
   const client = new BridgeClient({ auth: () => ({ accessToken: "private-token", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
     if (options?.method === "POST") {
       posts.push(JSON.parse(String(options.body)));
@@ -32,6 +34,7 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
       stateReads++;
       return stateFailure ? new Response("", { status: 503 }) : Response.json({ worker_status: workerStatus });
     }
+    if (String(url).includes("/events?sort_order=asc")) return Response.json({ data: history });
     if (String(url).includes("/events?sort_order=desc")) return Response.json({ data: [] });
     assert.ok(String(url).includes("/events/stream?from_sequence_num="));
     return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; options?.signal?.addEventListener("abort", () => c.close(), { once: true }); } }));
@@ -43,7 +46,7 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
   t.after(async () => { sessions.shutdown(); await tick(); fs.rmSync(root, { recursive: true, force: true }); });
   let sequence = 0;
   const emit = (payload: unknown, source = "worker") => controller!.enqueue(new TextEncoder().encode(`event: client_event\ndata: ${JSON.stringify({ source, event_id: `e${++sequence}`, sequence_num: sequence, payload })}\n\n`));
-  return { root, file, registry, sessions, posts, permissions, emit, queries: () => queries,
+  return { root, file, registry, sessions, posts, permissions, emit, history, queries: () => queries,
     stateReads: () => stateReads, advance: () => { now += 3000; }, status: (value: string) => { workerStatus = value; }, failState: () => { stateFailure = true; } };
 }
 
@@ -152,4 +155,35 @@ test("a rejected live bridge send fails each attempt without logging the user or
   assert.equal(f.posts.length, 2);
   assert.equal(f.queries(), 0);
   assert.equal(f.sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "phone"), false);
+});
+
+test("attach replays approvals requested before the stream connected, skipping answered ones", async t => {
+  const f = fixture(t);
+  const requested = (request_id: string, command: string) => ({ payload: { type: "control_request", request_id, request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: `tool-${request_id}`, input: { command } } } });
+  // Requested while no stream was up: latest() sees nothing, so the stream alone would miss these.
+  f.history.push(
+    requested("early", "early"),
+    { payload: { type: "control_response", request_id: "early", response: { subtype: "success" } } },
+    requested("waiting", "stale"),
+  );
+  await f.sessions.syncBridge(id);
+  await tick();
+  const pending = f.permissions.pending();
+  assert.equal(pending.length, 1, "the answered request stays silent, the open one cards");
+  assert.equal(pending[0]!.tool, "Bash");
+  const card = f.sessions.log(id).tail().events.find(e => e.kind === "permission" && e.id === pending[0]!.id);
+  assert.ok(card?.kind === "permission" && card.input === "stale");
+  // The listed state follows the worker: requires_action reads as waiting.
+  f.status("requires_action");
+  f.advance();
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(id)!.state, "waiting");
+  // A second sync (or a live duplicate of the same request) cards nothing twice.
+  await f.sessions.syncBridge(id);
+  await tick();
+  assert.equal(f.permissions.pending().length, 1);
+  assert.equal(f.sessions.log(id).tail().events.filter(e => e.kind === "permission").length, 1);
+  assert.equal(await f.sessions.decide(id, pending[0]!.id, "deny"), true);
+  assert.equal(f.posts.length, 1);
+  assert.equal(await f.sessions.decide(id, pending[0]!.id, "deny"), false, "the second answer resolves nothing again");
 });

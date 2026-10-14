@@ -11,21 +11,22 @@ const permission: EventBody = { kind: 'permission', id: 'p', tool: secret, title
 const done: EventBody = { kind: 'result', ok: true, ms: 1, turns: 1 };
 const failed: EventBody = { ...done, ok: false, error: secret };
 
-test('native payload contains only fixed lines and session id; persists per client and respects presence', async () => {
+test('native payload contains only fixed lines and session id; persists per client and respects per-session views', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'expo-push-'));
   try {
-    let looking = false;
+    const seen = new Map<string, number>();
+    let now = 1_000_000;
     const sent: ExpoPayload[] = [];
-    const options = { dir, send: async (p: ExpoPayload) => { sent.push(p); return 'sent' as const; }, someoneLooking: () => looking, log: () => {} };
+    const options = { dir, send: async (p: ExpoPayload) => { sent.push(p); return 'sent' as const; }, seenRecently: (session: string) => now - (seen.get(session) ?? 0) < 180_000, log: () => {} };
     const notifier = new ExpoNotifier(options);
     assert.throws(() => notifier.subscribe('device', 'https://invalid', 'ko'));
     notifier.subscribe('device', token, 'ko');
     const restored = new ExpoNotifier(options);
     assert.deepEqual(restored.devices(), ['device']);
-    looking = true;
+    seen.set('session', now);
     await restored.onEvent('session', permission);
     assert.equal(sent.length, 0);
-    looking = false;
+    seen.delete('session');
     for (const event of [permission, done, failed, { kind: 'user', text: secret, clientMsgId: 'x' } as const]) await restored.onEvent('session', event);
     assert.deepEqual(sent.map(p => p.body), ['승인을 기다립니다', '작업을 마쳤습니다', '작업이 실패했습니다']);
     for (const p of sent) {
@@ -44,7 +45,7 @@ test('DeviceNotRegistered removes a token but never its concurrent replacement; 
   try {
     let resolve: ((result: 'gone') => void) | undefined;
     let errors = 0;
-    const notifier = new ExpoNotifier({ dir, someoneLooking: () => false, log: () => { errors++; }, send: () => new Promise(r => { resolve = r; }) });
+    const notifier = new ExpoNotifier({ dir, seenRecently: () => false, log: () => { errors++; }, send: () => new Promise(r => { resolve = r; }) });
     notifier.subscribe('device', token, 'ko');
     const pending = notifier.onEvent('session', failed);
     notifier.subscribe('device', 'ExpoPushToken[replacement]', 'en');
@@ -53,7 +54,7 @@ test('DeviceNotRegistered removes a token but never its concurrent replacement; 
     const gone = notifier.onEvent('session', done);
     resolve!('gone'); await gone;
     assert.deepEqual(notifier.devices(), []);
-    const failing = new ExpoNotifier({ dir, someoneLooking: () => false, log: () => { errors++; }, send: async () => { throw new Error('network'); } });
+    const failing = new ExpoNotifier({ dir, seenRecently: () => false, log: () => { errors++; }, send: async () => { throw new Error('network'); } });
     failing.subscribe('device', token, 'ko'); await failing.onEvent('session', done);
     assert.deepEqual(failing.devices(), ['device']); assert.equal(errors, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

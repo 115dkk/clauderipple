@@ -6,10 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { PermissionQueue } from "../src/permissions.ts";
+import { MessageReceipts } from "../src/receipts.ts";
 import { reduce } from "../web/timeline.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
-import { Sessions, modelArg, summarize } from "../src/sessions.ts";
+import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 
 const router = {
@@ -393,7 +394,7 @@ test("recover expires persisted permissions, stops a mid-turn session and resume
   assert.equal(permissions.pending().length, 0);
   assert.deepEqual(recovered.log(id).readAfter(before).events.map(({ seq: _seq, at: _at, ...event }) => event), [
     { kind: "permission_decided", id: pending.record.id, decision: "expired", reason: "host_restarted" },
-    { kind: "notice", code: "host_restarted" },
+    { kind: "notice", code: "host_restarted", text: "호스트가 다시 시작되어 이 턴이 중단되었습니다" },
     { kind: "state", state: "stopped" },
   ]);
   assert.equal(recovered.list()[0]?.state, "stopped");
@@ -482,6 +483,64 @@ test("desktop handoff failure is logged and never retried", async t => {
   assert.match(logs[0]!, /failed: timeout/);
 });
 
+test("attention: a permission request is set, survives `seen`, and clears when the approval is answered", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+  // Looking at the session (seen) must NOT clear a permission request.
+  assert.equal(f.sessions.markSeen(id), false);
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+  // Answering it clears the permission attention; the turn then finishes unseen, so "finished" appears.
+  await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.notEqual(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+});
+
+test("attention: a finished turn is marked unseen, cleared by seen, and restorable", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "finished");
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(f.sessions.summaryOf(id)?.attention, null);
+  assert.equal(f.sessions.markUnread(id).reason, "finished");
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "finished");
+});
+
+test("nextAttention maps a state change to the right reason", () => {
+  const at = 100;
+  assert.deepEqual(nextAttention(null, "running", "waiting", at), { reason: "permission", at });
+  assert.deepEqual(nextAttention(null, "starting", "error", at), { reason: "failed", at });
+  assert.deepEqual(nextAttention(null, "running", "idle", at), { reason: "finished", at });
+  assert.equal(nextAttention(null, "starting", "idle", at), null); // a fresh session that never ran
+  assert.equal(nextAttention({ reason: "finished", at }, "idle", "running", at), null);
+  assert.equal(nextAttention({ reason: "permission", at }, "waiting", "idle", at)?.reason, "finished");
+  // No transition keeps what is there.
+  assert.deepEqual(nextAttention({ reason: "failed", at }, "error", "error", at), { reason: "failed", at });
+});
+
+test("archive: the flag round-trips, /exit archives, and nothing is deleted", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.archived, undefined);
+  const seq = f.sessions.log(id).lastSeq;
+  assert.equal(f.sessions.setArchived(id, true), true);
+  assert.equal(f.sessions.summaryOf(id)?.archived, true);
+  assert.equal(f.sessions.list().find(x => x.id === id)?.archived, true);
+  assert.equal(f.sessions.setArchived(id, true), false, "archiving twice changes nothing");
+  assert.equal(f.sessions.log(id).lastSeq, seq, "archiving touches no log");
+  assert.equal(f.sessions.setArchived(id, false), true);
+  assert.equal(f.sessions.summaryOf(id)?.archived, undefined);
+  // /exit is the composer's archive path: it sets the flag and sends no turn.
+  f.sessions.send(id, "exit-1", "/exit");
+  assert.equal(f.sessions.summaryOf(id)?.archived, true);
+  assert.equal(f.sessions.log(id).lastSeq, seq, "no turn is sent for /exit");
+  // Durable: the flag is in list-state.json, so a restart keeps it.
+  assert.ok((JSON.parse(fs.readFileSync(path.join(f.dir, "list-state.json"), "utf8")) as { archived: string[] }).archived.includes(id));
+});
+
 test("summarize uses Bash's first line, cwd-relative Read paths and Grep pattern plus path", () => {
   const cwd = path.resolve(os.tmpdir(), "summary-project");
   assert.equal(summarize("Bash", { command: "ls -la\npwd" }, cwd), "ls -la");
@@ -492,4 +551,55 @@ test("summarize uses Bash's first line, cwd-relative Read paths and Grep pattern
   assert.equal(summarize("Read", { file_path: outside }, cwd), outside);
   assert.equal(summarize("Grep", { pattern: "needle", path: path.join(cwd, "src") }, cwd), "needle  src");
   assert.equal(summarize("Grep", { pattern: "needle" }, cwd), "needle");
+});
+
+test("receipts go pending to completed on disk, and a completed resend never re-runs", { timeout: 4500 }, async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  const stored = JSON.parse(fs.readFileSync(path.join(f.dir, "receipts.json"), "utf8")) as { key: string; state: string }[];
+  assert.ok(stored.some(r => r.key === "create:create-1" && r.state === "completed"), "create receipt completed on disk");
+  assert.ok(stored.some(r => r.key === `send:${id}:create-1` && r.state === "completed"), "send receipt completed on disk");
+  const users = f.fake.users.length;
+  assert.equal(await f.sessions.send(id, "create-1", "ping"), id);
+  f.sessions.send(id, "send-1", "again");
+  await waitFor(() => f.fake.users.length === users + 1);
+  assert.equal(await f.sessions.send(id, "send-1", "again"), id);
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  assert.equal(f.fake.users.length, users + 1, "completed resends ack without running again");
+});
+
+function reopen(t: TestContext, f: ReturnType<typeof fixture>) {
+  const permissions = PermissionQueue.open(f.permissionsFile);
+  const fake = scriptedQuery();
+  const recovered = new Sessions({ dir: f.dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, onEvent: () => {}, onSessions: () => {} });
+  f.instances.push(recovered);
+  return { permissions, fake, recovered };
+}
+
+test("a send resend orphaned by a restart answers outcome_unknown without running", { timeout: 4500 }, async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  // The first attempt wrote pending, then the host died before completing it.
+  MessageReceipts.open(path.join(f.dir, "receipts.json")).begin(`send:${id}:orphan-1`, id);
+  f.sessions.shutdown();
+  const { fake, recovered } = reopen(t, f);
+  assert.throws(() => recovered.send(id, "orphan-1", "lost turn"), /전송 결과를 확인할 수 없음/);
+  assert.equal(fake.users.length, 0, "nothing reached the SDK");
+  assert.equal(fake.options.length, 0);
+  assert.equal(recovered.log(id).readAfter(0).events.filter(e => e.kind === "user" && e.clientMsgId === "orphan-1").length, 0);
+});
+
+test("a create resend orphaned by a restart answers outcome_unknown", { timeout: 4500 }, async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.list()[0]?.state === "idle");
+  MessageReceipts.open(path.join(f.dir, "receipts.json")).begin("create:orphan-create", "");
+  f.sessions.shutdown();
+  const { fake, recovered } = reopen(t, f);
+  assert.throws(() => recovered.create({ clientMsgId: "orphan-create", cwd: f.cwd, model: "x", effort: null, text: "lost session" }), /전송 결과를 확인할 수 없음/);
+  assert.equal(fake.options.length, 0);
+  assert.equal(recovered.list().length, 1, "no duplicate session was started");
+  void id;
 });

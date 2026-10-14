@@ -16,6 +16,21 @@ export async function isDirectory(p: string): Promise<boolean> {
   try { return (await fs.stat(p)).isDirectory(); } catch { return false; }
 }
 
+/** One path segment: no separators, control characters or the reserved names "." and "..". */
+const FOLDER_NAME = /^[^/\\\u0000-\u001f]{1,100}$/;
+
+/** Make a folder directly inside `parent`, returning its path. The name is one segment and must
+ * not already exist; nothing outside `parent` can be reached. */
+export async function makeFolder(parent: string, name: string): Promise<string> {
+  const dir = path.resolve(parent || os.homedir());
+  if (!(await isDirectory(dir))) throw new Error("That parent folder can't be opened");
+  const segment = name.trim();
+  if (!segment || segment === "." || segment === ".." || !FOLDER_NAME.test(segment)) throw new Error("Invalid folder name");
+  const target = path.join(dir, segment);
+  await fs.mkdir(target);
+  return target;
+}
+
 export async function recentFolders(sources: RecentSource[], limit = 12): Promise<FolderEntry[]> {
   const best = new Map<string, RecentSource>();
   for (const s of sources) {

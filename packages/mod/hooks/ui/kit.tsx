@@ -34,6 +34,15 @@ const NBSP_PX = 3.6
 /** The host's padding either side of a plain Button's label, px. */
 const BUTTON_PAD = 6
 
+/**
+ * The props that light a Box under the pointer the way `lit` lights a control: the skin's light
+ * (a transparent round edge at rest, so the box does not move when lit), joined to `scope`.
+ */
+export function hoverLight(frame: Frame, scope?: string): Record<string, unknown> {
+  const look = lookOf(frame).lit
+  return { ...look, hover: { ...look.hover, ...(scope ? { scope } : {}) } }
+}
+
 /** Cells a run of px takes, rounded up. */
 function cellsOf(px: number): number {
   return Math.ceil(px / CELL_PX)
