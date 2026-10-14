@@ -67,6 +67,7 @@
 - 보관·보관 해제 (paseo `components/archived-agent-callout.tsx`).
 - 생성: 폴더(최근·탐색·새 폴더·GitHub clone), local / **새 worktree**(브랜치에서 갈라지기 / PR 체크아웃), 모델·모드·강도는 마지막 선택 기억 — 모델별 강도까지 (paseo `screens/new-workspace-screen.tsx`, `new-workspace-picker-item.ts:156–208`, `create-agent-preferences/`).
 - 생성 중 다른 화면으로 가도 생성은 계속.
+- 세션 화면 상단의 세션 제목(▾)을 누르면 세션 목록이 드롭다운으로 내려와 바로 다른 세션으로 전환한다 — 목록으로 돌아갈 필요 없음(2026-10-14 주군 지시, 2단계에서 구현).
 
 ### 5단계 — 호스트 신뢰성과 알림
 
