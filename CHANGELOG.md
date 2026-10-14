@@ -1,15 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.9.2 — 2026-10-14
 
 ### Added
+
+- **The mod shows when keep-warm held your cache.** A successful ping used to be silent, so it was
+  easy to think keep-warm never ran. When you come back, a card now says how many pings kept how
+  many tokens in cache and how long is left. It goes when you send a prompt or close it, and the
+  cold-cache card takes over if the cache expires after all.
+- **Keep-warm per chat.** The band's flame now turns keep-warm on or off for that chat only: a full
+  flame where it is on, an empty one where it is off. Settings is what a new chat starts with.
+  After a restart or resume, a chat follows Settings again.
 
 - **Grok through a Grok subscription.** A new "Grok subscription" provider uses Grok 4.7, 4.7
   Fast, 4.6 and 4.5 with the Grok CLI's own sign-in (`grok login`), with no API key. It reads the
   CLI's session and, when the session is about to expire, has the CLI refresh it. Tools,
   thinking and effort (low…xhigh, per model) work as on the other translated providers. This
   is the channel the Grok CLI itself talks to, not a published xAI API, so a CLI update can
-  change it. Pay-per-token access with an xAI API key stays under the xAI preset.
+  change it. Pay-per-token access with an xAI API key stays under the xAI preset. Thanks @nakjiya (#52).
+
+### Fixed
+
+- An OpenAI-compatible provider's error that echoed the bare token, without its `Bearer` scheme,
+  could show it in the error message. It is now redacted like the full header value (#52).
+- On a two-line mod card, 리플이 sat on the title's line; it now sits at the card's middle.
 
 ## 0.9.1 — 2026-10-14
 
