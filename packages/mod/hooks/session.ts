@@ -71,6 +71,21 @@ export function keptAlert(kept: { pings: number; tokens: number } | null, memo: 
   return kept !== null && kept.pings > 0 && memo !== null && memo.expiresAt > now
 }
 
+/**
+ * Whether a put-off hot card should be forgotten: only when the window itself has moved on — another
+ * window became the hottest, or its reset moved forward by more than an hour. A reading that is
+ * missing for a while (a routed model's session carries no plan windows) or that comes from the
+ * other source with its reset spelled to the second rather than the minute is the same window, and
+ * forgetting on either brought the card back on every turn (2026-10-14, weekly at 87%).
+ */
+export function hotWindowMoved(previous: Hot | null, next: Hot | null): boolean {
+  if (!previous || !next) return false
+  if (previous.kind !== next.kind) return true
+  const before = previous.resetsAt ? Date.parse(previous.resetsAt) : NaN
+  const after = next.resetsAt ? Date.parse(next.resetsAt) : NaN
+  return Number.isFinite(before) && Number.isFinite(after) && after - before > 3_600_000
+}
+
 export function hotAlert(hot: Hot | null, hidden: number | null): boolean {
   return hot !== null && hot.percent >= 80 && (hidden === null || hot.percent >= hidden + 10)
 }
