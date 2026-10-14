@@ -966,7 +966,8 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
     });
     assert.equal(seen.auth, "Bearer secret-key");
     assert.equal(seen.model, "oai-model");
-    assert.equal(seen.tokens, 1);
+    // Above the floor some vendors set (B.ai refuses anything under 3, #57).
+    assert.equal(seen.tokens, 16);
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
   }

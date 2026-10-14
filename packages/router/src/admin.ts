@@ -1144,11 +1144,13 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
   const responses = openai && body.wire === "responses" && !body.preset;
   const checkUrl = responses ? responsesUrl(body.url) : openai ? chatCompletionsUrl(body.url) : messagesUrl(body.url);
   const checkModel = presetProbeModel(body.preset) ?? models[0]?.id ?? body.probeModel ?? "test";
+  // 16 tokens, as on Responses: some vendors refuse a smaller cap outright (B.ai: "max_tokens must be
+  // greater than 2", #57), which read as a failed connection though the key and URL were right.
   const checkBody = responses
     ? { model: checkModel, max_output_tokens: 16, stream: false, store: false, input: "hi" }
     : openai
-      ? { model: checkModel, max_tokens: 1, stream: false, messages: [{ role: "user", content: "hi" }] }
-      : { model: checkModel, max_tokens: 1, messages: [{ role: "user", content: "hi" }] };
+      ? { model: checkModel, max_tokens: 16, stream: false, messages: [{ role: "user", content: "hi" }] }
+      : { model: checkModel, max_tokens: 16, messages: [{ role: "user", content: "hi" }] };
   const label = responses ? "responses endpoint" : openai ? "chat completions endpoint" : "messages endpoint";
   try {
     const response = await probeFetch(checkUrl, {
