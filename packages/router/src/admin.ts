@@ -25,7 +25,7 @@ import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderModel } from "./config.ts";
-import { adminPort, homeDir, searchProviderFor, validate } from "./config.ts";
+import { adminPort, headerValueProblem, homeDir, searchProviderFor, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
@@ -63,7 +63,7 @@ import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
 import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/login.ts";
-import { GROK_AUTH_HINT, GrokAuth, grokAuthPath, grokHome, readGrokToken } from "./providers/grok/auth.ts";
+import { GROK_AUTH_HINT, grokAuthPath, grokHome, readGrokToken, sharedGrokAuth } from "./providers/grok/auth.ts";
 import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS, GROK_FALLBACK_MODELS, grokModelsFromListing } from "./providers/grok/catalog.ts";
 import { GROK_WARNING, grokHeaders } from "./providers/grok/index.ts";
 
@@ -990,9 +990,13 @@ async function probeGrok(
   const home = text(body.home) ?? grokHome();
   const cli = text(body.cli);
   const clientVersion = text(body.clientVersion);
-  const auth = new GrokAuth({ home, ...(cli ? { cli } : {}), ...(clientVersion ? { clientVersion } : {}), log });
   const fallback = (result: Omit<GrokProbeResult, "models" | "modelsSource" | "warning">): GrokProbeResult =>
     ({ ...result, models: GROK_FALLBACK_MODELS, modelsSource: "fallback", warning: GROK_WARNING });
+  const versionProblem = clientVersion ? headerValueProblem(clientVersion) : null;
+  if (versionProblem) return fallback({ ok: false, auth: "unknown", error: `clientVersion cannot be sent as a header: ${versionProblem}` });
+  // The adapter's own instance for this session, so a probe joins a refresh a turn started (and the
+  // reverse) instead of spawning a second CLI.
+  const auth = sharedGrokAuth({ home, ...(cli ? { cli } : {}), log });
   let token;
   try {
     token = await auth.token();
@@ -1000,7 +1004,7 @@ async function probeGrok(
     return fallback({ ok: false, auth: "missing", error: errorText(error) });
   }
   const base = (text(body.url) ?? GROK_DEFAULT_URL).replace(/\/+$/, "");
-  const { "x-grok-model-override": _route, ...headers } = grokHeaders(token.key, "", await auth.clientVersion());
+  const { "x-grok-model-override": _route, ...headers } = grokHeaders(token.key, "", await auth.clientVersion(clientVersion));
   let response: Response;
   try {
     response = await probeFetch(`${base}/models`, { headers });

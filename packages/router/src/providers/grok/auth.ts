@@ -186,8 +186,11 @@ export class GrokAuth {
     const now = this.current();
     if (this.usable(now, this.refreshAheadMs)) return now;
     if (now === null && !fs.existsSync(this.file)) throw new GrokAuthError(`no Grok session at ${this.file}: ${GROK_AUTH_HINT}`);
-    const triedJustNow = !this.refreshing && this.now() - this.lastAttemptAt < REFRESH_RETRY_GAP_MS;
-    if (!(triedJustNow && this.usable(now, 0))) await this.refresh(Math.ceil(this.refreshAheadMs / 1000));
+    // A refresh already running is joined. Otherwise one that failed less than a minute ago is not
+    // run again, whether or not the token has expired since: with the IdP down every turn would
+    // spawn the CLI for nothing. The file is still read again, in case the CLI fixed it on its own.
+    if (this.refreshing) await this.refreshing;
+    else if (this.now() - this.lastAttemptAt >= REFRESH_RETRY_GAP_MS) await this.refresh(Math.ceil(this.refreshAheadMs / 1000));
     const after = this.current();
     if (this.usable(after, 0)) return after;
     throw new GrokAuthError(`the Grok session in ${this.file} has expired: ${GROK_AUTH_HINT}`);
@@ -199,13 +202,21 @@ export class GrokAuth {
    * the CLI asked to refresh, and that refresh is forced — the token was refused, however long it had.
    */
   async rejected(key: string): Promise<boolean> {
-    const now = this.current();
-    if (now && now.key !== key && this.usable(now, 0)) return true;
+    const replaced = (): boolean => {
+      const now = this.current();
+      return now !== null && now.key !== key && this.usable(now, 0);
+    };
+    if (replaced()) return true;
+    // Concurrent turns refused together share the refresh the first one started, rather than the
+    // second one finding the once-a-minute limit spent and failing.
+    if (this.refreshing) {
+      await this.refreshing;
+      if (replaced()) return true;
+    }
     if (this.now() - this.lastForcedAt < FORCED_REFRESH_GAP_MS) return false;
     this.lastForcedAt = this.now();
     await this.refresh(FORCE_REFRESH_SECS);
-    const after = this.current();
-    return after !== null && after.key !== key && this.usable(after, 0);
+    return replaced();
   }
 
   /** One refresh at a time: concurrent turns that all find the token stale share the CLI run. */
@@ -227,19 +238,28 @@ export class GrokAuth {
     this.refreshing = this.run(cli, ["models"], env, REFRESH_TIMEOUT_MS)
       .then(() => this.opts.log.info(`grok: session refreshed through the CLI in ${this.now() - started}ms`))
       .catch((error: Error) => this.opts.log.warn(`grok: CLI session refresh failed: ${error.message.split("\n")[0]?.slice(0, 200)}`))
-      .finally(() => { this.refreshing = undefined; });
+      // The CLI rewrites the file with a token of the same length, possibly within the mtime's
+      // resolution, so the read after a refresh must not trust the stat-keyed cache.
+      .finally(() => { this.refreshing = undefined; this.cached = undefined; });
     return this.refreshing;
   }
 
   /**
    * `x-grok-client-version`: the installed CLI's own version, so the proxy sees the client the token
-   * was issued to. Read again when the binary changes — an update replaces the file the symlink names.
+   * was issued to. Read again when the binary changes: an update either replaces the file the symlink
+   * names or rewrites the binary in place, so the key is the resolved path with its mtime and size.
    */
-  clientVersion(): Promise<string> {
-    if (this.opts.clientVersion) return Promise.resolve(this.opts.clientVersion);
+  clientVersion(pinned = this.opts.clientVersion): Promise<string> {
+    if (pinned) return Promise.resolve(pinned);
     const cli = findGrokCli(this.opts.home, this.opts.cli, this.env);
     let binary = "";
-    try { binary = cli ? fs.realpathSync(cli) : ""; } catch { /* keep the unresolved name */ }
+    try {
+      if (cli) {
+        const real = fs.realpathSync(cli);
+        const st = fs.statSync(real);
+        binary = `${real}\0${st.mtimeMs}\0${st.size}`;
+      }
+    } catch { binary = cli ?? ""; /* keep the unresolved name */ }
     if (this.version && this.version.binary === binary) return this.version.value;
     const value = !cli
       ? Promise.resolve(GROK_CLIENT_VERSION_FALLBACK)
@@ -252,4 +272,24 @@ export class GrokAuth {
     this.version = { binary, value };
     return value;
   }
+}
+
+const shared = new Map<string, GrokAuth>();
+
+/**
+ * The `GrokAuth` for one Grok home and binary, made once per process. The refresh is single-flight
+ * and backed off per instance, so the dashboard's probes and the turns that use the same session
+ * have to share one, or two of them spawn two CLI runs against the same lock. A pinned client version
+ * is not part of it: that is passed to `clientVersion()` by whoever sends the header.
+ */
+export function sharedGrokAuth(opts: Omit<GrokAuthOptions, "clientVersion">): GrokAuth {
+  let home = path.resolve(opts.home);
+  try { home = fs.realpathSync(home); } catch { /* not there yet: the resolved path names it */ }
+  const key = JSON.stringify([home, opts.cli ?? ""]);
+  let auth = shared.get(key);
+  if (!auth) {
+    auth = new GrokAuth(opts);
+    shared.set(key, auth);
+  }
+  return auth;
 }

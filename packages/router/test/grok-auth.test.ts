@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { findGrokCli, GROK_CLIENT_VERSION_FALLBACK, GrokAuth, GrokAuthError, grokAuthPath, readGrokToken, type RunCli } from "../src/providers/grok/auth.ts";
+import { findGrokCli, GROK_CLIENT_VERSION_FALLBACK, GrokAuth, GrokAuthError, grokAuthPath, readGrokToken, sharedGrokAuth, type RunCli } from "../src/providers/grok/auth.ts";
 
 const HOUR = 3600_000;
 const NOW = Date.parse("2026-10-08T12:00:00Z");
@@ -95,6 +95,33 @@ test("a token close to its end is still used when the CLI cannot refresh it, and
   assert.equal(runs, 2);
 });
 
+test("an expired token is not refreshed again for every turn while the CLI keeps failing", async () => {
+  const dir = home();
+  writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-a", expiresAt: NOW - 60_000 } });
+  let runs = 0;
+  const failing: RunCli = async () => { runs += 1; throw new Error("IdP unreachable"); };
+  fakeCli(dir);
+  let clock = NOW;
+  const auth = new GrokAuth({ home: dir, log: quiet, run: failing, now: () => clock, env: {} });
+  await assert.rejects(auth.token(), /expired/);
+  await assert.rejects(auth.token(), /expired/);
+  clock += 10_000;
+  await assert.rejects(auth.token(), /expired/);
+  assert.equal(runs, 1, "the backoff holds after the token has expired too");
+  // A token the CLI wrote on its own in the meantime is still picked up inside the backoff.
+  writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-b", expiresAt: NOW + 6 * HOUR } });
+  const later = new Date(Date.now() + 5_000);
+  fs.utimesSync(grokAuthPath(dir), later, later);
+  assert.equal((await auth.token()).key, "tok-b");
+  assert.equal(runs, 1);
+  writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-a", expiresAt: NOW - 60_000 } });
+  const latest = new Date(Date.now() + 10_000);
+  fs.utimesSync(grokAuthPath(dir), latest, latest);
+  clock += 60_000;
+  await assert.rejects(auth.token(), /expired/);
+  assert.equal(runs, 2, "tried again once the minute is up");
+});
+
 test("an expired session the CLI cannot refresh, or none at all, is an error naming grok login", async () => {
   const dir = home();
   writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-a", expiresAt: NOW - 60_000 } });
@@ -142,6 +169,37 @@ test("after a 401 on the file's own token the CLI refresh is forced, and a refus
   assert.equal(stuck.runs.filter((r) => r.args[0] === "models").length, 2);
 });
 
+test("turns refused together share one forced refresh, and all of them recover", async () => {
+  const dir = home();
+  writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-a", expiresAt: NOW + 5 * HOUR } });
+  const cli = fakeCli(dir, () => writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-b", expiresAt: NOW + 6 * HOUR } }));
+  const auth = new GrokAuth({ home: dir, log: quiet, run: cli.run, now: () => NOW, env: {} });
+  assert.deepEqual(await Promise.all([auth.rejected("tok-a"), auth.rejected("tok-a"), auth.rejected("tok-a")]), [true, true, true]);
+  assert.equal(cli.runs.filter((r) => r.args[0] === "models").length, 1);
+
+  // One that cannot be fixed fails for all of them, still on one run.
+  const stuckDir = home();
+  writeAuth(stuckDir, { "https://auth.x.ai::a": { key: "tok-x", expiresAt: NOW + 5 * HOUR } });
+  const stuck = fakeCli(stuckDir);
+  const auth2 = new GrokAuth({ home: stuckDir, log: quiet, run: stuck.run, now: () => NOW, env: {} });
+  assert.deepEqual(await Promise.all([auth2.rejected("tok-x"), auth2.rejected("tok-x")]), [false, false]);
+  assert.equal(stuck.runs.filter((r) => r.args[0] === "models").length, 1);
+});
+
+test("a token the CLI rewrote with the same length and mtime is still read after the refresh", async () => {
+  const dir = home();
+  writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-a", expiresAt: NOW + 5 * HOUR } });
+  const pinned = fs.statSync(grokAuthPath(dir)).mtime;
+  const cli = fakeCli(dir, () => {
+    writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-b", expiresAt: NOW + 5 * HOUR } });
+    fs.utimesSync(grokAuthPath(dir), pinned, pinned);
+  });
+  const auth = new GrokAuth({ home: dir, log: quiet, run: cli.run, now: () => NOW, env: {} });
+  assert.equal(auth.current()?.key, "tok-a");
+  assert.equal(await auth.rejected("tok-a"), true);
+  assert.equal(auth.current()?.key, "tok-b");
+});
+
 test("the client version is the installed CLI's, asked once per binary, with a fallback", async () => {
   const dir = home();
   const cli = fakeCli(dir);
@@ -156,6 +214,37 @@ test("the client version is the installed CLI's, asked once per binary, with a f
   const bare = home();
   const missing = new GrokAuth({ home: bare, log: quiet, run: cli.run, now: () => NOW, env: { PATH: "", HOME: bare } });
   assert.equal(await missing.clientVersion(), GROK_CLIENT_VERSION_FALLBACK);
+});
+
+test("a CLI updated in place at the same path is asked for its version again", async () => {
+  const dir = home();
+  const cli = fakeCli(dir);
+  const auth = new GrokAuth({ home: dir, log: quiet, run: cli.run, now: () => NOW, env: {} });
+  const versions = () => cli.runs.filter((r) => r.args[0] === "--version").length;
+  await Promise.all([auth.clientVersion(), auth.clientVersion()]);
+  assert.equal(versions(), 1, "concurrent callers share one run");
+  const binary = path.join(dir, "bin", GROK_BIN);
+  fs.writeFileSync(binary, "#!/bin/sh\n# 1.0.53\n", { mode: 0o755 });
+  await auth.clientVersion();
+  assert.equal(versions(), 2, "a new size");
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(binary, later, later);
+  await auth.clientVersion();
+  assert.equal(versions(), 3, "the same size, a new mtime");
+  await auth.clientVersion();
+  assert.equal(versions(), 3);
+  assert.equal(await auth.clientVersion("9.9.9"), "9.9.9", "a pinned version is sent as it is");
+});
+
+test("one GrokAuth per Grok home and binary, however the home is spelled", () => {
+  const dir = home();
+  const link = `${dir}-link`;
+  fs.symlinkSync(dir, link);
+  const a = sharedGrokAuth({ home: dir, log: quiet });
+  assert.equal(sharedGrokAuth({ home: path.join(dir, "."), log: quiet }), a);
+  assert.equal(sharedGrokAuth({ home: link, log: quiet }), a);
+  assert.notEqual(sharedGrokAuth({ home: home(), log: quiet }), a);
+  assert.notEqual(sharedGrokAuth({ home: dir, cli: path.join(dir, "other-grok"), log: quiet }), a);
 });
 
 test("findGrokCli looks in the CLI's own bin before PATH, and honours an explicit path only if it runs", () => {

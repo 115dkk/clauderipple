@@ -1954,6 +1954,15 @@ function openAnthropicProviderForm(options) {
   if (auth.value === "claude-code") void runProbe();
 }
 /**
+ * What a Grok form's check leaves ticked. A handful of models, so a new provider's first listing
+ * starts with all of them ticked. Every later check — and every check of a saved provider — keeps
+ * what is ticked at that moment, so a model the user unticked stays unticked.
+ */
+function grokTickedAfterCheck(firstListing, tickedIds, listedIds) {
+  return new Set(firstListing ? listedIds : tickedIds);
+}
+
+/**
  * A Grok subscription: nothing to type. The router reads the Grok CLI's own session, so the form
  * checks that it is there, lists what the proxy offers and saves the ticked models. The check runs
  * as soon as the form opens, since there is no key to wait for.
@@ -1966,6 +1975,7 @@ function openGrokProviderForm(options) {
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   let foundModels = modelsOf(existing);
   const currentChecked = new Set(foundModels.map((model) => model.id));
+  let listed = false;
   const modelArea = el("div", { class: "form-field" });
   function renderModels(checked, help) {
     modelArea.replaceChildren(el("span", { text: t("providers.models") }), hint(help || t("providers.modelsHelp")), modelChecklist(foundModels, checked, { allowCustom: true }));
@@ -1986,9 +1996,8 @@ function openGrokProviderForm(options) {
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
         const ticked = modelArea.querySelector(".model-picker").selected();
-        // A handful of models, so a new provider starts with all of them ticked; an existing one keeps
-        // its own picks.
-        const keep = existing ? new Set([...currentChecked, ...ticked.map((model) => model.id)]) : new Set(response.models.map((model) => model.id));
+        const keep = grokTickedAfterCheck(!existing && !listed, ticked.map((model) => model.id), response.models.map((model) => model.id));
+        listed = true;
         foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
         renderModels(keep);
       }

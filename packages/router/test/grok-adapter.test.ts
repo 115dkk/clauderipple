@@ -8,6 +8,7 @@ import { GrokAdapter } from "../src/providers/grok/index.ts";
 import { GrokAuth, grokAuthPath, type RunCli } from "../src/providers/grok/auth.ts";
 import { grokModelsFromListing } from "../src/providers/grok/catalog.ts";
 import { Logger } from "../src/log.ts";
+import type { OpenAiOutcome } from "../src/providers/openai/index.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
 const HOUR = 3600_000;
@@ -16,6 +17,10 @@ const sse = (records: Record<string, unknown>[]) => records.map((record) => `dat
 /** The proxy as measured 2026-10-08: refuses a token it does not know (401), streams Chat otherwise. */
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
 let accepted = new Set(["tok-a"]);
+/** When set, an accepted turn is answered 200 with this as an SSE `error` — a proxy echoing a token mid-stream. */
+let streamError: string | null = null;
+/** Appended to a 401 body, to play a proxy that echoes more than the token it was just sent. */
+let refusalEcho = "";
 const upstream = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -23,10 +28,14 @@ const upstream = http.createServer((req, res) => {
     seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown> });
     const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
     if (!accepted.has(token)) {
-      res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: `Invalid or expired credentials (token ${token})` }));
+      res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: `Invalid or expired credentials (token ${token})${refusalEcho}` }));
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (streamError !== null) {
+      res.end(sse([{ error: { message: streamError, code: "invalid_request" } }]));
+      return;
+    }
     res.end(sse([
       { choices: [{ delta: { role: "assistant", reasoning_content: "Need the weather." }, finish_reason: null }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "get_weather", arguments: '{"city":"Seoul"}' } }] }, finish_reason: null }] },
@@ -54,15 +63,17 @@ function writeAuth(key: string, expiresAt = Date.now() + 5 * HOUR): void {
   fs.utimesSync(grokAuthPath(dir), t, t);
 }
 
-let onRefresh: () => void = () => {};
+let onRefresh: () => void | Promise<void> = () => {};
 const runs: string[][] = [];
 const run: RunCli = async (_file, args) => {
   runs.push(args);
   if (args[0] === "--version") return "grok 1.0.46 (2765805b9442) [stable]\n";
-  onRefresh();
+  await onRefresh();
   return "";
 };
-const auth = new GrokAuth({ home: dir, log, run, env: { PATH: "", HOME: dir } });
+/** Moved forward by a test that needs the once-a-minute forced refresh to be available again. */
+let clockSkew = 0;
+const auth = new GrokAuth({ home: dir, log, run, env: { PATH: "", HOME: dir }, now: () => Date.now() + clockSkew });
 const adapter = new GrokAdapter("grok", {
   type: "grok",
   url: `http://127.0.0.1:${upstreamPort}/v1`,
@@ -74,10 +85,18 @@ const front = http.createServer((req, res) => {
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest & { model: string };
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, json.model, req.headers["x-effort"] as string | undefined);
+    void adapter.handle(req, res, req.url ?? "/v1/messages", json, json.model, req.headers["x-effort"] as string | undefined).then((outcome) => { lastOutcome = outcome; });
   });
 });
 const frontPort = await listen(front);
+let lastOutcome: OpenAiOutcome | undefined;
+/** The outcome is recorded after the response ends; give the handler its tick. */
+async function outcome(): Promise<OpenAiOutcome> {
+  for (let i = 0; i < 50 && !lastOutcome; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  const out = lastOutcome!;
+  lastOutcome = undefined;
+  return out;
+}
 
 function call(body: unknown, opts: { path?: string; effort?: string } = {}): Promise<{ status: number; text: string }> {
   return new Promise((resolve, reject) => {
@@ -161,6 +180,70 @@ test("a session the proxy keeps refusing ends as an authentication error that na
   assert.doesNotMatch(res.text, /tok-revoked/);
   assert.equal(seen.length, 1, "asked again only when a different token exists");
   accepted = new Set(["tok-a"]);
+});
+
+test("a token echoed in a 200 stream's error reaches neither the client nor the request log, streamed or not", async () => {
+  writeAuth("tok-a");
+  streamError = "session tok-a is not valid for this model";
+  for (const stream of [true, false]) {
+    lastOutcome = undefined;
+    const res = await call({ ...turn("grok-4.7"), stream });
+    const note = (await outcome()).note ?? "";
+    assert.match(res.text, /not valid for this model/, `stream=${stream}: the error itself still reaches the client`);
+    assert.doesNotMatch(res.text, /tok-a/, `stream=${stream}: client`);
+    assert.match(note, /not valid for this model/);
+    assert.doesNotMatch(note, /tok-a/, `stream=${stream}: request log note`);
+  }
+  streamError = null;
+});
+
+test("after a 401 retry, an error that echoes the first token is redacted as well as one that echoes the second", async () => {
+  // Mid-stream: tok-a is refused, the CLI rotates to tok-b, and tok-b's stream fails naming both.
+  writeAuth("tok-a");
+  accepted = new Set(["tok-b"]);
+  onRefresh = () => writeAuth("tok-b");
+  streamError = "tok-b replaced tok-a";
+  clockSkew += 2 * 60_000;
+  lastOutcome = undefined;
+  let res = await call(turn("grok-4.7"));
+  assert.doesNotMatch(res.text + ((await outcome()).note ?? ""), /tok-[ab]/);
+  streamError = null;
+  // HTTP error: tok-c is refused, the CLI rotates to tok-d, which is refused naming both.
+  writeAuth("tok-c");
+  accepted = new Set();
+  onRefresh = () => writeAuth("tok-d");
+  refusalEcho = "; earlier tok-c";
+  clockSkew += 2 * 60_000;
+  seen.length = 0;
+  res = await call(turn("grok-4.7"));
+  assert.equal(res.status, 401);
+  assert.deepEqual(seen.map((s) => s.headers.authorization), ["Bearer tok-c", "Bearer tok-d"]);
+  assert.doesNotMatch(res.text, /tok-[cd]/);
+  refusalEcho = "";
+  accepted = new Set(["tok-a"]);
+  onRefresh = () => {};
+});
+
+test("a client that leaves while the session is being refreshed cancels the turn: nothing is sent", async () => {
+  clockSkew += 2 * 60_000; // past the failure backoff, so the near-expiry token is refreshed
+  writeAuth("tok-a", Date.now() + clockSkew + 5 * 60_000);
+  let release!: () => void;
+  onRefresh = () => new Promise<void>((resolve) => { release = () => { writeAuth("tok-a"); resolve(); }; });
+  seen.length = 0;
+  runs.length = 0;
+  lastOutcome = undefined;
+  const raw = JSON.stringify(turn("grok-4.7"));
+  const req = http.request({ host: "127.0.0.1", port: frontPort, method: "POST", path: "/v1/messages", headers: { "content-type": "application/json", "content-length": String(Buffer.byteLength(raw)) } });
+  req.on("error", () => {});
+  req.end(raw);
+  for (let i = 0; i < 100 && !runs.some((r) => r[0] === "models"); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(runs.some((r) => r[0] === "models"), "the refresh is under way");
+  req.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release();
+  assert.equal((await outcome()).note, "client closed");
+  assert.equal(seen.length, 0, "the cancelled turn spent no quota");
+  onRefresh = () => {};
 });
 
 test("with no session nothing is sent, and counting tokens still works", async () => {

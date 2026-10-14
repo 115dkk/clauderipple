@@ -2170,6 +2170,50 @@ test("POST /api/providers/probe[grok] lists the proxy's models with the headers 
   assert.equal(seen[0]!.headers.get("x-grok-client-version"), "1.0.46");
 });
 
+test("POST /api/providers/probe[grok]: two probes at once share one CLI refresh", { skip: process.platform === "win32" }, async () => {
+  const grokHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-grok-probe-"));
+  const auth = (key: string, ms: number) => JSON.stringify({ "https://auth.x.ai::u": { key, expires_at: new Date(Date.now() + ms).toISOString() } });
+  fs.writeFileSync(path.join(grokHomeDir, "auth.json"), auth("grok-old", 5 * 60_000));
+  fs.writeFileSync(path.join(grokHomeDir, "fresh.json"), auth("grok-new", 6 * 3600_000));
+  fs.mkdirSync(path.join(grokHomeDir, "bin"));
+  // Plays `grok models` refreshing the session: slow enough for the second probe to arrive meanwhile.
+  fs.writeFileSync(path.join(grokHomeDir, "bin", "grok"), `#!/bin/sh\necho "$1" >> "${grokHomeDir}/runs"\nsleep 0.3\ncp "${grokHomeDir}/fresh.json" "${grokHomeDir}/auth.json"\n`, { mode: 0o755 });
+  const sent: string[] = [];
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      const probe = () => fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "grok", home: grokHomeDir, clientVersion: "1.0.46" }) }).then((res) => res.json() as Promise<{ ok: boolean }>);
+      const results = await Promise.all([probe(), probe()]);
+      assert.deepEqual(results.map((r) => r.ok), [true, true]);
+    },
+    {
+      probeFetch: async (_url, init) => {
+        sent.push(new Headers(init.headers).get("authorization") ?? "");
+        return new Response(JSON.stringify({ object: "list", data: [{ id: "grok-4.7" }] }), { status: 200 });
+      },
+    },
+  );
+  assert.deepEqual(fs.readFileSync(path.join(grokHomeDir, "runs"), "utf8").trim().split("\n"), ["models"], "one CLI run for both probes");
+  assert.deepEqual(sent, ["Bearer grok-new", "Bearer grok-new"]);
+});
+
+test("POST /api/providers/probe[grok] refuses a clientVersion that cannot be a header, before calling anything", async () => {
+  const grokHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-grok-probe-"));
+  fs.writeFileSync(path.join(grokHomeDir, "auth.json"), JSON.stringify({ "https://auth.x.ai::u": { key: "grok-session-secret", expires_at: new Date(Date.now() + 5 * 3600_000).toISOString() } }));
+  let called = false;
+  await withAdmin(
+    makeCfg(),
+    async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "grok", home: grokHomeDir, clientVersion: "1.0.46\r\nx: y" }) });
+      const body = (await res.json()) as { ok: boolean; error: string };
+      assert.equal(body.ok, false);
+      assert.match(body.error, /clientVersion cannot be sent as a header/);
+    },
+    { probeFetch: async () => { called = true; return new Response("{}", { status: 200 }); } },
+  );
+  assert.equal(called, false);
+});
+
 test("POST /api/providers/probe[grok] without a session says to sign in and calls nothing", async () => {
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "cr-grok-probe-"));
   let called = false;

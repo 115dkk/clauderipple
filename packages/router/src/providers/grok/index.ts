@@ -13,7 +13,7 @@ import type { GrokProvider, OpenAiCompatibleProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { AnthropicRequest } from "../chatgpt/translate.ts";
 import { OpenAiCompatibleAdapter, type OpenAiOutcome } from "../openai/index.ts";
-import { GROK_AUTH_HINT, GrokAuth, GrokAuthError, grokHome } from "./auth.ts";
+import { GROK_AUTH_HINT, GrokAuth, GrokAuthError, grokHome, sharedGrokAuth } from "./auth.ts";
 import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS } from "./catalog.ts";
 
 /**
@@ -23,7 +23,8 @@ import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS } from "./catalog.ts";
 export const GROK_WARNING =
   "This uses the Grok CLI's own sign-in and the chat proxy the CLI talks to. xAI's README for the CLI " +
   "shows that proxy being called directly with this session, but the version header it also requires " +
-  "is undocumented and could change with any CLI release. ClaudeRipple is not affiliated with xAI.";
+  "is undocumented, and the proxy is not a published API: a CLI release or a change on xAI's side can " +
+  "break this without warning. ClaudeRipple is not affiliated with xAI.";
 
 /** The headers the proxy authenticates and routes on. The model goes in a header, not just the body. */
 export function grokHeaders(token: string, model: string, clientVersion: string): Record<string, string> {
@@ -46,12 +47,9 @@ export class GrokAdapter {
 
   constructor(name: string, cfg: GrokProvider, log: Logger, auth?: GrokAuth) {
     this.name = name;
-    this.auth = auth ?? new GrokAuth({
-      home: cfg.home ?? grokHome(),
-      ...(cfg.cli ? { cli: cfg.cli } : {}),
-      ...(cfg.clientVersion ? { clientVersion: cfg.clientVersion } : {}),
-      log,
-    });
+    // Shared with the dashboard's probe and with any other provider on the same session, and kept
+    // across a config change that rebuilds this adapter.
+    this.auth = auth ?? sharedGrokAuth({ home: cfg.home ?? grokHome(), ...(cfg.cli ? { cli: cfg.cli } : {}), log });
     // Chat Completions rather than the `responses` backend the listing names: on Chat the reasoning
     // arrives as text the mapper turns into thinking blocks, and a stable prefix was cached without a
     // conversation header (measured 2026-10-08, §4e). Effort per model comes from the listing the
@@ -71,7 +69,7 @@ export class GrokAdapter {
       authHint: GROK_AUTH_HINT,
       headers: async (model) => {
         const token = this.auth.current();
-        return grokHeaders(token?.key ?? "", model, await this.auth.clientVersion());
+        return grokHeaders(token?.key ?? "", model, await this.auth.clientVersion(cfg.clientVersion));
       },
       unauthorized: async (_model, sent) => this.auth.rejected(bearer(sent)),
     });
@@ -80,14 +78,23 @@ export class GrokAdapter {
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<OpenAiOutcome> {
     // Counting tokens is answered locally and needs no session.
     if (!path.startsWith("/v1/messages/count_tokens")) {
+      // The wait can be a 30s CLI refresh. A client that leaves meanwhile has cancelled the turn, and
+      // the inner adapter only starts listening for that once it is called, so it is watched from here.
+      let closed = res.destroyed;
+      const onClose = (): void => { closed = true; };
+      res.on("close", onClose);
       try {
         await this.auth.token();
       } catch (error) {
+        if (closed) return { status: 0, bytes: 0, note: "client closed" };
         if (!(error instanceof GrokAuthError)) throw error;
         const body = JSON.stringify({ type: "error", error: { type: "authentication_error", message: `Grok: ${error.message}` } });
         res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }).end(body);
         return { status: 401, bytes: Buffer.byteLength(body), note: "no usable Grok session" };
+      } finally {
+        res.off("close", onClose);
       }
+      if (closed) return { status: 0, bytes: 0, note: "client closed" };
     }
     return this.inner.handle(req, res, path, json, model, effort);
   }

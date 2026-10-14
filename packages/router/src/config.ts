@@ -685,6 +685,9 @@ export function validate(c: Config): string[] {
       for (const field of ["home", "cli", "clientVersion"] as const) {
         if (p[field] !== undefined && (typeof p[field] !== "string" || !p[field])) errors.push(`provider ${name}: ${field} must be a non-empty string`);
       }
+      // Sent as `x-grok-client-version`, so it has to survive being a header value.
+      const versionProblem = typeof p.clientVersion === "string" && p.clientVersion ? headerValueProblem(p.clientVersion) : null;
+      if (versionProblem) errors.push(`provider ${name}: clientVersion cannot be sent as a header: ${versionProblem}`);
       if (p.url !== undefined && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.models !== undefined) {
         if (!validModels(p.models)) errors.push(`provider ${name}: ${MODELS_SHAPE}`);

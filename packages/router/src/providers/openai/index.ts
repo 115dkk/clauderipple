@@ -169,7 +169,9 @@ export class OpenAiCompatibleAdapter {
       ...(this.hooks.headers ? await this.hooks.headers(model) : {}),
     });
     let upstreamHeaders: Record<string, string> = {};
-    let upstreamSecrets: string[] = [];
+    // Every credential sent on any attempt: after a 401 retry the vendor's error may still echo the
+    // first one.
+    const upstreamSecrets = new Set<string>();
     // Same input floor behavior as the ChatGPT adapter: the CLI snapshots message_start before usage arrives.
     const key = JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" });
     const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(key) ?? 0);
@@ -179,7 +181,7 @@ export class OpenAiCompatibleAdapter {
 
     const ask = async (): Promise<Response> => {
       upstreamHeaders = await headersNow();
-      upstreamSecrets = credentialHeaderValues(Object.entries(upstreamHeaders));
+      for (const secret of credentialHeaderValues(Object.entries(upstreamHeaders))) upstreamSecrets.add(secret);
       // Nothing has been written to the client yet, so a failure another attempt could answer is
       // asked again here rather than handed to the user as an error they would have to retry by
       // hand. Once this returns, the response is written straight through (see `fetchWithRetry`).
@@ -208,14 +210,14 @@ export class OpenAiCompatibleAdapter {
     } catch (error) {
       res.off("close", onClose);
       if (controller.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
-      const out = anthropicError(502, "api_error", `${label} unreachable: ${(error as Error).message}`);
+      const out = anthropicError(502, "api_error", `${label} unreachable: ${redactErrorText((error as Error).message, [...upstreamSecrets])}`);
       if (!res.headersSent) res.writeHead(out.status, { "content-type": "application/json" }).end(out.body);
       throw error;
     }
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
-      const safeText = redactErrorText(text, upstreamSecrets);
+      const safeText = redactErrorText(text, [...upstreamSecrets]);
       const out = mapHttpError(upstream.status, safeText, label, this.hooks.authHint);
       this.log.warn(`${this.tag} ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
       res.off("close", onClose);
@@ -225,6 +227,7 @@ export class OpenAiCompatibleAdapter {
 
     const wantStream = json.stream === true;
     const mapper = new OpenAiStreamMapper(model, startInput, toolNameRestoreMap(json));
+    mapper.redactError = (message) => redactErrorText(message, [...upstreamSecrets], 2000);
     const parser = new SseParser();
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
