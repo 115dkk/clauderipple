@@ -80,7 +80,11 @@ export class MessageReceipts {
     const records = new Map(this.records);
     const kept = new Map<string, Receipt>();
     for (const [k, record] of records) {
-      if (k !== key && record.state === "completed" && record.at < at - RETENTION_MS) continue;
+      // Completed entries older than retention go; so do pending ones left orphaned by a restart
+      // (the phone resends under a new id, so the orphan would otherwise sit here forever).
+      // A resend of the same orphaned id still answers outcome_unknown: it checks status first
+      // and never reaches here.
+      if (k !== key && record.at < at - RETENTION_MS) continue;
       kept.set(k, record);
     }
     kept.set(key, { key, session, state: "pending", at });

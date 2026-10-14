@@ -38,6 +38,33 @@ test("a pending receipt orphaned by a restart reads as pending with nothing in f
   assert.equal(new OutcomeUnknownError().message, "전송 결과를 확인할 수 없음");
 });
 
+test("beginning a new id prunes orphaned pending entries older than the retention window", t => {
+  const f = file(t);
+  let now = 1_000_000;
+  MessageReceipts.open(f, () => now).begin("send:s:crashed", "s");
+  const afterRestart = MessageReceipts.open(f, () => now);
+  assert.equal(afterRestart.status("send:s:crashed"), "pending");
+  // The phone resends the same text under a new id; beginning it drops the old orphan.
+  now += 8 * 24 * 60 * 60 * 1000;
+  afterRestart.begin("send:s:retry", "s");
+  assert.equal(afterRestart.status("send:s:crashed"), null);
+  assert.equal(afterRestart.status("send:s:retry"), "pending");
+  const stored = JSON.parse(fs.readFileSync(f, "utf8")) as { key: string }[];
+  assert.deepEqual(stored.map(r => r.key), ["send:s:retry"]);
+});
+
+test("pruning never drops the same key being begun", t => {
+  const f = file(t);
+  let now = 1_000_000;
+  MessageReceipts.open(f, () => now).begin("send:s:m1", "s");
+  const afterRestart = MessageReceipts.open(f, () => now);
+  // A resend of the same orphaned id checks status first (outcome_unknown) and never reaches
+  // here; if it did, begin must keep its own pending entry even past the window.
+  now += 8 * 24 * 60 * 60 * 1000;
+  afterRestart.begin("send:s:m1", "s");
+  assert.equal(afterRestart.status("send:s:m1"), "pending");
+});
+
 test("abandoned attempts run fresh on resend; completed ones survive a reopen", t => {
   const f = file(t);
   const receipts = MessageReceipts.open(f);
