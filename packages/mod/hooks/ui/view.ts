@@ -242,10 +242,10 @@ export function effortLabel(value: string, lang: Lang): string {
 /** "claude-opus-5-5[1m]" → "Opus 5.5"; ids it does not know pass through, trimmed. */
 export function modelName(id: string): string {
   const bare = id.replace(/\[.*?\]/g, '').replace(/^claude-/, '')
-  const m = /^(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?/.exec(bare)
+  const m = /^(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?/.exec(bare)
   if (m) return m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
   // A bare alias ("sonnet") reads as its family's name.
-  if (/^(opus|sonnet|haiku|fable)\b/.test(bare) && !bare.includes('-')) return bare.charAt(0).toUpperCase() + bare.slice(1)
+  if (/^(opus|sonnet|haiku|fable|mythos)\b/.test(bare) && !bare.includes('-')) return bare.charAt(0).toUpperCase() + bare.slice(1)
   return bare
 }
 

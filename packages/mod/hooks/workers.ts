@@ -192,7 +192,7 @@ const TITLE_PREFIX = /^[^\s·]+(?:·[a-z]+)? · /
  */
 export function titleName(model: string, models: readonly RouterModel[] = []): string {
   const id = baseModel(model).replace(/\[.*?\]/g, '')
-  const claude = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d+)(?:-(\d{1,2}))?)?/i.exec(id)
+  const claude = /^(?:claude-)?(opus|sonnet|haiku|fable|mythos)(?:-(\d+)(?:-(\d{1,2}))?)?/i.exec(id)
   if (claude) return claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase() + (claude[2] ? claude[2] + (claude[3] ? '.' + claude[3] : '') : '')
   const named = models.find(m => m.value.toLowerCase() === id.toLowerCase())?.name
   if (named) return named.trim().split(/\s+/).pop()!

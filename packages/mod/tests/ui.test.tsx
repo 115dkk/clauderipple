@@ -107,6 +107,8 @@ function mount($: Engine, id: string, surface: (typeof SURFACES)[number], column
 test('view helpers', () => {
   expect(modelName('claude-opus-5-5[1m]')).toBe('Opus 5.5')
   expect(modelName('claude-fable-5-1')).toBe('Fable 5.1')
+  expect(modelName('claude-mythos-5-1')).toBe('Mythos 5.1')
+  expect(modelName('mythos')).toBe('Mythos')
   expect(modelName('sonnet')).toBe('Sonnet')
   expect(modelName('gpt-6.1-sol')).toBe('gpt-6.1-sol')
   expect(countdown(41 * 60_000, 'en')).toBe('41m')

@@ -176,5 +176,5 @@ test('floor wins inverted ceiling, save wins floor, and reasons explain final ch
 
 test('only the measured 5.5 Claude families are cache-safe', () => {
   for (const id of ['claude-opus-5-5', 'claude-sonnet-5-5-20261001', 'haiku-5-5']) assert.equal(isCacheSafeModel(id), true)
-  for (const id of ['claude-fable-5-1', 'claude-opus-4-6', 'gpt-6-1-sol', 'claude-sonnet-5-50', 'sonnet']) assert.equal(isCacheSafeModel(id), false)
+  for (const id of ['claude-fable-5-1', 'claude-mythos-5-1', 'claude-opus-4-6', 'gpt-6-1-sol', 'claude-sonnet-5-50', 'sonnet']) assert.equal(isCacheSafeModel(id), false)
 })

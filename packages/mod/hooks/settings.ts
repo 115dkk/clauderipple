@@ -39,7 +39,9 @@ export const EXTRAS: readonly string[] = ['context', 'limits']
 
 /**
  * Claude's own models as workers: the built-in general-purpose agent run on the model, `model` its
- * current id. The key is what the allow-list stores.
+ * current id. The key is what the allow-list stores. Mythos is not here: the Agent tool's `model`
+ * takes only sonnet, opus, haiku and fable (Claude Code 2.1.295, read 2026-10-14), so a
+ * general-purpose worker on it would be refused.
  */
 export const CLAUDE_WORKERS: readonly { name: string; model: string; provider: string; target: TierTarget }[] = [
   { name: 'general-purpose:haiku', model: 'claude-haiku-5-5', provider: 'anthropic', target: { agent: 'general-purpose', model: 'haiku' } },

@@ -34,7 +34,7 @@ type HookInput = {
 const MARKER = /^\s*\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/;
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 const OUR_PREFIX = /^[^\s·]+(?:·[a-z]+)? · /;
-const CLAUDE_ID = /^claude-(opus|sonnet|haiku|fable)-(\d+(?:-\d+)*?)(?:-\d{8})?$/;
+const CLAUDE_ID = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+(?:-\d+)*?)(?:-\d{8})?$/;
 /** The router's default `effortClamp` (config.ts), for when config.json cannot be read. */
 const DEFAULT_CLAMP: Record<string, string> = { ultra: "max" };
 
@@ -98,7 +98,7 @@ export function fromAgentFile(subagentType: string, dirs: string[]): { model: st
 
 export function claudePretty(modelId: string | undefined): string | null {
   const v = (modelId ?? "").trim().toLowerCase();
-  if (["opus", "sonnet", "haiku", "fable"].includes(v)) return v[0]!.toUpperCase() + v.slice(1);
+  if (["opus", "sonnet", "haiku", "fable", "mythos"].includes(v)) return v[0]!.toUpperCase() + v.slice(1);
   const m = CLAUDE_ID.exec(v);
   return m ? m[1]![0]!.toUpperCase() + m[1]!.slice(1) + m[2]!.replace(/-/g, ".") : null;
 }
