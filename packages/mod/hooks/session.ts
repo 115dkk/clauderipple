@@ -7,6 +7,32 @@ export function hottest(rateLimits: readonly SessionRateLimit[]): Hot | null {
   return limit ? { kind: limit.kind, percent: limit.percentUsed, ...(limit.resetsAt ? { resetsAt: limit.resetsAt } : {}) } : null
 }
 
+const WINDOW_KIND: Record<number, string> = { 300: 'five_hour', 10080: 'seven_day' }
+/** A router snapshot older than this is not shown as the plan's figure. */
+export const CLAUDE_USAGE_STALE_MS = 15 * 60_000
+
+/**
+ * The plan windows of the Claude login this session's requests pass through, from the router's
+ * GET /api/status (`claude.accounts[id=current].quota`, packages/router/src/admin.ts
+ * claudeAccountUsage): for when the host leaves `rateLimits` empty though the requests carry them
+ * (measured 2026-10-14: the router passes the `anthropic-ratelimit-unified-*` headers through).
+ * Percent as the router reports it; a stale or unknown snapshot gives nothing.
+ */
+export function claudeLimitsFrom(status: unknown, now: number): SessionRateLimit[] {
+  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const accounts = object(object(status).claude).accounts
+  const current = Array.isArray(accounts) ? accounts.map(object).find(a => a.id === 'current') : undefined
+  const quota = object(current?.quota)
+  if (typeof quota.at !== 'number' || now - quota.at > CLAUDE_USAGE_STALE_MS) return []
+  const limits = object(quota.rate_limits)
+  return [limits.primary, limits.secondary].map(object).flatMap(w => {
+    const kind = typeof w.window_minutes === 'number' ? WINDOW_KIND[w.window_minutes] : undefined
+    if (!kind || typeof w.used_percent !== 'number' || !Number.isFinite(w.used_percent)) return []
+    const reset = typeof w.reset_at === 'number' ? w.reset_at * (w.reset_at < 1e12 ? 1000 : 1) : NaN
+    return [{ kind, percentUsed: Math.round(w.used_percent * 10) / 10, ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}) }]
+  })
+}
+
 /**
  * The reset is read in the person's own clock: `offsetMinutes` is `Date#getTimezoneOffset` (minutes
  * behind UTC), passed in so tests do not depend on the machine's zone.

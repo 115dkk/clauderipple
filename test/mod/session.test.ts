@@ -1,8 +1,26 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { hottest, limitLabel, saveUntil, swamped, coldAlert, hotAlert, swampAlert, keptAlert, bandPriority } from '../../packages/mod/hooks/session.ts'
+import { hottest, limitLabel, saveUntil, swamped, coldAlert, hotAlert, swampAlert, keptAlert, bandPriority, claudeLimitsFrom, CLAUDE_USAGE_STALE_MS } from '../../packages/mod/hooks/session.ts'
 const now = Date.parse('2026-10-10T00:00:00Z')
 const hot = { kind: 'five_hour', percent: 80, resetsAt: '2026-10-10T05:00:00Z' }
+
+test('the router stands in for the plan windows of the current login, fresh snapshots only', () => {
+  // The shape GET /api/status answered on 2026-10-14.
+  const status = (at: number) => ({ claude: { accounts: [
+    { id: 'other', quota: { at, rate_limits: { primary: { used_percent: 99, window_minutes: 300, reset_at: 1 } } } },
+    { id: 'current', quota: { type: 'claude.usage', at, rate_limits: {
+      primary: { used_percent: 7, window_minutes: 300, reset_at: Date.parse('2026-10-10T03:00:00Z') / 1000 },
+      secondary: { used_percent: 75, window_minutes: 10080, reset_at: Date.parse('2026-10-13T00:00:00Z') / 1000 } } } },
+  ] } })
+  assert.deepEqual(claudeLimitsFrom(status(now - 60_000), now), [
+    { kind: 'five_hour', percentUsed: 7, resetsAt: '2026-10-10T03:00:00.000Z' },
+    { kind: 'seven_day', percentUsed: 75, resetsAt: '2026-10-13T00:00:00.000Z' },
+  ])
+  assert.deepEqual(claudeLimitsFrom(status(now - CLAUDE_USAGE_STALE_MS - 1), now), [])
+  assert.deepEqual(claudeLimitsFrom({ claude: { accounts: [] } }, now), [])
+  assert.deepEqual(claudeLimitsFrom({}, now), [])
+  assert.deepEqual(claudeLimitsFrom(null, now), [])
+})
 
 test('hottest only considers five_hour/seven_day at or above eighty', () => {
   assert.equal(hottest([]), null)

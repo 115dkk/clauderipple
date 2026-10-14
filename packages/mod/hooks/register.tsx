@@ -1,7 +1,7 @@
 // Engine wiring lives here: imported logic and drawings never receive the engine interface.
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
-import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
@@ -13,7 +13,7 @@ import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, quotaWindows,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { bandPriority, coldAlert, hotAlert, hottest, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { bandPriority, claudeLimitsFrom, coldAlert, hotAlert, hottest, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
 import { addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, weighted } from './stats'
@@ -931,6 +931,13 @@ async function openCompact($: EngineInterface, surface: Frame['surface']): Promi
   await update($, compactNote, () => '')
   await update($, panel, () => 'compact')
 }
+/** The router's figure for this login's plan windows; nothing when the router cannot say. */
+async function routerClaudeLimits($: EngineInterface): Promise<SessionRateLimit[]> {
+  try {
+    const status = await $.http.fetch(`${await adminUrl($)}/api/status`)
+    return status.ok ? claudeLimitsFrom(JSON.parse(status.text), await $.clock.now()) : []
+  } catch (error) { await report($, 'claude limits', error); return [] }
+}
 async function refreshUsage($: EngineInterface): Promise<void> {
   const usage = await $.session.usage()
   const c = usage.context
@@ -940,11 +947,15 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   // Below the line again (a compact, a clear), the next crossing shows the heavy-context band once.
   const putOff = await read($, swampHidden)
   if (putOff !== null && (putOff > 100 || !ctx || ctx.percent < (await currentSettings($)).swampAt)) await update($, swampHidden, () => null)
-  const h = hottest(usage.rateLimits)
+  // The host can leave the plan windows out though the replies carried them; on a Claude chat the
+  // router's figure for the same login stands in.
+  const own = usage.rateLimits.some(l => ['five_hour', 'seven_day'].includes(l.kind))
+  const rateLimits = own || !/^claude-/.test(await $.session.model()) ? usage.rateLimits : [...usage.rateLimits, ...await routerClaudeLimits($)]
+  const h = hottest(rateLimits)
   const previous = await read($, hot)
   if (previous && (!h || previous.kind !== h.kind || previous.resetsAt !== h.resetsAt)) await update($, hotHidden, () => null)
   if (JSON.stringify(h) !== JSON.stringify(previous)) await update($, hot, () => h)
-  const top = usage.rateLimits.filter(l => ['five_hour', 'seven_day'].includes(l.kind)).sort((a, b) => b.percentUsed - a.percentUsed)[0]
+  const top = rateLimits.filter(l => ['five_hour', 'seven_day'].includes(l.kind)).sort((a, b) => b.percentUsed - a.percentUsed)[0]
   const l = top ? { kind: top.kind, percent: top.percentUsed, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}) } : null
   // Check the previous binding deadline before a rolled-forward snapshot replaces it.
   await endModeIfOver($)
