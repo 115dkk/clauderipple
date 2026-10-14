@@ -81,7 +81,8 @@ function backupModSettings(file: string, previousRevision: number): void {
   const backup = `${file}.bak-${previousRevision}`;
   fs.copyFileSync(file, backup);
   fs.chmodSync(backup, 0o600);
-  const fd = fs.openSync(backup, "r");
+  // Windows refuses to flush a read-only handle (EPERM, #53), so the backup is opened for writing.
+  const fd = fs.openSync(backup, "r+");
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   const backups = fs.readdirSync(path.dirname(file)).filter(name => /^mod-settings\.json\.bak-\d+$/.test(name))
     .sort((a, b) => Number(b.split("-").at(-1)) - Number(a.split("-").at(-1)));
