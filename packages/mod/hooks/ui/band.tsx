@@ -515,10 +515,9 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   }
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   // The route is a button (it opens the log), so it lights under the pointer like the controls do,
-  // and it has no tip: a tip is laid over the facts, and the app passes no press through a drawn Box,
-  // so the route's own tip lay over it and took every click (2026-10-14). Its card is what the log shows.
+  // and its hover shows its card in the tip layer, to its left (the band draws it outside the facts).
   return (
-    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight()}>
+    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight(tipScope('route'))}>
       <Box flexShrink={0}>
         {r.ok ? <Text color={r.resent ? MUTE : providerColor(r.provider)}>{r.resent ? '↻' : '•'}</Text> : <Text color={TONE.red.text}>✕</Text>}
       </Box>
@@ -683,6 +682,8 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
+  const routeTip = route > 0 && view.route ? routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ') : undefined
+  if (routeTip) tips.push({ key: 'route', text: routeTip })
   for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
@@ -698,10 +699,18 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
         {effort.node}
         {ruled && facts.length ? rule(el, 'facts') : null}
         {facts.map(f => f.node)}
-        {ruled && routeNode ? rule(el, 'route') : null}
-        {routeNode}
         {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP)}
       </Box>
+      {/* The route is a button, so it stays out of the facts: the tip layer laid over them is an
+          absolute Box, and the pointer on an absolute Box is on its parent, so anything under it
+          took neither the hover nor the press (2026-10-14, the route stopped opening the log). Its
+          tip shows in the layer, to its left. */}
+      {routeNode ? (
+        <Box key="band-route" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexShrink={1} minWidth={0}>
+          {ruled ? rule(el, 'route') : null}
+          {routeNode}
+        </Box>
+      ) : null}
       <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.15} flexShrink={0} marginLeft={0.5}>
         {controls.map(c => c.node)}
         {actions.hide ? closeButton(el, 'hide', t(frame.lang, 'band.hideBand'), () => actions.hide!(), tipScope('hide')) : null}
