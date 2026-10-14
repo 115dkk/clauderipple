@@ -90,7 +90,23 @@ export function verdictObject(text: string): Record<string, unknown> | undefined
       }
     }
   }
-  return undefined
+  return looseVerdictObject(text)
+}
+
+/**
+ * A small judge sometimes breaks its JSON (Haiku answered `…"why":"…","}`, #53). Its complete
+ * `"key": value` pairs still carry the verdict, so they are read one by one; the parsers above
+ * check every field they use, so nothing here is trusted beyond a JSON scalar.
+ */
+function looseVerdictObject(text: string): Record<string, unknown> | undefined {
+  const start = text.indexOf('{')
+  if (start === -1) return undefined
+  const value: Record<string, unknown> = {}
+  const pair = /"(\w+)"\s*:\s*("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)/g
+  for (const match of text.slice(start).matchAll(pair)) {
+    try { value[match[1]!] ??= JSON.parse(match[2]!) } catch { /* a malformed scalar adds nothing */ }
+  }
+  return Object.keys(value).length ? value : undefined
 }
 
 const effortCriteria = {

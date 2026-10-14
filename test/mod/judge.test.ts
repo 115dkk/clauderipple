@@ -67,6 +67,15 @@ test('JSON verdicts tolerate fences/prose, reject invalid effort and bound confi
   assert.equal(verdictObject('no JSON'), undefined)
 })
 
+test('A verdict whose JSON is broken still yields its complete fields (#53)', () => {
+  // Measured from Haiku 2026-10-14: a stray `,"` before the closing brace.
+  assert.deepEqual(parseEffortVerdict('{"effort":"medium","sure":0.6,"why":"Structure explanation needs inspection; keep it simple","}'),
+    { effort: 'medium', sure: 0.6, why: 'Structure explanation needs inspection; keep it simple' })
+  assert.deepEqual(parseEffortVerdict('{"effort":"high","sure":0.8,"why":"cut off'), { effort: 'high', sure: 0.8, why: '' })
+  assert.deepEqual(verdictObject('{"effort":"low","why":"a \\"quoted\\" word",'), { effort: 'low', why: 'a "quoted" word' })
+  assert.equal(parseEffortVerdict('effort: high'), undefined)
+})
+
 test('Jev effort body has only the specified root/state/questions and all effort criteria', () => {
   const body = jevEffortRequest({ ...input, next: 'x'.repeat(5000), contextPercent: 90 })
   assert.deepEqual(Object.keys(body), ['model', 'state', 'questions'])
