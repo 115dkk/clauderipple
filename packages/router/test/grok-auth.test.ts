@@ -188,8 +188,11 @@ test("turns refused together share one forced refresh, and all of them recover",
 
 test("a token the CLI rewrote with the same length and mtime is still read after the refresh", async () => {
   const dir = home();
+  // Whole seconds, so restoring the time loses nothing and the stat really is identical.
+  const pinned = new Date(Math.floor(Date.now() / 1000) * 1000);
   writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-a", expiresAt: NOW + 5 * HOUR } });
-  const pinned = fs.statSync(grokAuthPath(dir)).mtime;
+  fs.utimesSync(grokAuthPath(dir), pinned, pinned);
+  const before = fs.statSync(grokAuthPath(dir));
   const cli = fakeCli(dir, () => {
     writeAuth(dir, { "https://auth.x.ai::a": { key: "tok-b", expiresAt: NOW + 5 * HOUR } });
     fs.utimesSync(grokAuthPath(dir), pinned, pinned);
@@ -197,7 +200,15 @@ test("a token the CLI rewrote with the same length and mtime is still read after
   const auth = new GrokAuth({ home: dir, log: quiet, run: cli.run, now: () => NOW, env: {} });
   assert.equal(auth.current()?.key, "tok-a");
   assert.equal(await auth.rejected("tok-a"), true);
+  const after = fs.statSync(grokAuthPath(dir));
+  assert.deepEqual([after.mtimeMs, after.size], [before.mtimeMs, before.size], "the stat alone cannot tell the two files apart");
   assert.equal(auth.current()?.key, "tok-b");
+});
+
+test("a key that cannot travel in a header is not taken as a session", () => {
+  const dir = home();
+  writeAuth(dir, { "https://auth.x.ai::a": { key: "tok\nbroken", expiresAt: NOW + 5 * HOUR } });
+  assert.equal(readGrokToken(grokAuthPath(dir)), null);
 });
 
 test("the client version is the installed CLI's, asked once per binary, with a fallback", async () => {
@@ -245,6 +256,25 @@ test("one GrokAuth per Grok home and binary, however the home is spelled", () =>
   assert.equal(sharedGrokAuth({ home: link, log: quiet }), a);
   assert.notEqual(sharedGrokAuth({ home: home(), log: quiet }), a);
   assert.notEqual(sharedGrokAuth({ home: dir, cli: path.join(dir, "other-grok"), log: quiet }), a);
+  // Naming the binary the lookup finds anyway is the same refresher.
+  fakeCli(dir);
+  const found = sharedGrokAuth({ home: dir, log: quiet, env: { PATH: "", HOME: dir } });
+  assert.equal(sharedGrokAuth({ home: dir, cli: path.join(dir, "bin", GROK_BIN), log: quiet, env: { PATH: "", HOME: dir } }), found);
+});
+
+test("an instance found through a symlink keeps the home it was resolved to", async () => {
+  const a = home();
+  const b = home();
+  writeAuth(a, { "https://auth.x.ai::a": { key: "tok-in-a", expiresAt: NOW + 5 * HOUR } });
+  writeAuth(b, { "https://auth.x.ai::b": { key: "tok-in-b", expiresAt: NOW + 5 * HOUR } });
+  const link = `${a}-moving`;
+  fs.symlinkSync(a, link);
+  const viaLink = sharedGrokAuth({ home: link, log: quiet, env: { PATH: "", HOME: a } });
+  fs.unlinkSync(link);
+  fs.symlinkSync(b, link);
+  const viaA = sharedGrokAuth({ home: a, log: quiet, env: { PATH: "", HOME: a } });
+  assert.equal(viaA, viaLink);
+  assert.equal(viaA.current()?.key, "tok-in-a", "a's instance reads a's session, not where the link points now");
 });
 
 test("findGrokCli looks in the CLI's own bin before PATH, and honours an explicit path only if it runs", () => {

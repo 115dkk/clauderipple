@@ -1009,7 +1009,8 @@ async function probeGrok(
   try {
     response = await probeFetch(`${base}/models`, { headers });
   } catch (error) {
-    return fallback({ ok: false, auth: "unreachable", error: errorText(error) });
+    // fetch quotes a header value it refuses, which here is the session token.
+    return fallback({ ok: false, auth: "unreachable", error: redactErrorText(errorText(error), [token.key]) });
   }
   if (response.status === 401 || response.status === 403) {
     return fallback({ ok: false, auth: "bad-key", error: `the proxy refused the Grok session (HTTP ${response.status}): ${GROK_AUTH_HINT}` });

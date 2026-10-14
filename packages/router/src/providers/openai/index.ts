@@ -48,8 +48,10 @@ export function looksLikeAuth(text: string): boolean {
  * authentication error to say what to do about it — a credential the user can fix in another tool is
  * only fixable if the error names the tool.
  */
-export function mapHttpError(status: number, text: string, label = "OpenAI-compatible provider", authHint?: string): { status: number; body: string } {
-  const message = `${label}: ${vendorMessage(text)}`;
+export function mapHttpError(status: number, text: string, label = "OpenAI-compatible provider", authHint?: string, redact: (message: string) => string = (message) => message): { status: number; body: string } {
+  // Cleaned after decoding: a credential escaped inside the JSON (`\u0074ok…`) only reads as itself
+  // once the string is parsed.
+  const message = `${label}: ${redact(vendorMessage(text))}`;
   const authMessage = authHint ? `${message} — ${authHint}` : message;
   if (status === 401) return anthropicError(401, "authentication_error", authMessage);
   // A 403 is often not the credential at all: a data-sharing policy that needs opting into, a
@@ -98,6 +100,8 @@ export type OpenAiAdapterHooks = {
   unauthorized?: (model: string, sent: Record<string, string>) => Promise<boolean>;
   /** Appended to an authentication error the user reads. */
   authHint?: string;
+  /** `fetchWithRetry`'s attempt ceiling. Test seam; the default is its own. */
+  attempts?: number;
 };
 
 export class OpenAiCompatibleAdapter {
@@ -172,6 +176,7 @@ export class OpenAiCompatibleAdapter {
     // Every credential sent on any attempt: after a 401 retry the vendor's error may still echo the
     // first one.
     const upstreamSecrets = new Set<string>();
+    const redact = (text: string): string => redactErrorText(text, [...upstreamSecrets], 2000);
     // Same input floor behavior as the ChatGPT adapter: the CLI snapshots message_start before usage arrives.
     const key = JSON.stringify({ model, wire, system: json.system ?? "", user: json.messages.find((message) => message.role === "user")?.content ?? "" });
     const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(key) ?? 0);
@@ -190,7 +195,7 @@ export class OpenAiCompatibleAdapter {
         headers: upstreamHeaders,
         body: requestBody,
         signal: controller.signal,
-      }, { log: (line) => this.log.info(`${this.tag} ${this.name}: ${line}`) });
+      }, { log: (line) => this.log.info(`${this.tag} ${this.name}: ${redact(line)}`), ...(this.hooks.attempts ? { attempts: this.hooks.attempts } : {}) });
     };
 
     let upstream: Response;
@@ -210,15 +215,21 @@ export class OpenAiCompatibleAdapter {
     } catch (error) {
       res.off("close", onClose);
       if (controller.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
-      const out = anthropicError(502, "api_error", `${label} unreachable: ${redactErrorText((error as Error).message, [...upstreamSecrets])}`);
+      // fetch names an invalid header value in full, credential included; the message also reaches the
+      // request log through whoever catches this.
+      (error as Error).message = redact((error as Error).message);
+      const out = anthropicError(502, "api_error", `${label} unreachable: ${(error as Error).message}`);
       if (!res.headersSent) res.writeHead(out.status, { "content-type": "application/json" }).end(out.body);
       throw error;
     }
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
-      const safeText = redactErrorText(text, [...upstreamSecrets]);
-      const out = mapHttpError(upstream.status, safeText, label, this.hooks.authHint);
+      // Re-serialised first, so an escaped credential in a JSON body is spelled out before it is matched.
+      let plain = text;
+      try { plain = JSON.stringify(JSON.parse(text)); } catch { /* not JSON: matched as it came */ }
+      const safeText = redactErrorText(plain, [...upstreamSecrets]);
+      const out = mapHttpError(upstream.status, text, label, this.hooks.authHint, redact);
       this.log.warn(`${this.tag} ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
       res.off("close", onClose);
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
@@ -227,7 +238,7 @@ export class OpenAiCompatibleAdapter {
 
     const wantStream = json.stream === true;
     const mapper = new OpenAiStreamMapper(model, startInput, toolNameRestoreMap(json));
-    mapper.redactError = (message) => redactErrorText(message, [...upstreamSecrets], 2000);
+    mapper.redactError = redact;
     const parser = new SseParser();
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();

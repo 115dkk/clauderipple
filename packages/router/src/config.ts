@@ -454,6 +454,8 @@ export function headerValueProblem(value: string): string | null {
     if (code > 0xff) return `character ${i + 1} is "${value[i]}", which cannot travel in an HTTP header — paste the key on its own, without any label or surrounding text`;
     // A newline would split the header; a stray one usually means a copied line rather than a key.
     if (code === 0x0a || code === 0x0d) return `there is a line break at character ${i + 1} — paste the key on its own, without the line around it`;
+    // fetch refuses a NUL too, so a value that passes here would only fail when sent.
+    if (code === 0x00) return `there is a NUL character at character ${i + 1} — paste the key on its own`;
   }
   return null;
 }

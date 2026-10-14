@@ -230,6 +230,7 @@ test("validate accepts a grok provider and refuses a model that would leave its 
   // clientVersion goes out as a header value.
   assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", clientVersion: "1.0.46\nx-evil: 1" } } }).some((e) => e.includes("clientVersion cannot be sent as a header")));
   assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", clientVersion: "버전1" } } }).some((e) => e.includes("clientVersion cannot be sent as a header")));
+  assert.ok(validate({ ...DEFAULTS, providers: { grok: { type: "grok", clientVersion: "1.0.46\u0000" } } }).some((e) => e.includes("clientVersion cannot be sent as a header")));
   // A grok model with no overrides is its own provider: providerFor hands it back unchanged.
   const provider = { type: "grok" as const, models: [{ id: "grok-4.7" }] };
   assert.equal(providerFor(provider, "grok-4.7"), provider);

@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import { mapHttpError, OpenAiCompatibleAdapter } from "../src/providers/openai/index.ts";
 import { Logger } from "../src/log.ts";
@@ -248,4 +249,35 @@ test("a 403 that is not about the credential is a permission error, not an auth 
   assert.match(rejected.body, /authentication_error/);
 
   assert.equal(mapHttpError(401, "{}").status, 401);
+});
+
+// fetch refuses a header value it cannot send and quotes it whole — credential included — in the
+// error, which reaches the retry log, the client and (rethrown) the request log.
+test("a credential quoted in a connection error is redacted in the retry log, the client error and the rethrown error", async () => {
+  const lines: string[] = [];
+  const capture = { info: (line: string) => lines.push(line), warn: (line: string) => lines.push(line), error: (line: string) => lines.push(line) } as unknown as Logger;
+  const bad = new OpenAiCompatibleAdapter("bad", { type: "openai-compatible", url: "http://127.0.0.1:9/v1", wire: "chat" }, capture, {
+    headers: async () => ({ authorization: "Bearer sec\u0000ret-token-1234" }),
+    attempts: 2,
+  });
+  // A response stand-in: nothing here needs a socket.
+  let text = "";
+  const res = Object.assign(new EventEmitter(), {
+    headersSent: false,
+    writeHead() { this.headersSent = true; return this; },
+    end(body?: string) { text += body ?? ""; return this; },
+  }) as unknown as http.ServerResponse;
+  let thrown: Error | undefined;
+  await bad.handle({} as http.IncomingMessage, res, "/v1/messages", { model: "m", max_tokens: 10, messages: [{ role: "user", content: "hi" }] } as AnthropicRequest, "m", undefined)
+    .catch((error: Error) => { thrown = error; });
+  assert.match(text, /unreachable/);
+  assert.ok(lines.some((line) => /could not connect/.test(line)), "the retry was logged");
+  assert.ok(thrown, "the error still reaches the caller");
+  for (const out of [text, ...lines, thrown!.message]) assert.doesNotMatch(out, /ret-token-1234/);
+});
+
+test("a credential escaped inside a JSON error body is redacted once the body is decoded", () => {
+  const body = JSON.stringify({ error: { message: "bad key PLACEHOLDER" } }).replace("PLACEHOLDER", "\\u0073ecret-xyz");
+  assert.match(mapHttpError(401, body).body, /secret-xyz/, "decoded, the escape spells the credential");
+  assert.doesNotMatch(mapHttpError(401, body, "P", undefined, (m) => m.replaceAll("secret-xyz", "[REDACTED]")).body, /secret-xyz/);
 });

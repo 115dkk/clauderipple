@@ -56,7 +56,8 @@ export function readGrokToken(file: string): GrokToken | null {
   for (const value of Object.values(doc as Record<string, unknown>)) {
     if (!value || typeof value !== "object") continue;
     const entry = value as { key?: unknown; expires_at?: unknown; email?: unknown };
-    if (typeof entry.key !== "string" || !entry.key) continue;
+    // A key that cannot be a header value would only fail inside fetch, which quotes it in the error.
+    if (typeof entry.key !== "string" || !entry.key || /[\0\r\n]|[^\0-\xff]/.test(entry.key)) continue;
     const expiresAt = typeof entry.expires_at === "string" ? Date.parse(entry.expires_at) || 0 : 0;
     if (best && expiresAt <= best.expiresAt) continue;
     best = { key: entry.key, expiresAt, ...(typeof entry.email === "string" ? { email: entry.email } : {}) };
@@ -283,12 +284,19 @@ const shared = new Map<string, GrokAuth>();
  * is not part of it: that is passed to `clientVersion()` by whoever sends the header.
  */
 export function sharedGrokAuth(opts: Omit<GrokAuthOptions, "clientVersion">): GrokAuth {
-  let home = path.resolve(opts.home);
-  try { home = fs.realpathSync(home); } catch { /* not there yet: the resolved path names it */ }
-  const key = JSON.stringify([home, opts.cli ?? ""]);
+  const real = (file: string): string => {
+    try { return fs.realpathSync(file); } catch { return file; /* not there yet: the resolved path names it */ }
+  };
+  const home = real(path.resolve(opts.home));
+  // The binary that would actually run, so a config that names the CLI the lookup would find anyway
+  // still shares the instance of one that leaves it out.
+  const cli = findGrokCli(home, opts.cli, opts.env);
+  const key = JSON.stringify([home, cli ? real(cli) : opts.cli ?? ""]);
   let auth = shared.get(key);
   if (!auth) {
-    auth = new GrokAuth(opts);
+    // Built on the resolved home: one created through a symlink must not follow the link elsewhere
+    // later while still being found under the old target.
+    auth = new GrokAuth({ ...opts, home });
     shared.set(key, auth);
   }
   return auth;

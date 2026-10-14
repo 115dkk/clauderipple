@@ -21,6 +21,8 @@ let accepted = new Set(["tok-a"]);
 let streamError: string | null = null;
 /** Appended to a 401 body, to play a proxy that echoes more than the token it was just sent. */
 let refusalEcho = "";
+/** When set, a refusal is sent with exactly this body. */
+let rawRefusal: string | null = null;
 const upstream = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -28,7 +30,7 @@ const upstream = http.createServer((req, res) => {
     seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as Record<string, unknown> });
     const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
     if (!accepted.has(token)) {
-      res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: `Invalid or expired credentials (token ${token})${refusalEcho}` }));
+      res.writeHead(401, { "content-type": "application/json" }).end(rawRefusal ?? JSON.stringify({ error: `Invalid or expired credentials (token ${token})${refusalEcho}` }));
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -222,6 +224,18 @@ test("after a 401 retry, an error that echoes the first token is redacted as wel
   refusalEcho = "";
   accepted = new Set(["tok-a"]);
   onRefresh = () => {};
+});
+
+test("a refused token the proxy escapes inside its JSON error is still redacted for the client", async () => {
+  writeAuth("tok-e");
+  accepted = new Set();
+  rawRefusal = '{"error":"session \\u0074ok-e was revoked"}';
+  const res = await call(turn("grok-4.7"));
+  assert.equal(res.status, 401);
+  assert.match(res.text, /was revoked/);
+  assert.doesNotMatch(res.text, /tok-e/);
+  rawRefusal = null;
+  accepted = new Set(["tok-a"]);
 });
 
 test("a client that leaves while the session is being refreshed cancels the turn: nothing is sent", async () => {
