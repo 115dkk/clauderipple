@@ -136,3 +136,30 @@ test("ResponseUsageTap inflates a gzip SSE stream side-band", async () => {
   assert.equal(r.usage?.cached, 900);
   assert.equal(r.usage?.output, 42);
 });
+
+test("ResponseUsageTap keeps usage when a whole SSE body over 64KiB arrives at once (#55)", async () => {
+  const zlib = await import("node:zlib");
+  const delta = 'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"' + "a".repeat(200) + '"}}\n\n';
+  const sse = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":900,"cache_creation_input_tokens":7,"output_tokens":1}}}\n\n',
+    delta.repeat(400),
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}\n\n',
+  ].join("");
+  assert.ok(sse.length > 64 * 1024);
+  const expected = { usage: { input: 100, cached: 900, cacheWrite: 7, output: 42 }, stopReason: "end_turn" };
+  const gzip = new ResponseUsageTap("text/event-stream", "gzip");
+  gzip.feed(zlib.gzipSync(Buffer.from(sse)));
+  assert.deepEqual(gzip.finish(), expected);
+  const plain = new ResponseUsageTap("text/event-stream", "identity");
+  plain.feed(Buffer.from(sse));
+  assert.deepEqual(plain.finish(), expected);
+});
+
+test("ResponseUsageTap drops an over-long SSE line whole and reads the events after it", () => {
+  const tap = new ResponseUsageTap("text/event-stream", "identity");
+  tap.feed(Buffer.from('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n\n'));
+  tap.feed(Buffer.from("data: " + "x".repeat(70 * 1024)));
+  tap.feed(Buffer.from('data: {"type":"message_delta"}\n\n'));
+  tap.feed(Buffer.from('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}\n\n'));
+  assert.deepEqual(tap.finish(), { usage: { input: 5, cached: 0, output: 9 }, stopReason: "end_turn" });
+});

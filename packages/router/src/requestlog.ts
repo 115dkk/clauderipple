@@ -181,6 +181,7 @@ export class ResponseUsageTap {
   private readonly isSse: boolean;
   private readonly decoder = new TextDecoder();
   private carry = "";
+  private skipSseLine = false;
   private event = "";
   private data: string[] = [];
   private dropUntilNewline = false;
@@ -258,25 +259,20 @@ export class ResponseUsageTap {
     return { ...(this.usage ? { usage: this.usage } : {}), ...(this.stopReason ? { stopReason: this.stopReason } : {}) };
   }
 
+  // Complete lines are consumed before the cap applies, so an inflated body or one large chunk keeps
+  // its events; only an unfinished line longer than the cap is dropped, along with its later bytes.
   private feedSse(text: string): void {
-    this.carry += text;
-    if (this.carry.length > MAX_CARRY) {
-      const newline = this.carry.lastIndexOf("\n");
-      if (newline < 0) {
-        this.carry = "";
-        this.event = "";
-        this.data = [];
-        return;
-      }
-      this.carry = this.carry.slice(newline + 1);
-      this.event = "";
-      this.data = [];
-    }
+    const buffer = this.carry + text;
+    let start = 0;
     for (;;) {
-      const newline = this.carry.indexOf("\n");
-      if (newline < 0) return;
-      const raw = this.carry.slice(0, newline);
-      this.carry = this.carry.slice(newline + 1);
+      const newline = buffer.indexOf("\n", start);
+      if (newline < 0) break;
+      const raw = buffer.slice(start, newline);
+      start = newline + 1;
+      if (this.skipSseLine) {
+        this.skipSseLine = false;
+        continue;
+      }
       const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
       if (line === "") {
         this.consumeSseEvent();
@@ -287,6 +283,13 @@ export class ResponseUsageTap {
       } else if (line.startsWith("data:")) {
         this.data.push(line.slice(5).trimStart());
       }
+    }
+    this.carry = buffer.slice(start);
+    if (this.carry.length > MAX_CARRY) {
+      this.carry = "";
+      this.skipSseLine = true;
+      this.event = "";
+      this.data = [];
     }
   }
 
