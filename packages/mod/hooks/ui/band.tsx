@@ -694,7 +694,10 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const routeNode = route > 0 ? routeDrawn(el, frame, view, actions, route) : ''
   const row = (
     <Box key="band-row" flexDirection="row" alignItems="center" width="100%" minWidth={0} height={rowsOf(ROW_H)}>
-      <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
+      {/* The facts keep their own width (the drop rules above already made them fit) and take what
+          is left over; the route beside them is what gives way, down to its own minimum, truncating
+          the model's name. A facts box allowed to shrink let the route draw over them (2026-10-14). */}
+      <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexGrow={1} flexShrink={0} minWidth={0}>
         {crest}
         {effort.node}
         {ruled && facts.length ? rule(el, 'facts') : null}
