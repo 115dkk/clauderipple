@@ -20,8 +20,10 @@ import crypto from "node:crypto";
 export type WireCandidate = { wire: "chat" | "responses" | "anthropic"; url: string; authHeader?: "x-api-key" | "authorization-bearer" };
 
 /** What a measurement found. `wire` is set only when a wire actually answered; on any failure the
- * result carries `error` and no `wire`, so a caller can never mistake a guess for a measurement. */
-export type Measured = { id: string; wire?: "chat" | "responses" | "anthropic"; effortLevels?: string[]; error?: string };
+ * result carries `error` and no `wire`, so a caller can never mistake a guess for a measurement.
+ * `contextWindow` is not measured here — a probe request cannot see it — but the catalogue states
+ * it, so a caller folds it in on the same result (admin.ts `applyMeasurements`). */
+export type Measured = { id: string; wire?: "chat" | "responses" | "anthropic"; effortLevels?: string[]; contextWindow?: number; error?: string };
 
 export type MeasureDeps = { fetch: (url: string, init: RequestInit) => Promise<Response>; sessionHeader?: string; headers?: Record<string, string> };
 

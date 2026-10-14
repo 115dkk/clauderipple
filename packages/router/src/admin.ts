@@ -1300,8 +1300,9 @@ function effortUndeclared(p: Provider): boolean {
  *
  * Read again here rather than reusing what the job started with: the user may have saved from the
  * GUI while the measurements ran, and writing back a stale copy would silently revert that save.
- * Only a model that is still present is touched, and only into a blank field — a `wire` or
- * `effortLevels` already on the model is the user's, and an explicitly empty array is a decision
+ * Only a model that is still present is touched, and only into a blank field — a `wire`,
+ * `effortLevels` or `contextWindow` already on the model is the user's or the vendor's, and an
+ * explicitly empty ladder is a decision
  * (it disables the provider fallback), not an empty slot. A model whose measurement errored is
  * left entirely alone. The result is validated with the same `validate` the GUI's save uses, so a
  * bad edit is refused rather than written.
@@ -1320,10 +1321,11 @@ function applyMeasurements(configFile: string, results: Measured[]): { applied: 
       if (!("models" in provider) || !provider.models) continue;
       const model = provider.models.find((entry) => entry.id === result.id);
       if (!model) continue;
-      const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}`;
+      const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
       if (model.wire === undefined) model.wire = result.wire;
       if (model.effortLevels === undefined && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
-      if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}` !== before) applied++;
+      if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
+      if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
     }
   }
   const errors = validate(current);
@@ -1360,6 +1362,52 @@ export function measureUnsettledModels(deps: AdminDeps): number {
     started++;
   }
   return started;
+}
+
+/**
+ * Give models already saved without a context window the one the catalogue states.
+ *
+ * OpenCode's `/models` reports ids alone, so a provider set up before the catalogue's `limit.context`
+ * was read keeps no window and falls back to `cli.autoCompactWindow` — a quarter of a 1M model's real
+ * window. The measurement folds the catalogue's window in, but only over the models it runs on and
+ * only through its own write; this pass reaches the models already on disk, once, at start-up. Only
+ * into a blank field, through the same validated write, so a window the user or the vendor set is
+ * never overwritten. Returns the `provider/model` ids it filled.
+ */
+export async function backfillContextWindows(deps: AdminDeps): Promise<string[]> {
+  const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
+  if (!catalog) {
+    deps.log.warn("admin: context windows not backfilled: the catalogue could not be had");
+    return [];
+  }
+  let current: Config;
+  try {
+    current = JSON.parse(fs.readFileSync(deps.configFile, "utf8")) as Config;
+  } catch (e) {
+    deps.log.warn(`admin: context windows not backfilled: could not read config: ${errorText(e)}`);
+    return [];
+  }
+  const filled: string[] = [];
+  for (const [name, provider] of Object.entries(current.providers)) {
+    if (!("models" in provider) || !provider.models) continue;
+    const preset = "preset" in provider ? provider.preset : undefined;
+    for (const model of provider.models) {
+      if (model.contextWindow !== undefined) continue;
+      const entry = catalogEntry(catalog, preset, model.id);
+      if (entry?.contextWindow === undefined) continue;
+      model.contextWindow = entry.contextWindow;
+      filled.push(`${name}/${model.id}`);
+      deps.log.info(`admin: ${name}/${model.id} context window ${entry.contextWindow} (catalogue)`);
+    }
+  }
+  if (filled.length === 0) return [];
+  const errors = validate(current);
+  if (errors.length > 0) {
+    deps.log.warn(`admin: context windows not backfilled: config did not validate: ${errors[0]}`);
+    return [];
+  }
+  writeConfigFile(deps.configFile, current);
+  return filled;
 }
 
 /**
@@ -1435,6 +1483,9 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     const known = stated !== undefined;
     const measured = await measureModel(id, candidates, known ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }, { discover: discover && !known });
     if (stated && measured.wire) measured.effortLevels = stated;
+    // The wire was answered, so the model exists: the catalogue's own window travels with the result
+    // and is written only into a model that has none (see applyMeasurements).
+    if (measured.wire && listed?.contextWindow !== undefined) measured.contextWindow = listed.contextWindow;
     job.results.push(measured);
     job.done++;
     deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : ""}` : ""}`}`);

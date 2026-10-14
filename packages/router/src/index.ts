@@ -15,7 +15,7 @@ import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
 import { Proxy } from "./proxy.ts";
-import { adoptNewClaudeModels, measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
+import { adoptNewClaudeModels, backfillContextWindows, measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
 import { loadModelCatalog } from "./catalog.ts";
 import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
@@ -184,9 +184,15 @@ proxy
     const admin = await startAdmin(adminDeps);
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
     setImmediate(premintLeaves);
-    // A minute in, once start-up traffic has settled: a few one-token requests per model whose
-    // effort nobody has measured yet, so effort works without the owner re-saving the provider.
-    setTimeout(() => measureUnsettledModels(adminDeps), 60_000).unref();
+    // A minute in, once start-up traffic has settled: first the catalogue's context windows are
+    // written into models already saved without one (a one-shot pass), then a few one-token requests
+    // per model whose effort nobody has measured yet, so effort works without the owner re-saving the
+    // provider. The backfill runs first so its write lands before the measured jobs re-read the config.
+    setTimeout(() => {
+      void backfillContextWindows(adminDeps)
+        .catch((e: Error) => log!.warn(`context windows: ${e.message}`))
+        .finally(() => measureUnsettledModels(adminDeps));
+    }, 60_000).unref();
     // Claude releases reach the declared models without a ClaudeRipple release: checked a minute in,
     // then every six hours (the catalogue itself is cached for an hour).
     const adopt = () => void adoptNewClaudeModels(adminDeps).catch((e: Error) => log!.warn(`claude models: ${e.message}`));

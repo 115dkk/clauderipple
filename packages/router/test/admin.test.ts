@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps } from "../src/admin.ts";
+import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
@@ -1923,6 +1923,86 @@ test("a model the catalogue describes is measured with one request and takes the
     assert.deepEqual(models.find((m) => m.id === "glm-5.3-flash")?.effortLevels, ["low", "high", "max"]);
     assert.equal(models.find((m) => m.id === "glm-5.3-flash")?.wire, "chat");
   }, { measureFetch, modelCatalog });
+});
+
+// OpenCode's `/models` reports ids alone, so a model the catalogue lists has no window unless the
+// catalogue's `limit.context` is written in. It goes only into a blank field (the user's stands).
+test("measurement writes the catalogue's context window into a model that has none, and never overwrites one", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "opencode-go": {
+        type: "openai-compatible",
+        url: "https://opencode.ai/zen/go/v1",
+        wire: "responses",
+        preset: "opencode-go",
+        headers: { authorization: "Bearer sk-test" },
+        models: [
+          { id: "muse-spark-1.3-contributor", name: "Muse", contextWindow: 999 },
+          { id: "deepseek-v4.1-flash", name: "DeepSeek" },
+        ],
+      },
+    },
+  });
+  const modelCatalog = async (): Promise<unknown> => ({
+    "opencode-go": {
+      models: {
+        "muse-spark-1.3-contributor": { reasoning: true, reasoning_options: [{ type: "effort", values: ["max"] }], limit: { context: 1048576 } },
+        "deepseek-v4.1-flash": { reasoning: true, reasoning_options: [{ type: "effort", values: ["low", "high"] }], limit: { context: 1000000 } },
+      },
+    },
+  });
+  const measureFetch = async (): Promise<Response> => new Response("{}", { status: 200 });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "opencode-go", models: ["muse-spark-1.3-contributor", "deepseek-v4.1-flash"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models!;
+    assert.equal(models.find((m) => m.id === "muse-spark-1.3-contributor")?.contextWindow, 999, "a window already set is not overwritten");
+    assert.equal(models.find((m) => m.id === "deepseek-v4.1-flash")?.contextWindow, 1000000);
+  }, { measureFetch, modelCatalog });
+});
+
+// The same window for models already saved: OpenCode's ids-only `/models` left them without one, so
+// they fell back to `cli.autoCompactWindow`. The backfill reaches them once, at start-up.
+test("backfillContextWindows fills only models without a window, leaving a set one alone", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-window-"));
+  try {
+    const cfg = makeCfg({
+      providers: {
+        "opencode-go": {
+          type: "openai-compatible",
+          url: "https://opencode.ai/zen/go/v1",
+          preset: "opencode-go",
+          headers: { authorization: "Bearer sk-test" },
+          models: [
+            { id: "muse-spark-1.3-contributor", name: "Muse" },
+            { id: "deepseek-v4.1-flash", name: "DeepSeek", contextWindow: 123 },
+            { id: "not-listed", name: "Unlisted" },
+          ],
+        },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const lines: string[] = [];
+    const log = new Logger(null, 1_000_000, 1, false);
+    log.info = (msg: string) => { lines.push(msg); };
+    const modelCatalog = async (): Promise<unknown> => ({
+      "opencode-go": { models: { "muse-spark-1.3-contributor": { limit: { context: 1048576 } }, "deepseek-v4.1-flash": { limit: { context: 1000000 } } } },
+    });
+    const deps = { config: () => cfg, configFile, log, modelCatalog } as unknown as AdminDeps;
+    assert.deepEqual(await backfillContextWindows(deps), ["opencode-go/muse-spark-1.3-contributor"]);
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["opencode-go"]!.models!;
+    assert.equal(models.find((m) => m.id === "muse-spark-1.3-contributor")?.contextWindow, 1048576);
+    assert.equal(models.find((m) => m.id === "deepseek-v4.1-flash")?.contextWindow, 123, "the vendor's own window stands");
+    assert.equal("contextWindow" in (models.find((m) => m.id === "not-listed") ?? {}), false);
+    assert.ok(lines.some((line) => line === "admin: opencode-go/muse-spark-1.3-contributor context window 1048576 (catalogue)"), `expected the catalogue log line, got ${JSON.stringify(lines)}`);
+    assert.deepEqual(await backfillContextWindows(deps), [], "a second pass finds nothing left to fill");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("a model the plan refuses is still reported when the catalogue lists it", async () => {
