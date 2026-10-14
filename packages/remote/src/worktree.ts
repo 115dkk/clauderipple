@@ -69,6 +69,8 @@ export async function createWorktree(opts: WorktreeOptions): Promise<WorktreeRes
     if (!head || head === "HEAD") throw new Error("The repository has no current branch to branch from.");
     base = head;
   }
+  // The base comes from the phone and goes on git's command line: a leading dash would be an option.
+  if (base.startsWith("-")) throw new Error(`Unknown base branch: ${base}`);
   try { await git(root, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`]); }
   catch { throw new Error(`Unknown base branch: ${base}`); }
   const slug = worktreeSlug(opts.text) || `session-${(opts.now ?? Date.now)()}`;
