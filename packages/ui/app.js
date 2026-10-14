@@ -2695,7 +2695,7 @@ function modEffortCard() {
  */
 function modChoices() {
   const options = modState.options || {};
-  const claudeEfforts = Array.isArray(options.claudeEfforts) && options.claudeEfforts.length ? options.claudeEfforts : ["low", "medium", "high", "max"];
+  const claudeEfforts = Array.isArray(options.claudeEfforts) && options.claudeEfforts.length ? options.claudeEfforts : ["low", "medium", "high", "xhigh", "max"];
   const workers = modAgents().map((agent) => {
     const info = modProviderInfo(agent.provider);
     return {

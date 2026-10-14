@@ -311,7 +311,7 @@ test("admin mod-options offers owned workers, every provider model, judge candid
       const options = await get();
       assert.deepEqual(options.agents, [{ name: "gpt-6-1-sol", model: "gpt-6.1-sol", provider: "codex", efforts: ["low", "medium", "high", "xhigh", "max"], billing: "subscription" }]);
       assert.deepEqual(options.providers.map(p => [p.name, p.billing]), [["codex", "subscription"], ["zen", "payg"], ["custom", "free"], ["native", "payg"], ["google", "subscription"]]);
-      assert.deepEqual(options.claudeEfforts, ["low", "medium", "high", "max"]);
+      assert.deepEqual(options.claudeEfforts, ["low", "medium", "high", "xhigh", "max"]);
       assert.equal(Object.hasOwn(options, "presets"), false, "the presets are gone: the router fills empty rungs itself");
       assert.deepEqual(options.models.find(m => m.model === "jev-1.13"), { model: "jev-1.13", provider: "zen", name: "Jev", judgeOnly: true });
       assert.equal(options.models.length, 6);
@@ -689,7 +689,7 @@ test("GET /api/effort-levels reports compatible defaults and ChatGPT model excep
     const res = await fetch(`${base()}:${port}/api/effort-levels`);
     assert.equal(res.status, 200);
     const body = await res.json() as { providers: Record<string, { default: string[]; models?: Record<string, string[]> }> };
-    assert.deepEqual(body.providers.anthropic?.default, ["low", "medium", "high", "max"]);
+    assert.deepEqual(body.providers.anthropic?.default, ["low", "medium", "high", "xhigh", "max"]);
     assert.deepEqual(body.providers.openrouter?.default, ["low", "medium", "high"]);
     assert.deepEqual(body.providers.openrouter?.models, { effort: ["low", "medium", "high"], "no-effort": [] });
     assert.deepEqual(body.providers.custom?.default, ["max"]);

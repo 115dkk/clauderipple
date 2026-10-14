@@ -222,7 +222,8 @@ type ProbeRequest = {
   wire?: "chat" | "responses";
 };
 
-const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "max"];
+// The CLI's `--effort` takes the same five; Opus, Sonnet and Haiku 5.5 answered `xhigh` (requests.jsonl, 2026-10-14, #56).
+const ANTHROPIC_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 const CHATGPT_DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 type ChatgptLogin = { running: boolean; startedAt?: string; finishedAt?: string; ok?: boolean; output?: string };
