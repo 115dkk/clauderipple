@@ -139,9 +139,14 @@ export class HostServer {
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
+  private desktopTicks = 0;
+
   private pollDesktop(): void {
     // The desktop poll runs on its own timer even with no phone connected, so a Mac session that
-    // finishes while nobody watches still appends its result — and the push for it goes out.
+    // finishes while nobody watches still appends its result — and the push for it goes out. Each
+    // tick also asks Remote Control for every live Mac session's state over the network, so with no
+    // phone looking it runs every fifth tick (15 s) rather than every 3 s, around the clock.
+    if (!this.someoneLooking() && this.desktopTicks++ % 5 !== 0) return;
     void this.opts.sessions.pollDesktop().catch(error => {
       this.opts.log?.(`desktop poll failed: ${error instanceof Error ? error.message : String(error)}`);
     });
