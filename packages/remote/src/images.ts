@@ -2,7 +2,50 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ImagePart } from "./protocol.ts";
+import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart } from "./protocol.ts";
+
+export type InputBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } };
+
+/** Validate everything before writing; generated filenames cannot escape or overwrite a user file. */
+export function attachmentContent(cwd: string, text: string, attachments: Attachment[], read: (id: string) => string | null): { content: string | InputBlock[]; images: ImagePart[] } {
+  if (!Array.isArray(attachments) || attachments.length > ATTACHMENT_COUNT) throw new Error(`At most ${ATTACHMENT_COUNT} attachments.`);
+  const items = attachments.map(a => {
+    if (!a || typeof a.name !== "string" || typeof a.mediaType !== "string") throw new Error("Invalid attachment.");
+    const data = read(a.blob);
+    if (!data || data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error("Attachment missing or too large (8 MB limit).");
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.length > ATTACHMENT_CAP) throw new Error("Attachment exceeds 8 MB.");
+    if (a.mediaType.startsWith("image/") && !MIME.has(a.mediaType)) throw new Error("Use PNG, JPEG, GIF or WebP images.");
+    return { a, data, bytes };
+  });
+  const blocks: InputBlock[] = [], images: ImagePart[] = [];
+  const mentions: string[] = [];
+  for (const { a, data, bytes } of items) {
+    if (a.mediaType === "image/png" || a.mediaType === "image/jpeg" || a.mediaType === "image/gif" || a.mediaType === "image/webp") {
+      blocks.push({ type: "image", source: { type: "base64", media_type: a.mediaType, data } });
+      images.push({ type: "image", blob: a.blob, mediaType: a.mediaType });
+      continue;
+    }
+    const root = path.join(cwd, ".ripple-attachments");
+    fs.mkdirSync(root, { recursive: true });
+    if (fs.lstatSync(root).isSymbolicLink()) throw new Error("Attachment folder must not be a symlink.");
+    const name = a.name.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-100) || "file";
+    const file = path.join(root, `${a.blob}-${name}`);
+    try {
+      const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+      try { fs.writeFileSync(fd, bytes); } finally { fs.closeSync(fd); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try {
+        if (!fs.fstatSync(fd).isFile() || !fs.readFileSync(fd).equals(bytes)) throw new Error("Attachment filename collision.");
+      } finally { fs.closeSync(fd); }
+    }
+    mentions.push(`Attached file: ${JSON.stringify(file)}`);
+  }
+  const prompt = [text, ...mentions].filter(Boolean).join("\n\n");
+  return { content: blocks.length ? [{ type: "text", text: prompt || "Please inspect these images." }, ...blocks] : prompt, images };
+}
 
 export type ImageSink = (base64: string) => string;
 const MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);

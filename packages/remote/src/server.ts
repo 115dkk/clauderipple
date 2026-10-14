@@ -9,7 +9,7 @@ import { WebSocketServer } from "ws";
 import { tokenMatches } from "./config.ts";
 import { browse, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
-import { FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
+import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp } from "./protocol.ts";
 import { VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
@@ -86,6 +86,7 @@ export class HostServer {
   private clients = new Set<Client>();
   private stripped = new Map<string, { mtime: number; body: string }>();
   private models: { at: number; data: ProviderGroup[] } | null = null;
+  private uploads = new Map<string, { data: string; at: number }>();
   private hostInfo: HostInfo;
   private timers: ReturnType<typeof setInterval>[] = [];
   private sessionsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -278,7 +279,7 @@ export class HostServer {
       case "send":
         try {
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
-          const id = await s.send(msg.session, msg.clientMsgId, msg.text);
+          const id = await s.send(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
           if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
@@ -302,8 +303,17 @@ export class HostServer {
           this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
         }
         return;
-      case "interrupt": await s.interrupt(msg.session); return;
-      case "set_model": await s.setModel(msg.session, msg.model, msg.effort); return;
+      case "interrupt":
+      case "set_model":
+        try {
+          if (msg.t === "interrupt") await s.interrupt(msg.session);
+          else await s.setModel(msg.session, msg.model, msg.effort);
+          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
+        } catch (e) {
+          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
+          else this.send(c, { t: "error", code: msg.t, session: msg.session, message: (e as Error).message });
+        }
+        return;
       case "presence": c.visibleAt = msg.visible === true ? this.now() : 0; return;
       case "req":
         try {
@@ -318,6 +328,20 @@ export class HostServer {
   private async request(op: ReqOp, c: Client): Promise<unknown> {
     const s = this.opts.sessions;
     switch (op.op) {
+      case "upload": {
+        if (!s.has(op.session) || !/^[\w-]{1,100}$/.test(op.uploadId) || typeof op.data !== "string" || op.data.length > BLOB_CHUNK_CHARS || !/^[A-Za-z0-9+/=]*$/.test(op.data)) throw new Error("Invalid attachment chunk.");
+        for (const [key, value] of this.uploads) if (this.now() - value.at > 300_000) this.uploads.delete(key);
+        const key = `${c.clientId}/${op.session}/${op.uploadId}`;
+        if (!this.uploads.has(key) && this.uploads.size >= 16) throw new Error("Too many unfinished uploads. Try again later.");
+        const previous = op.offset === 0 ? "" : this.uploads.get(key)?.data;
+        if (previous === undefined || previous.length !== op.offset) throw new Error("Upload offset mismatch. Retry the attachment.");
+        const data = previous + op.data;
+        if (data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4) { this.uploads.delete(key); throw new Error("Attachment exceeds 8 MB."); }
+        if (!op.done) { this.uploads.set(key, { data, at: this.now() }); return null; }
+        this.uploads.delete(key);
+        if (!data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || Buffer.from(data, "base64").length > ATTACHMENT_CAP) throw new Error("Invalid attachment bytes.");
+        return { blob: s.log(op.session).image(data) };
+      }
       case "models": {
         if (!this.models || Date.now() - this.models.at > 30_000) this.models = { at: Date.now(), data: await this.opts.router.models() };
         return this.models.data;

@@ -51,6 +51,16 @@ class RemoteClient {
   private active: string | null = null;
   private requests = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private saves: Promise<void> = Promise.resolve();
+  private sends = new Map<string, { resolve: (session: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  async submit(message: Omit<Extract<ClientMsg, { t: 'send' }>, 'clientMsgId'>, clientMsgId: string): Promise<string> {
+    if (this.snapshot.status?.state !== 'open') throw new Error('The computer is not connected');
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.sends.delete(clientMsgId); reject(new Error('No receipt yet. Retry uses the same message ID.')); }, 30_000);
+      this.sends.set(clientMsgId, { resolve, reject, timer });
+      try { this.send({ ...message, clientMsgId }); }
+      catch (e) { clearTimeout(timer); this.sends.delete(clientMsgId); reject(e); }
+    });
+  }
   subscribe = (fn: () => void): (() => void) => { this.listeners.add(fn); return () => this.listeners.delete(fn); };
   getSnapshot = (): Snapshot => this.snapshot;
   private update(patch: Partial<Snapshot>): void { this.snapshot = { ...this.snapshot, ...patch }; this.listeners.forEach(fn => fn()); }
@@ -111,7 +121,7 @@ class RemoteClient {
   retry(): void { this.link?.nudge(); }
   send(message: ClientMsg): void { if (!this.link?.send(message)) throw new Error('The computer is not connected'); }
   request(op: ReqOp): Promise<unknown> { return this.command({ t: 'req', op }); }
-  command(message: Omit<Extract<ClientMsg, { t: 'req' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'set_mode' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'decide' }>, 'reqId'>): Promise<unknown> {
+  command(message: Omit<Extract<ClientMsg, { t: 'req' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'set_mode' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'decide' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'interrupt' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'set_model' }>, 'reqId'>): Promise<unknown> {
     const reqId = id();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.requests.delete(reqId); reject(new Error('The computer did not answer in time')); }, 15_000);
@@ -175,6 +185,8 @@ class RemoteClient {
       case 'events': this.merge(msg.session, msg.epoch, msg.events, msg.tail?.hasOlder ?? this.snapshot.histories[msg.session]?.hasOlder ?? false, !!msg.tail); break;
       case 'history': this.merge(msg.session, this.snapshot.histories[msg.session]?.epoch ?? '', msg.events, msg.hasOlder, false); break;
       case 'ack': {
+        const send = this.sends.get(msg.clientMsgId);
+        if (send) { clearTimeout(send.timer); this.sends.delete(msg.clientMsgId); send.resolve(msg.session); }
         const pending = this.snapshot.pending.find(p => p.message.clientMsgId === msg.clientMsgId);
         this.update({ pending: this.snapshot.pending.filter(p => p.message.clientMsgId !== msg.clientMsgId) });
         void this.persist().catch(e => this.report(e));
@@ -191,6 +203,8 @@ class RemoteClient {
       }
       case 'error':
         if (msg.clientMsgId) {
+          const send = this.sends.get(msg.clientMsgId);
+          if (send) { clearTimeout(send.timer); this.sends.delete(msg.clientMsgId); send.reject(new Error(msg.message)); }
           this.update({ pending: this.snapshot.pending.map(p => p.message.clientMsgId === msg.clientMsgId ? { ...p, error: msg.message } : p) });
           void this.persist().catch(e => this.report(e));
         }

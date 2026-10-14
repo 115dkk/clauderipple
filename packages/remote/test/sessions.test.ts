@@ -83,6 +83,58 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
 
+test("steer keeps the running query; interrupt closes it and withdraws unstarted inputs", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.send(id, 'steer', 'steering');
+  assert.equal(f.fake.spies.interrupt, 0);
+  assert.equal(f.fake.spies.close, 0);
+  await f.sessions.interrupt(id);
+  await nextTick();
+  assert.equal(f.fake.spies.interrupt, 1);
+  assert.equal(f.fake.spies.close, 1);
+  assert.equal(f.fake.users.length, 1);
+  assert.equal(f.sessions.summaryOf(id)?.state, 'idle');
+  await f.sessions.send(id, 'replacement', 'replace', [], 'interrupt');
+  await waitFor(() => f.fake.users.length === 2);
+  assert.equal(f.fake.users[1]!.message.content, 'replace');
+  assert.equal(f.fake.options.length, 2);
+});
+
+test("phone images reach SDK blocks and files are written under cwd", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === 'idle');
+  const data = Buffer.from('photo bytes').toString('base64');
+  const blob = f.sessions.log(id).image(data);
+  await f.sessions.send(id, 'image-input', 'look', [{ blob, name: 'photo.png', mediaType: 'image/png' }]);
+  await waitFor(() => f.fake.users.length === 2);
+  assert.deepEqual(f.fake.users[1]!.message.content, [{ type: 'text', text: 'look' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data } }]);
+  const fileBlob = f.sessions.log(id).image(Buffer.from('file bytes').toString('base64'));
+  await f.sessions.send(id, 'file-input', 'read', [{ blob: fileBlob, name: '../../notes.txt', mediaType: 'text/plain' }]);
+  await waitFor(() => f.fake.users.length === 3);
+  const files = fs.readdirSync(path.join(f.cwd, '.ripple-attachments'));
+  assert.equal(files.length, 1);
+  assert.equal(fs.readFileSync(path.join(f.cwd, '.ripple-attachments', files[0]!), 'utf8'), 'file bytes');
+  assert.match(String(f.fake.users[2]!.message.content), /Attached file:/);
+  assert.throws(() => f.sessions.send(id, 'missing-file', 'read', [{ blob: 'missing', name: 'a', mediaType: 'text/plain' }]), /missing/);
+});
+
+test("clear and new create an empty fresh session with identical settings", async t => {
+  const f = fixture(t);
+  const id = await f.sessions.create({ clientMsgId: 'original', cwd: f.cwd, model: 'routed', effort: 'high', permissionMode: 'plan', text: 'ping' });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === 'idle');
+  for (const command of ['/clear', '/new']) {
+    const fresh = await f.sessions.send(id, command, command);
+    assert.notEqual(fresh, id);
+    const s = f.sessions.summaryOf(fresh)!;
+    assert.deepEqual([s.cwd, s.model, s.effort, s.permissionMode, s.state], [f.cwd, 'routed', 'high', 'plan', 'idle']);
+    assert.equal(f.sessions.log(fresh).before(Number.MAX_SAFE_INTEGER).events.some(e => e.kind === 'user'), false);
+    assert.equal(await f.sessions.send(id, command, command), fresh);
+  }
+});
+
 test("creation carries permission mode, enables bypass explicitly, and defaults to auto", async t => {
   const f = fixture(t);
   for (const mode of [undefined, 'plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions'] as const) {

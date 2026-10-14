@@ -7,8 +7,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
-import { messageContent } from "./images.ts";
-import type { ImagePart } from "./protocol.ts";
+import { attachmentContent, messageContent, type InputBlock } from "./images.ts";
+import type { Attachment, ImagePart, SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeClient, DESKTOP_BLOCKED, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
@@ -21,7 +21,7 @@ import type { RouterClient } from "./router.ts";
 
 // ---- the slice of the Agent SDK this file relies on (typed loosely so tests can fake it) ----
 
-export interface SdkUserMessage { type: "user"; message: { role: "user"; content: string }; parent_tool_use_id: null; session_id: string; origin?: { kind: "human" } }
+export interface SdkUserMessage { type: "user"; message: { role: "user"; content: string | InputBlock[] }; parent_tool_use_id: null; session_id: string; uuid?: string; origin?: { kind: "human" } }
 export interface SdkQuery extends AsyncIterable<Record<string, unknown>> {
   interrupt(): Promise<unknown>;
   setModel(model?: string): Promise<void>;
@@ -103,6 +103,7 @@ class Inbox implements AsyncIterable<SdkUserMessage> {
     if (this.waiting) { const w = this.waiting; this.waiting = null; w({ value: m, done: false }); } else this.queue.push(m);
   }
   close(): void {
+    this.queue = [];
     this.done = true;
     if (this.waiting) { const w = this.waiting; this.waiting = null; w({ value: undefined, done: true }); }
   }
@@ -446,18 +447,29 @@ export class Sessions {
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
-    this.send(r.id, req.clientMsgId, req.text);
+    if (req.text.trim()) await this.send(r.id, req.clientMsgId, req.text);
+    else this.setState(r, "idle");
     this.opts.onSessions();
     return r.id;
   }
 
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live. */
-  send(id: string, clientMsgId: string, text: string): string | Promise<string> {
+  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
+    if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
+    if (this.seen(id, clientMsgId)) return id;
+    if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
+      const s = this.list().find(s => s.id === id);
+      if (!s) throw new Error("no such session");
+      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" });
+    }
+    if (/^\/exit\s*$/.test(text)) throw new Error("Archive is not supported yet; this session was not closed.");
+    if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
     const existing = this.records.get(id);
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
       const process = this.desktop.liveProcess(desktopId);
       if (process?.bridgeSessionId) {
+        if (attachments.length) throw new Error("Attachments are not supported on Mac sessions yet.");
         const key = `${id}/${clientMsgId}`;
         const pending = this.bridgeSends.get(key);
         if (pending) return pending;
@@ -471,8 +483,9 @@ export class Sessions {
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
     id = r.id;
     if (this.seen(id, clientMsgId)) return id;
+    const converted = attachmentContent(r.cwd, text, attachments, blob => this.log(id).blob(blob));
     this.opts.permissions.denySession(id, "superseded by a new message from the user");
-    this.append(id, { kind: "user", text, clientMsgId });
+    this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
     let live = this.live.get(id);
     const handoff = this.handingOff.get(id);
     if (!live && !handoff) live = this.start(r);
@@ -482,7 +495,7 @@ export class Sessions {
       this.append(id, { kind: "turn", model: r.model, effort: r.effort });
       this.setState(r, "running");
     }
-    const message: SdkUserMessage = { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } };
+    const message: SdkUserMessage = { type: "user", uuid: uuidFrom(clientMsgId), message: { role: "user", content: converted.content }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } };
     if (handoff) handoff.messages.push(message);
     else if (live) { live.pendingTurns++; live.input.push(message); }
     return id;
@@ -659,6 +672,8 @@ export class Sessions {
   }
 
   async interrupt(id: string): Promise<void> {
+    const bridgeId = this.desktop?.liveProcess(this.records.get(id)?.sdkSessionId ?? id)?.bridgeSessionId;
+    if (!this.bridges.has(id) && bridgeId) { this.log(id); this.ensureBridge(id, bridgeId); }
     const connection = this.bridges.get(id);
     if (connection) {
       if (connection.failed) throw new Error(DESKTOP_BLOCKED);
@@ -675,7 +690,17 @@ export class Sessions {
     // Only a running turn can be stopped; a flag set while idle would swallow the next real result.
     if (!r || (r.state !== "running" && r.state !== "waiting")) return;
     live.interrupted = true;
-    await live.query.interrupt().catch(() => undefined);
+    live.input.close();
+    const handoff = this.handingOff.get(id);
+    if (handoff) handoff.messages = [];
+    await live.ready;
+    try { await live.query.interrupt(); }
+    finally {
+      // SDK Query.interrupt() may retain still_queued input (sdk.d.ts:2850–2857).
+      // No cancelAsyncMessage is exposed: closing the process withdraws that input too.
+      this.stop(id);
+      this.setState(r, "idle");
+    }
     this.append(id, { kind: "notice", code: "interrupted" });
   }
 
@@ -723,16 +748,15 @@ export class Sessions {
     const r = this.records.get(id);
     if (!r) throw new Error("no such session");
     const changedModel = r.model !== model;
+    const live = this.live.get(id);
+    if (live && changedModel) { await live.ready; await live.query.setModel(modelArg(model, effort).model); }
     r.model = model;
     r.effort = effort;
     this.save();
     this.append(id, { kind: "notice", code: "model_changed", text: effort ? `${model} · ${effort}` : model });
-    const live = this.live.get(id);
     if (!live) { this.opts.onSessions(); return; }
-    // A routed model's effort rides on its id, so setModel covers both. A Claude model's effort is a
-    // process option: the query is closed after this turn and the next message resumes it with the new one.
-    if (changedModel || !model.startsWith("claude-")) await live.query.setModel(modelArg(model, effort).model).catch(() => { live.restartAfterTurn = true; });
-    else live.restartAfterTurn = true;
+    // Effort-only changes resume a fresh process after this turn, for routed and Claude models alike.
+    if (!changedModel) live.restartAfterTurn = true;
     if (live.restartAfterTurn && (r.state === "idle" || r.state === "error")) this.stop(id);
     this.opts.onSessions();
   }
@@ -797,12 +821,16 @@ export class Sessions {
   private async consume(r: SessionRecord, live: Live): Promise<void> {
     let failure: string | null = null;
     try {
-      for await (const msg of live.query) this.handle(r, live, msg);
+      for await (const msg of live.query) {
+        if (this.live.get(r.id) !== live) break;
+        this.handle(r, live, msg);
+      }
     } catch (e) {
       if (!live.abort.signal.aborted) failure = (e as Error).message;
     }
+    if (this.live.get(r.id) !== live) return;
     this.flush(r.id, live);
-    if (this.live.get(r.id) === live) this.live.delete(r.id);
+    this.live.delete(r.id);
     this.opts.permissions.expireSession(r.id, "aborted");
     if (failure) {
       this.append(r.id, { kind: "result", ok: false, error: failure, ms: this.now() - live.turnStart, turns: 0 });

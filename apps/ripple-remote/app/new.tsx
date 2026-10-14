@@ -9,6 +9,7 @@ import { Icon } from '../src/icons';
 import { mono } from '../src/theme';
 import type { PermissionMode } from '../../../packages/remote/src/protocol.ts';
 import { ModePicker, savedMode, rememberMode } from '../src/mode';
+import { savedEffort, rememberEffort } from '../src/composer';
 export default function NewSession() {
   const { c, s } = useStyles();
   const insets = useSafeAreaInsets();
@@ -72,12 +73,12 @@ export default function NewSession() {
           const off = !g.usable || !m.usable;
           return <Opt key={m.model} first={i === 0} disabled={off} on={on} icon={<Icon name="model" size={20} color={c.muted} />} title={m.name} sub={m.model} subMono
             trailing={on ? tick : !m.usable ? <Text style={s.badge}>{t('model.unusable')}</Text> : undefined}
-            onPress={() => { setModel(m); setEffort(m.efforts.includes('medium') ? 'medium' : m.efforts[0] ?? null); }} />;
+            onPress={() => { setModel(m); void savedEffort(m).then(setEffort).catch(e => remote.report(e)); }} />;
         })}</List>
       </View>)}
       {efforts.length > 0 && <View style={{ marginHorizontal: 12, marginTop: 16 }}>
         <Text style={s.segLabel}>{t('model.effort')}</Text>
-        <Segmented options={efforts.map(e => ({ value: e, label: t(`effort.${e}`) }))} value={effort} onChange={setEffort} />
+        <Segmented options={efforts.map(e => ({ value: e, label: t(`effort.${e}`) }))} value={effort} onChange={e => { setEffort(e); if (model) void rememberEffort(model.model, e).catch(error => remote.report(error)); }} />
       </View>}
       <View style={{ marginHorizontal: 12, marginTop: 16 }}>
         <ModePicker value={permissionMode} onChange={mode => { modePicked.current = true; setPermissionMode(mode); void rememberMode(mode).catch(e => remote.report(e)); }} />

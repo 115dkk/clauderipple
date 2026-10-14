@@ -162,6 +162,26 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
 }
 
+test("attachment upload is chunked, checks offsets, and sends image blocks", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const peer = await f.auth();
+  const data = Buffer.from('uploaded photo').toString('base64');
+  peer.send({ t: 'req', reqId: 'bad-offset', op: { op: 'upload', session: id, uploadId: 'photo', offset: 4, data: data.slice(4), done: true } });
+  assert.equal((await peer.take('res', m => m.reqId === 'bad-offset')).msg.ok, false);
+  peer.send({ t: 'req', reqId: 'chunk-1', op: { op: 'upload', session: id, uploadId: 'photo', offset: 0, data: data.slice(0, 4), done: false } });
+  assert.equal((await peer.take('res', m => m.reqId === 'chunk-1')).msg.ok, true);
+  peer.send({ t: 'req', reqId: 'chunk-2', op: { op: 'upload', session: id, uploadId: 'photo', offset: 4, data: data.slice(4), done: true } });
+  const response = (await peer.take('res', m => m.reqId === 'chunk-2')).msg;
+  assert.ok(response.ok);
+  const { blob } = response.data as { blob: string };
+  assert.equal(f.sessions.log(id).blob(blob), data);
+  peer.send({ t: 'send', session: id, clientMsgId: 'photo-send', text: 'look', attachments: [{ blob, name: 'photo.png', mediaType: 'image/png' }] });
+  await peer.take('ack', m => m.clientMsgId === 'photo-send');
+  await waitFor(() => f.fake.users.length === 2);
+  assert.deepEqual(f.fake.users[1]!.message.content, [{ type: 'text', text: 'look' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data } }]);
+});
+
 test("set_mode returns correlated success/error and broadcasts the mode event", async t => {
   const f = await fixture(t);
   const id = await f.create();

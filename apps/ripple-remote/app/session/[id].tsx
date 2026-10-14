@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
+import { Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { remote } from '../../src/client';
-import { Button, Composer, ConnectionBanner, Frame, IconButton, copy, useKeyboardOpen, useNow, useRemote, useStyles } from '../../src/ui';
+import { Button, ConnectionBanner, Frame, IconButton, copy, useKeyboardOpen, useNow, useRemote, useStyles } from '../../src/ui';
 import { StateRing } from '../../src/mascot';
 import { Icon } from '../../src/icons';
 import { radius } from '../../src/theme';
@@ -11,8 +11,7 @@ import { TimelineItem } from '../../src/timeline';
 import { reduce, timelineItems } from '../../../../packages/remote/web/timeline.ts';
 import { t } from '../../../../packages/remote/web/i18n.ts';
 import { clock, duration, folderName } from '../../../../packages/remote/web/dom.ts';
-import { ModePicker, modeLabel, rememberMode } from '../../src/mode';
-import type { PermissionMode } from '../../../../packages/remote/src/protocol.ts';
+import { SessionComposer } from '../../src/composer';
 export default function Session() {
   const { c, s } = useStyles();
   const insets = useSafeAreaInsets();
@@ -20,30 +19,8 @@ export default function Session() {
   const now = useNow();
   const { id } = useLocalSearchParams<{ id: string }>();
   const state = useRemote();
-  const [text, setText] = useState('');
   const [tasksOpen, setTasksOpen] = useState(false);
-  const [modeOpen, setModeOpen] = useState(false);
-  const [modeBusy, setModeBusy] = useState(false);
-  const [modeError, setModeError] = useState('');
-  const modeSending = useRef(false);
-  const changeMode = async (mode: PermissionMode) => {
-    if (modeSending.current) return;
-    modeSending.current = true; setModeBusy(true); setModeError('');
-    try { await remote.command({ t: 'set_mode', sessionId: id, mode }); await rememberMode(mode); setModeOpen(false); }
-    catch (e) { setModeError(e instanceof Error ? e.message : String(e)); }
-    finally { modeSending.current = false; setModeBusy(false); }
-  };
-  const [commands, setCommands] = useState<string[] | null>(null);
-  // "/" at the start, before any space: the session's slash commands, as the app's composer offers them.
-  const slash = /^\/(\S*)$/.exec(text)?.[1]?.toLowerCase() ?? null;
-  const matches = slash === null || !commands ? [] : commands
-    .filter(name => name.toLowerCase().includes(slash))
-    .sort((a, b) => Number(!b.toLowerCase().startsWith(slash)) - Number(!a.toLowerCase().startsWith(slash)));
-  useEffect(() => { setCommands(null); }, [id]);
-  useEffect(() => {
-    if (slash === null || commands) return;
-    remote.request({ op: 'commands', session: id }).then(list => setCommands(Array.isArray(list) ? list as string[] : []), () => setCommands([]));
-  }, [slash === null, commands, id]);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
   const session = state.sessions.find(s => s.id === id);
   const history = state.histories[id];
   const view = reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder);
@@ -61,7 +38,7 @@ export default function Session() {
     });
     return () => shown.remove();
   }, []);
-  const send = async () => { const value = text.trim(); if (!value) return; try { await remote.queue({ t: 'send', session: id, text: value }); setText(''); } catch (e) { remote.report(e); } };
+  const switchSession = (next: string) => { setSessionsOpen(false); router.replace({ pathname: '/session/[id]', params: { id: next } }); };
   const link = state.status;
   const live = link?.state === 'open';
   const model = view.model ?? session?.model ?? '';
@@ -81,12 +58,22 @@ export default function Session() {
   return <Frame avoidKeyboard>
     <View style={s.top}>
       <IconButton name="back" label={t('a11y.back')} onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} />
-      <View style={s.topTitle}>
-        <Text style={s.topB} numberOfLines={1}>{session ? session.title || folderName(session.cwd) : t('tool.loading')}</Text>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded: sessionsOpen }} onPress={() => setSessionsOpen(v => !v)} style={s.topTitle}>
+        <Text style={s.topB} numberOfLines={1}>{session ? session.title || folderName(session.cwd) : t('tool.loading')} ▾</Text>
         <Text style={s.topSub} numberOfLines={1}>{model}{effort && !readOnly ? ` · ${t(`effort.${effort}`)}` : ''}</Text>
-      </View>
+      </Pressable>
       <View style={[s.iconBtn, !live && { opacity: 0.45 }]} accessibilityLabel={t(`state.${sessionState}`)}><StateRing state={readOnly ? 'stopped' : sessionState} size={24} /></View>
     </View>
+    {sessionsOpen && <ScrollView style={{ maxHeight: 320, backgroundColor: c.surface, borderBottomLeftRadius: 20, borderBottomRightRadius: 20 }} keyboardShouldPersistTaps="handled">
+      <Button title={copy('새 세션', 'New session')} ghost onPress={() => { setSessionsOpen(false); router.replace('/new'); }} />
+      {[...state.sessions].filter(x => x.id !== id).sort((a, b) => {
+        const rank = (x: typeof a) => x.pending || x.state === 'waiting' ? 0 : ['running', 'starting'].includes(x.state) ? 1 : 2;
+        return rank(a) - rank(b) || b.updatedAt - a.updatedAt;
+      }).map(x => <Pressable key={x.id} accessibilityRole="button" onPress={() => switchSession(x.id)} style={{ padding: 12, borderTopWidth: 1, borderColor: c.line }}>
+        <Text numberOfLines={1} style={{ color: c.ink, fontSize: 15 }}>{x.title || folderName(x.cwd)}</Text>
+        <Text numberOfLines={1} style={{ color: c.muted, fontSize: 12 }}>{folderName(x.cwd)} · {t(`state.${x.pending ? 'waiting' : x.state}`)} · {duration(Math.max(0, now - x.updatedAt))} {copy('전', 'ago')}</Text>
+      </Pressable>)}
+    </ScrollView>}
     {f && <View style={[{ marginHorizontal: 12, marginBottom: 6, flexDirection: 'row', backgroundColor: c.surface, borderWidth: 1, borderColor: c.line, borderRadius: 14 }, !live && { opacity: 0.55 }]}>
       {cell(t('band.effort'), f.effort ? t(`effort.${f.effort}`) : null, null, true)}
       {cell(t('band.cache'), pct(f.cachePct), null)}
@@ -126,29 +113,7 @@ export default function Session() {
           {!!session!.taskList?.length && <Icon name={tasksOpen ? 'down' : 'chevron'} size={14} color={c.muted} />}
         </Pressable>
       </>}
-      {!readOnly && matches.length > 0 && <View style={{ marginHorizontal: 6, marginBottom: 8, maxHeight: 264, borderRadius: radius.sm, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line, overflow: 'hidden' }}>
-        <ScrollView keyboardShouldPersistTaps="handled">
-          {matches.map((name, i) => <Pressable key={name} accessibilityRole="button" accessibilityLabel={`/${name}`} onPress={() => setText(`/${name} `)}
-            style={({ pressed }) => ({ paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: i ? 1 : 0, borderColor: c.line, backgroundColor: pressed ? c.surface2 : 'transparent' })}>
-            <Text numberOfLines={1} style={{ fontSize: 15, color: c.ink }}><Text style={{ color: c.muted }}>/</Text>{name}</Text>
-          </Pressable>)}
-        </ScrollView>
-      </View>}
-      {!readOnly && session && <View style={{ marginHorizontal: 6, marginBottom: 8, gap: 8 }}>
-        <Pressable accessibilityRole="button" disabled={modeBusy} onPress={() => setModeOpen(v => !v)} style={{ alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: radius.sm, backgroundColor: c.surface2 }}>
-          <Text style={{ color: c.ink2, fontSize: 13 }}>{modeBusy ? copy('변경 중…', 'Changing…') : session.desktopBridge || session.origin === 'desktop' ? copy('모드: Mac', 'Mode: Mac') : modeLabel(session.permissionMode ?? 'auto')}</Text>
-        </Pressable>
-        {modeOpen && !modeBusy && <ModePicker value={session.permissionMode ?? 'auto'} onChange={mode => {
-          if (mode !== 'bypassPermissions') { void changeMode(mode); return; }
-          Alert.alert(modeLabel(mode), copy('경고: 승인 없이 모든 도구를 실행합니다.', 'Warning: all tools run without approval.'), [
-            { text: copy('취소', 'Cancel'), style: 'cancel' },
-            { text: copy('모두 허용', 'Bypass'), style: 'destructive', onPress: () => { void changeMode(mode); } },
-          ]);
-        }} />}
-        {!!modeError && <Text accessibilityRole="alert" style={{ color: c.bad, fontSize: 13 }}>{modeError}</Text>}
-      </View>}
-      {!readOnly && session && <Composer testID="session-composer" value={text} onChangeText={setText} placeholder={t('composer.reply')} canSend={!!text.trim()} onSend={() => { void send(); }}
-        onStop={['running', 'starting', 'waiting'].includes(session.state) ? () => { try { remote.send({ t: 'interrupt', session: id }); } catch (e) { remote.report(e); } } : undefined} />}
+      {!readOnly && session && <SessionComposer key={id} session={session} busy={['running', 'starting', 'waiting'].includes(session.state)} connected={!!live} onSession={switchSession} />}
     </View>
   </Frame>;
 }

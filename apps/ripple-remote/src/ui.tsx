@@ -206,12 +206,18 @@ export function Segmented<T extends string>({ options, value, onChange }: { opti
 }
 
 /** `.composer`: the rounded input with its round send (and stop) button. */
-export function Composer({ value, onChangeText, placeholder, onSend, onStop, canSend, testID }: { value: string; onChangeText: (v: string) => void; placeholder: string; onSend: () => void; onStop?: () => void; canSend: boolean; testID?: string }) {
+export function Composer({ value, onChangeText, placeholder, onSend, onStop, canSend, testID, onAttach, onModel, modelLabel, attachments, editable = true }: { value: string; onChangeText: (v: string) => void; placeholder: string; onSend: () => void; onStop?: () => void; canSend: boolean; testID?: string; onAttach?: () => void; onModel?: () => void; modelLabel?: string; attachments?: React.ReactNode; editable?: boolean }) {
   const { c, s } = useStyles();
-  return <View style={s.composer}>
-    <TextInput testID={testID} accessibilityLabel={placeholder} placeholder={placeholder} placeholderTextColor={c.muted} value={value} onChangeText={onChangeText} multiline keyboardAppearance={c.dark ? 'dark' : 'light'} style={s.composerInput} />
-    {onStop && <Pressable accessibilityRole="button" accessibilityLabel={t('composer.stop')} onPress={onStop} style={[s.send, s.sendStop]}><Icon name="stop" size={18} color={c.bg} /></Pressable>}
-    <Pressable accessibilityRole="button" accessibilityLabel={t('composer.send')} disabled={!canSend} onPress={onSend} style={[s.send, !canSend && s.sendOff]}><Icon name="send" size={20} color={canSend ? c.accentInk : c.faint} /></Pressable>
+  return <View style={[s.composer, { flexDirection: 'column', alignItems: 'stretch', paddingHorizontal: 12, paddingBottom: 10 }]}>
+    {attachments && <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>{attachments}</View>}
+    <TextInput editable={editable} testID={testID} accessibilityLabel={placeholder} placeholder={placeholder} placeholderTextColor={c.muted} value={value} onChangeText={onChangeText} multiline keyboardAppearance={c.dark ? 'dark' : 'light'} style={[s.composerInput, { flex: 0, minHeight: 50 }]} />
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      {onAttach && <Pressable accessibilityRole="button" accessibilityLabel={copy('첨부', 'Attach')} onPress={onAttach} style={[s.send, s.sendOff]}><Text style={{ color: c.ink2, fontSize: 26 }}>+</Text></Pressable>}
+      {onModel && <Pressable accessibilityRole="button" accessibilityLabel={modelLabel} onPress={onModel} style={{ maxWidth: '65%', borderRadius: 99, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: c.surface2 }}><Text numberOfLines={1} style={{ color: c.ink2, fontSize: 13 }}>{modelLabel} ▾</Text></Pressable>}
+      <View style={{ flex: 1 }} />
+      {onStop ? <Pressable accessibilityRole="button" accessibilityLabel={t('composer.stop')} onPress={onStop} style={[s.send, s.sendStop]}><Icon name="stop" size={18} color={c.bg} /></Pressable>
+        : <Pressable accessibilityRole="button" accessibilityLabel={t('composer.send')} disabled={!canSend} onPress={onSend} style={[s.send, !canSend && s.sendOff]}><Icon name="send" size={20} color={canSend ? c.accentInk : c.faint} /></Pressable>}
+    </View>
   </View>;
 }
 

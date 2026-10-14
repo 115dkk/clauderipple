@@ -10,7 +10,7 @@ import { browserPushEnv, currentSubscription, enablePush, sameKey } from "./noti
 import { pushAvailability } from "./pushstate.ts";
 import { RelaySocket, browserNacl, relayClientUrl } from "./secure.ts";
 import type { RawSocket, RelayPairing } from "./secure.ts";
-import { PING_MS } from "../src/protocol.ts";
+import { PING_MS, defaultEffort } from "../src/protocol.ts";
 import { mergeEvents, reduce, timelineItems } from "./timeline.ts";
 import type { TimelineItem, Outgoing, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
@@ -246,6 +246,7 @@ export class App {
       }
       case "ack": {
         const entry = this.outbox.find((o) => o.clientMsgId === m.clientMsgId);
+        if (entry && entry.session && entry.session !== m.session && this.isCurrent(entry.session)) this.go({ name: "session", id: m.session });
         if (entry?.create) {
           this.created.set(m.clientMsgId, m.session);
           if (this.screen.name === "session" && this.screen.id === `local:${m.clientMsgId}`) {
@@ -653,7 +654,7 @@ export class App {
       case "choose-model": if (this.ui.sheet?.kind === "model") {
         const m = this.ui.models.flatMap((g) => g.models).find((x) => x.model === el.dataset.model);
         this.ui.sheet.model = m?.model ?? null;
-        if (m && (!this.ui.sheet.effort || !m.efforts.includes(this.ui.sheet.effort))) this.ui.sheet.effort = m.efforts.includes("high") ? "high" : m.efforts[0] ?? null;
+        if (m) { const saved = store.get<Effort | null>(`rr.effort.${m.model}`, null); this.ui.sheet.effort = saved && m.efforts.includes(saved) ? saved : defaultEffort(m.efforts); }
         if (m && !m.efforts.length) this.ui.sheet.effort = null;
         this.renderSheet();
       } break;
@@ -663,6 +664,7 @@ export class App {
         if (forSession) this.link?.send({ t: "set_model", session: forSession, model, effort });
         else { this.ui.draft.model = model; this.ui.draft.effort = effort; store.set("rr.draft", this.ui.draft); }
         this.rememberModel(model);
+        store.set(`rr.effort.${model}`, effort);
         this.ui.sheet = null;
         this.render();
       } break;

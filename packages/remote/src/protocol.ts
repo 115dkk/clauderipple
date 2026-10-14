@@ -53,6 +53,11 @@ export type Text = string | BlobRef;
 /** Image bytes are base64 in the existing chunked blob transport, never in an event. */
 export interface ImagePart { type: "image"; blob?: string; mediaType: string; width?: number; height?: number }
 export interface MessageImages { images?: ImagePart[] }
+export const ATTACHMENT_CAP = 8 * 1024 * 1024;
+export const ATTACHMENT_COUNT = 8;
+export interface Attachment { blob: string; name: string; mediaType: string }
+export type SendBehavior = "steer" | "interrupt";
+export function defaultEffort(efforts: Effort[]): Effort | null { return efforts.includes("high") ? "high" : efforts[0] ?? null; }
 
 export interface ToolCall { id: string; name: string; /** one line a person reads: a command, a path */ summary: string; input?: Text }
 
@@ -145,10 +150,10 @@ export type ClientMsg =
   | { t: "history"; session: string; beforeSeq: number; reqId: string }
   | { t: "create"; clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode }
   | { t: "set_mode"; reqId: string; sessionId: string; mode: PermissionMode }
-  | { t: "send"; session: string; clientMsgId: string; text: string }
+  | { t: "send"; session: string; clientMsgId: string; text: string; behavior?: SendBehavior; attachments?: Attachment[] }
   | { t: "decide"; session: string; id: string; decision: "allow" | "allow_always" | "deny"; reqId?: string; message?: string; answers?: Record<string, string> }
-  | { t: "interrupt"; session: string }
-  | { t: "set_model"; session: string; model: string; effort: Effort | null }
+  | { t: "interrupt"; session: string; reqId?: string }
+  | { t: "set_model"; session: string; model: string; effort: Effort | null; reqId?: string }
   /** The app is in front (visible) or not. Sent on change and every PING_MS while visible; the host pushes only when nobody is looking. */
   | { t: "presence"; visible: boolean }
   /** Request/response over the same socket, so a relay later forwards one stream and nothing else. */
@@ -156,6 +161,7 @@ export type ClientMsg =
 
 export type ReqOp =
   | { op: "models" }
+  | { op: "upload"; session: string; uploadId: string; offset: number; data: string; done: boolean }
   | { op: "folders" }
   | { op: "browse"; path?: string; hidden?: boolean }
   | { op: "blob"; session: string; id: string; offset?: number }
