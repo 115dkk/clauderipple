@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.1 — 2026-10-14
+
+### Added
+
+- **The request log records more of each request** (`logs/requests.jsonl`, #55). Every new field is
+  optional, so older records and readers keep working.
+  - Anthropic's request id or the message id, to match a row to the transcript, subagents included.
+  - Why a request ended before reaching a model, with the right provider instead of `anthropic`.
+  - Whether a call was the auto-mode classifier or a web search.
+  - An explicit `cacheWrite: 0`.
+  - The service tier that was asked for and the one the provider served. This shows whether a Fast
+    request was honoured (#54).
+
+### Fixed
+
+- Saving the mod settings failed on Windows with `EPERM … fsync` since 0.9.0 (#53).
+- "Haiku returned no verdict" appeared now and then. When Haiku breaks the end of its JSON, the
+  verdict's complete fields are now read instead of the whole answer being dropped (#53).
+- A response over 64KiB that arrived in one piece (every compressed answer, for one) lost its usage
+  and stop reason in the request log.
+- Alert cards centre their buttons when the title takes two lines.
+- Ripple Remote no longer lists a resumed session's old halves, and a host restart no longer marks
+  idle sessions as just used.
+
 ## 0.9.0 — 2026-10-13
 
 ### Added
