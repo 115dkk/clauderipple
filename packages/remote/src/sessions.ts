@@ -247,18 +247,33 @@ export class Sessions {
     if (cached && this.now() - cached.at < 3000) return Promise.resolve();
     const entry: { at: number; state?: SessionState; pending?: Promise<void> } = { at: this.now(), ...(cached?.state ? { state: cached.state } : {}) };
     this.bridgeStates.set(id, entry);
+    let changed = false;
     entry.pending = this.bridge.session(id).then(session => {
-      entry.state = session.worker_status === "requires_action" ? "waiting" : session.worker_status;
+      const next: SessionState = session.worker_status === "requires_action" ? "waiting" : session.worker_status;
+      // Phones are told only when the state actually moved; every desktop poll re-reads this.
+      if (entry.state !== next) { entry.state = next; changed = true; }
     }).catch(error => {
-      delete entry.state; // The registry is the fallback only on a failed read.
+      if (entry.state !== undefined) { delete entry.state; changed = true; } // The registry is the fallback only on a failed read.
       (this.opts.log ?? console.error)(`[desktop state] ${error instanceof Error ? error.message : String(error)}`);
-    }).finally(() => { delete entry.pending; this.opts.onSessions(); });
+    }).finally(() => { delete entry.pending; if (changed) this.opts.onSessions(); });
     return entry.pending;
   }
   private bridges = new Map<string, { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }>();
   private bridgeSends = new Map<string, Promise<string>>();
   /** uuids of prompts sent over Remote Control, so their transcript echo is not shown twice. */
   private bridgeEchoes = new Set<string>();
+  /** Cap for bridgeEchoes: prompts are answered or superseded long before this many pile up. */
+  private static readonly ECHO_CAP = 500;
+  /** Bridge requestIds already answered or withdrawn (`${session}/${requestId}` → answered at),
+   * so a replay that still lists them skips them instead of reviving the card. Bounded below. */
+  private answeredBridge = new Map<string, number>();
+  private static readonly ANSWERED_CAP = 500;
+  private static readonly ANSWERED_MS = 3_600_000;
+  /** Recent phone message ids per session, so resend checks skip the log scan while warm. */
+  private seenIds = new Map<string, Set<string>>();
+  private static readonly SEEN_INDEX_CAP = 200;
+  /** Transcript size when a bridged record's title was last refreshed (a Mac rename appends). */
+  private bridgeTitleSize = new Map<string, number>();
   private bridgeDecisions = new Map<string, Promise<boolean>>();
 
   constructor(opts: SessionsOptions) {
@@ -650,11 +665,14 @@ export class Sessions {
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId, true);
     if (!r.desktopBridge) this.rebaseDesktop(r);
     if (this.seen(id, clientMsgId)) return id;
+    const prior = this.bridges.get(id);
+    if (prior?.bridgeId === bridgeId && prior.permissions.size) this.supersedeBridge(id, prior);
     // The stream only carries permission prompts; sending does not depend on it.
     this.ensureBridge(id, bridgeId);
     // The API takes only a UUID; phones send short random ids. Derived, not random, so a retry of
     // the same message is the same event; the transcript echoes it under this uuid.
     const uuid = UUID_RE.test(clientMsgId) ? clientMsgId : uuidFrom(clientMsgId);
+    while (this.bridgeEchoes.size >= Sessions.ECHO_CAP) this.bridgeEchoes.delete(this.bridgeEchoes.values().next().value!);
     this.bridgeEchoes.add(uuid);
     try { await this.bridge.send(bridgeId, uuid, text); }
     catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
@@ -715,12 +733,16 @@ export class Sessions {
     connection.abort.abort();
     this.opts.permissions.expireSession(id, "aborted");
     this.bridges.delete(id);
+    // With nothing pending, a permission attention would otherwise stick: markSeen skips it and
+    // decide on an expired record returns false, so clear it the way answering does.
+    this.clearPermissionAttention(id);
   }
 
   private bridgeFailure(id: string, error: unknown): void {
     const connection = this.bridges.get(id);
     if (connection) { connection.failed = true; connection.abort.abort(); }
     this.opts.permissions.expireSession(id, "aborted");
+    this.clearPermissionAttention(id);
     // Logged, not shown: a dropped permission stream reconnects on the next poll and says nothing new to the user.
     console.error(`remote control stream (${id}): ${error instanceof Error ? error.message : "failed"}`);
   }
@@ -737,6 +759,7 @@ export class Sessions {
       const pending = connection.permissions.get(response.request_id);
       if (pending) this.opts.permissions.expire(pending.id, "cancelled");
       connection.permissions.delete(response.request_id);
+      this.rememberAnsweredBridge(id, response.request_id);
       return;
     }
     // Only the server's worker channel may ask for authorization or withdraw a request.
@@ -746,6 +769,7 @@ export class Sessions {
       const pending = connection.permissions.get(requestId);
       if (pending) this.opts.permissions.expire(pending.id, "cancelled");
       connection.permissions.delete(requestId);
+      this.rememberAnsweredBridge(id, requestId);
       return;
     }
     const request = object(payload.request);
@@ -758,7 +782,7 @@ export class Sessions {
 
   /** A permission prompt from Remote Control, live or replayed: one record, one card, one decision. */
   private openBridgePermission(id: string, connection: { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }, r: SessionRecord, req: { requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }): void {
-    if (connection.permissions.has(req.requestId)) return;
+    if (connection.permissions.has(req.requestId) || this.wasAnsweredBridge(id, req.requestId)) return;
     const { record, decision } = this.opts.permissions.request({ session: id, tool: req.tool, title: "", summary: summarize(req.tool, req.input, r.cwd), input: req.input }, connection.abort.signal);
     connection.permissions.set(req.requestId, { id: record.id, input: req.input, toolUseId: req.toolUseId });
     this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, req.input, r.cwd), canAlways: false });
@@ -766,6 +790,7 @@ export class Sessions {
     void decision.then(answer => {
       this.append(id, { kind: "permission_decided", id: record.id, decision: answer.decision, ...(answer.reason ? { reason: answer.reason } : {}) });
       if (answer.decision === "expired") connection.permissions.delete(req.requestId);
+      this.clearPermissionAttention(id);
       this.opts.onSessions();
     });
   }
@@ -796,20 +821,58 @@ export class Sessions {
     for (const req of open) this.openBridgePermission(id, connection, r, req);
   }
 
+  /**
+   * Remember a bridge requestId as answered, so a replay that still lists it (the server records
+   * the control_response after we do) skips it instead of reviving an answered card. Bounded to
+   * the last ANSWERED_CAP entries and entries from the last hour.
+   */
+  private rememberAnsweredBridge(id: string, requestId: string): void {
+    const at = this.now();
+    for (const [key, answeredAt] of this.answeredBridge) if (at - answeredAt > Sessions.ANSWERED_MS) this.answeredBridge.delete(key);
+    this.answeredBridge.set(`${id}/${requestId}`, at);
+    while (this.answeredBridge.size > Sessions.ANSWERED_CAP) this.answeredBridge.delete(this.answeredBridge.keys().next().value!);
+  }
+
+  private wasAnsweredBridge(id: string, requestId: string): boolean {
+    const at = this.answeredBridge.get(`${id}/${requestId}`);
+    if (at === undefined) return false;
+    if (this.now() - at > Sessions.ANSWERED_MS) { this.answeredBridge.delete(`${id}/${requestId}`); return false; }
+    return true;
+  }
+
+  /** Remember a phone message id so later resend checks hit memory instead of the log. Bounded. */
+  private rememberClientMsgId(id: string, clientMsgId: string): void {
+    let set = this.seenIds.get(id);
+    if (!set) { set = new Set(); this.seenIds.set(id, set); }
+    set.add(clientMsgId);
+    while (set.size > Sessions.SEEN_INDEX_CAP) set.delete(set.values().next().value!);
+  }
+
   private seen(id: string, clientMsgId: string): boolean {
-    // The log is the record of what was received; scan from the end, where a resend's original is.
+    // Warm index (this process appended every user event in it): absence means absent, no scan.
+    if (this.seenIds.get(id)?.has(clientMsgId)) return true;
+    if (this.seenIds.has(id)) return false;
+    // Cold index (after a restart): scan from the end, where a resend's original is, and warm
+    // the index with the ids the scan passes over.
     const log = this.log(id);
+    const collected: string[] = [];
     let before = log.lastSeq + 1;
     for (let pages = 0; pages < 8 && before > 1; pages++) {
       const page = log.before(before);
-      for (const e of page.events) if (e.kind === "user" && e.clientMsgId === clientMsgId) return true;
+      for (const e of page.events) {
+        if (e.kind !== "user" || !e.clientMsgId) continue;
+        if (collected.length < Sessions.SEEN_INDEX_CAP) collected.push(e.clientMsgId);
+        if (e.clientMsgId === clientMsgId) { this.rememberClientMsgId(id, clientMsgId); return true; }
+      }
       if (!page.hasOlder || !page.events.length) break;
       before = page.events[0]!.seq;
     }
+    this.seenIds.set(id, new Set(collected));
     return false;
   }
 
   decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny", message?: string, answers?: Record<string, string>): boolean | Promise<boolean> {
+    if (decision !== "allow" && decision !== "allow_always" && decision !== "deny") throw new Error("invalid decision");
     const connection = this.bridges.get(id);
     const pending = connection && [...connection.permissions].find(([, value]) => value.id === permId);
     if (connection && pending) {
@@ -856,10 +919,29 @@ export class Sessions {
     if (!connection || connection.failed || this.opts.permissions.get(permId)?.state !== "pending") return false;
     if (decision === "allow_always") throw new Error("Remote Control supports allow once only.");
     try {
-      await this.bridge.post(connection.bridgeId, { type: "control_response", uuid: randomUUID(), response: { subtype: "success", request_id: requestId, response: { behavior: decision, updatedInput: pending.input, toolUseID: pending.toolUseId, ...(decision === "deny" ? { message: "The user denied this from their phone." } : {}) } } });
+      await this.bridge.post(connection.bridgeId, this.bridgeDecisionPayload(requestId, pending, decision, decision === "deny" ? "The user denied this from their phone." : undefined));
     } catch (error) { this.bridgeFailure(id, error); throw error; }
     connection.permissions.delete(requestId);
+    this.rememberAnsweredBridge(id, requestId);
     return this.opts.permissions.decide(permId, decision) !== null;
+  }
+
+  /**
+   * A new message from the phone supersedes waiting Mac approvals, as host sessions do
+   * (parity doc phase 1: "승인 대기 중에 새 메시지 → 대기 승인 거부"). Each open request gets
+   * the deny control_response the Remote Control side accepts, and the local record resolves
+   * denied the same way the host path's denySession resolves it.
+   */
+  private supersedeBridge(id: string, connection: { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }): void {
+    const reason = "superseded by a new message from the user";
+    for (const [requestId, pending] of [...connection.permissions]) {
+      connection.permissions.delete(requestId);
+      this.rememberAnsweredBridge(id, requestId);
+      void this.bridge.post(connection.bridgeId, this.bridgeDecisionPayload(requestId, pending, "deny", "The user superseded this with a new message."))
+        .catch(error => this.bridgeFailure(id, error));
+      this.opts.permissions.decide(pending.id, "deny", reason);
+    }
+    this.clearPermissionAttention(id);
   }
 
   async interrupt(id: string): Promise<void> {
