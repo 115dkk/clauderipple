@@ -11,7 +11,8 @@
     "ios": { "bundleIdentifier": "com.clauderipple.remote", "supportsTablet": true },
     "plugins": [
       "expo-router", "expo-secure-store", "expo-notifications", "expo-localization", "./plugins/withPodTarget", "./plugins/withSceneLifecycle",
-      ["expo-camera", { "cameraPermission": "컴퓨터에 표시된 연결용 QR 코드를 스캔하기 위해 카메라를 사용합니다.", "recordAudioAndroid": false }]
+      ["expo-camera", { "cameraPermission": "연결용 QR 코드를 스캔하고, 대화에 첨부할 사진을 찍기 위해 카메라를 사용합니다.", "recordAudioAndroid": false }],
+      ["expo-image-picker", { "photosPermission": "대화에 첨부할 사진을 고르기 위해 사진 보관함을 사용합니다.", "cameraPermission": "연결용 QR 코드를 스캔하고, 대화에 첨부할 사진을 찍기 위해 카메라를 사용합니다.", "microphonePermission": false }]
     ]
   }
 }

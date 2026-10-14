@@ -11,6 +11,8 @@ module.exports = config => {
   });
   return withAppDelegate(config, mod => {
     const start = '    window = UIWindow(frame: UIScreen.main.bounds)\n    factory.startReactNative(\n      withModuleName: "main",\n      in: window,\n      launchOptions: launchOptions)';
+    // A prebuild that reuses ./ios meets an AppDelegate this plugin already changed.
+    if (mod.modResults.contents.includes('class SceneDelegate: UIResponder')) return mod;
     if (!mod.modResults.contents.includes(start)) throw new Error('Expo AppDelegate startup hook changed');
     mod.modResults.contents = mod.modResults.contents.replace(start, '    // The SceneDelegate owns the window on iOS 27.');
     mod.modResults.contents += `
