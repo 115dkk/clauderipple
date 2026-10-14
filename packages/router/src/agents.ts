@@ -43,6 +43,11 @@ const BODY = [
   "다른 에이전트에게 넘기지 않는다. 프롬프트 첫 줄의 `[[ripple: …]]` 표식은 라우팅용이니 무시한다.",
   "**시키지 않은 파일은 만들지 않는다.** 작업 지시에 결과물 경로가 없으면 조사·감사라도 작업 디렉터리(cwd)에 아무 파일도 남기지 않는다.",
   "작업 지시가 결과물 경로(파일·폴더)를 정했으면 조사·감사·대조 작업이라도 그 경로에는 반드시 만든다. 그 밖의 메모·사본·임시 파일은 `/tmp` 아래에만 만들고, 끝나면 지운다.",
+  // Claude Code tells a bypass/auto session to read and edit through Bash (since CLI 2.1.234). After it
+  // arrived Bash edits went from 32% to 78% and Read calls from 2,897 to 151 in the operator's
+  // sessions, and details went missing (brain, 2026-08-25); workers here read with `sed -n`/`cat` more
+  // than with Read (2026-10-14). The operator's own rule, given to the workers too:
+  "**소스 파일 읽기와 수정은 전용 도구로 한다.** 처음 만지는 파일은 Read로 통독하고(필요하면 다시 읽는다), 수정은 Edit, 새 파일은 Write로 한다. `cat`·`sed -n`·`head`로 조각만 읽어 넘기지 않고, `sed -i`·heredoc 덮어쓰기·스크립트 재작성으로 소스를 고치지 않는다 — 간격·정렬·주석이 조용히 깎인다. Bash는 검색(grep/rg)·실행·테스트·빌드, 그리고 수십 곳 이상의 기계적 일괄 치환(끝나면 `git diff`로 확인)에만 쓴다.",
 ].join("\n");
 
 /**
