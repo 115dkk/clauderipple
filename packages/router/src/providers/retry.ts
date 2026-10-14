@@ -24,7 +24,25 @@
 
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { Agent, setGlobalDispatcher } from "undici";
+
 import { classify } from "../pool.ts";
+
+/**
+ * How long a translated provider's response may stay silent. Node's `fetch` gives up after 300s
+ * without a byte (`UND_ERR_BODY_TIMEOUT`, reproduced 2026-10-14: an SSE response that went quiet was
+ * cut at 300.98s). A reasoning model says nothing while it thinks: Muse Spark 1.3 at xhigh on a
+ * 100k+ context thought for minutes per step, and every one of its 529s that day ended at 303–305s,
+ * while every step that finished did so under 280s — the whole step thrown away and asked again.
+ * OpenCode's own CLI has no such limit. Fifteen minutes is past Claude Code's own request timeout,
+ * so the client, not this, decides when a turn has taken too long.
+ */
+export const UPSTREAM_SILENCE_MS = 15 * 60_000;
+
+/** Every `fetch` in this process waits `ms` for headers and between body bytes. Called at startup. */
+export function allowLongSilences(ms = UPSTREAM_SILENCE_MS): void {
+  setGlobalDispatcher(new Agent({ bodyTimeout: ms, headersTimeout: ms }));
+}
 
 /** Attempts in total — one ask plus nine retries, matching the CLI's own ceiling (2026-09-21). */
 export const DEFAULT_ATTEMPTS = 10;

@@ -21,6 +21,7 @@ import { RequestLog } from "./requestlog.ts";
 import { OpenAiIngress } from "./ingress/server.ts";
 import { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { VERSION } from "./version.ts";
+import { allowLongSilences } from "./providers/retry.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
 // second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
@@ -88,6 +89,8 @@ const health = new UpstreamHealth(
 );
 
 const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claude-auth-observed.json"));
+// Before any provider fetches: a reasoning model may stay silent past fetch's 300s default.
+allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name) });
 
