@@ -514,10 +514,10 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
     )
   }
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
-  // The route is a button (it opens the log), so it lights under the pointer like the controls do,
-  // and its hover shows its card in the tip layer, to its left (the band draws it outside the facts).
+  // The route is a button (it opens the log), so it lights under the pointer like the controls do.
+  // It has no tip: the light says it is a button, and its card is what the log shows (asked 2026-10-14).
   return (
-    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight(tipScope('route'))}>
+    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight()}>
       <Box flexShrink={0}>
         {r.ok ? <Text color={r.resent ? MUTE : providerColor(r.provider)}>{r.resent ? '↻' : '•'}</Text> : <Text color={TONE.red.text}>✕</Text>}
       </Box>
@@ -682,8 +682,6 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
-  const routeTip = route > 0 && view.route ? routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ') : undefined
-  if (routeTip) tips.push({ key: 'route', text: routeTip })
   for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
@@ -706,8 +704,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
       </Box>
       {/* The route is a button, so it stays out of the facts: the tip layer laid over them is an
           absolute Box, and the pointer on an absolute Box is on its parent, so anything under it
-          took neither the hover nor the press (2026-10-14, the route stopped opening the log). Its
-          tip shows in the layer, to its left. */}
+          took neither the hover nor the press (2026-10-14, the route stopped opening the log). */}
       {routeNode ? (
         <Box key="band-route" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexShrink={1} minWidth={0}>
           {ruled ? rule(el, 'route') : null}
