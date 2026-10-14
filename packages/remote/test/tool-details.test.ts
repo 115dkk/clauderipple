@@ -5,7 +5,16 @@ import { reduce, timelineItems } from "../web/timeline.ts";
 import type { EventBody, SessionEvent } from "../src/protocol.ts";
 
 const tool = (name: string, input: Record<string, unknown> = {}, ok: boolean | null = true): SummaryRow => ({ type: "tool", tool: { id: name, name, summary: name, input: JSON.stringify(input), ...(ok === null ? {} : { result: { ok } }) } });
+const edit = (path: string, old_string: string, new_string: string): SummaryRow => ({ type: "tool", tool: { id: path, name: "Edit", summary: path, input: JSON.stringify({ file_path: path, old_string, new_string }), result: { ok: true } } });
 const events = (...bodies: EventBody[]): SessionEvent[] => bodies.map((body, i) => ({ ...body, seq: i + 1, at: i }));
+
+test("a group of two edits and two commands yields the official summary line and its +/− badge", () => {
+  // Two distinct files edited (+7/−2 then +2/−1 → +9/−3) and two Bash calls.
+  const rows = [edit("a.ts", "a\nb", "1\n2\n3\n4\n5\n6\n7"), edit("b.ts", "x", "y\nz"), tool("Bash"), tool("Bash")];
+  assert.deepEqual(activitySummary(rows, false, "ko"), { text: "파일 2개를 편집함, 명령어 2개 실행함", added: 9, removed: 3, failed: false });
+  // No edits or line changes: the summary carries no badge (added = removed = 0).
+  assert.deepEqual(activitySummary([tool("Bash"), tool("Read")], false, "ko"), { text: "명령어 1개 실행함, 파일 1개 읽음", added: 0, removed: 0, failed: false });
+});
 
 test("activity summary localizes categories, running state and failure", () => {
   const rows = [tool("Bash"), tool("Read")];

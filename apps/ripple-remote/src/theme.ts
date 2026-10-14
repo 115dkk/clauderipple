@@ -11,6 +11,8 @@ export interface Palette {
   warn: string; warnSoft: string; warnLine: string; warnRing: string;
   bad: string; badSoft: string; badLine: string;
   ok: string; okSoft: string;
+  /** tints behind the timeline's two-part +/− line-count pill (green add, red remove) */
+  addTint: string; delTint: string;
   scrim: string;
   /** colour of the shadow in `shadow`, and how heavy it is */
   shadowColor: string; shadowOpacity: number;
@@ -26,6 +28,7 @@ export const light: Palette = {
   warn: '#b5820a', warnSoft: 'rgba(181, 130, 10, 0.12)', warnLine: 'rgba(181, 130, 10, 0.35)', warnRing: 'rgba(181, 130, 10, 0.55)',
   bad: '#c73434', badSoft: 'rgba(199, 52, 52, 0.1)', badLine: 'rgba(199, 52, 52, 0.35)',
   ok: '#1a8a4a', okSoft: 'rgba(26, 138, 74, 0.1)',
+  addTint: 'rgba(26, 138, 74, 0.14)', delTint: 'rgba(199, 52, 52, 0.12)',
   scrim: 'rgba(20, 18, 28, 0.32)',
   shadowColor: '#1d1b26', shadowOpacity: 0.08,
   dark: false,
@@ -40,6 +43,7 @@ export const dark: Palette = {
   warn: '#e0b436', warnSoft: 'rgba(224, 180, 54, 0.13)', warnLine: 'rgba(224, 180, 54, 0.35)', warnRing: 'rgba(224, 180, 54, 0.55)',
   bad: '#ef5a5a', badSoft: 'rgba(239, 90, 90, 0.13)', badLine: 'rgba(239, 90, 90, 0.35)',
   ok: '#3ecb7d', okSoft: 'rgba(62, 203, 125, 0.12)',
+  addTint: 'rgba(62, 203, 125, 0.18)', delTint: 'rgba(239, 90, 90, 0.18)',
   scrim: 'rgba(0, 0, 0, 0.5)',
   shadowColor: '#000000', shadowOpacity: 0.35,
   dark: true,

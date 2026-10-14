@@ -6,7 +6,7 @@ import { reduce, timelineItems, type Item, type TimelineItem as DisplayItem } fr
 import { t, dictionaries, lang, type Key } from '../../../packages/remote/web/i18n.ts';
 import { remote } from './client';
 import { copy, Field, useStyles } from './ui';
-import { Icon, toolIconName } from './icons';
+import { Icon } from './icons';
 import { Markdown } from './markdown';
 import { StateRing } from './mascot';
 import { mono, shadow } from './theme';
@@ -103,13 +103,28 @@ function ConversationImages({ images, session }: { images?: ImagePart[]; session
 function ToolRow({ tool }: { tool: ToolView }) {
   const { c } = useStyles();
   const open = useContext(OpenTool);
-  const status = !tool.result ? <Icon name="clock" size={15} color={c.faint} /> : tool.result.ok ? <Icon name="check" size={15} color={c.ok} /> : <Icon name="x" size={15} color={c.bad} />;
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${tool.name} ${tool.summary}`} onPress={() => open({ type: 'tool', tool })} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
-    <Icon name={toolIconName(tool.name)} size={16} color={c.ink2} />
-    <Text style={{ fontSize: 13.5, fontWeight: '700', color: c.ink }}>{tool.name}</Text>
-    <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontFamily: mono, fontSize: 12.5, color: c.muted }}>{tool.summary}</Text>
-    {status}<Icon name="chevron" size={14} color={c.muted} />
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${tool.name} ${tool.summary}`} onPress={() => open({ type: 'tool', tool })} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 40, paddingVertical: 6, paddingLeft: 22, paddingRight: 8 }}>
+    <Text style={{ flexShrink: 0, fontSize: 13.5, fontWeight: '600', color: c.muted }}>{tool.name}</Text>
+    <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontFamily: mono, fontSize: 12.5, color: c.faint }}>{tool.summary}</Text>
+    <Icon name="chevron" size={14} color={c.faint} />
   </Pressable>;
+}
+
+/** The official app's "edited 2 files" line: muted text, then a joined +/− pill and a chevron.
+ * Each side keeps the green/red tint; the two halves join as one capsule (inner corners square). */
+function DiffBadge({ added, removed }: { added: number; removed: number }) {
+  const { c } = useStyles();
+  if (added <= 0 && removed <= 0) return null;
+  const r = 9;
+  const half = (left: boolean, right: boolean) => ({
+    paddingVertical: 2, paddingHorizontal: 7, fontFamily: mono, fontSize: 12.5, fontWeight: '600' as const,
+    ...(left ? { borderTopLeftRadius: r, borderBottomLeftRadius: r } : {}),
+    ...(right ? { borderTopRightRadius: r, borderBottomRightRadius: r } : {}),
+  });
+  return <View style={{ flexDirection: 'row' }}>
+    {added > 0 && <Text style={[{ color: c.ok, backgroundColor: c.addTint }, half(true, removed <= 0)]}>+{added}</Text>}
+    {removed > 0 && <Text style={[{ color: c.bad, backgroundColor: c.delTint }, half(added <= 0, true)]}>−{removed}</Text>}
+  </View>;
 }
 function CopyAnswer({ value, session }: { value: WireText; session: string }) {
   const { c } = useStyles();
@@ -187,15 +202,15 @@ function TimelineRow({ item, session, readOnly }: { item: DisplayItem; session: 
   if (item.type === 'toolGroup') {
     const summary = activitySummary(item.rows, item.running, lang());
     const label = summary.text;
-    return <View style={{ gap: 4 }}>
-      <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
-        {item.running ? <ActivityIndicator size="small" color={c.muted} /> : <Icon name="terminal" size={16} color={c.ink2} />}
-        <Text style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: c.muted }}>{label}</Text>
-        {(summary.added > 0 || summary.removed > 0) && <View style={{ flexDirection: 'row', gap: 4 }}><Text style={{ color: c.ok, backgroundColor: c.okSoft, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 2, fontFamily: mono, fontSize: 12.5 }}>+{summary.added}</Text><Text style={{ color: c.bad, backgroundColor: c.badSoft, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 2, fontFamily: mono, fontSize: 12.5 }}>−{summary.removed}</Text></View>}
+    return <View>
+      <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 10 }}>
+        {item.running && <ActivityIndicator size="small" color={c.muted} />}
+        <Text style={{ flex: 1, minWidth: 0, fontSize: 14, color: c.muted }}>{label}</Text>
+        <DiffBadge added={summary.added} removed={summary.removed} />
         {summary.failed && <Icon name="x" size={16} color={c.bad} />}
-        <View style={expanded ? { transform: [{ rotate: '90deg' }] } : undefined}><Icon name="chevron" size={16} color={c.muted} /></View>
+        <View style={expanded ? { transform: [{ rotate: '90deg' }] } : undefined}><Icon name="chevron" size={15} color={c.muted} /></View>
       </Pressable>
-      {expanded && item.rows.map(row => row.type === 'tool' ? <ToolRow key={row.tool.id} tool={row.tool} /> : <Pressable key={row.key} accessibilityRole="button" accessibilityLabel={row.description} onPress={() => openTool(row)} style={{ flexDirection: 'row', gap: 8, alignItems: 'center', padding: 10, minHeight: 44 }}><StateRing state={row.status === 'running' ? 'running' : row.status === 'done' ? 'idle' : 'error'} size={20} /><Text style={{ flex: 1, color: c.ink2 }}>{row.description}</Text><Icon name="chevron" size={16} color={c.muted} /></Pressable>)}
+      {expanded && item.rows.map(row => row.type === 'tool' ? <ToolRow key={row.tool.id} tool={row.tool} /> : <Pressable key={row.key} accessibilityRole="button" accessibilityLabel={row.description} onPress={() => openTool(row)} style={{ flexDirection: 'row', gap: 8, alignItems: 'center', paddingVertical: 10, paddingLeft: 22, paddingRight: 8, minHeight: 44 }}><StateRing state={row.status === 'running' ? 'running' : row.status === 'done' ? 'idle' : 'error'} size={20} /><Text style={{ flex: 1, color: c.ink2 }}>{row.description}</Text><Icon name="chevron" size={16} color={c.muted} /></Pressable>)}
     </View>;
   }
   if (item.type === 'start') return <Text style={{ alignSelf: 'center', fontSize: 12.5, color: c.faint, paddingVertical: 4 }}>{t('history.start')}</Text>;
@@ -205,7 +220,7 @@ function TimelineRow({ item, session, readOnly }: { item: DisplayItem; session: 
     {item.queued && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4, justifyContent: 'flex-end' }}><Icon name="clock" size={13} color={c.muted} /><Text style={{ fontSize: 12.5, color: c.muted }}>{t(`queue.${item.queued}`)}</Text></View>}
   </View>;
   if (item.type === 'thinking') return <View style={{ gap: 8 }}>
-    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44 }}><Icon name="clock" size={16} color={c.muted} /><Text style={{ color: c.muted, fontSize: 13.5 }}>{copy('사고 과정', 'Thinking')}</Text><Icon name={expanded ? 'down' : 'chevron'} size={15} color={c.muted} /></Pressable>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 10 }}><Icon name="clock" size={16} color={c.muted} /><Text style={{ color: c.muted, fontSize: 14 }}>{copy('사고 과정', 'Thinking')}</Text><Icon name={expanded ? 'down' : 'chevron'} size={15} color={c.muted} /></Pressable>
     {expanded && <View style={{ paddingLeft: 12, borderLeftWidth: 2, borderColor: c.line2 }}><EventText value={item.text} session={session} streaming={item.streaming} /></View>}
   </View>;
   if (item.type === 'assistant') return <View>
