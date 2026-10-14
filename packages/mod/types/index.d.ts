@@ -319,7 +319,7 @@ declare module 'claude-code' {
       judgeDown: string | null
       advice: string | null
       handoff: { stage: HandoffStage; kind: HandoffKind; text?: string } | null
-      panel: 'settings' | 'setup' | 'compact' | 'handoff' | null
+      panel: 'settings' | 'setup' | 'compact' | 'clear' | 'handoff' | null
       busy: boolean
       decidingSince: number | null
       heldPick: Pick | null

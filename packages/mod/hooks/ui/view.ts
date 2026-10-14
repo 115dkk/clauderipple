@@ -95,6 +95,7 @@ export type BandActions = {
   toggleAuto: () => void
   toggleWarm: () => void
   compact: () => void
+  clear: () => void
   handoff: () => void
   toggleLog: () => void
   toggleAgents: () => void
@@ -125,11 +126,15 @@ export type AlertView =
   | { kind: 'result'; stage: ResultStage; handoffKind?: HandoffKind; detail?: string }
   /** Compact with an optional note of what to keep. */
   | { kind: 'compactNote'; draft: string }
+  /** The band's Clear asks before the conversation is started over. */
+  | { kind: 'clear' }
   /** Quick or full handoff, and what happens after. */
   | { kind: 'handoffChoice'; handoffKind: HandoffKind; after: Settings['handoffAfter'] }
 
 export type AlertActions = {
   compact: (note?: string) => void
+  /** Runs the conversation's clear, from the Clear confirm card. */
+  clear: () => void
   /** Opens the handoff choice bar. */
   handoff: () => void
   dismiss: () => void

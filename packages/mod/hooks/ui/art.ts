@@ -278,6 +278,9 @@ export function plateArt(width: number, height: number): string {
 
 // ---- Controls -----------------------------------------------------------------------------------
 
+/** A drawn control's height, px (kit.tsx holds it too for the wells). */
+export const CONTROL_PX = 26
+
 export const SWITCH_W = 36
 export const SWITCH_H = 22
 
@@ -297,6 +300,18 @@ export function switchArt(on: boolean, busy = false): string {
 /** The root's class on a picture of a state: `on` or `off`, so the state is in the drawing itself. */
 function lit(on: boolean): string {
   return ' class="' + (on ? 'on' : 'off') + '"'
+}
+
+/**
+ * One cell of the drawn light laid over a control under the pointer (kit.tsx `extraHover`): a thin
+ * white wash, its edges fading, on the water's dark.
+ */
+export function extraHoverArt(widthPx: number): string {
+  return svg(widthPx, CONTROL_PX,
+    '<defs><linearGradient id="f" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>' +
+    '<linearGradient id="v" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".12"/><stop offset=".5" stop-color="#fff" stop-opacity=".02"/><stop offset="1" stop-color="#fff" stop-opacity=".12"/></linearGradient></defs>' +
+    '<rect x="0" y="2" width="' + r(widthPx) + '" height="' + r(CONTROL_PX - 4) + '" fill="url(#f)"/>' +
+    '<rect x="2" y="1" width="' + r(Math.max(0, widthPx - 4)) + '" height="' + r(CONTROL_PX - 2) + '" fill="url(#v)"/>')
 }
 
 /** The look of a drawn button: the one thing to press, or a quiet one. */
@@ -344,6 +359,37 @@ export function pillArt(label: string, look: PillLook, tone: Tone = 'violet', gl
   if (glyph) body += '<g transform="translate(' + r(x0) + ' ' + (h / 2 - 6) + ')" fill="none" stroke="' + ink + '" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + GLYPH[glyph] + '</g>'
   body += '<text x="' + r(x0 + gw + textW / 2) + '" y="' + r(h / 2 + size * 0.36) + '" text-anchor="middle" font-size="' + size + '" font-weight="' + (look === 'primary' ? 650 : 550) + '" fill="' + ink + '">' + esc(label) + '</text>'
   return { source: svg(w, h, body), cells }
+}
+
+/**
+ * A word that is itself a control, 26 px high: on, a lit violet pill with the word in white (the
+ * whole capsule's one violet check, on hover a pulse breathing around it); off, a quiet ghost with
+ * the word in soft ink. The deciding pulse rings the lit pill.
+ */
+export function wordArt(label: string, on: boolean, busy = false): { source: string; cells: number } {
+  const t = TONE.violet
+  const size = 12
+  const pad = 11
+  const cells = Math.ceil((labelPx(label, size) + pad * 2) / CELL_PX)
+  const w = cells * CELL_PX
+  const h = 26
+  let body: string
+  let css = ''
+  if (on) {
+    body =
+      '<defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="' + t.lo + '"/><stop offset="1" stop-color="' + t.hi + '"/></linearGradient>' +
+      '<filter id="f" x="-30%" y="-60%" width="160%" height="220%"><feGaussianBlur stdDeviation="1.8"/></filter></defs>' +
+      (busy ? '<rect class="pu" x="1" y="1" width="' + r(w - 2) + '" height="' + (h - 2) + '" rx="' + (h / 2 - 1) + '" fill="none" stroke="' + t.hi + '" stroke-width="1.4" filter="url(#f)"/>' : '') +
+      '<rect x="1" y="1" width="' + r(w - 2) + '" height="' + (h - 2) + '" rx="' + (h / 2 - 1) + '" fill="url(#g)"/>' +
+      '<rect x="2" y="1.5" width="' + r(w - 4) + '" height="' + (h / 2 - 2) + '" rx="' + (h / 4) + '" fill="#fff" fill-opacity=".16"/>' +
+      '<text x="' + r(w / 2) + '" y="' + r(h / 2 + size * 0.36) + '" text-anchor="middle" font-size="' + size + '" font-weight="650" fill="' + t.on + '">' + esc(label) + '</text>'
+    css += busy ? '.pu{transform-box:fill-box;transform-origin:center;animation:pu 1.3s ease-in-out infinite}@keyframes pu{0%,100%{opacity:.55;transform:scale(1)}50%{opacity:.15;transform:scale(1.06)}}' : ''
+  } else {
+    body =
+      '<rect x="1" y="1" width="' + r(w - 2) + '" height="' + (h - 2) + '" rx="' + (h / 2 - 1) + '" fill="#fff" fill-opacity=".05" stroke="' + HAIR + '" stroke-opacity=".2"/>' +
+      '<text x="' + r(w / 2) + '" y="' + r(h / 2 + size * 0.36) + '" text-anchor="middle" font-size="' + size + '" font-weight="500" fill="' + SOFT + '" opacity=".55">' + esc(label) + '</text>'
+  }
+  return { source: svg(w, h, body, css, lit(on)), cells }
 }
 
 /**
@@ -496,10 +542,23 @@ export function clockArt(share: number, tone: Tone | 'soft'): string {
   return svg(s, s, '<circle cx="' + c + '" cy="' + c + '" r="' + rad + '" fill="none" stroke="' + fill + '" stroke-opacity=".75" stroke-width="1.3"/>' + pie)
 }
 
+/**
+ * The plan limit's window as a small gauge, 16 px, in the idiom of the ring and the clock: a dial
+ * with a needle, the two windows a needle at a different turn (the five-hour one up, the weekly one
+ * leaning right). The window's name and its reset time are in the fact's own tip; a band at 100
+ * columns once cut this fact's name to "g…" (2026-10-14), and the glyph buys the room back.
+ */
+export function gaugeArt(kind: string): string {
+  const stroke = SOFT
+  const arc = '<path d="M1.8 11.4A6.2 6.2 0 0 1 14.2 11.4" fill="none" stroke="' + stroke + '" stroke-opacity=".7" stroke-width="1.3" stroke-linecap="round"/>'
+  const needle = kind === 'seven_day' ? 'M8 11.4L11.4 7.6' : 'M8 11.4L8 6.5'
+  return svg(16, 16, arc + '<path d="' + needle + '" fill="none" stroke="' + stroke + '" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.4" r="1.2" fill="' + stroke + '"/>')
+}
+
 export const ICON_PX = 16
 
 /** Line icons of the band's controls, 16 px. */
-export type Icon = 'flame' | 'gear' | 'agents' | 'log'
+export type Icon = 'flame' | 'gear' | 'agents' | 'log' | 'compact' | 'clear'
 
 const FLAME = 'M8.1 14.3c2.8 0 4.5-1.9 4.5-4.4 0-2.8-2.4-4.2-2.8-7.2-1.7 1.1-2.6 2.8-2.5 4.3-1-.4-1.5-1.4-1.6-2.3-1.4 1.3-2 2.9-2 5.2 0 2.5 1.6 4.4 4.4 4.4z'
 
@@ -508,6 +567,10 @@ const ICON: Record<Icon, string> = {
   gear: '<circle cx="8" cy="8" r="2.3"/><path d="M8 1.7v1.8M8 12.5v1.8M1.7 8h1.8M12.5 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M3.5 12.5l1.3-1.3M11.2 4.8l1.3-1.3"/><circle cx="8" cy="8" r="4.8"/>',
   agents: '<circle cx="4.8" cy="5" r="2.1"/><circle cx="11.4" cy="5" r="2.1"/><path d="M1.6 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6M8.2 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6"/>',
   log: '<path d="M2.4 3.8h11.2M2.4 8h11.2M2.4 12.2h6.8"/>',
+  // Two arrows leaning inward over a base: the chat drawn down into itself.
+  compact: '<path d="M4.6 3.4L8 6.8l3.4-3.4M8 6.8V1.9M4.6 12.6L8 9.2l3.4 3.4M8 9.2v4.9M2.2 8h11.6"/>',
+  // A broom sweeping into nothing: the chat is started over, nothing kept.
+  clear: '<path d="M9.8 2.2l4 4M11.4 5.4L6.6 10.2a1.2 1.2 0 0 1-1.7 0L3.8 9.1a1.2 1.2 0 0 1 0-1.7L8.6 2.6a1.2 1.2 0 0 1 1.7 0zM5.2 10.6L2.6 13.2M6.8 6.6L4 9.4"/>',
 }
 
 /**

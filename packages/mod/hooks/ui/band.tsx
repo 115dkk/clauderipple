@@ -3,8 +3,9 @@
 // Desktop: one capsule of the deep (see "Desktop" below, art.ts and kit.tsx): 리플이 glowing at its
 // left, acting out what the band is doing (thinking while Auto picks, busy while a request is out,
 // drowsy as the cache runs out, asleep once it has, otherwise its idle life), the effort as five
-// bars rising shallow to deep, the context ring, the cache clock in whole minutes, the plan limit and
-// the mode when on, the last route, the judge's reason; then the drawn controls and the way out.
+// bars rising shallow to deep, the context ring, the cache clock in whole minutes, the plan limit
+// (its window a gauge, its name and reset in the tip) and the mode when on, the last route, the
+// judge's reason; then the drawn controls and the way out.
 // What each fact means shows in the reason's place on hover. The terminal draws the same facts as
 // one quiet row of text, without 리플이.
 //
@@ -32,9 +33,9 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, clockArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, switchArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, clockArt, gaugeArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, textPx } from './art'
 import type { Sea, Tone } from './art'
-import { CLOSE_CELLS, capsule, closeButton, lift, lit, pic, pill, press, ripple, rowsOf, segmented, toggle, toggleCells } from './kit'
+import { CLOSE_CELLS, capsule, closeButton, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
@@ -284,31 +285,31 @@ function routeFact(frame: Frame, view: DashboardView, room: number, onPress: () 
 // ---- Controls ----------------------------------------------------------------------------------
 
 /**
- * A control: its label, the terminal's hotkey, and whether it is on (a toggle that is on, an open
- * pane, the advised Handoff). The terminal says it in the label (● / ○), as its plain Buttons take
- * no colour.
+ * A control: its label, the hotkey, and whether it is on (a toggle that is on, an open pane, the
+ * advised Handoff). The terminal says it in the label (● / ○), as its plain Buttons take no colour.
  */
 type Control = { key: string; label: string; hotkey: string; onPress: () => void; on: boolean; count?: string }
 
 function controls(frame: Frame, view: DashboardView, actions: BandActions): Control[] {
-  const rich = isRich(frame)
   const L = frame.lang
-  const mark = (on: boolean) => (rich ? '' : on ? ' ●' : ' ○')
+  const mark = (on: boolean) => (on ? ' ●' : ' ○')
   const out: Control[] = []
   // Handoff comes and goes; first in the row, it moves nothing when it does.
   if (view.handoff !== 'off') {
     const advised = view.handoff === 'advised'
-    out.push({ key: 'handoff', label: t(L, 'band.handoff') + (!rich && advised ? ' ◆' : ''), hotkey: 'h', onPress: actions.handoff, on: advised })
+    out.push({ key: 'handoff', label: t(L, 'band.handoff') + (!isRich(frame) && advised ? ' ◆' : ''), hotkey: 'h', onPress: actions.handoff, on: advised })
   }
   out.push(
     { key: 'auto', label: t(L, 'band.auto') + mark(view.auto), hotkey: 'a', onPress: actions.toggleAuto, on: view.auto },
     { key: 'warm', label: t(L, 'band.warm') + mark(view.warm.on), hotkey: 'w', onPress: actions.toggleWarm, on: view.warm.on },
     // The desktop opens the log from the route itself (its value is that button), so it has no Log of its own.
-    ...(rich ? [] : [{ key: 'log', label: t(L, 'band.log') + mark(view.logOpen), hotkey: 'l', onPress: actions.toggleLog, on: view.logOpen }]),
+    ...(!isRich(frame) ? [{ key: 'log', label: t(L, 'band.log') + mark(view.logOpen), hotkey: 'l', onPress: actions.toggleLog, on: view.logOpen }] : []),
     // The count has a slot of its own (desktop) or is always a number (terminal): no width change.
-    { key: 'agents', label: t(L, 'band.agents') + (rich ? '' : ' ' + (view.agents.live || '·')) + mark(view.agentsOpen), hotkey: 'g', onPress: actions.toggleAgents, on: view.agentsOpen, ...(rich ? { count: view.agents.live > 0 ? String(view.agents.live) : '' } : {}) },
+    { key: 'agents', label: t(L, 'band.agents') + (isRich(frame) ? '' : ' ' + (view.agents.live || '·')) + mark(view.agentsOpen), hotkey: 'g', onPress: actions.toggleAgents, on: view.agentsOpen, ...(isRich(frame) ? { count: view.agents.live > 0 ? String(view.agents.live) : '' } : {}) },
+    // The desktop's Clear asks first (a card of its own, "clear" in bandPriority); Compact opens its note bar.
+    ...(isRich(frame) ? [{ key: 'compact', label: t(L, 'band.compact'), hotkey: 'c', onPress: actions.compact, on: false }, { key: 'clear', label: t(L, 'band.clear'), hotkey: 'x', onPress: actions.clear, on: false }] : []),
     // A word on the desktop: the host's 14 px font draws ⚙ as a small ring that reads as "o".
-    { key: 'settings', label: rich ? t(L, 'band.settings') : '⚙', hotkey: 's', onPress: actions.openSettings, on: false },
+    { key: 'settings', label: isRich(frame) ? t(L, 'band.settings') : '⚙', hotkey: 's', onPress: actions.openSettings, on: false },
   )
   return out
 }
@@ -358,16 +359,19 @@ export const BAND_RIPPLE = 24
 export const CREST_CELLS = 4
 /** The row's height, px: a pill's, whether or not one shows, so Handoff never moves the band. */
 const ROW_H = 26
+// Fact and control widths alone decide the row, never a value, so a changing figure never moves its
+// neighbours. The air between facts and between controls is trimmed below what reads as a whole cell
+// (the limit's word became a gauge for the same reason): at 100 columns a route name of 13
+// characters ("glm-5.3-flash") must draw whole beside everything else, and a loose gap ate the
+// route's room and cut it (2026-10-14).
 /** The air between facts, in cells (the host takes fractions of a cell). */
-const DRAWN_GAP = 1.25
+const DRAWN_GAP = 0.2
 /** A rule between the band's groups, in cells. */
 const RULE_CELLS = 1
 /** The room the route is counted at (a model name and its hit); it takes more when the row has it. */
-const ROUTE_ROOM = 10
+const ROUTE_ROOM = 14
 /** The controls whose words go first when the band is narrow, in that order; Auto's goes last. */
-const WORDLESS = ['settings', 'agents', 'warm'] as const
-/** Cells Auto's switch takes without its word. */
-const SWITCH_ONLY = Math.ceil(36 / CELL_PX) + 1
+const WORDLESS = ['clear', 'compact', 'settings', 'agents', 'warm'] as const
 /** The capsule's own air, in cells across and rows down. */
 const PAD_X = 1
 const PAD_Y = 0.5
@@ -467,13 +471,14 @@ function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   const limit = view.limit
   if (!limit || !view.extras.includes('limits')) return null
   const { Text } = el
-  const names = [limitName('five_hour', frame.lang), limitName('seven_day', frame.lang)]
   const save = t(frame.lang, 'band.save')
-  // Save's word takes room only while save mode is on: reserved always, it cost the limit its place
-  // on a band near 95 columns (2026-10-14).
-  const cells = Math.ceil((Math.max(...names.map(textPx)) + CELL_PX + textPx('100%') + (limit.save ? CELL_PX + textPx(save) : 0)) / CELL_PX)
+  // The window is a gauge (art.ts), not its word: at 100 columns the name "주간"/"Weekly" was cut
+  // to "g…" beside the route, and the window's name and reset stay in the tip (2026-10-14). Save's
+  // word takes room only while save mode is on: reserved always, it cost the limit its place on a
+  // band near 95 columns (2026-10-14).
+  const cells = Math.ceil((16 + CELL_PX + textPx('100%') + (limit.save ? CELL_PX + textPx(save) : 0)) / CELL_PX)
   return drawnFact(el, 'limit', cells, [
-    <Text key="limit-name" color={SUB}>{limitName(limit.kind, frame.lang)}</Text>,
+    pic(el, 'limit', gaugeArt(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
     <Text key="limit-value" color={figure(limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
     limit.save ? <Text key="limit-save" color={TONE.violet.text}>{save}</Text> : '',
   ], limitFact(frame, view)?.card?.join(' · '))
@@ -496,7 +501,7 @@ function routeName(model: string): string {
 }
 
 /** The last route: where it went (the provider's dot), the model, its cache hit; the way into the log. */
-function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
+function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions, room: number): RenderNode {
   const { Box, Text } = el
   if (view.hide.includes('route')) return ''
   const r = view.route
@@ -511,7 +516,7 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   const tip = routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ')
   return (
-    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={1} flexShrink={1} minWidth={ROUTE_ROOM} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
+    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
       <Box flexShrink={0}>
         {r.ok ? <Text color={r.resent ? MUTE : providerColor(r.provider)}>{r.resent ? '↻' : '•'}</Text> : <Text color={TONE.red.text}>✕</Text>}
       </Box>
@@ -591,17 +596,21 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
     const look = advised ? 'primary' : 'ghost'
     out.push({ key: 'handoff', cells: pillArt(label, look, 'violet').cells + 1, node: pill(el, 'handoff', label, look, actions.handoff, 'violet'), tip: t(L, 'alerts.handoffTitle') })
   }
+  // Auto's word is the control (art.ts `wordArt`): lit violet while on, a quiet ghost while off,
+  // pulsing while the judge decides. No switch: the state is in the word's own light (2026-10-14).
   const autoLabel = t(L, 'band.auto')
   const autoTip = t(L, 'band.effortAutoAlt', { state: state(view.auto) }) + ' · ' + t(L, 'settings.autoLine')
-  out.push(words.includes('auto')
-    ? { key: 'auto', cells: toggleCells(autoLabel), node: toggle(el, 'auto', view.auto, autoLabel, actions.toggleAuto, view.effort.mode === 'deciding', tipScope('auto')), tip: autoTip }
-    : { key: 'auto', cells: SWITCH_ONLY, node: lit(el, 'auto', SWITCH_ONLY, [pic(el, 'auto', switchArt(view.auto, view.effort.mode === 'deciding'), autoLabel, 36, 22), press(el, 'auto', SWITCH_ONLY * CELL_PX, actions.toggleAuto)], 0.25, tipScope('auto')), tip: autoTip })
+  out.push({ key: 'auto', cells: wordCells(autoLabel), node: word(el, 'auto', view.auto, autoLabel, actions.toggleAuto, view.effort.mode === 'deciding', tipScope('auto')), tip: autoTip })
   const warmLabel = t(L, 'band.warm')
   out.push(iconControl(el, 'warm', iconArt('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, view.warm.here ? 'band.warmHere' : 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? TONE.amber.text : SUB))
   const agentsLabel = t(L, 'band.agents')
   const live = view.agents.live
   // The live count sits on the icon's shoulder, in one picture of one width: no width change.
   out.push(iconControl(el, 'agents', agentsArt(live, view.agentsOpen || live > 0), AGENTS_W, live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? INK : SUB))
+  const compactLabel = t(L, 'band.compact')
+  out.push(iconControl(el, 'compact', iconArt('compact', false), ICON_PX, compactLabel, t(L, 'band.compactAlt'), actions.compact, words.includes('compact') ? compactLabel : undefined))
+  const clearLabel = t(L, 'band.clear')
+  out.push(iconControl(el, 'clear', iconArt('clear', false), ICON_PX, clearLabel, t(L, 'band.clearAlt'), actions.clear, words.includes('clear') ? clearLabel : undefined))
   const settingsLabel = t(L, 'band.settings')
   out.push(iconControl(el, 'settings', iconArt('gear', false), ICON_PX, settingsLabel, t(L, 'band.settingsAlt'), actions.openSettings, words.includes('settings') ? settingsLabel : undefined))
   return out
@@ -612,7 +621,7 @@ function effortMenuDrawn(el: Els, frame: Frame, view: DashboardView, actions: Ba
   const current = view.effort.mode === 'manual' || view.effort.mode === 'off' ? view.effort.level : null
   return (
     <Box key="effort-menu" flexDirection="row" alignItems="center" flexWrap="wrap" columnGap={2} rowGap={1} paddingTop={1} paddingLeft={CREST_CELLS}>
-      {toggle(el, 'pick-auto', view.auto, t(frame.lang, 'band.auto'), actions.toggleAuto)}
+      {word(el, 'pick-auto', view.auto, t(frame.lang, 'band.auto'), actions.toggleAuto)}
       {segmented(el, 'pick', EFFORTS.map(effort => ({ value: effort, label: effortName(effort, frame.lang) })), current, effort => actions.pickEffort(effort), 'violet', DEPTH)}
     </Box>
   )
@@ -629,10 +638,17 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const close = actions.hide ? CLOSE_CELLS : 0
   const effort = effortDrawn(el, frame, view, actions)
   const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view), cacheDrawn(el, frame, view), limitDrawn(el, frame, view)].filter((f): f is DrawnFact => f !== null)
-  let words: readonly string[] = ['auto', ...WORDLESS]
+  // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
+  // spare words (the icons' beside it) go first when the row narrows.
+  let words: readonly string[] = [...WORDLESS]
   // Counted with Handoff in its place whether it shows or not, and the route at a fixed room
   // (a long model name is cut, a short one leaves air): what the band holds never depends on a value.
-  const counted = (w: readonly string[]) => controlsDrawn(el, frame, { ...view, handoff: 'advised' }, actions, w).reduce((n, c) => n + c.cells + 0.5, 0)
+  // The air between controls is the row's own columnGap (a fraction of a cell, as the facts' air),
+  // and the hide button a half-separator of its own.
+  const counted = (w: readonly string[]) => {
+    const list = controlsDrawn(el, frame, { ...view, handoff: 'advised' }, actions, w)
+    return list.reduce((n, c) => n + c.cells, 0) + 0.15 * (list.length - 1) + (actions.hide ? 0.15 : 0)
+  }
   let controlCells = counted(words)
   let route = view.hide.includes('route') ? 0 : ROUTE_ROOM
   let ruled = true
@@ -640,17 +656,17 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const rules = (facts: DrawnFact[]) => (ruled ? (facts.length ? RULE_CELLS + DRAWN_GAP : 0) + (route ? RULE_CELLS + DRAWN_GAP : 0) : 0)
   const need = (facts: DrawnFact[]) => CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP + rules(facts) + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
   let facts = optional
-  // Narrow, things go in this order until the row fits: the controls' words (settings, agents,
-  // keep-warm), the rules, Auto's word, the standing facts (the plan limit, the mode, context), then
-  // the route and last the cache. A changing figure outlasts a standing state, and a fact the person
-  // switched on outlasts a word beside a switch (2026-10-14: at ~96 columns the limit never showed).
-  for (const drop of [...WORDLESS, 'rules', 'auto', 'limit', 'mode', 'context', 'route', 'cache']) {
+  // Narrow, things go in this order until the row fits: the icons' words (clear, compact,
+  // settings, agents, keep-warm), the rules, then the route draws in to its least, then the mode
+  // and the context chip, last the cache. The limit and the new icons stay (2026-10-14: the band
+  // sits at its ~100-column maximum and must hold everything there, Handoff with the rest).
+  for (const drop of [...WORDLESS, 'rules', 'route', 'mode', 'context', 'cache']) {
     if (need(facts) <= cols) break
-    if ((WORDLESS as readonly string[]).includes(drop) || drop === 'auto') {
+    if ((WORDLESS as readonly string[]).includes(drop)) {
       words = words.filter(w => w !== drop)
       controlCells = counted(words)
     } else if (drop === 'rules') ruled = false
-    else if (drop === 'route') route = 0
+    else if (drop === 'route') route = RICH_ROUTE_MIN
     else facts = facts.filter(f => f.key !== drop)
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
@@ -664,7 +680,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
       {ripple(el, 'band-' + mood.face + (mood.dim ? '-dim' : ''), mood.face, 'ClaudeRipple', BAND_RIPPLE, undefined, mood.dim)}
     </Box>
   )
-  const routeNode = route > 0 ? routeDrawn(el, frame, view, actions) : ''
+  const routeNode = route > 0 ? routeDrawn(el, frame, view, actions, route) : ''
   const row = (
     <Box key="band-row" flexDirection="row" alignItems="center" width="100%" minWidth={0} height={rowsOf(ROW_H)}>
       <Box key="band-facts" flexDirection="row" alignItems="center" columnGap={DRAWN_GAP} flexGrow={1} flexShrink={1} width={0} minWidth={0}>
@@ -676,7 +692,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
         {routeNode}
         {whyDrawn(el, frame, tips)}
       </Box>
-      <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={0} marginLeft={1}>
+      <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.15} flexShrink={0} marginLeft={0.5}>
         {controls.map(c => c.node)}
         {actions.hide ? closeButton(el, 'hide', t(frame.lang, 'band.hideBand'), () => actions.hide!(), tipScope('hide')) : null}
       </Box>

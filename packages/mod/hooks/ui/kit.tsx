@@ -22,7 +22,7 @@ import { rippleSource } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
 import type { Frame } from './view'
-import { CELL_PX, CLOSE_PX, INK, ROW_PX, SUB, SWITCH_H, SWITCH_W, WELL_PX, closeArt, labelPx, pillArt, seaArt, segmentedArt, sliderArt, switchArt, wellArt } from './art'
+import { CELL_PX, CLOSE_PX, INK, ROW_PX, SUB, SWITCH_H, SWITCH_W, WELL_PX, closeArt, extraHoverArt, labelPx, pillArt, seaArt, segmentedArt, sliderArt, switchArt, wellArt, wordArt } from './art'
 import type { Glyph, PillLook, Sea, Tone } from './art'
 import { chOf } from './theme'
 
@@ -35,7 +35,7 @@ const EDGE = 'rgba(128,124,116,0.55)'
 /** A control under the pointer: a soft light on the water. */
 const HOVER = 'rgba(255,255,255,0.09)'
 const HOVER_EDGE = 'rgba(255,255,255,0.16)'
-/** A drawn control's height, px: pills, segments. */
+/** A drawn control's height, px: pills, segments (art.ts holds the same figure). */
 const CONTROL_PX = 26
 
 /** Cells a run of px takes, rounded up. */
@@ -116,6 +116,14 @@ export function lit(el: Els, key: string, cells: number, children: RenderNode[],
   )
 }
 
+/** The drawn light over `cells`, in absolute Boxes of whole cells each. */
+function extraHover(el: Els, cells: number): RenderNode[] {
+  const { Box } = el
+  const parts: RenderNode[] = []
+  for (let i = 0; i < cells; i++) parts.push(<Box key={'extra-' + i} position="absolute" top={0} bottom={0} left={i} width={1}>{pic(el, 'extra-' + i, extraHoverArt(CELL_PX), '', CELL_PX, CONTROL_PX)}</Box>)
+  return parts
+}
+
 /**
  * A capsule: a rounded Box edged in violet light, the deep (art.ts `seaArt`) painted behind it from
  * its top left, and everything it holds in one positioned layer above the sea. `rows` is about how
@@ -182,6 +190,30 @@ export function closeButton(el: Els, key: string, label: string, onPress: () => 
 /** Cells a switch and its word take, their hover's air included. */
 export function toggleCells(label: string): number {
   return Math.ceil((SWITCH_W + CELL_PX + chOf(label) * CELL_PX * 1.1) / CELL_PX) + 1
+}
+
+/** Cells the Auto word takes as its own control: its picture's width (the pill's own air drawn in). */
+export function wordCells(label: string): number {
+  return wordArt(label, true).cells
+}
+
+/**
+ * The Auto word as the control itself (art.ts `wordArt`): lit violet while Auto is on, a quiet
+ * ghost while off, pulsing while the judge decides; the whole pressable.
+ */
+export function word(el: Els, key: string, on: boolean, label: string, onPress: () => void, busy = false, scope?: string): RenderNode {
+  const { Box } = el
+  const art = wordArt(label, on, busy)
+  return (
+    <Box key={(on ? 'word-on-' : 'ghost-') + key} position="relative" width={art.cells} height={rowsOf(CONTROL_PX)} flexShrink={0} alignItems="center" justifyContent="center">
+      {pic(el, key, art.source, label, art.cells * CELL_PX, CONTROL_PX)}
+      <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope }}>
+        {lift(el)}
+        {extraHover(el, art.cells)}
+      </Box>
+      {press(el, key, art.cells * CELL_PX, onPress)}
+    </Box>
+  )
 }
 
 /** A switch and its word (On / Off), the whole pressable; lit while on. */

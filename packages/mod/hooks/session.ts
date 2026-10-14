@@ -87,9 +87,9 @@ export function swampAlert(percent: number | null, hidden: number | null): boole
 
 /** Rendering consumes eligibility, keeping dismissal and idle decisions outside drawing code. */
 export function bandPriority(state: {
-  panel?: 'settings' | 'compact' | 'handoff' | 'setup' | null
+  panel?: 'settings' | 'compact' | 'clear' | 'handoff' | 'setup' | null
   judgeDown?: boolean; hot?: boolean; result?: boolean; cold?: boolean; swamp?: boolean; kept?: boolean
-}): 'settings' | 'compact' | 'handoff' | 'setup' | 'judgeDown' | 'hot' | 'result' | 'cold' | 'swamp' | 'kept' | 'dashboard' {
+}): 'settings' | 'compact' | 'clear' | 'handoff' | 'setup' | 'judgeDown' | 'hot' | 'result' | 'cold' | 'swamp' | 'kept' | 'dashboard' {
   if (state.panel) return state.panel
   for (const band of ['judgeDown', 'hot', 'result', 'cold', 'swamp', 'kept'] as const) if (state[band]) return band
   return 'dashboard'

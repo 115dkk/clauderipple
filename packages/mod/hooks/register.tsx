@@ -931,6 +931,9 @@ async function openCompact($: EngineInterface, surface: Frame['surface']): Promi
   await update($, compactNote, () => '')
   await update($, panel, () => 'compact')
 }
+async function openClear($: EngineInterface): Promise<void> {
+  await update($, panel, () => 'clear')
+}
 /** The router's figure for this login's plan windows; nothing when the router cannot say. */
 async function routerClaudeLimits($: EngineInterface): Promise<SessionRateLimit[]> {
   try {
@@ -1090,6 +1093,7 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
   if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
+  if (which === 'clear') return { kind: 'clear' }
   if (which === 'handoff') return { kind: 'handoffChoice', handoffKind: await read($, handoffChoiceKind), after: await read($, handoffChoiceAfter) }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
@@ -1127,7 +1131,7 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
   else await update($, panel, () => null)
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
-  return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), handoff: () => openHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
+  return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), handoff: () => openHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
     toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
@@ -1147,7 +1151,7 @@ function setupActions($: EngineInterface): SetupActions {
     back: () => update($, setupStep, step => Math.max(1, step - 1) as 1 | 2 | 3 | 4), next: () => update($, setupStep, step => Math.min(4, step + 1) as 1 | 2 | 3 | 4), finish: () => finishSetup($), skip: () => finishSetup($, true) }
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
-  return { compact: note => runCompact($, note), handoff: () => openHandoff($), dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
+  return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, handoff: () => openHandoff($), dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
     noteInput: text => update($, compactNote, () => text), setHandoffKind: kind => update($, handoffChoiceKind, () => kind), setHandoffAfter: after => update($, handoffChoiceAfter, () => after), go: () => queueHandoff($), copy: () => copyHandoff($), openNew: () => moveToNewSession($) }
 }
 function toolLine(e: ToolCallInput): string {
@@ -1502,7 +1506,7 @@ export const register: Register = on => {
       const frame = await frameOf($, e)
       const el = $.ui.resolve(e)
       if (which === 'settings') return renderSettings(el, frame, await settingsView($), settingsActions($)) as RenderElement
-      if (which === 'compact' || which === 'handoff') {
+      if (which === 'compact' || which === 'clear' || which === 'handoff') {
         const choice = await alertView($, frame.now)
         if (choice) return renderAlert(el, frame, choice, alertActions($, choice)) as RenderElement
       }

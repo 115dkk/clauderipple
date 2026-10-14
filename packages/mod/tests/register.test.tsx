@@ -1753,14 +1753,16 @@ test('every band control changes the next drawing, and a toggle says its state o
   http(on)
   await start($)
   await b.clock.advance(3000)
-  // The terminal says it in the label (● / ○); the desktop in the control's drawing: a switch's lit
-  // track, a lit icon, each picture marked `on` or `off` at its root.
+  // The terminal says it in the label (● / ○); the desktop in the control's drawing: a lit icon,
+  // a lit word, each picture marked `on` or `off` at its root.
   const desktopState = (n: unknown) => {
     const drawing = JSON.stringify(n ?? '')
     return /<svg[^>]* class=\\"on\\"/.test(drawing) ? 'on' : /<svg[^>]* class=\\"off\\"/.test(drawing) ? 'off' : 'other'
   }
   const state = async (ui: Awaited<ReturnType<typeof band>>, key: string, surface: string) =>
-    surface === 'desktop' ? desktopState(await ui.find({ type: 'Box', key: 'hv-' + key })) : (n => /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other')(await ui.find({ type: 'Button', key }))
+    surface === 'desktop'
+      ? desktopState(await ui.find({ type: 'Box', key: key === 'auto' ? 'word-on-auto' : 'hv-' + key }) ?? await ui.find({ type: 'Box', key: 'ghost-' + key }))
+      : (n => /●/.test(String(n?.props.label)) ? 'on' : /○/.test(String(n?.props.label)) ? 'off' : 'other')(await ui.find({ type: 'Button', key }))
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await band($, surface)
     const drawn = async () => JSON.stringify(await ui.drawn()).replace(/"handle":\d+/g, '')
@@ -1790,4 +1792,30 @@ test('every band control changes the next drawing, and a toggle says its state o
     }
     await ui.unmount()
   }
+})
+
+// 2026-10-14: the band's Clear icon asks before it runs /clear; Cancel leaves the chat alone.
+test('the band Clear asks first, and confirming runs the clear once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const commands: string[] = []
+  on('command.run', { command: 'clear' }, () => { commands.push('clear'); return {} })
+  await start($)
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ key: 'clear' })).toBeDefined()
+  await ui.press({ key: 'clear' })
+  expect(commands).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'Start this conversation over?' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /context is emptied/ })).toBeDefined()
+  // Cancel keeps the conversation and closes the card.
+  await ui.press({ key: 'dismiss' })
+  expect(commands).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'Start this conversation over?' })).toBeUndefined()
+  // The main action runs the clear once.
+  await ui.press({ key: 'clear' })
+  await ui.press({ key: 'clear-go' })
+  await b.clock.advance(3000)
+  expect(commands).toEqual(['clear'])
+  expect(await ui.find({ type: 'Text', text: 'Start this conversation over?' })).toBeUndefined()
+  await ui.unmount()
 })

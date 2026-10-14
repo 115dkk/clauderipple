@@ -114,6 +114,15 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         main: { ...compact, onPress: () => a.compact(alert.draft) },
         close: cancel,
       }
+    case 'clear':
+      return {
+        key: 'clear',
+        face: 'asking',
+        title: t(L, 'alerts.clearTitle'),
+        body: t(L, 'alerts.clearBody'),
+        main: { key: 'clear-go', label: t(L, 'alerts.clearGo'), hotkey: 'g', onPress: a.clear },
+        close: cancel,
+      }
     case 'handoffChoice':
       return {
         key: 'handoff',
@@ -222,6 +231,7 @@ function seaOf(card: Card, alert: AlertView): Omit<Sea, 'at'> {
     case 'judge':
       return { tone: 'red', weather: 'static' }
     case 'note':
+    case 'clear':
     case 'handoff':
       return { tone: 'violet', weather: 'sparkles', ripples: 'calm' }
     default: {
