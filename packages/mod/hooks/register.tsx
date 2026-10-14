@@ -347,7 +347,15 @@ async function toggleLog($: EngineInterface): Promise<boolean> {
   const language = await read($, lang)
   const open = await isLogUp($)
   if (open) await $.ui.close({ id: LOG_PANE })
-  else await $.ui.open({ id: LOG_PANE, title: t(language, 'commands.logTitle') })
+  else {
+    // The surface may decline to draw the pane; say why rather than doing nothing on a press.
+    const opened = await $.ui.open({ id: LOG_PANE, title: t(language, 'commands.logTitle') })
+    if (!opened.isPlaced) {
+      const why = 'reason' in opened && opened.reason ? String(opened.reason) : 'not placed'
+      $.ui.toast(t(language, 'toasts.logNotPlaced', { reason: why }))
+      await report($, 'log pane', why)
+    }
+  }
   await syncPanes($)
   if (!open) await refreshRouter($)
   return !open
