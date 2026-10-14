@@ -39,13 +39,19 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
   const permissions = PermissionQueue.open(path.join(root, "permissions.json"));
   const sessions = new Sessions({ now: () => now, log() {}, dir: path.join(root, "host"), desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client, permissions,
     router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
-    queryFn: () => { queries++; return { async *[Symbol.asyncIterator]() {}, interrupt: async () => {}, setModel: async () => {}, close() {} }; }, onEvent() {}, onSessions() {} });
+    queryFn: () => { queries++; return { async *[Symbol.asyncIterator]() {}, interrupt: async () => {}, setModel: async () => {}, setPermissionMode: async () => {}, close() {} }; }, onEvent() {}, onSessions() {} });
   t.after(async () => { sessions.shutdown(); await tick(); fs.rmSync(root, { recursive: true, force: true }); });
   let sequence = 0;
   const emit = (payload: unknown, source = "worker") => controller!.enqueue(new TextEncoder().encode(`event: client_event\ndata: ${JSON.stringify({ source, event_id: `e${++sequence}`, sequence_num: sequence, payload })}\n\n`));
   return { root, file, registry, sessions, posts, permissions, emit, queries: () => queries,
     stateReads: () => stateReads, advance: () => { now += 3000; }, status: (value: string) => { workerStatus = value; }, failState: () => { stateFailure = true; } };
 }
+
+test("Mac bridge mode switching reports not supported without posting controls", async t => {
+  const f = fixture(t);
+  await assert.rejects(f.sessions.setMode(id, 'plan'), /not supported yet/);
+  assert.equal(f.posts.length, 0);
+});
 
 test("bridge worker state overrides busy registry for listed and opened sessions, caches and falls back on failure", async t => {
   const f = fixture(t);

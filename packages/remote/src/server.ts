@@ -286,7 +286,21 @@ export class HostServer {
         }
         return;
       case "decide":
-        if (!await s.decide(msg.session, msg.id, msg.decision)) this.send(c, { t: "error", code: "stale_permission", message: "already answered or expired", session: msg.session });
+        try {
+          if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers)) throw new Error("already answered or expired");
+          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
+        } catch (e) {
+          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
+          else this.send(c, { t: "error", code: "permission", message: (e as Error).message, session: msg.session });
+        }
+        return;
+      case "set_mode":
+        try {
+          await s.setMode(msg.sessionId, msg.mode);
+          this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
+        } catch (e) {
+          this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
+        }
         return;
       case "interrupt": await s.interrupt(msg.session); return;
       case "set_model": await s.setModel(msg.session, msg.model, msg.effort); return;

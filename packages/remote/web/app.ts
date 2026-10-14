@@ -618,7 +618,16 @@ export class App {
       case "allow": case "deny": case "always":
         if (session) {
           const decision = act === "always" ? "allow_always" : act;
-          if (!this.link?.send({ t: "decide", session, id, decision })) this.toast(t("queue.pending"));
+          const permission = reduce(this.cache(session).events).open.find(p => p.id === id);
+          const answers: Record<string, string> = {};
+          if (decision !== "deny" && permission?.requestKind === "question") {
+            for (const q of permission.questions ?? []) {
+              const answer = window.prompt(`${q.question}\n${q.options.map(o => `${o.label}: ${o.description}`).join("\n")}\n${q.multiSelect ? "Separate multiple answers with commas." : "Choose one or type your own answer."}`);
+              if (!answer?.trim()) return;
+              answers[q.question] = answer.trim();
+            }
+          }
+          if (!this.link?.send({ t: "decide", session, id, decision, ...(permission?.requestKind === "question" && decision !== "deny" ? { answers } : {}) })) this.toast(t("queue.pending"));
         }
         break;
       case "perm-more": this.ui.permOpen.add(id); this.renderSession(true); break;

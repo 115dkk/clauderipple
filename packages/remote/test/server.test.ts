@@ -46,6 +46,7 @@ function scriptedQuery() {
       },
       interrupt: async () => { spies.interrupt++; },
       setModel: async model => { spies.setModel.push(model); },
+      setPermissionMode: async () => {},
       close: () => { spies.close++; },
     };
   };
@@ -160,6 +161,19 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   };
   return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
 }
+
+test("set_mode returns correlated success/error and broadcasts the mode event", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const peer = await f.auth();
+  peer.send({ t: 'attach', session: id });
+  await peer.take('events');
+  peer.send({ t: 'set_mode', reqId: 'mode-ok', sessionId: id, mode: 'plan' });
+  assert.deepEqual((await peer.take('res', m => m.reqId === 'mode-ok')).msg, { t: 'res', reqId: 'mode-ok', ok: true, data: null });
+  await peer.take('events', m => m.events.some(e => e.kind === 'mode' && e.mode === 'plan'));
+  peer.send({ t: 'set_mode', reqId: 'mode-error', sessionId: 'missing', mode: 'auto' });
+  assert.equal((await peer.take('res', m => m.reqId === 'mode-error')).msg.ok, false);
+});
 
 test("desktop polling broadcasts changed lists only to an authenticated visible connection", { timeout: 15_000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-live-wire-"));

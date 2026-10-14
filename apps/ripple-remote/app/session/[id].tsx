@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { remote } from '../../src/client';
@@ -11,6 +11,8 @@ import { TimelineItem } from '../../src/timeline';
 import { reduce, timelineItems } from '../../../../packages/remote/web/timeline.ts';
 import { t } from '../../../../packages/remote/web/i18n.ts';
 import { clock, duration, folderName } from '../../../../packages/remote/web/dom.ts';
+import { ModePicker, modeLabel, rememberMode } from '../../src/mode';
+import type { PermissionMode } from '../../../../packages/remote/src/protocol.ts';
 export default function Session() {
   const { c, s } = useStyles();
   const insets = useSafeAreaInsets();
@@ -20,6 +22,17 @@ export default function Session() {
   const state = useRemote();
   const [text, setText] = useState('');
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
+  const [modeError, setModeError] = useState('');
+  const modeSending = useRef(false);
+  const changeMode = async (mode: PermissionMode) => {
+    if (modeSending.current) return;
+    modeSending.current = true; setModeBusy(true); setModeError('');
+    try { await remote.command({ t: 'set_mode', sessionId: id, mode }); await rememberMode(mode); setModeOpen(false); }
+    catch (e) { setModeError(e instanceof Error ? e.message : String(e)); }
+    finally { modeSending.current = false; setModeBusy(false); }
+  };
   const [commands, setCommands] = useState<string[] | null>(null);
   // "/" at the start, before any space: the session's slash commands, as the app's composer offers them.
   const slash = /^\/(\S*)$/.exec(text)?.[1]?.toLowerCase() ?? null;
@@ -120,6 +133,19 @@ export default function Session() {
             <Text numberOfLines={1} style={{ fontSize: 15, color: c.ink }}><Text style={{ color: c.muted }}>/</Text>{name}</Text>
           </Pressable>)}
         </ScrollView>
+      </View>}
+      {!readOnly && session && <View style={{ marginHorizontal: 6, marginBottom: 8, gap: 8 }}>
+        <Pressable accessibilityRole="button" disabled={modeBusy} onPress={() => setModeOpen(v => !v)} style={{ alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 10, borderRadius: radius.sm, backgroundColor: c.surface2 }}>
+          <Text style={{ color: c.ink2, fontSize: 13 }}>{modeBusy ? copy('변경 중…', 'Changing…') : session.desktopBridge || session.origin === 'desktop' ? copy('모드: Mac', 'Mode: Mac') : modeLabel(session.permissionMode ?? 'auto')}</Text>
+        </Pressable>
+        {modeOpen && !modeBusy && <ModePicker value={session.permissionMode ?? 'auto'} onChange={mode => {
+          if (mode !== 'bypassPermissions') { void changeMode(mode); return; }
+          Alert.alert(modeLabel(mode), copy('경고: 승인 없이 모든 도구를 실행합니다.', 'Warning: all tools run without approval.'), [
+            { text: copy('취소', 'Cancel'), style: 'cancel' },
+            { text: copy('모두 허용', 'Bypass'), style: 'destructive', onPress: () => { void changeMode(mode); } },
+          ]);
+        }} />}
+        {!!modeError && <Text accessibilityRole="alert" style={{ color: c.bad, fontSize: 13 }}>{modeError}</Text>}
       </View>}
       {!readOnly && session && <Composer testID="session-composer" value={text} onChangeText={setText} placeholder={t('composer.reply')} canSend={!!text.trim()} onSend={() => { void send(); }}
         onStop={['running', 'starting', 'waiting'].includes(session.state) ? () => { try { remote.send({ t: 'interrupt', session: id }); } catch (e) { remote.report(e); } } : undefined} />}

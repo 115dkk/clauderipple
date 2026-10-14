@@ -294,7 +294,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
           yield { type: "assistant", message: { id: `reply-${turns}`, model: "test-model", content: [{ type: "text", text: input.message.content }] } };
           yield { type: "result", subtype: "success", num_turns: 1 };
         }
-      }, interrupt: async () => {}, setModel: async () => {}, close: () => {},
+      }, interrupt: async () => {}, setModel: async () => {}, setPermissionMode: async () => {}, close: () => {},
     };
   }, handoff: async () => { handoffs++; return "unexpected"; }, onEvent: () => {}, onSessions: () => {} });
   t.after(async () => { for (const s of sessions.list()) sessions.stop(s.id); await new Promise(resolve => setImmediate(resolve)); sessions.shutdown(); });

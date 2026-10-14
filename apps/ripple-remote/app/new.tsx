@@ -7,6 +7,8 @@ import { Button, Field, Frame, Label, List, Opt, Segmented, TopBar, useRemote, u
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon } from '../src/icons';
 import { mono } from '../src/theme';
+import type { PermissionMode } from '../../../packages/remote/src/protocol.ts';
+import { ModePicker, savedMode, rememberMode } from '../src/mode';
 export default function NewSession() {
   const { c, s } = useStyles();
   const insets = useSafeAreaInsets();
@@ -29,6 +31,9 @@ export default function NewSession() {
   const [text, setText] = useState('');
   const [browse, setBrowse] = useState<BrowseResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>('auto');
+  const modePicked = useRef(false);
+  useEffect(() => { void savedMode().then(mode => { if (!modePicked.current) setPermissionMode(mode); }).catch(e => remote.report(e)); }, []);
   useEffect(() => {
     if (state.status?.state !== 'open') return;
     void Promise.all([remote.request({ op: 'folders' }), remote.request({ op: 'models' })]).then(([f, m]) => { setFolders(f as FolderEntry[]); setGroups(m as ProviderGroup[]); }).catch(e => remote.report(e));
@@ -37,7 +42,7 @@ export default function NewSession() {
   const create = async () => {
     if (!model || busy) return;
     setBusy(true);
-    try { await remote.queue({ t: 'create', cwd, model: model.model, effort, text: text.trim() }); }
+    try { await remote.queue({ t: 'create', cwd, model: model.model, effort, permissionMode, text: text.trim() }); }
     catch (e) { remote.report(e); }
     finally { setBusy(false); }
   };
@@ -74,6 +79,9 @@ export default function NewSession() {
         <Text style={s.segLabel}>{t('model.effort')}</Text>
         <Segmented options={efforts.map(e => ({ value: e, label: t(`effort.${e}`) }))} value={effort} onChange={setEffort} />
       </View>}
+      <View style={{ marginHorizontal: 12, marginTop: 16 }}>
+        <ModePicker value={permissionMode} onChange={mode => { modePicked.current = true; setPermissionMode(mode); void rememberMode(mode).catch(e => remote.report(e)); }} />
+      </View>
       <View style={{ marginHorizontal: 12, marginTop: 16 }}>
         <Field onFocus={() => { focused.current = 'prompt'; reveal(); }} onBlur={() => { focused.current = null; }} testID="new-prompt" accessibilityLabel={t('composer.new')} placeholder={t('composer.new')} value={text} onChangeText={setText} multiline style={{ minHeight: 120, borderRadius: 20, paddingTop: 14, paddingHorizontal: 16, textAlignVertical: 'top', borderColor: c.line2 }} />
       </View>

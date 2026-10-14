@@ -31,6 +31,11 @@ export type RelayMsg = { relay: "hello" } | { relay: "connect"; conn: string } |
 /** Close codes the relay uses. */
 export const RELAY_CLOSE = { badRequest: 4400, badSecret: 4401, hostOffline: 4404, replaced: 4409, peerGone: 4410, tooBig: 1009 } as const;
 
+export const PERMISSION_MODES = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const;
+export type PermissionMode = typeof PERMISSION_MODES[number];
+export interface Question { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }
+export interface PermissionContent { requestKind?: "tool" | "plan" | "question"; questions?: Question[] }
+
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export type SessionState =
@@ -60,7 +65,8 @@ export type EventBody = MessageImages & (
   | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */
   | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
-  | { kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean }
+  | ({ kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean } & PermissionContent)
+  | { kind: "mode"; mode: PermissionMode }
   | { kind: "permission_decided"; id: string; decision: "allow" | "allow_always" | "deny" | "expired"; reason?: string }
   | { kind: "result"; ok: boolean; error?: string; ms: number; turns: number }
   | { kind: "state"; state: SessionState; detail?: string }
@@ -98,6 +104,7 @@ export interface SessionSummary {
   cwd: string;
   model: string;
   effort: Effort | null;
+  permissionMode?: PermissionMode;
   state: SessionState;
   /** Main-turn state is authoritative for desktop Remote Control sessions. */
   desktopBridge?: boolean;
@@ -136,9 +143,10 @@ export type ClientMsg =
   | { t: "attach"; session: string; epoch?: string; afterSeq?: number }
   | { t: "detach"; session: string }
   | { t: "history"; session: string; beforeSeq: number; reqId: string }
-  | { t: "create"; clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string }
+  | { t: "create"; clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode }
+  | { t: "set_mode"; reqId: string; sessionId: string; mode: PermissionMode }
   | { t: "send"; session: string; clientMsgId: string; text: string }
-  | { t: "decide"; session: string; id: string; decision: "allow" | "allow_always" | "deny" }
+  | { t: "decide"; session: string; id: string; decision: "allow" | "allow_always" | "deny"; reqId?: string; message?: string; answers?: Record<string, string> }
   | { t: "interrupt"; session: string }
   | { t: "set_model"; session: string; model: string; effort: Effort | null }
   /** The app is in front (visible) or not. Sent on change and every PING_MS while visible; the host pushes only when nobody is looking. */

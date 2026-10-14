@@ -22,7 +22,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
   const suggestions = [{ type: "addRules" }];
-  const spies = { interrupt: 0, setModel: [] as (string | undefined)[], close: 0 };
+  const spies = { modeError: null as Error | null, setPermissionMode: [] as import('../src/protocol.ts').PermissionMode[], interrupt: 0, setModel: [] as (string | undefined)[], close: 0 };
   const queryFn: QueryFn = params => {
     options.push(params.options);
     return {
@@ -52,6 +52,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
       },
       interrupt: async () => { spies.interrupt++; },
       setModel: async model => { spies.setModel.push(model); },
+      setPermissionMode: async mode => { if (spies.modeError) throw spies.modeError; spies.setPermissionMode.push(mode); },
       close: () => { spies.close++; },
     };
   };
@@ -81,6 +82,92 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
     sessions.create({ clientMsgId, cwd, model, effort, text: "ping" });
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
+
+test("creation carries permission mode, enables bypass explicitly, and defaults to auto", async t => {
+  const f = fixture(t);
+  for (const mode of [undefined, 'plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions'] as const) {
+    const id = await f.sessions.create({ clientMsgId: `mode-${mode}`, cwd: f.cwd, model: 'test', effort: null, text: 'ping', ...(mode ? { permissionMode: mode } : {}) });
+    await waitFor(() => f.fake.options.length > 0 && f.sessions.summaryOf(id)?.state === 'idle');
+    const options = f.fake.options.at(-1)!;
+    assert.equal(options.permissionMode, mode ?? 'auto');
+    assert.equal(options.allowDangerouslySkipPermissions, mode === 'bypassPermissions' ? true : undefined);
+    assert.equal(f.sessions.summaryOf(id)?.permissionMode, mode ?? 'auto');
+  }
+});
+
+test("set_mode applies during a turn and stores mode for a stopped session", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  await f.sessions.setMode(id, 'plan');
+  assert.deepEqual(f.fake.spies.setPermissionMode, ['plan']);
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, 'plan');
+  assert.ok(f.events.some(e => e.event.kind === 'mode' && e.event.mode === 'plan'));
+  f.sessions.stop(id);
+  await nextTick();
+  await f.sessions.setMode(id, 'acceptEdits');
+  f.sessions.send(id, 'resume-mode', 'again');
+  await waitFor(() => f.fake.options.length === 2);
+  assert.equal(f.fake.options[1]!.permissionMode, 'acceptEdits');
+});
+
+for (const original of ['auto', 'bypassPermissions'] as const) test(`plan implementation returns from ${original}`, async t => {
+  const f = fixture(t);
+  const id = await f.sessions.create({ clientMsgId: 'plan', cwd: f.cwd, model: 'test', effort: null, text: 'ping', permissionMode: original });
+  await waitFor(() => f.fake.options.length === 1);
+  await f.sessions.setMode(id, 'plan');
+  const callback = f.fake.options[0]!.canUseTool as CanUseTool;
+  const answer = callback('ExitPlanMode', { plan: '# Plan\nImplement it' }, { signal: new AbortController().signal });
+  const pending = f.permissions.pending(id)[0]!;
+  assert.ok(f.events.some(e => e.event.kind === 'permission' && e.event.requestKind === 'plan' && e.event.input === '# Plan\nImplement it'));
+  assert.equal(await f.sessions.decide(id, pending.id, 'allow'), true);
+  assert.equal((await answer).behavior, 'allow');
+  assert.equal(f.fake.spies.setPermissionMode.at(-1), original === 'bypassPermissions' ? 'bypassPermissions' : 'acceptEdits');
+});
+
+test("mode and plan approval failures stay visible and leave the permission pending", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.fake.options.length === 1);
+  f.fake.spies.modeError = new Error('mode rejected');
+  await assert.rejects(f.sessions.setMode(id, 'plan'), /mode rejected/);
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, 'auto');
+  f.fake.spies.modeError = null;
+  await f.sessions.setMode(id, 'plan');
+  const callback = f.fake.options[0]!.canUseTool as CanUseTool;
+  const answer = callback('ExitPlanMode', { plan: 'Work' }, { signal: new AbortController().signal });
+  const pending = f.permissions.pending(id)[0]!;
+  f.fake.spies.modeError = new Error('mode rejected');
+  await assert.rejects(Promise.resolve(f.sessions.decide(id, pending.id, 'allow')), /mode rejected/);
+  assert.equal(f.permissions.get(pending.id)?.state, 'pending');
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, 'plan');
+  await f.sessions.decide(id, pending.id, 'deny', 'Revise the plan');
+  assert.deepEqual(await answer, { behavior: 'deny', message: 'Revise the plan' });
+});
+
+test("AskUserQuestion passes answers keyed by question text in updatedInput", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.fake.options.length === 1);
+  const callback = f.fake.options[0]!.canUseTool as CanUseTool;
+  const input = { questions: [{ question: 'Which?', header: 'Choice', multiSelect: true, options: [{ label: 'A', description: 'first' }, { label: 'B', description: 'second' }] }] };
+  const answer = callback('AskUserQuestion', input, { signal: new AbortController().signal });
+  const pending = f.permissions.pending(id)[0]!;
+  assert.throws(() => f.sessions.decide(id, pending.id, 'allow'), /Answer every question/);
+  const answers = { 'Which?': 'A, B, custom' };
+  assert.equal(await f.sessions.decide(id, pending.id, 'allow', undefined, answers), true);
+  assert.deepEqual(await answer, { behavior: 'allow', updatedInput: { ...input, answers } });
+});
+
+test("a new SDK message denies pending approvals before delivering the message", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.send(id, 'supersede', 'new instructions');
+  await waitFor(() => f.fake.users.length === 2);
+  assert.deepEqual(f.fake.answers[0], { behavior: 'deny', message: 'superseded by a new message from the user' });
+  assert.equal(f.fake.users[1]!.message.content, 'new instructions');
+});
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = performance.now() + 2000;
@@ -302,7 +389,7 @@ test("desktop handoff waits until already queued turns finish", async t => {
   const id = await f.create();
   await waitFor(() => f.permissions.pending(id).length === 1);
   f.sessions.send(id, "queued", "second turn");
-  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  assert.equal(f.permissions.pending(id).length, 0);
   await waitFor(() => f.fake.users.length === 2 && f.permissions.pending(id).length === 1);
   assert.deepEqual(counts, []);
   f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");

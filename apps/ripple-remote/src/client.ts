@@ -110,12 +110,13 @@ class RemoteClient {
   }
   retry(): void { this.link?.nudge(); }
   send(message: ClientMsg): void { if (!this.link?.send(message)) throw new Error('The computer is not connected'); }
-  request(op: ReqOp): Promise<unknown> {
+  request(op: ReqOp): Promise<unknown> { return this.command({ t: 'req', op }); }
+  command(message: Omit<Extract<ClientMsg, { t: 'req' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'set_mode' }>, 'reqId'> | Omit<Extract<ClientMsg, { t: 'decide' }>, 'reqId'>): Promise<unknown> {
     const reqId = id();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.requests.delete(reqId); reject(new Error('The computer did not answer in time')); }, 15_000);
       this.requests.set(reqId, { resolve, reject, timer });
-      if (!this.link?.send({ t: 'req', reqId, op })) { clearTimeout(timer); this.requests.delete(reqId); reject(new Error('The computer is not connected')); }
+      if (!this.link?.send({ ...message, reqId })) { clearTimeout(timer); this.requests.delete(reqId); reject(new Error('The computer is not connected')); }
     });
   }
   async registerToken(token: string, lang: 'ko' | 'en'): Promise<void> {

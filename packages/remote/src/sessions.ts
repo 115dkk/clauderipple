@@ -16,7 +16,7 @@ import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
-import type { Effort, EventBody, Figures, SessionEvent, SessionState, SessionSummary, ToolCall } from "./protocol.ts";
+import { PERMISSION_MODES, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
 
 // ---- the slice of the Agent SDK this file relies on (typed loosely so tests can fake it) ----
@@ -25,6 +25,7 @@ export interface SdkUserMessage { type: "user"; message: { role: "user"; content
 export interface SdkQuery extends AsyncIterable<Record<string, unknown>> {
   interrupt(): Promise<unknown>;
   setModel(model?: string): Promise<void>;
+  setPermissionMode(mode: PermissionMode): Promise<void>;
   close(): void;
 }
 export type PermissionAnswer =
@@ -39,6 +40,8 @@ interface SessionRecord {
   cwd: string;
   model: string;
   effort: Effort | null;
+  permissionMode?: PermissionMode;
+  prePlanMode?: PermissionMode;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -53,6 +56,7 @@ interface SessionRecord {
 
 interface Live {
   query: SdkQuery;
+  ready: Promise<void>;
   input: Inbox;
   abort: AbortController;
   /** Text deltas waiting to be written (coalesced, ~80 ms). */
@@ -147,8 +151,24 @@ export function summarize(tool: string, input: Record<string, unknown>, cwd: str
 export function permissionDetail(tool: string, input: Record<string, unknown>, cwd: string): string {
   if (tool === "Bash") return str(input.command);
   if (tool === "Edit") return `${summarize(tool, input, cwd)}\n- ${str(input.old_string).split("\n").join("\n- ")}\n+ ${str(input.new_string).split("\n").join("\n+ ")}`;
-  if (tool === "Write") return `${summarize(tool, input, cwd)}\n${str(input.content)}`;
+  if (tool === "Write") return `${summarize(tool, input, cwd)}\n+ ${str(input.content).split("\n").join("\n+ ")}`;
+  if (tool === "MultiEdit" && Array.isArray(input.edits)) return input.edits.map(edit => permissionDetail("Edit", { ...object(edit), file_path: input.file_path }, cwd)).join("\n\n");
+  if (tool === "ExitPlanMode") return str(input.plan);
   return JSON.stringify(input, null, 2);
+}
+
+function questionInputs(input: Record<string, unknown>): Question[] {
+  if (!Array.isArray(input.questions)) throw new Error("Invalid AskUserQuestion input");
+  return input.questions.map(value => {
+    const q = object(value);
+    if (!q || typeof q.question !== "string" || typeof q.header !== "string" || typeof q.multiSelect !== "boolean" || !Array.isArray(q.options)) throw new Error("Invalid AskUserQuestion question");
+    const options = q.options.map(value => {
+      const option = object(value);
+      if (!option || typeof option.label !== "string" || typeof option.description !== "string") throw new Error("Invalid AskUserQuestion option");
+      return { label: option.label, description: option.description };
+    });
+    return { question: q.question, header: q.header, multiSelect: q.multiSelect, options };
+  });
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -350,7 +370,7 @@ export class Sessions {
     const working = process?.status === "busy" || process?.status === "shell";
     const taskList = working ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(!r.desktopBridge ? { permissionMode: r.permissionMode ?? "auto" } : {}), state, pending: this.opts.permissions.pending(r.id).length, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -405,7 +425,7 @@ export class Sessions {
   // ---- what the phone asks for --------------------------------------------------------------
 
   /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session. */
-  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string }): Promise<string> {
+  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode }): Promise<string> {
     for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
     // A resend can arrive while the first create is still checking the folder; both get the one session.
     let pending = this.creating.get(req.clientMsgId);
@@ -416,11 +436,13 @@ export class Sessions {
     return pending;
   }
 
-  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string }): Promise<string> {
+  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode }): Promise<string> {
+    const mode = req.permissionMode ?? "auto";
+    if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const cwd = path.resolve(req.cwd);
     if (!(await isDirectory(cwd))) throw new Error(`not a folder: ${cwd}`);
     const now = this.now();
-    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
+    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
@@ -449,6 +471,7 @@ export class Sessions {
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
     id = r.id;
     if (this.seen(id, clientMsgId)) return id;
+    this.opts.permissions.denySession(id, "superseded by a new message from the user");
     this.append(id, { kind: "user", text, clientMsgId });
     let live = this.live.get(id);
     const handoff = this.handingOff.get(id);
@@ -588,7 +611,7 @@ export class Sessions {
     return false;
   }
 
-  decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny"): boolean | Promise<boolean> {
+  decide(id: string, permId: string, decision: "allow" | "allow_always" | "deny", message?: string, answers?: Record<string, string>): boolean | Promise<boolean> {
     const connection = this.bridges.get(id);
     const pending = connection && [...connection.permissions].find(([, value]) => value.id === permId);
     if (connection && pending) {
@@ -599,8 +622,29 @@ export class Sessions {
       return answer;
     }
     const p = this.opts.permissions.get(permId);
-    if (!p || p.session !== id) return false;
-    return this.opts.permissions.decide(permId, decision) !== null;
+    if (!p || p.session !== id || p.state !== "pending") return false;
+    if (p.tool === "ExitPlanMode" && decision !== "deny") return this.implementPlan(id, permId);
+    if (p.tool === "AskUserQuestion" && decision !== "deny") {
+      const questions = questionInputs(object(p.input) ?? {});
+      if (!answers || !questions.length || questions.some(q => typeof answers[q.question] !== "string" || !answers[q.question]!.trim())) throw new Error("Answer every question before submitting.");
+      if (Object.values(answers).some(value => typeof value !== "string")) throw new Error("Invalid question answers.");
+    }
+    return this.opts.permissions.decide(permId, decision, message, answers) !== null;
+  }
+
+  private planDecisions = new Map<string, Promise<boolean>>();
+
+  private implementPlan(id: string, permId: string): Promise<boolean> {
+    const pending = this.planDecisions.get(permId);
+    if (pending) return pending;
+    const change = (async () => {
+      const r = this.records.get(id)!;
+      await this.setMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits");
+      return this.opts.permissions.decide(permId, "allow") !== null;
+    })();
+    this.planDecisions.set(permId, change);
+    void change.finally(() => this.planDecisions.delete(permId)).catch(() => {});
+    return change;
   }
 
   private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }): Promise<boolean> {
@@ -633,6 +677,40 @@ export class Sessions {
     live.interrupted = true;
     await live.query.interrupt().catch(() => undefined);
     this.append(id, { kind: "notice", code: "interrupted" });
+  }
+
+  private modeChanges = new Map<string, Promise<void>>();
+
+  setMode(id: string, mode: PermissionMode): Promise<void> {
+    const previous = this.modeChanges.get(id) ?? Promise.resolve();
+    const change = previous.catch(() => {}).then(() => this.changeMode(id, mode));
+    this.modeChanges.set(id, change);
+    void change.finally(() => { if (this.modeChanges.get(id) === change) this.modeChanges.delete(id); }).catch(() => {});
+    return change;
+  }
+
+  private async changeMode(id: string, mode: PermissionMode): Promise<void> {
+    if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
+    const existing = this.records.get(id);
+    const desktopId = existing?.sdkSessionId ?? id;
+    if (existing?.desktopBridge || this.bridges.has(id) || this.desktop?.liveProcess(desktopId)?.bridgeSessionId || this.desktop?.isOpen(desktopId)) throw new Error("Permission mode switching for Mac Remote Control is not supported yet.");
+    const r = existing ?? this.continueDesktop(id, "");
+    const live = this.live.get(id);
+    if (live) {
+      await live.ready;
+      if (this.live.get(id) !== live) throw new Error("The session stopped before its mode changed. Try again.");
+      await live.query.setPermissionMode(mode);
+    }
+    this.recordMode(r, mode);
+  }
+
+  private recordMode(r: SessionRecord, mode: PermissionMode): void {
+    if (mode === "plan" && r.permissionMode !== "plan") r.prePlanMode = r.permissionMode ?? "auto";
+    if (mode !== "plan") delete r.prePlanMode;
+    r.permissionMode = mode;
+    this.save();
+    this.append(r.id, { kind: "mode", mode });
+    this.opts.onSessions();
   }
 
   async setModel(id: string, model: string, effort: Effort | null): Promise<void> {
@@ -694,6 +772,8 @@ export class Sessions {
       ...(m.effort ? { effort: m.effort } : {}),
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
+      permissionMode: r.permissionMode ?? "auto",
+      ...(r.permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
       abortController: abort,
       env,
       canUseTool: this.canUseTool(r.id),
@@ -701,9 +781,9 @@ export class Sessions {
       ...(r.sdkSessionId ? { resume: r.sdkSessionId } : {}),
       ...(this.opts.claudePath ? { pathToClaudeCodeExecutable: this.opts.claudePath } : {}),
     };
-    const live: Live = { query: null as unknown as SdkQuery, input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingTurns: 0 };
+    const live: Live = { query: null as unknown as SdkQuery, ready: Promise.resolve(), input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingTurns: 0 };
     this.live.set(r.id, live);
-    void this.opts.router.status().then((s) => {
+    live.ready = this.opts.router.status().then((s) => {
       // The router's own word on where its proxy and CA are wins over whatever this process inherited.
       Object.assign(env, s.proxyEnv);
     }).finally(() => {
@@ -734,6 +814,8 @@ export class Sessions {
     const parent = (msg.parent_tool_use_id as string | null | undefined) ?? null;
     switch (msg.type) {
       case "system": {
+        const mode = PERMISSION_MODES.find(mode => mode === msg.permissionMode);
+        if (!parent && mode && mode !== r.permissionMode && (msg.subtype === "init" || msg.subtype === "status")) this.recordMode(r, mode);
         if (msg.subtype === "init") {
           const list = slashCommands(msg);
           if (list) { this.commandLists.set(r.id, { at: this.now(), list }); this.lastCommands = list; }
@@ -888,16 +970,29 @@ export class Sessions {
       const r = this.records.get(id)!;
       const live = this.live.get(id);
       if (live) this.flush(id, live);
+      let detail = permissionDetail(tool, input, r.cwd);
+      if (tool === "Write" && typeof input.file_path === "string") {
+        // What the write replaces, when it is a readable file of a size worth showing on a phone; any
+        // failure keeps the plain listing rather than failing the approval itself.
+        try {
+          const file = path.resolve(r.cwd, input.file_path);
+          if ((await fs.promises.stat(file)).size <= 256 * 1024) {
+            const before = await fs.promises.readFile(file, "utf8");
+            detail = permissionDetail("Edit", { file_path: input.file_path, old_string: before, new_string: input.content }, r.cwd);
+          }
+        } catch { /* new file, unreadable or gone: the plain listing stands */ }
+      }
+      const questions = tool === "AskUserQuestion" ? questionInputs(input) : undefined;
       const { record, decision } = this.opts.permissions.request({ session: id, tool, title: opts.title ?? "", summary: summarize(tool, input, r.cwd), input }, opts.signal);
-      this.append(id, { kind: "permission", id: record.id, tool, title: opts.title ?? "", summary: record.summary, input: permissionDetail(tool, input, r.cwd), canAlways: Array.isArray(opts.suggestions) && opts.suggestions.length > 0 });
+      this.append(id, { kind: "permission", id: record.id, tool, title: opts.title ?? "", summary: record.summary, input: detail, canAlways: tool !== "ExitPlanMode" && tool !== "AskUserQuestion" && Array.isArray(opts.suggestions) && opts.suggestions.length > 0, requestKind: tool === "ExitPlanMode" ? "plan" : tool === "AskUserQuestion" ? "question" : "tool", ...(questions ? { questions } : {}) });
       this.setState(r, "waiting");
-      const answer: { decision: Decision; reason?: string } = await decision;
+      const answer = await decision;
       this.append(id, { kind: "permission_decided", id: record.id, decision: answer.decision, ...(answer.reason ? { reason: answer.reason } : {}) });
       if (this.live.has(id) && this.opts.permissions.pending(id).length === 0) this.setState(r, "running");
       else this.opts.onSessions();
-      if (answer.decision === "allow") return { behavior: "allow", updatedInput: input };
-      if (answer.decision === "allow_always") return { behavior: "allow", updatedInput: input, ...(opts.suggestions ? { updatedPermissions: opts.suggestions } : {}) };
-      if (answer.decision === "deny") return { behavior: "deny", message: "The user denied this from their phone." };
+      if (answer.decision === "allow") return { behavior: "allow", updatedInput: answer.answers ? { ...input, answers: answer.answers } : input };
+      if (answer.decision === "allow_always") return { behavior: "allow", updatedInput: answer.answers ? { ...input, answers: answer.answers } : input, ...(opts.suggestions ? { updatedPermissions: opts.suggestions } : {}) };
+      if (answer.decision === "deny") return { behavior: "deny", message: answer.reason ?? "The user denied this from their phone." };
       return { behavior: "deny", message: "This permission request expired before anyone answered.", interrupt: true };
     };
   }

@@ -16,7 +16,7 @@ export interface PermissionRecord {
 }
 
 type Request = Pick<PermissionRecord, "session" | "tool" | "title" | "summary" | "input">;
-type Answer = { decision: Decision; reason?: string };
+type Answer = { decision: Decision; reason?: string; answers?: Record<string, string> };
 interface Waiter { resolve: (answer: Answer) => void; cleanup: () => void }
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 
@@ -77,7 +77,7 @@ export class PermissionQueue {
     return { record: structuredClone(this.records.get(record.id)!), decision };
   }
 
-  private finish(ids: string[], decision: Decision, reason?: string): PermissionRecord[] {
+  private finish(ids: string[], decision: Decision, reason?: string, answers?: Record<string, string>): PermissionRecord[] {
     const at = this.now();
     const records = new Map(this.records);
     const changed: PermissionRecord[] = [];
@@ -98,13 +98,18 @@ export class PermissionQueue {
       waiter.cleanup();
       const answer: Answer = { decision };
       if (reason !== undefined) answer.reason = reason;
+      if (answers !== undefined) answer.answers = answers;
       waiter.resolve(answer);
     }
     return structuredClone(changed);
   }
 
-  decide(id: string, decision: "allow" | "allow_always" | "deny"): PermissionRecord | null {
-    return this.finish([id], decision)[0] ?? null;
+  decide(id: string, decision: "allow" | "allow_always" | "deny", reason?: string, answers?: Record<string, string>): PermissionRecord | null {
+    return this.finish([id], decision, reason, answers)[0] ?? null;
+  }
+
+  denySession(session: string, reason: string): PermissionRecord[] {
+    return this.finish(this.pending(session).map(record => record.id), "deny", reason);
   }
 
   expire(id: string, reason: string): PermissionRecord | null {

@@ -1,5 +1,5 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
-import type { Effort, Figures, ImagePart, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
+import type { PermissionContent, Effort, Figures, ImagePart, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[] } }
 
@@ -7,7 +7,7 @@ export type Item =
   | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; at: number; queued?: "pending" | "sending" }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
-  | { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; reason?: string; at: number }
+  | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
   | { type: "start"; key: string; ver: string };
@@ -90,7 +90,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, status: e.status, steps: e.steps });
         break;
       case "permission":
-        put({ type: "permission", key: `p${e.id}`, ver: `${e.seq}`, id: e.id, tool: e.tool, title: e.title, summary: e.summary, input: e.input, canAlways: e.canAlways, decision: null, at: e.at });
+        put({ type: "permission", key: `p${e.id}`, ver: `${e.seq}`, id: e.id, tool: e.tool, title: e.title, summary: e.summary, input: e.input, canAlways: e.canAlways, ...(e.requestKind ? { requestKind: e.requestKind } : {}), ...(e.questions ? { questions: e.questions } : {}), decision: null, at: e.at });
         break;
       case "permission_decided": {
         const at = byKey.get(`p${e.id}`);
