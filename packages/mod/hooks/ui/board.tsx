@@ -21,7 +21,7 @@ import type { Effort, Settings, Skin } from '../../types'
 import { SKINS } from '../settings'
 import { CELL_PX, ROW_PX } from './art'
 import type { Icon } from './art'
-import { bandMood, cacheFact, contextFact, effortFact, limitFact, modeFact, modeLabel, routeFact, routeName } from './band'
+import { bandMood, cacheFact, contextFact, effortFact, limitFact, modeFact, modeLabel, routeName } from './band'
 import { BOARD_PALETTE, CODE, CONTROL, CROSSPOINT, LEAD_PX, READOUT, SCAN_LEAD, captionArt, cellArt, cellsOf, closeArt, codeArt, groundArt, lampArt, ledStripArt, meterArt, plateArt, portCells, portsArt, powerArt, readoutArt, rowArt, ruleArt, scanArt, stepsArt } from './cells'
 import type { Ink, Lamp, Made } from './cells'
 import { lift, pic, press, rowsOf } from './kit'
@@ -240,16 +240,20 @@ type Drawn = { key: string; cells: number; node: RenderNode; tip?: string }
 
 const tipScope = (key: string) => 'board-tip-' + key
 
-/** A fact: its parts in a row of fixed cells, pointing at it shows its tip. */
-function fact(el: Els, key: string, parts: Drawn[], tip?: string, onPress?: () => void): Drawn {
+/**
+ * A fact: its parts in a row of fixed cells, pointing at it shows its tip. A `lit` fact is a button
+ * that says so the board's way, the crosspoint's column light under the pointer.
+ */
+function fact(el: Els, key: string, parts: Drawn[], tip?: string, onPress?: () => void, lit = false): Drawn {
   const { Box } = el
   const cells = parts.reduce((n, p) => n + p.cells, 0) + GAP * (parts.length - 1)
+  const hover = { ...(lit ? { backgroundColor: CROSSPOINT.column } : {}), ...(tip ? { scope: tipScope(key) } : {}) }
   return {
     key,
     cells,
     tip,
     node: (
-      <Box key={'fact-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={GAP} width={cells} flexShrink={0} {...(tip ? { hover: { scope: tipScope(key) } } : {})}>
+      <Box key={'fact-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={GAP} width={cells} flexShrink={0} {...(lit || tip ? { hover } : {})}>
         {parts.map(p => p.node)}
         {onPress ? press(el, key, cells * CELL_PX, onPress) : null}
       </Box>
@@ -327,29 +331,36 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   const name = readoutArt((r.resent ? '~ ' : '') + routeName(r.model), { marker: true, widthPx: nameRoom * CELL_PX, ink: r.ok ? 'text' : 'danger' })
   const parts: Drawn[] = [{ key: 'route-name', cells: nameRoom, node: <Box key="route-name" width={nameRoom} flexShrink={0} overflow="hidden">{pic(el, 'route-name', name.source, routeName(r.model), name.width, READOUT)}</Box> }]
   if (tailArt) parts.push(made(el, 'route-hit', tailArt, tail, READOUT))
-  return fact(el, 'route', parts, routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · '), actions.toggleLog)
+  // The route is a button (it opens the log), so it lights like the board's other presses. It has
+  // no tip, as on the deep's band: the light says it is a button, and its card is what the log shows.
+  return fact(el, 'route', parts, undefined, actions.toggleLog, true)
 }
 
-/** The tips laid over the facts, each shown while its fact or control is pointed at: a board line. */
-function tips(el: Els, frame: Frame, list: { key: string; text: string }[], at: number): RenderNode {
+/**
+ * The tips over the facts, each a board line shown while its fact or control is pointed at, from
+ * column `at` to the facts' right edge (just before the controls).
+ *
+ * The tips are the facts' own children with no Box spanning them, as on the deep's band: the pointer
+ * on an absolute Box is on its parent, so a standing layer over the facts would take every hover and
+ * press from what lies under it (upstream found the route no longer opened the log, 2026-10-14). A
+ * tip resting `display: "none"` takes no pointer, and carries no `key` (a keyed Box drawn hidden is
+ * refused as a hover scope), so each tip reveals through its own `hover.scope`.
+ */
+function tips(el: Els, frame: Frame, list: { key: string; text: string }[], at: number): RenderNode[] {
   const { Box, Text } = el
   const left = Math.ceil(at)
   const width = boardWidth(frame)
-  return (
-    <Box key="board-why" position="absolute" top={0} bottom={0} left={left} right={0} minWidth={0} overflow="hidden">
-      {list.map(tip => (
-        <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden" alignItems="center">
-          <Box position="absolute" top={0} left={0}>
-            {pic(el, 'tip-plate-' + tip.key, scanArt(width, ROW_H), tip.text, width, ROW_H)}
-          </Box>
-          <Box position="relative" flexShrink={1} minWidth={0} paddingLeft={SCAN_LEAD}>
-            {lift(el)}
-            <Text wrap="truncate">{tip.text}</Text>
-          </Box>
-        </Box>
-      ))}
+  return list.map(tip => (
+    <Box position="absolute" top={0} bottom={0} left={left} right={0} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden" alignItems="center">
+      <Box position="absolute" top={0} left={0}>
+        {pic(el, 'tip-plate-' + tip.key, scanArt(width, ROW_H), tip.text, width, ROW_H)}
+      </Box>
+      <Box position="relative" flexShrink={1} minWidth={0} paddingLeft={SCAN_LEAD}>
+        {lift(el)}
+        <Text wrap="truncate">{tip.text}</Text>
+      </Box>
     </Box>
-  )
+  ))
 }
 
 /** An icon cell at the band's right end, its word when the band has room, lit under the pointer. */
@@ -443,7 +454,6 @@ export function boardBand(el: Els, frame: Frame, view: DashboardView, actions: B
   const controls = bandControls(el, frame, view, actions, words)
   const routeNode = route > 0 ? routeDrawn(el, frame, view, actions, route) : null
   const list = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
-  if (routeNode?.tip) list.push({ key: 'route', text: routeNode.tip })
   for (const c of controls) if (c.tip && c.key !== 'handoff') list.push({ key: c.key, text: c.tip })
   if (actions.hide) list.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (

@@ -556,6 +556,32 @@ test('the board keeps every key the deep draws, on the band, the quick settings,
   }
 })
 
+/**
+ * The board's band behaves as the deep's does since 2026-10-14: the route is a press that lights
+ * under the pointer and has no tip, and no Box stands over the facts (one there took every hover and
+ * press from what lay under it), while the facts' and controls' tips are still drawn.
+ */
+test('on the board the route lights as a press with no tip, and nothing stands over the facts', async ($, on) => {
+  const { calls, fn } = recorder()
+  const noop = () => undefined
+  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: fn('log'), toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
+  drawPane(on, 'board-band', el => renderBand(el, frameOf('desktop', 120, 12, 'matrix'), DASH, actions))
+  const ui = await mount($, 'board-band', 'desktop')
+  expect(await ui.find({ key: 'board-why' })).toBeUndefined()
+  // `find` leaves a Box's hover out; the drawn tree carries it beside the props (as tipsOf reads it).
+  let route: (Drawn & { hover?: { backgroundColor?: string; scope?: string } }) | undefined
+  walk(await ui.drawn(), n => { if (!route && n.type === 'Box' && n.props?.key === 'fact-route') route = n })
+  expect(route, 'the route is drawn').toBeDefined()
+  const hover = route?.hover
+  expect(hover?.backgroundColor, 'the route lights').toBeDefined()
+  expect(hover?.scope, 'the route has no tip').toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Last route:/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Keep cache warm Off · / })).toBeDefined()
+  await ui.press({ key: 'route' })
+  await ui.unmount()
+  expect(calls).toEqual(['log'])
+})
+
 test('Jev key and Test row appear only for TypeSafe Jev with no known key', async ($, on) => {
   const sources: JevState['source'][] = [null, 'zen', 'env', 'file', 'pasted']
   for (const judge of ['haiku', 'jev', 'model'] as const) {
