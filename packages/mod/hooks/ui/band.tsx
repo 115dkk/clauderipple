@@ -469,8 +469,9 @@ function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   const { Text } = el
   const names = [limitName('five_hour', frame.lang), limitName('seven_day', frame.lang)]
   const save = t(frame.lang, 'band.save')
-  // Save's word is counted whether it shows or not: turning save mode on moves nothing.
-  const cells = Math.ceil((Math.max(...names.map(textPx)) + CELL_PX + textPx('100%') + CELL_PX + textPx(save)) / CELL_PX)
+  // Save's word takes room only while save mode is on: reserved always, it cost the limit its place
+  // on a band near 95 columns (2026-10-14).
+  const cells = Math.ceil((Math.max(...names.map(textPx)) + CELL_PX + textPx('100%') + (limit.save ? CELL_PX + textPx(save) : 0)) / CELL_PX)
   return drawnFact(el, 'limit', cells, [
     <Text key="limit-name" color={SUB}>{limitName(limit.kind, frame.lang)}</Text>,
     <Text key="limit-value" color={figure(limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
@@ -640,9 +641,10 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const need = (facts: DrawnFact[]) => CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP + rules(facts) + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
   let facts = optional
   // Narrow, things go in this order until the row fits: the controls' words (settings, agents,
-  // keep-warm), the rules, the standing facts (the plan limit, the mode, context), Auto's word, then
-  // the route and last the cache. A changing figure outlasts a standing state.
-  for (const drop of [...WORDLESS, 'rules', 'limit', 'mode', 'context', 'auto', 'route', 'cache']) {
+  // keep-warm), the rules, Auto's word, the standing facts (the plan limit, the mode, context), then
+  // the route and last the cache. A changing figure outlasts a standing state, and a fact the person
+  // switched on outlasts a word beside a switch (2026-10-14: at ~96 columns the limit never showed).
+  for (const drop of [...WORDLESS, 'rules', 'auto', 'limit', 'mode', 'context', 'route', 'cache']) {
     if (need(facts) <= cols) break
     if ((WORDLESS as readonly string[]).includes(drop) || drop === 'auto') {
       words = words.filter(w => w !== drop)
