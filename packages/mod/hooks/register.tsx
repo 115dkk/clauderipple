@@ -442,7 +442,7 @@ async function refreshLadder($: EngineInterface): Promise<void> {
   try {
     const response = await $.http.fetch(`${await adminUrl($)}/api/mod-options`)
     if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
-    const fresh = ladderOptionsFrom(JSON.parse(response.text), await $.clock.now() + KEEP_MS, (await currentSettings($)).allow)
+    const fresh = ladderOptionsFrom(JSON.parse(response.text), await $.clock.now() + KEEP_MS, (await currentSettings($)).allow, (await currentSettings($)).allowKnown)
     if (!same(await read($, ladderOptions), fresh)) await update($, ladderOptions, () => fresh)
   } catch (error) { await report($, 'ladder options', error) }
 }
@@ -692,7 +692,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const routing = routingSettings(s)
   const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
     ? { target: target!, effort: verdict.effort }
-    : ladderPick(verdict, routing.rules.general, routing, pinnedCandidates, usable, language, routing.allow, providers)
+    : ladderPick(verdict, routing.rules.general, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason

@@ -149,6 +149,12 @@ export type Settings = {
    * picks, only among these.
    */
   allow: string[]
+  /**
+   * The allow-list keys of every worker that existed when `allow` was last written (what
+   * `candidateKey` returns). A key absent from this non-empty list counts as ticked on; empty means
+   * either every worker is ticked (`allow` empty) or all writers predate the field (#56).
+   */
+  allowKnown: string[]
   /** The user's operating modes; none is built in. */
   modes: Mode[]
   /** The mode that is on, by id; absent when none is. */

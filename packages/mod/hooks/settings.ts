@@ -26,7 +26,7 @@ export const DEFAULTS: Settings = {
       hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], plan: [claude('opus', 'high')],
     } },
   },
-  allow: [], modes: [],
+  allow: [], allowKnown: [], modes: [],
   providers: {},
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
@@ -159,16 +159,16 @@ export function migrateAllow(allow: readonly string[], workers: readonly Worker[
   return [...new Set(allow.flatMap(entry => agents.has(entry) || !workers.some(w => w.provider === entry) ? [entry] : workers.filter(w => w.provider === entry).map(w => w.name)))]
 }
 
-/** The workers switched on by an allow-list; empty means every worker. */
-export function allowedWorkers(allow: readonly string[], workers: readonly Worker[]): string[] {
+/** The workers switched on by an allow-list; empty means every worker. A worker that did not exist when the list was last written (absent from `known`) counts as on. */
+export function allowedWorkers(allow: readonly string[], workers: readonly Worker[], known: readonly string[] = []): string[] {
   if (!allow.length) return workers.map(w => w.name)
   const on = new Set(migrateAllow(allow, workers))
-  return workers.filter(w => on.has(w.name)).map(w => w.name)
+  return workers.filter(w => on.has(w.name) || known.length > 0 && !known.includes(w.name)).map(w => w.name)
 }
 
-/** Switches one worker; every worker on again is stored as [], and the last one cannot go off. */
-export function toggleAllow(allow: readonly string[], name: string, workers: readonly Worker[]): string[] {
-  const on = allowedWorkers(allow, workers)
+/** Switches one worker; every worker on again is stored as [], and the last one cannot go off. `known` is the allow-list keys the writer knew. */
+export function toggleAllow(allow: readonly string[], name: string, workers: readonly Worker[], known: readonly string[] = []): string[] {
+  const on = allowedWorkers(allow, workers, known)
   const next = on.includes(name) ? on.filter(n => n !== name) : workers.filter(w => w.name === name || on.includes(w.name)).map(w => w.name)
   if (!next.length) return [...allow]
   return next.length === workers.length ? [] : next
@@ -176,10 +176,11 @@ export function toggleAllow(allow: readonly string[], name: string, workers: rea
 
 /**
  * Whether a stored model is ticked: its key (an agent name, or `general-purpose:<model>`) or, for
- * settings from before 2026-10-10, its provider is listed; an empty list ticks every model.
+ * settings from before 2026-10-10, its provider is listed; an empty list ticks every model. A key
+ * absent from a non-empty `known` list (a worker added after the list was last written) ticks on.
  */
-export function isAllowed(key: string, provider: string, allow: readonly string[]): boolean {
-  return !allow.length || allow.includes(key) || allow.includes(provider)
+export function isAllowed(key: string, provider: string, allow: readonly string[], known: readonly string[] = []): boolean {
+  return !allow.length || allow.includes(key) || allow.includes(provider) || known.length > 0 && !known.includes(key)
 }
 
 /** The design ladder every save stored until 2026-10-12: Claude, Sonnet then Opus. */
@@ -262,7 +263,8 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
     rules.general = ladderFromPin(targets, {})
   }
   const ticked = names(Array.isArray(value.allow) ? value.allow : object(stored.general).mode === 'auto' ? object(stored.general).allow : [])
-  const result: Settings = { ...DEFAULTS, rules, allow: workers?.length ? migrateAllow(ticked, workers) : ticked, providers: {}, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
+  const savedKnown = names(value.allowKnown)
+  const result: Settings = { ...DEFAULTS, rules, allow: workers?.length ? migrateAllow(ticked, workers) : ticked, allowKnown: savedKnown, providers: {}, hide: [...DEFAULTS.hide], extras: [...DEFAULTS.extras], fallback: { ...DEFAULTS.fallback } }
   for (const [name, enabled] of Object.entries(object(value.providers))) if (typeof enabled === 'boolean') result.providers[name] = enabled
   for (const key of ['effortAuto', 'keepWarm', 'setupDone', 'swampAlert'] as const) if (typeof value[key] === 'boolean') result[key] = value[key]
   if (Array.isArray(value.extras)) result.extras = [...new Set(value.extras.filter((part): part is string => typeof part === 'string' && EXTRAS.includes(part)))]

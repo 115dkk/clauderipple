@@ -1,6 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, candidateKey, hadRetiredRouting, isAllowed, normalizeSettings, settingsChanges } from '../../packages/mod/hooks/settings.ts'
+import { CLAUDE_WORKERS, DEFAULTS, applySettingsChanges, allowedWorkers, candidateKey, hadRetiredRouting, isAllowed, normalizeSettings, settingsChanges } from '../../packages/mod/hooks/settings.ts'
+
+const ALLOW_WORKERS = [
+  { name: 'gpt-6-1-sol', provider: 'chatgpt' },
+  { name: 'general-purpose:sonnet', provider: 'anthropic' },
+]
 
 test('defaults hold one ladder', () => {
   assert.equal(DEFAULTS.judge, 'haiku')
@@ -118,6 +123,20 @@ test('a model is ticked by its key or, in old settings, its provider; an empty l
   assert.equal(isAllowed('gpt-6-astra', 'chatgpt', ['gpt-6-1-sol']), false)
   assert.equal(isAllowed('gpt-6-astra', 'chatgpt', ['chatgpt']), true)
   assert.equal(isAllowed('general-purpose:opus', 'anthropic', ['general-purpose:opus']), true)
+})
+
+test('a worker the allow-list never saw ticks on; one it saw but unticked stays off; pre-known settings read strictly (#56)', () => {
+  const old = ['gpt-6-1-sol', 'general-purpose:sonnet'], fresh = 'new-worker'
+  // A key the writer never knew is ticked on; a known unticked one stays off.
+  assert.equal(isAllowed(fresh, 'chatgpt', old, old), true)
+  assert.equal(isAllowed('gpt-6-astra', 'chatgpt', old, [...old, 'gpt-6-astra']), false)
+  assert.equal(isAllowed(fresh, 'chatgpt', old), false, 'no known list reads strict')
+  const workers = [...ALLOW_WORKERS, { name: fresh, provider: 'chatgpt' }]
+  assert.deepEqual(allowedWorkers(old, workers, old), [...ALLOW_WORKERS.map(w => w.name), fresh])
+  assert.deepEqual(allowedWorkers(old, workers), ALLOW_WORKERS.map(w => w.name))
+  // Legacy settings (an empty know-list) keep today's strict behaviour.
+  assert.deepEqual(normalizeSettings({ allow: old }).allowKnown, [])
+  assert.deepEqual(normalizeSettings({ allow: old, allowKnown: ['gone'] }).allowKnown, ['gone'])
 })
 
 test('stored settings that still held Auto or a field rule say so, once; the design ladder every save stored does not count', () => {

@@ -550,8 +550,8 @@ async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, sett
   if (![general, ...settings.modes].some(set => ladderNeedsFill(set.rungs))) return settings;
   try {
     const choices = ladderChoices(await modOptions(deps, scores));
-    const { rungs } = fillLadder(general.rungs, settings.allow, choices);
-    const modes = settings.modes.map(mode => ({ ...mode, rungs: fillLadder(mode.rungs, settings.allow, choices).rungs }));
+    const { rungs } = fillLadder(general.rungs, settings.allow, choices, settings.allowKnown);
+    const modes = settings.modes.map(mode => ({ ...mode, rungs: fillLadder(mode.rungs, settings.allow, choices, settings.allowKnown).rungs }));
     return { ...settings, rules: { general: { mode: "ladder", rungs } }, modes };
   } catch (error) {
     deps.log.warn(`admin: filling the worker ladder failed: ${(error as Error).message}`);

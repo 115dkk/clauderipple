@@ -2486,7 +2486,7 @@ const MOD_DEFAULTS = {
       hard: [{ target: { agent: "gpt-6-astra" }, effort: "high" }], plan: [modClaude("opus", "high")],
     } },
   },
-  allow: [], modes: [], providers: {},
+  allow: [], allowKnown: [], modes: [], providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
@@ -2510,6 +2510,7 @@ function modNormalize(raw) {
     ...value,
     rules: { ...clone(MOD_DEFAULTS.rules), ...(value.rules || {}) },
     allow: Array.isArray(value.allow) ? value.allow : [],
+    allowKnown: Array.isArray(value.allowKnown) ? value.allowKnown : [],
     modes: Array.isArray(value.modes) ? value.modes : [],
     providers: { ...(value.providers || {}) },
     hide: Array.isArray(value.hide) ? value.hide : clone(MOD_DEFAULTS.hide),
@@ -2749,17 +2750,20 @@ function modGroupLabel(group) { return group.billing ? `${group.name} · ${t(`mo
 function modTickKey(choice) { return choice.claude ? choice.value.replace("+", ":") : choice.value; }
 /** The models that can be ticked: every worker and Claude's own; the session's model is always there. */
 function modTickable() { return modChoices().filter((choice) => choice.value !== "general-purpose"); }
-/** Whether a model is ticked: an empty list means every model, and an old provider name ticks that provider's. */
+/** Whether a model is ticked: an empty list means every model, an old provider name ticks that provider's, and a model added after the list was last written (absent from `allowKnown`) ticks on. */
 function modTicked(choice) {
   const allow = modState.settings.allow || [];
-  return !allow.length || allow.includes(modTickKey(choice)) || allow.includes(choice.provider);
+  const known = modState.settings.allowKnown || [];
+  return !allow.length || allow.includes(modTickKey(choice)) || allow.includes(choice.provider) || known.length > 0 && !known.includes(modTickKey(choice));
 }
 /** Ticks one model; every model on again is stored as [], and the last one on cannot go off. */
 function modTick(choice, on) {
   const all = modTickable();
-  const kept = new Set(all.filter(modTicked).map(modTickKey));
+  const known = all.map(modTickKey);
+  const kept = new Set(all.filter((model) => modTicked(model)).map(modTickKey));
   if (on) kept.add(modTickKey(choice)); else kept.delete(modTickKey(choice));
-  modPatch({ allow: kept.size === all.length ? [] : all.map(modTickKey).filter((key) => kept.has(key)) });
+  const allow = kept.size === known.length ? [] : known.filter((key) => kept.has(key));
+  modPatch({ allow, allowKnown: allow.length ? known : [] });
 }
 function modTickRows() {
   const choices = modTickable();

@@ -93,8 +93,8 @@ export function scoreModels(raw: unknown): ModelScore[] {
  * Allow-lists name worker agents, and Claude's own models as `general-purpose:<model>`; provider
  * names from settings saved before 2026-10-10 still match.
  */
-export function allowed(candidate: WorkerCandidate, allow: readonly string[]): boolean {
-  return isAllowed(candidateKey(candidate.target), candidate.provider, allow)
+export function allowed(candidate: WorkerCandidate, allow: readonly string[], known: readonly string[] = []): boolean {
+  return isAllowed(candidateKey(candidate.target), candidate.provider, allow, known)
 }
 /** Claude's own models as candidates: general-purpose on each. */
 export function claudeCandidates(): WorkerCandidate[] {
@@ -106,16 +106,16 @@ const BILLINGS: readonly Billing[] = ['free', 'payg', 'subscription']
  * provider can run now, with ladders, billing and cheapest measured cost, then Claude's own
  * models; only the ticked ones (`allow`, empty for every model).
  */
-export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly string[] = []): LadderOptions {
+export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly string[] = [], allowKnown: readonly string[] = []): LadderOptions {
   const root = record(raw)
   const efforts = (value: unknown): Effort[] => list(value).filter((e): e is Effort => EFFORTS.includes(e as Effort))
   const usable = new Set(list(root.providers).flatMap(p => { const v = record(p); return typeof v.name === 'string' && v.usable !== false ? [v.name] : [] }))
-  const known = list(root.providers).length > 0
+  const catalogue = list(root.providers).length > 0
   const scores = scoreModels(root.scores)
   const choices: LadderChoice[] = list(root.agents).flatMap(value => {
     const a = record(value)
     if (typeof a.name !== 'string' || !a.name || typeof a.model !== 'string' || typeof a.provider !== 'string') return []
-    if (known && !usable.has(a.provider)) return []
+    if (catalogue && !usable.has(a.provider)) return []
     const costs = (scores.find(s => s.model === a.model && s.provider === a.provider)?.variants ?? []).flatMap(v => v.costPerTask === null ? [] : [v.costPerTask])
     const billing = BILLINGS.includes(a.billing as Billing) ? a.billing as Billing : 'payg'
     return [{ target: { agent: a.name }, model: a.model, provider: a.provider, billing, efforts: efforts(a.efforts), ...(costs.length ? { cost: Math.min(...costs) } : {}) }]
@@ -125,7 +125,7 @@ export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly s
     if (typeof p.name !== 'string' || typeof p.usable !== 'boolean') return []
     return [[p.name, { usable: p.usable, ...(typeof p.reason === 'string' ? { reason: p.reason } : {}), ...(typeof p.exhaustedUntil === 'number' ? { exhaustedUntil: p.exhaustedUntil } : {}) }]]
   }))
-  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow), providers }
+  return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow, allowKnown), providers }
 }
 export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean, providers: NonNullable<LadderOptions['providers']> = {}): boolean {
   const live = providers[candidate.provider]
@@ -152,7 +152,7 @@ export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
  * The ladder: the verdict's rung, else one rung up, else the session model, never down. Whatever
  * ran instead says why (the fallback toast).
  */
-export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], providers: NonNullable<LadderOptions['providers']> = {}): Resolution {
+export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], providers: NonNullable<LadderOptions['providers']> = {}, known: readonly string[] = []): Resolution {
   const wanted = rungOf(verdict)
   const skipped: NonNullable<Resolution['skipped']> = []
   const reasons: string[] = []
@@ -163,7 +163,7 @@ export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Setting
     for (const [index, step] of steps.entries()) {
       const target = step.target
       const candidate = candidateOf(target, candidates)
-      const ticked = target.agent === 'general-purpose' && !target.model || candidate && allowed(candidate, allow)
+      const ticked = target.agent === 'general-purpose' && !target.model || candidate && allowed(candidate, allow, known)
       if (candidate && candidateUsable(candidate, settings, chatgpt, providers) && ticked) {
         return { target: { ...target }, effort: step.effort, rung, position: index + 1, skipped, ...(reasons.length ? { fallbackReason: reasons.join('; ') } : {}) }
       }

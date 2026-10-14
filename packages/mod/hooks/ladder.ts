@@ -146,9 +146,9 @@ export function preset(id: PresetId, choices: readonly LadderChoice[]): Preset {
   return { rungs, substituted }
 }
 
-/** The choices a person ticked; an empty list ticks every one. */
-export function tickedChoices(choices: readonly LadderChoice[], allow: readonly string[]): LadderChoice[] {
-  return choices.filter(choice => isAllowed(candidateKey(choice.target), choice.provider, allow))
+/** The choices a person ticked; an empty list ticks every one, and a key absent from `known` ticks on too. */
+export function tickedChoices(choices: readonly LadderChoice[], allow: readonly string[], known: readonly string[] = []): LadderChoice[] {
+  return choices.filter(choice => isAllowed(candidateKey(choice.target), choice.provider, allow, known))
 }
 
 /** Only empty lists need filling; unticked entries stay in order and are skipped at dispatch. */
@@ -160,8 +160,8 @@ export function ladderNeedsFill(rungs: Rungs, _allow: readonly string[] = []): b
  * Fill empty lists from the ticked, connected choices. Existing ordered lists are never rewritten
  * for temporary availability or shared allow-list changes; dispatch explains each skipped entry.
  */
-export function fillLadder(rungs: Rungs, allow: readonly string[], choices: readonly LadderChoice[]): { rungs: Record<Rung, Step[]>; filled: Rung[] } {
-  const pick = preset('claudeGpt', tickedChoices(choices, allow))
+export function fillLadder(rungs: Rungs, allow: readonly string[], choices: readonly LadderChoice[], known: readonly string[] = []): { rungs: Record<Rung, Step[]>; filled: Rung[] } {
+  const pick = preset('claudeGpt', tickedChoices(choices, allow, known))
   const out = {} as Record<Rung, Step[]>
   const filled: Rung[] = []
   for (const rung of RUNGS) {

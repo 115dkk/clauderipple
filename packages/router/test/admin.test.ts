@@ -230,6 +230,20 @@ test("admin mod-settings reads Auto and field rules as the four workers, fills e
   });
 });
 
+test("admin mod-settings round-trips allowKnown, the keys the allow-list was last written with", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const known = ["deepseek-v4-1-flash", "gpt-6-1-sol", "gpt-6-astra", "general-purpose:haiku", "general-purpose:sonnet", "general-purpose:opus", "general-purpose:fable"];
+    const saved = await (await putModSettings(port, { settings: { allow: ["gpt-6-1-sol"], allowKnown: known } })).json() as ModSettingsSnapshot;
+    assert.deepEqual(saved.settings.allow, ["gpt-6-1-sol"]);
+    assert.deepEqual(saved.settings.allowKnown, known);
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), saved, "the stored copy carries allowKnown too");
+    // A default-sized list (every model ticked) resets both to empty.
+    const all = await (await putModSettings(port, { settings: { allow: [], allowKnown: [] } })).json() as ModSettingsSnapshot;
+    assert.deepEqual(all.settings.allow, []);
+    assert.deepEqual(all.settings.allowKnown, []);
+  });
+});
+
 test("admin mod-settings stale revisions return current settings; concurrent CAS has one winner", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const responses = await Promise.all([putModSettings(port, { settings: { language: "ko" }, revision: 0 }), putModSettings(port, { settings: { language: "ja" }, revision: 0 })]);
