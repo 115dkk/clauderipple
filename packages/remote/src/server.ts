@@ -281,8 +281,14 @@ export class HostServer {
     if (msg.t === "ping") { this.send(c, { t: "pong", n: msg.n }); return; }
     if (!c.authed) {
       if (msg.t === "hello" && tokenMatches(this.opts.token, msg.token)) {
+        const clientId = typeof msg.clientId === "string" ? msg.clientId : "";
+        if (clientId && !/^[A-Za-z0-9_-]{1,100}$/.test(clientId)) {
+          this.send(c, { t: "denied", reason: "token" });
+          c.ws.close(4003, "denied");
+          return;
+        }
         c.authed = true;
-        c.clientId = typeof msg.clientId === "string" ? msg.clientId.slice(0, 100) : "";
+        c.clientId = clientId;
         this.send(c, { t: "ready", host: this.hostInfo, sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() });
       } else {
         this.send(c, { t: "denied", reason: "token" });
@@ -338,6 +344,7 @@ export class HostServer {
         return;
       case "decide":
         try {
+          if (msg.decision !== "allow" && msg.decision !== "allow_always" && msg.decision !== "deny") throw new Error("invalid decision");
           if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers)) throw new Error("이미 처리됨");
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
         } catch (e) {
@@ -451,18 +458,37 @@ export class HostServer {
 
   // ---- the PWA --------------------------------------------------------------------------------
 
+  /** Never throws: a malformed path is a 400, anything else unexpected a logged 500. */
   private serve(req: http.IncomingMessage, res: http.ServerResponse): void {
+    try {
+      this.serveInner(req, res);
+    } catch (error) {
+      this.opts.log?.(`http serve failed: ${error instanceof Error ? error.message : String(error)}`);
+      try { res.writeHead(500).end(); } catch { /* the socket is already gone */ }
+    }
+  }
+
+  private serveInner(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url ?? "/", "http://x");
     if (url.pathname === "/healthz") { res.writeHead(200, { "content-type": "application/json" }).end(`{"ok":true}`); return; }
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405).end(); return; }
-    const rel = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname).replace(/^\/+/, "");
+    let rel: string;
+    try {
+      rel = url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname).replace(/^\/+/, "");
+    } catch { res.writeHead(400).end(); return; }
+    if (rel.includes("\0")) { res.writeHead(400).end(); return; }
     // Files from outside web/ the client loads: the shared protocol and encryption, and tweetnacl.
     const shared = SHARED[rel];
     const file = shared ? shared(path.dirname(this.opts.webDir)) : path.resolve(this.opts.webDir, rel);
     const ext = path.extname(file);
     if ((!shared && !file.startsWith(this.opts.webDir + path.sep)) || !TYPES[ext]) { res.writeHead(404).end(); return; }
     let stat: fs.Stats;
-    try { stat = fs.statSync(file); } catch { res.writeHead(404).end(); return; }
+    try { stat = fs.statSync(file); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      res.writeHead(404).end();
+      return;
+    }
     let body: string | Buffer;
     if (ext === ".ts") {
       const hit = this.stripped.get(file);
