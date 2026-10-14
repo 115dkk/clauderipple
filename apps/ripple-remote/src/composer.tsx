@@ -5,6 +5,7 @@ import { remote } from './client';
 import { Button, Composer, Segmented, copy, useRemote, useStyles } from './ui';
 import { ModePicker, modeLabel, rememberMode } from './mode';
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, defaultEffort, type Attachment, type Effort, type ModelOption, type ProviderGroup, type SendBehavior, type SessionSummary } from '../../../packages/remote/src/protocol.ts';
+import { COMPOSER_MENU, composerCommand, type ComposerMenuId } from '../../../packages/remote/src/composer-menu.ts';
 import { t } from '../../../packages/remote/web/i18n.ts';
 
 // These are Expo 56 standard modules. Kept at the native boundary so host/web never load them.
@@ -155,6 +156,21 @@ export function SessionComposer({ session, busy, connected, onSession, onSend }:
     if (mode !== 'bypassPermissions') { void apply(); return; }
     Alert.alert(modeLabel(mode), copy('경고: 승인 없이 모든 도구를 실행합니다.', 'Warning: all tools run without approval.'), [{ text: copy('취소', 'Cancel'), style: 'cancel' }, { text: copy('허용', 'Bypass'), style: 'destructive', onPress: () => { void apply(); } }]);
   };
+  // compact and fresh-session are plain text commands: the host routes "/compact" on (SDK or bridge)
+  // and "/clear" starts a new session with the same settings.
+  const runMenu = (id: ComposerMenuId) => {
+    setSheet(null);
+    const go = async () => {
+      setSending(true); setError('');
+      try {
+        const next = await remote.submit({ t: 'send', session: session.id, text: composerCommand(id), behavior: 'steer' }, `${session.id}-${id}-${Date.now()}`);
+        if (next !== session.id) onSession(next);
+      } catch (e) { fail(e); } finally { setSending(false); }
+    };
+    const entry = COMPOSER_MENU.find(e => e.id === id);
+    if (entry?.confirm) Alert.alert(copy(entry.ko, entry.en), copy(entry.confirm.ko, entry.confirm.en), [{ text: copy('취소', 'Cancel'), style: 'cancel' }, { text: copy(entry.ko, entry.en), style: 'destructive', onPress: () => { void go(); } }]);
+    else void go();
+  };
   const model = models.flatMap(g => g.models).find(m => m.model === session.model);
   const attachmentViews = draft.attachments.map((a, index) => <Pressable key={`${index}-${a.name}`} disabled={sending} accessibilityLabel={`${a.name} ${copy('제거', 'Remove')}`} onPress={() => setDraft(d => ({ ...d, id: newDraft().id, attachments: d.attachments.filter((_, i) => i !== index) }))} style={{ padding: 6, borderRadius: 10, backgroundColor: c.surface2 }}>
     {a.mediaType.startsWith('image/') && <Image source={{ uri: `data:${a.mediaType};base64,${a.data}` }} style={{ width: 48, height: 48, borderRadius: 6 }} />}
@@ -192,6 +208,7 @@ export function SessionComposer({ session, busy, connected, onSession, onSend }:
             <Button title={copy('카메라', 'Camera')} onPress={() => { void pick('camera'); }} />
             <Button title={copy('파일', 'Files')} onPress={() => { void pick('files'); }} />
             <Text style={s.foot}>{copy('최대 8개 · 파일당 8 MB. Mac 세션 첨부는 아직 지원하지 않습니다.', 'Up to 8 files · 8 MB each. Attachments are not on Mac sessions yet.')}</Text>
+            {COMPOSER_MENU.map(entry => <Button key={entry.id} title={copy(entry.ko, entry.en)} secondary={!!entry.confirm} onPress={() => runMenu(entry.id)} />)}
           </> : <>
             <Text style={{ color: c.muted }}>{copy('강도 변경은 다음 턴부터 적용됩니다. Mac 세션은 Claude 앱에서 변경하십시오.', 'Effort changes apply from the next turn. Change Mac sessions in the Claude app.')}</Text>
             {models.map(g => <View key={g.provider} style={{ gap: 6 }}><Text style={{ color: c.muted }}>{g.label}</Text>{g.models.map(m => <Button key={m.model} title={`${m.model === session.model ? '• ' : ''}${m.name}`} disabled={!g.usable || !m.usable} secondary onPress={() => { void savedEffort(m).then(e => changeModel(m, e)).catch(fail); }} />)}</View>)}
