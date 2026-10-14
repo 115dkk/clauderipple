@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.3 — 2026-10-14
+
+### Fixed
+
+- **Claude workers offer X-High.** Claude's effort ladder stopped at high and max, so X-High could
+  not be picked for Claude in the mod or the dashboard though GPT had it. Opus, Sonnet and Haiku 5.5
+  all take it (#56).
+- **A model ticked after the mod's worker list was saved is usable.** It used to stay off and show
+  as unavailable in the mod (GPT-6 Astra in #56). A worker the list has not seen now starts on.
+  Settings saved before this keep the old reading until the list is changed once.
+- **The plan limit shows in the band on Claude chats.** The desktop Code tab left the mod's rate
+  limits empty, so the limit never appeared even with it switched on. The mod now falls back to the
+  router's figure for the same Claude login, and hides it when that figure is over 15 minutes old.
+- `/ripple-bar` no longer says the band is shown above the prompt when the layout is Minimal, where
+  only the short line under the prompt is drawn (#56).
+- The close button lights as one disc under the pointer instead of drawing a second box around it.
+
 ## 0.9.2 — 2026-10-14
 
 ### Added
