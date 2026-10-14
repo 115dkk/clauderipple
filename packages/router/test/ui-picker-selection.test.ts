@@ -262,3 +262,17 @@ test("an id two providers offer is owned by the rule that says which deal was me
   config.direct!.push({ prefix: "deepseek-v4.1-flash", provider: "openrouter" });
   assert.equal(except(config, "chatgpt").find((entry) => entry.id === "deepseek-v4.1-flash")?.provider, "openrouter");
 });
+
+test("a Grok form's check keeps what is ticked now; only a new provider's first listing ticks everything", () => {
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js"), "utf8");
+  const start = source.indexOf("function grokTickedAfterCheck");
+  const end = source.indexOf("}", start) + 1;
+  assert.ok(start > 0, "app.js no longer contains grokTickedAfterCheck");
+  const ticked = new Function(`${source.slice(start, end)}; return grokTickedAfterCheck;`)() as (first: boolean, tickedIds: string[], listedIds: string[]) => Set<string>;
+  const listing = ["grok-4.7", "grok-4.7-fast", "grok-4.6", "grok-4.5"];
+  assert.deepEqual([...ticked(true, [], listing)], listing, "a new provider starts with every model");
+  // The user unticked two models; a re-check — of a new or a saved provider — leaves them unticked.
+  assert.deepEqual([...ticked(false, ["grok-4.7", "grok-4.5"], listing)], ["grok-4.7", "grok-4.5"]);
+  assert.deepEqual([...ticked(false, [], listing)], [], "all unticked stays all unticked");
+  assert.deepEqual([...ticked(false, ["my-custom"], listing)], ["my-custom"], "a custom model the user added stays ticked");
+});

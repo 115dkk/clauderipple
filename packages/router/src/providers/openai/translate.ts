@@ -339,6 +339,9 @@ export class OpenAiStreamMapper {
   /** Mangled tool name → the name Claude Code knows, from `toolNameRestoreMap`. */
   private readonly toolNames: ReadonlyMap<string, string>;
 
+  /** Applied to every error message before it is stored or sent. */
+  redactError: (message: string) => string = (message) => message;
+
   constructor(model: string, startInput = 0, toolNames: ReadonlyMap<string, string> = new Map()) {
     this.model = model;
     this.startInput = startInput;
@@ -585,9 +588,12 @@ export class OpenAiStreamMapper {
     return [...this.start(), ...this.closeBlock(), { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: this.stopReason, stop_sequence: null }, usage: this.usage } }, { event: "message_stop", data: { type: "message_stop" } }];
   }
 
-  fail(message: string, code?: string): AnthropicEvent[] {
+  fail(rawMessage: string, code?: string): AnthropicEvent[] {
     if (this.finished) return [];
     this.finished = true;
+    // A vendor's error text can echo the credential it was sent; the client, the non-streamed body
+    // and the request log all take `failure.message`, so it is cleaned once, here.
+    const message = this.redactError(rawMessage);
     // `overloaded_error` is the one mid-stream error Claude Code retries on its own (CLI 2.1.278
     // matches `"type":"overloaded_error"` in the message); `api_error` ends the turn for good.
     const type = code === "rate_limit_exceeded" ? "rate_limit_error" : code === "server_is_overloaded" ? "overloaded_error" : "api_error";

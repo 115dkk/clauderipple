@@ -16,6 +16,7 @@ import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { declaredBy } from "./routing.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
+import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
 
 /** The least a caller has to offer as a logger; `console` qualifies, so startup can pass one. */
@@ -154,6 +155,8 @@ export function agentNameFor(modelId: string): string {
 }
 
 function capsEffortLevels(provider: Provider): string[] | undefined {
+  // A grok provider has no caps: its adapter sends the common ladder to a model the listing left out.
+  if (provider.type === "grok") return [...GROK_EFFORT_LEVELS];
   return (provider as { caps?: { effortLevels?: string[] } }).caps?.effortLevels;
 }
 
