@@ -628,6 +628,14 @@ export class ChatGptAdapter {
       return null;
     }
     this.noteRateLimits(tokens, parsed);
+    // The backend's own answer that every window has room ends a usage-limit cooldown early: the
+    // limit was reset or the plan topped up, and the account stayed refused until the old reset time
+    // otherwise (2026-10-14: credits added at 15:50, still "cooling" until 21:42). Only this asked-for
+    // figure does it, never the headers of the 429 that started the cooldown.
+    if (exhaustedForMs(parsed) === undefined && this.accounts.peekCredentials().some((c) => c.id === tokens.id && !this.pool.hasUsable(this.name, [c]))) {
+      this.pool.clear(this.name, tokens.id);
+      this.log.info(`chatgpt ${this.name}: account ${tokens.ownerId.slice(0, 8)} has room again; back in rotation`);
+    }
     return parsed;
   }
 

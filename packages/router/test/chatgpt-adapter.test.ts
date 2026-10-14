@@ -306,6 +306,17 @@ test("HTTP 429 upstream → Anthropic rate_limit_error 429", async () => {
   adapter.clearCooldown("legacy");
 });
 
+test("a usage lookup that finds room ends a usage-limit cooldown (limit reset or plan topped up)", async () => {
+  mode = "error429";
+  await call(request);
+  assert.equal(adapter.accountStatus()[0]?.state, "cooling");
+  mode = "stream";
+  usageMode = "ok"; // primary window at 40%
+  await adapter.fetchRateLimits();
+  assert.equal(adapter.accountStatus()[0]?.state, "ready");
+  assert.equal(adapter.hasUsable(), true);
+});
+
 test("rateLimitsFromHeaders: missing headers → null", () => {
   assert.equal(rateLimitsFromHeaders(new Headers({ "content-type": "text/event-stream" })), null);
 });
