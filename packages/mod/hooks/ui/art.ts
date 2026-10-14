@@ -431,8 +431,8 @@ export function wellArt(width: number, height: number): string {
 export const CLOSE_PX = 22
 
 /** The way out of a capsule, 22 px: a soft disc with a ×. */
-export function closeArt(): string {
-  return svg(CLOSE_PX, CLOSE_PX, '<circle cx="11" cy="11" r="10" fill="#fff" fill-opacity=".07" stroke="' + HAIR + '" stroke-opacity=".2"/><path d="M7.6 7.6l6.8 6.8M14.4 7.6l-6.8 6.8" stroke="' + LABEL + '" stroke-width="1.6" stroke-linecap="round"/>')
+export function closeArt(lit = false): string {
+  return svg(CLOSE_PX, CLOSE_PX, '<circle cx="11" cy="11" r="10" fill="#fff" fill-opacity="' + (lit ? '.16' : '.07') + '" stroke="' + HAIR + '" stroke-opacity="' + (lit ? '.45' : '.2') + '"/><path d="M7.6 7.6l6.8 6.8M14.4 7.6l-6.8 6.8" stroke="' + LABEL + '" stroke-width="1.6" stroke-linecap="round"/>')
 }
 
 // ---- The band's instruments ---------------------------------------------------------------------

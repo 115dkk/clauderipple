@@ -161,9 +161,22 @@ export function pill(el: Els, key: string, label: string, look: PillLook, onPres
 /** Cells the way out takes. */
 export const CLOSE_CELLS = cellsOf(CLOSE_PX + 4)
 
-/** The way out: a soft disc with a ×, `label` its name for a reader that cannot see it. */
+/**
+ * The way out: a soft disc with a ×, `label` its name for a reader that cannot see it. The disc is
+ * its own light under the pointer: `lit`'s rounded box around it read as a second button
+ * (2026-10-14).
+ */
 export function closeButton(el: Els, key: string, label: string, onPress: () => void, scope?: string): RenderNode {
-  return lit(el, key, CLOSE_CELLS, [pic(el, key, closeArt(), label, CLOSE_PX, CLOSE_PX), press(el, key, CLOSE_CELLS * CELL_PX, onPress)], 0.25, scope)
+  const { Box } = el
+  return (
+    <Box key={'hv-' + key} position="relative" flexDirection="row" alignItems="center" justifyContent="center" width={CLOSE_CELLS} flexShrink={0} {...(scope ? { hover: { scope } } : {})}>
+      {pic(el, key, closeArt(), label, CLOSE_PX, CLOSE_PX)}
+      <Box position="absolute" top={0} bottom={0} left={0} right={0} alignItems="center" justifyContent="center" display="none" hover={{ display: 'flex' }}>
+        {pic(el, key + '-lit', closeArt(true), label, CLOSE_PX, CLOSE_PX)}
+      </Box>
+      {press(el, key, CLOSE_CELLS * CELL_PX, onPress)}
+    </Box>
+  )
 }
 
 /** Cells a switch and its word take, their hover's air included. */
