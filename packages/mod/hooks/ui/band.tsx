@@ -35,7 +35,7 @@ import type { RenderChildren, RenderNode } from 'claude-code'
 import type { Effort } from '../../types'
 import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, clockArt, gaugeArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, textPx } from './art'
 import type { Sea, Tone } from './art'
-import { CLOSE_CELLS, capsule, closeButton, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
+import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
@@ -514,9 +514,11 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
     )
   }
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
-  const tip = routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ')
+  // The route is a button (it opens the log), so it lights under the pointer like the controls do,
+  // and it has no tip: a tip is laid over the facts, and the app passes no press through a drawn Box,
+  // so the route's own tip lay over it and took every click (2026-10-14). Its card is what the log shows.
   return (
-    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...(tip ? { hover: { scope: tipScope('route') } } : {})}>
+    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight()}>
       <Box flexShrink={0}>
         {r.ok ? <Text color={r.resent ? MUTE : providerColor(r.provider)}>{r.resent ? '↻' : '•'}</Text> : <Text color={TONE.red.text}>✕</Text>}
       </Box>
@@ -681,8 +683,6 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
-  const routeTip = route > 0 && view.route ? routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ') : undefined
-  if (routeTip) tips.push({ key: 'route', text: routeTip })
   for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (

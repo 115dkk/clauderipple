@@ -35,6 +35,14 @@ const EDGE = 'rgba(128,124,116,0.55)'
 /** A control under the pointer: a soft light on the water. */
 const HOVER = 'rgba(255,255,255,0.09)'
 const HOVER_EDGE = 'rgba(255,255,255,0.16)'
+
+/**
+ * The props that light a Box under the pointer the way `lit` lights a control: a transparent round
+ * edge at rest (so the box does not move when lit) and the soft light on hover, joined to `scope`.
+ */
+export function hoverLight(scope?: string): Record<string, unknown> {
+  return { borderStyle: 'round', borderColor: 'rgba(0,0,0,0)', hover: { backgroundColor: HOVER, borderColor: HOVER_EDGE, ...(scope ? { scope } : {}) } }
+}
 /** A drawn control's height, px: pills, segments (art.ts holds the same figure). */
 const CONTROL_PX = 26
 
