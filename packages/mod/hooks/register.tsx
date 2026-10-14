@@ -1457,7 +1457,7 @@ export const register: Register = on => {
       const language = await read($, lang)
       const [sub = 'settings', arg] = e.args.trim().toLowerCase().split(/\s+/)
       if (sub === 'stats') return { text: formatStats(await read($, stats), language) }
-      if (sub === 'debug') return { text: debugText(language, { judge: (await currentSettings($)).judge, judgeModel: (await currentSettings($)).judgeModel, pick: await read($, pick), paused: await read($, paused), cache: await read($, cache), warm: await read($, warm), lastSpawn: await read($, lastSpawn), lastRequest: await read($, lastRequest) }) }
+      if (sub === 'debug') return { text: debugText(language, { judge: (await currentSettings($)).judge, judgeModel: (await currentSettings($)).judgeModel, pick: await read($, pick), paused: await read($, paused), cache: await read($, cache), warm: await read($, warm), lastSpawn: await read($, lastSpawn), lastRequest: await read($, lastRequest), model: await $.session.model(), limit: await read($, limit), hostRateLimits: (await $.session.usage()).rateLimits }) }
       if (sub === 'settings' || sub === 'setup') await startPanel($, sub)
       else if (sub === 'auto') await toggleAuto($)
       else if (sub === 'warm') await toggleWarm($)
