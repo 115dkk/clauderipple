@@ -34,7 +34,7 @@ const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
 const MODELS_CACHE_MS = 60 * 60 * 1000;
 
-export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; exhaustion?: ProviderExhaustion | undefined };
+export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -315,7 +315,7 @@ export class GoogleAdapter {
     if (!apiKey) {
       const out = anthropicError(401, "authentication_error", "Google provider: no API key; set apiKey or GEMINI_API_KEY");
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
-      return { status: out.status, bytes: Buffer.byteLength(out.body), note: "no api key" };
+      return { status: out.status, bytes: Buffer.byteLength(out.body), note: "no api key", upstreamCalled: false, refusal: "no-account" };
     }
 
     let built;
@@ -418,6 +418,7 @@ export class GoogleAdapter {
       }
       res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(err.body);
       return { status: err.status, bytes: Buffer.byteLength(err.body), note,
+        ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
         ...(sent.kind === "refused" ? { exhaustion: providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000) } : {}),
       };
     }
@@ -511,6 +512,7 @@ export class GoogleAdapter {
         : `in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} stop=${mapper.stopReason}`,
       usage: { input: usage.input_tokens, cached: usage.cache_read_input_tokens, output: usage.output_tokens },
       stopReason: mapper.stopReason,
+      ...(wantStream || !failure ? { messageId: mapper.messageId } : {}),
     };
   }
 

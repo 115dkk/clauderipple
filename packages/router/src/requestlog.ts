@@ -24,6 +24,13 @@ export type RequestRecord = {
   target: string;
   provider: string;
   effort?: string;
+  upstreamRequestId?: string;
+  messageId?: string;
+  upstreamCalled?: false;
+  refusal?: "thread-continue" | "drain" | "unroutable" | "no-account" | "unknown-provider" | "web-search-unsupported";
+  purpose?: "auto-mode-classifier" | "web-search";
+  requestedTier?: string;
+  servedTier?: string;
   stopReason?: string;
   usage?: RequestUsage;
   note?: string;
@@ -171,7 +178,7 @@ export class RequestLog {
   }
 }
 
-export type ObservedResponse = { usage?: RequestUsage; stopReason?: string };
+export type ObservedResponse = { usage?: RequestUsage; stopReason?: string; messageId?: string; servedTier?: string };
 
 /**
  * Observes an Anthropic-compatible response without retaining or modifying its bytes.
@@ -190,6 +197,13 @@ export class ResponseUsageTap {
   private jsonUsageText = "";
   private stopCarry = "";
   private stopReason: string | undefined;
+  private messageId: string | undefined;
+  private servedTier: string | undefined;
+  private jsonDepth = 0;
+  private jsonString: string | null = null;
+  private jsonEscaped = false;
+  private jsonKey: string | undefined;
+  private jsonValue = false;
   private usage: RequestUsage | undefined;
 
   // Compressed responses (Anthropic answers the CLI with gzip/br) are collected side-band up to a cap
@@ -256,7 +270,12 @@ export class ResponseUsageTap {
       else this.feedJson(tail);
     }
     if (this.isSse && this.carry) this.feedSse("\n");
-    return { ...(this.usage ? { usage: this.usage } : {}), ...(this.stopReason ? { stopReason: this.stopReason } : {}) };
+    return {
+      ...(this.usage ? { usage: this.usage } : {}),
+      ...(this.stopReason ? { stopReason: this.stopReason } : {}),
+      ...(this.messageId !== undefined ? { messageId: this.messageId } : {}),
+      ...(this.servedTier !== undefined ? { servedTier: this.servedTier } : {}),
+    };
   }
 
   // Complete lines are consumed before the cap applies, so an inflated body or one large chunk keeps
@@ -298,7 +317,8 @@ export class ResponseUsageTap {
     try {
       const body = JSON.parse(this.data.join("\n")) as Record<string, unknown>;
       if (this.event === "message_start" || body.type === "message_start") {
-        const message = body.message as { usage?: unknown } | undefined;
+        const message = body.message as { id?: unknown; usage?: unknown } | undefined;
+        if (typeof message?.id === "string") this.messageId = message.id;
         this.setUsage(message?.usage);
       } else if (this.event === "message_delta" || body.type === "message_delta") {
         this.setUsage(body.usage);
@@ -311,6 +331,28 @@ export class ResponseUsageTap {
   }
 
   private feedJson(text: string): void {
+    // Read only the top-level id, never an id quoted in content or a tool input.
+    for (const char of text) {
+      if (this.jsonString !== null) {
+        if (this.jsonString.length < 256) this.jsonString += char;
+        if (this.jsonEscaped) this.jsonEscaped = false;
+        else if (char === "\\") this.jsonEscaped = true;
+        else if (char === '"') {
+          if (this.jsonDepth === 1) {
+            try {
+              const value: unknown = JSON.parse(this.jsonString);
+              if (!this.jsonValue && typeof value === "string") this.jsonKey = value;
+              else if (this.jsonKey === "id" && typeof value === "string") this.messageId = value;
+            } catch { /* oversized or malformed string */ }
+          }
+          this.jsonString = null;
+        }
+      } else if (char === '"') this.jsonString = '"';
+      else if (char === "{" || char === "[") this.jsonDepth++;
+      else if (char === "}" || char === "]") this.jsonDepth--;
+      else if (this.jsonDepth === 1 && char === ":") this.jsonValue = true;
+      else if (this.jsonDepth === 1 && char === ",") { this.jsonValue = false; this.jsonKey = undefined; }
+    }
     this.carry += text;
     this.stopCarry = (this.stopCarry + text).slice(-MAX_CARRY);
     const stop = /"stop_reason"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/.exec(this.stopCarry);
@@ -337,6 +379,7 @@ export class ResponseUsageTap {
       this.jsonUsageText = "";
       return;
     }
+    this.jsonUsageDepth = 0;
     let quoted = false;
     let escaped = false;
     for (let i = 0; i < this.jsonUsageText.length; i++) {
@@ -361,14 +404,17 @@ export class ResponseUsageTap {
   private setUsage(value: unknown): void {
     if (!value || typeof value !== "object") return;
     const usage = value as Record<string, unknown>;
+    if (typeof usage.service_tier === "string") this.servedTier = usage.service_tier;
     const number = (key: string): number => typeof usage[key] === "number" && Number.isFinite(usage[key]) ? Math.max(0, usage[key] as number) : 0;
     if (!("input_tokens" in usage || "output_tokens" in usage || "cache_read_input_tokens" in usage || "cache_creation_input_tokens" in usage)) return;
     const current = this.usage ?? { input: 0, cached: 0, output: 0 };
     const input = "input_tokens" in usage ? number("input_tokens") : current.input;
     const cached = "cache_read_input_tokens" in usage ? number("cache_read_input_tokens") : current.cached;
-    const cacheWrite = "cache_creation_input_tokens" in usage ? number("cache_creation_input_tokens") : current.cacheWrite;
+    const cacheWrite = "cache_creation_input_tokens" in usage
+      ? typeof usage.cache_creation_input_tokens === "number" && Number.isFinite(usage.cache_creation_input_tokens) ? number("cache_creation_input_tokens") : undefined
+      : current.cacheWrite;
     const output = "output_tokens" in usage ? number("output_tokens") : current.output;
-    this.usage = { input, cached, ...(cacheWrite && cacheWrite > 0 ? { cacheWrite } : {}), output };
+    this.usage = { input, cached, ...(cacheWrite !== undefined ? { cacheWrite } : {}), output };
   }
 }
 

@@ -24,7 +24,7 @@ import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
-import { THREAD_UNSUPPORTED, effortOf, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
+import { THREAD_UNSUPPORTED, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
@@ -635,7 +635,7 @@ export class Proxy {
     let observedStopReason: string | undefined;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
-    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean }): void => {
+    const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
       this.stats.inFlight--;
@@ -660,6 +660,11 @@ export class Proxy {
         if (stopReason) completed.stopReason = stopReason;
         if (note) completed.note = note;
         if (extra?.resent && !completed.ok) completed.resent = true;
+        if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
+        if (extra?.requestedTier !== undefined) completed.requestedTier = extra.requestedTier;
+        if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
+        if (extra?.upstreamCalled === false) completed.upstreamCalled = false;
+        if (extra?.refusal !== undefined) completed.refusal = extra.refusal;
         this.deps.requests.add(completed);
       }
     };
@@ -671,7 +676,7 @@ export class Proxy {
       const msg = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "ClaudeRipple is restarting; retry" } });
       res.writeHead(503, { "content-type": "application/json", "retry-after": "3", connection: "close", "content-length": String(Buffer.byteLength(msg)) }).end(msg);
       req.resume();
-      finish("503", msg.length, "refused during drain (client retries)", false, { resent: true });
+      finish("503", msg.length, "refused during drain (client retries)", false, { resent: true, upstreamCalled: false, refusal: "drain" });
       return;
     }
 
@@ -705,9 +710,16 @@ export class Proxy {
     // backend is configured: `cfg.webSearch` decides who answers it, but knowing that this is a
     // search is what lets the guard below refuse a provider that cannot run one. Tying the two
     // together meant an unconfigured router could not tell a search from any other turn.
+    if (json) {
+      record.source = record.target = typeof model === "string" ? model : "-";
+      record.stream = json.stream === true;
+      if (isAutoModeClassifier(json)) record.purpose = "auto-mode-classifier";
+    }
     const search = json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
+    let searchAttempted = false;
+    const markSearchAttempted = (): void => { searchAttempted = true; };
     if (search && cfg.webSearch) {
-      const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish);
+      const served = await this.serveWebSearch(res, json!, search, cfg.webSearch, record, finish, markSearchAttempted);
       if (served) return;
       // Fall through on failure: the ordinary path still answers, and a search that quietly
       // returns nothing is worse than one that costs what it always cost.
@@ -727,7 +739,7 @@ export class Proxy {
         res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(payload)) }).end(payload);
         tag = `REFUSE ${model}`;
         record = { ...record, provider: "refused" };
-        finish("400", payload.length, `ClaudeRipple: ${reason}`, true);
+        finish("400", payload.length, `ClaudeRipple: ${reason}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unroutable" });
         return;
       }
     }
@@ -768,7 +780,7 @@ export class Proxy {
       // The same holds for a plan that searches on another of its endpoints (`anthropicSearch`).
       const own = (cfg.providers[route.provider]?.type === "chatgpt" || searchProviderFor(cfg.providers[route.provider], route.model) !== undefined) &&
         cfg.webSearch?.provider !== route.provider;
-      if (own && (await this.serveWebSearch(res, json, search, { provider: route.provider, model: route.model }, record, finish))) return;
+      if (own && (await this.serveWebSearch(res, json, search, { provider: route.provider, model: route.model }, record, finish, markSearchAttempted))) return;
       const blocks = webSearchErrorBlocks(search, "unavailable");
       const model = typeof json.model === "string" ? json.model : "unknown";
       const wantStream = json.stream === true;
@@ -777,7 +789,8 @@ export class Proxy {
         ? { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }
         : { "content-type": "application/json" }).end(payload);
       log.warn(`web search: ${route.provider} cannot run server tools and no webSearch backend is configured; refused rather than answered with invented results`);
-      finish("200", Buffer.byteLength(payload), `web search refused: ${route.provider} runs no server tools`, false);
+      record = { ...record, target: route.model, provider: route.provider, purpose: "web-search" };
+      finish("200", Buffer.byteLength(payload), `web search refused: ${route.provider} runs no server tools`, false, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "web-search-unsupported" });
       return;
     }
 
@@ -788,9 +801,10 @@ export class Proxy {
     let penalised: { provider: string; id: string } | null = null;
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
     if (route && json) {
+      record = { ...record, target: route.model, provider: route.provider };
       const configured = cfg.providers[route.provider];
       if (!configured) {
-        finish("500", 0, `unknown provider ${route.provider}`);
+        finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
         res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "clauderipple_config", message: `unknown provider ${route.provider}` } }));
         return;
       }
@@ -804,11 +818,10 @@ export class Proxy {
         if (td === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
           return;
         }
         if (td === "strip") stripThreadFields(json);
-        record = { ...record, target: route.model, provider: route.provider };
         const routeEffort = effortOf(json);
         if (routeEffort) record.effort = routeEffort;
         tag = `CHATGPT ${route.tag} effort=${routeEffort ?? "-"}`;
@@ -817,7 +830,7 @@ export class Proxy {
           // here fails over once every account is out (chooseTarget asks the adapter).
           const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
           if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
+          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
         } catch (e) {
           finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
           if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
@@ -830,11 +843,10 @@ export class Proxy {
         if (td === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
           return;
         }
         if (td === "strip") stripThreadFields(json);
-        record = { ...record, target: route.model, provider: route.provider };
         const routeEffort = effortOf(json);
         if (routeEffort) record.effort = routeEffort;
         tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
@@ -842,7 +854,7 @@ export class Proxy {
           const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
           this.recordOutcome(route.provider, o.status);
           if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
+          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
         } catch (e) {
           this.recordOutcome(route.provider, 0);
           finish("-", 0, `openai error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
@@ -858,11 +870,10 @@ export class Proxy {
         if (td === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
           return;
         }
         if (td === "strip") stripThreadFields(json);
-        record = { ...record, target: route.model, provider: route.provider };
         const routeEffort = effortOf(json);
         if (routeEffort) record.effort = routeEffort;
         tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
@@ -870,7 +881,7 @@ export class Proxy {
           const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
           this.recordOutcome(route.provider, o.status);
           if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
+          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
         } catch (e) {
           this.recordOutcome(route.provider, 0);
           finish("-", 0, `google error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
@@ -891,7 +902,7 @@ export class Proxy {
         if (credentials.length === 0) {
           const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "ClaudeRipple: no usable Claude account; sign in or reauthenticate an account" } });
           res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("401", out.length, "no usable Claude account");
+          finish("401", out.length, "no usable Claude account", true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "no-account" });
           return;
         }
         dropForeignThinking(json);
@@ -910,7 +921,6 @@ export class Proxy {
           dropHeaders: new Set(credentials.flatMap((credential) => Object.keys(credential.headers).map((name) => name.toLowerCase()))),
           dropHeaderPrefixes: ["anthropic-client-", "x-stainless-"],
         };
-        record = { ...record, target: route.model, provider: route.provider };
         const routeEffort = effortOf(json);
         if (routeEffort) record.effort = routeEffort;
         tag = `CLAUDE ${route.tag} account=${using.ownerId?.slice(0, 8) ?? "current"}`;
@@ -923,7 +933,7 @@ export class Proxy {
       if (threadDecision(json) === "refuse") {
         const out = JSON.stringify(THREAD_UNSUPPORTED);
         res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-        finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+        finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
         return;
       }
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
@@ -977,7 +987,6 @@ export class Proxy {
         // vendor's website, which answered 200 with HTML (measured 2026-09-13 with OpenRouter).
         basePath: u.pathname.replace(/\/+$/, ""),
       };
-      record = { ...record, target: route.model, provider: route.provider };
       const routeEffort = effortOf(json);
       if (routeEffort) record.effort = routeEffort;
       tag = `${route.provider.toUpperCase()} ${route.tag} effort=${routeEffort ?? "-"}`;
@@ -991,6 +1000,8 @@ export class Proxy {
       target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
       tag = `WEB ${reqHost}`;
     }
+
+    if (json && typeof json.service_tier === "string") record.requestedTier = json.service_tier;
 
     // Two kinds of response editing: the CLI bootstrap (api host) and the claude.ai bootstrap (picker mode).
     const isCliBootstrap = isApiHost && !route && path.startsWith(BOOTSTRAP_PATH);
@@ -1228,6 +1239,8 @@ export class Proxy {
         return;
       }
 
+      const native = isApiHost && (!route || cfg.providers[route.provider]?.type === "anthropic");
+      if (native && typeof upRes.headers["request-id"] === "string") record.upstreamRequestId = upRes.headers["request-id"];
       const outHeaders: string[] = [];
       const r = upRes.rawHeaders;
       for (let i = 0; i < r.length; i += 2) {
@@ -1329,6 +1342,8 @@ export class Proxy {
         const observed = tap.finish();
         observedUsage = observed.usage;
         observedStopReason = observed.stopReason;
+        if (!native && observed.messageId !== undefined) record.messageId = observed.messageId;
+        if (observed.servedTier !== undefined) record.servedTier = observed.servedTier;
         res.end();
         const errorBody = status >= 400 ? decodeBodyToText(Buffer.concat(errorHead), upRes.headers["content-encoding"]) : "";
         if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
@@ -1364,8 +1379,9 @@ export class Proxy {
     json: Record<string, unknown>,
     query: WebSearchQuery,
     settings: NonNullable<Config["webSearch"]>,
-    record: { source?: string; target?: string },
+    record: { source?: string; target?: string; provider?: string; purpose?: RequestRecord["purpose"] },
     finish: (status: string, bytes: number, note?: string, failed?: boolean) => void,
+    markAttempted: () => void,
   ): Promise<boolean> {
     const configured = this.deps.config().providers[settings.provider];
     if (!configured) {
@@ -1415,6 +1431,7 @@ export class Proxy {
     const model = typeof json.model === "string" ? json.model : "unknown";
     let blocks;
     try {
+      markAttempted();
       const outcome = await backend.search(query);
       blocks = webSearchBlocks(query, outcome).blocks;
     } catch (e) {
@@ -1423,6 +1440,8 @@ export class Proxy {
     }
 
     record.target = `${settings.provider}/${settings.model}`;
+    record.provider = settings.provider;
+    record.purpose = "web-search";
     const wantStream = json.stream === true;
     const payload = wantStream ? webSearchSse(model, blocks, 1) : JSON.stringify(webSearchMessage(model, blocks, 1));
     const headers = wantStream

@@ -409,6 +409,7 @@ export class StreamMapper {
   private sawToolCall = false;
   private finished = false;
   readonly messageId: string;
+  servedTier: string | undefined;
   readonly model: string;
   usage: AnthropicUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   /** Latest `codex.rate_limits` payload, if the backend sent one. */
@@ -548,7 +549,8 @@ export class StreamMapper {
       }
       case "response.completed":
       case "response.incomplete": {
-        const r = ev.response as { usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } }; incomplete_details?: { reason?: string } } | undefined;
+        const r = ev.response as { service_tier?: unknown; usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } }; incomplete_details?: { reason?: string } } | undefined;
+        if (typeof r?.service_tier === "string") this.servedTier = r.service_tier;
         const u = r?.usage;
         if (u) {
           const cached = u.input_tokens_details?.cached_tokens ?? 0;

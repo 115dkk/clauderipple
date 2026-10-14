@@ -15,7 +15,7 @@ import { DEFAULTS, type Config } from "../src/config.ts";
 import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
-import { RequestLog } from "../src/requestlog.ts";
+import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
 import { createCa } from "../src/x509.ts";
 
 function freePort(): Promise<number> {
@@ -56,6 +56,7 @@ type SearchReply = {
   message: { content: { type?: string; content?: { url?: string }[] }[]; usage: { server_tool_use: { web_search_requests: number } } };
   seenTool: unknown;
   target: string | undefined;
+  record: RequestRecord | undefined;
 };
 
 /** One `WebSearch` side request for `model`, through a real proxy whose ChatGPT backend is local. */
@@ -154,6 +155,7 @@ async function searchThrough(model: string, cfgFor: (backendUrl: string) => Part
       message: JSON.parse(decoded.body) as SearchReply["message"],
       seenTool,
       target: requests.list(10).find((entry) => entry.kind === "messages")?.target,
+      record: requests.list(10).find((entry) => entry.kind === "messages"),
     };
   } finally {
     proxy.close();
@@ -173,6 +175,10 @@ function assertSearched(reply: SearchReply, target: string): void {
     filters: { allowed_domains: ["nodejs.org"] },
   });
   assert.equal(reply.target, target);
+  assert.equal(reply.record?.purpose, "web-search");
+  assert.equal(reply.record?.provider, "chatgpt");
+  assert.equal(reply.record?.upstreamCalled, undefined);
+  assert.equal(reply.record?.refusal, undefined);
 }
 
 test("the proxy serves a configured ChatGPT hosted search before model routing", async () => {

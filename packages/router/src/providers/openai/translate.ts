@@ -328,6 +328,7 @@ export class OpenAiStreamMapper {
   private readonly responseItems: ResponseItem[] = [];
   private readonly responseItemsById = new Map<string, ResponseItem>();
   readonly messageId = `msg_${crypto.randomBytes(12).toString("hex")}`;
+  servedTier: string | undefined;
   readonly content: OutputBlock[] = [];
   usage: AnthropicUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   stopReason: "end_turn" | "tool_use" | "max_tokens" = "end_turn";
@@ -411,6 +412,7 @@ export class OpenAiStreamMapper {
 
   private feedChat(ev: Record<string, unknown>): AnthropicEvent[] {
     const out = [...this.start()];
+    if (typeof ev.service_tier === "string") this.servedTier = ev.service_tier;
     const usage = ev.usage;
     if (usage) this.setUsage(usage);
     const choices = Array.isArray(ev.choices) ? ev.choices as { delta?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: unknown }; finish_reason?: unknown }[] : [];
@@ -552,7 +554,8 @@ export class OpenAiStreamMapper {
       const item = this.responseItem(ev.item_id ?? (ev.item as { id?: unknown } | undefined)?.id);
       if (item) item.done = true;
     } else if (type === "response.completed" || type === "response.incomplete") {
-      const response = ev.response as { usage?: unknown; incomplete_details?: { reason?: unknown } } | undefined;
+      const response = ev.response as { service_tier?: unknown; usage?: unknown; incomplete_details?: { reason?: unknown } } | undefined;
+      if (typeof response?.service_tier === "string") this.servedTier = response.service_tier;
       this.setUsage(response?.usage);
       if (response?.incomplete_details?.reason === "max_output_tokens") this.finishReason = "length";
       this.sawCompletion = true;

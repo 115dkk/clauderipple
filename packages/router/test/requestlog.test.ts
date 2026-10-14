@@ -155,6 +155,33 @@ test("ResponseUsageTap keeps usage when a whole SSE body over 64KiB arrives at o
   assert.deepEqual(plain.finish(), expected);
 });
 
+test("ResponseUsageTap distinguishes explicit cache writes from absent/non-number values", () => {
+  for (const stream of [false, true]) {
+    for (const value of [0, 7, undefined, null, "0"]) {
+      const usage = { input_tokens: 5, output_tokens: 1, ...(value !== undefined ? { cache_creation_input_tokens: value } : {}) };
+      const tap = new ResponseUsageTap(stream ? "text/event-stream" : "application/json", undefined);
+      tap.feed(Buffer.from(stream
+        ? `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { usage } })}\n\n`
+        : JSON.stringify({ usage })));
+      if (stream) tap.feed(Buffer.from('event: message_delta\ndata: {"usage":{"output_tokens":9}}\n\n'));
+      assert.deepEqual(tap.finish().usage, { input: 5, cached: 0, ...(typeof value === "number" ? { cacheWrite: value } : {}), output: stream ? 9 : 1 });
+    }
+  }
+});
+
+test("ResponseUsageTap observes only the message id and reported tier, across split JSON/SSE", () => {
+  const message = { content: [{ id: "tool-id", text: 'quoted "id":"prompt-id"' }], id: "msg_actual", usage: { input_tokens: 1, service_tier: "standard" } };
+  for (const stream of [false, true]) {
+    const text = stream ? `event: message_start\ndata: ${JSON.stringify({ message })}\n\n` : JSON.stringify(message);
+    const tap = new ResponseUsageTap(stream ? "text/event-stream" : "application/json", undefined);
+    for (const char of text) tap.feed(Buffer.from(char));
+    assert.deepEqual(tap.finish(), { messageId: "msg_actual", servedTier: "standard", usage: { input: 1, cached: 0, output: 0 } });
+  }
+  const absent = new ResponseUsageTap("application/json", undefined);
+  absent.feed(Buffer.from(JSON.stringify({ content: [{ id: "tool-id" }], usage: { input_tokens: 1, service_tier: null } })));
+  assert.deepEqual(absent.finish(), { usage: { input: 1, cached: 0, output: 0 } });
+});
+
 test("ResponseUsageTap drops an over-long SSE line whole and reads the events after it", () => {
   const tap = new ResponseUsageTap("text/event-stream", "identity");
   tap.feed(Buffer.from('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n\n'));

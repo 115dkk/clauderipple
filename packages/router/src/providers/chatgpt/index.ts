@@ -59,7 +59,7 @@ export type ImageRequest = {
 
 export type ImageResult = { data: Buffer; format: string; size?: string; quality?: string; revisedPrompt?: string };
 
-export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; exhaustion?: ProviderExhaustion | undefined };
+export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -1057,6 +1057,8 @@ export class ChatGptAdapter {
       }
       res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(err.body);
       return { status: err.status, bytes: err.body.length, note,
+        ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
+        ...(sent.kind === "refused" && upstreamReq.service_tier !== undefined ? { requestedTier: upstreamReq.service_tier } : {}),
         ...(sent.kind === "refused" ? { exhaustion: providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000) } : {}),
       };
     }
@@ -1076,6 +1078,7 @@ export class ChatGptAdapter {
 
     // Keep early rejection as an HTTP error until an actual content block arrives.
     // A 200 followed by an error loses the status Claude uses for overflow recovery.
+    let messageSent = false;
     const pendingEvents: ReturnType<StreamMapper["start"]> = [];
     const openStream = (): void => {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -1088,7 +1091,11 @@ export class ChatGptAdapter {
         if (!pendingEvents.some((e) => e.event !== "message_start")) return;
         openStream();
       }
-      for (const ev of pendingEvents.splice(0)) bytes += write(res, formatSse(ev));
+      for (const ev of pendingEvents.splice(0)) {
+        const written = write(res, formatSse(ev));
+        bytes += written;
+        if (ev.event === "message_start" && written > 0) messageSent = true;
+      }
     };
     // The hold waits for upstream's first item, which normally follows the request within a second
     // — and an overflow rejection comes before it. Should it not come, the client must still hear
@@ -1099,7 +1106,11 @@ export class ChatGptAdapter {
       holdDeadline = setTimeout(() => {
         if (res.headersSent || res.writableEnded || mapper.failure) return;
         openStream();
-        for (const ev of [...pendingEvents.splice(0), ...mapper.start()]) bytes += write(res, formatSse(ev));
+        for (const ev of [...pendingEvents.splice(0), ...mapper.start()]) {
+          const written = write(res, formatSse(ev));
+          bytes += written;
+          if (ev.event === "message_start" && written > 0) messageSent = true;
+        }
       }, streamHold.ms);
       ping = setInterval(() => {
         if (res.headersSent && !res.writableEnded) bytes += write(res, formatSse({ event: "ping", data: { type: "ping" } }));
@@ -1173,6 +1184,9 @@ export class ChatGptAdapter {
         output: u.output_tokens,
       },
       stopReason: mapper.stopReason,
+      ...((!wantStream && !failure) || messageSent ? { messageId: mapper.messageId } : {}),
+      ...(upstreamReq.service_tier !== undefined ? { requestedTier: upstreamReq.service_tier } : {}),
+      ...(mapper.servedTier !== undefined ? { servedTier: mapper.servedTier } : {}),
     };
   }
 }

@@ -17,7 +17,7 @@ import type { AnthropicRequest } from "../chatgpt/translate.ts";
 
 const PING_MS = 15_000;
 
-export type OpenAiOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; exhaustion?: ProviderExhaustion | undefined };
+export type OpenAiOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; servedTier?: string; exhaustion?: ProviderExhaustion | undefined };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -232,6 +232,8 @@ export class OpenAiCompatibleAdapter {
         : `in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens} stop=${mapper.stopReason}`,
       usage: { input: usage.input_tokens, cached: usage.cache_read_input_tokens, output: usage.output_tokens },
       stopReason: mapper.stopReason,
+      ...(wantStream || !failure ? { messageId: mapper.messageId } : {}),
+      ...(mapper.servedTier !== undefined ? { servedTier: mapper.servedTier } : {}),
     };
   }
 }

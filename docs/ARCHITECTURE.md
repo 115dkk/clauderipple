@@ -759,6 +759,19 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
 
 ### 4a. Claude Code request shapes a translator must handle (measured 2026-09-13, CLI 2.1.266)
 
+**Request-log metadata (`requests.jsonl`, 2026-10-14).** These fields are optional;
+old records and `RequestLog.summary()` remain compatible. No prompt, auth or reasoning
+text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
+
+- `usage.cacheWrite`: native/Anthropic numeric cache creation tokens, including explicit 0; absent/non-number is omitted, as is a translated adapter's synthetic 0.
+- `upstreamRequestId`: the final forwarded native Anthropic response's `request-id` header (passthrough or account pool).
+- `messageId`: the Anthropic message id delivered by a translated adapter or forwarded compatible response; not a generated id from a non-streaming error.
+- `upstreamCalled`: `false` only for a known pre-model-API exit; omitted when a search backend was attempted or the call state is unknown.
+- `refusal`: `thread-continue`, `drain`, `unroutable`, `no-account`, `unknown-provider` or `web-search-unsupported`, from the actual exit branch.
+- `purpose`: `auto-mode-classifier` from the security-monitor request shape regardless of routing settings, or `web-search` for router-served searches.
+- `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent.
+- `servedTier`: the response-reported tier (Responses/Chat `service_tier` or Anthropic `usage.service_tier`); never inferred from the request.
+
 - **Server-side threads ("tether").** The first request of a session carries
   `thread: {type:"create"}` and the full history; later turns carry
   `thread: {type:"continue", previous_message_id: <our last assistant msg id>}` and
