@@ -27,7 +27,7 @@ export function attachmentContent(cwd: string, text: string, attachments: Attach
       continue;
     }
     const root = path.join(cwd, ".ripple-attachments");
-    fs.mkdirSync(root, { recursive: true });
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     if (fs.lstatSync(root).isSymbolicLink()) throw new Error("Attachment folder must not be a symlink.");
     const name = a.name.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-100) || "file";
     const file = path.join(root, `${a.blob}-${name}`);

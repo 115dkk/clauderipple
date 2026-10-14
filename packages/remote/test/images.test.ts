@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventLog } from "../src/eventlog.ts";
-import { imageCachePath, messageContent } from "../src/images.ts";
+import { attachmentContent, imageCachePath, messageContent } from "../src/images.ts";
 import { transcriptEvents } from "../src/desktop.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
 
@@ -65,4 +65,11 @@ test("referenced tmp image caches load, missing or unapproved references remain 
   const missing = messageContent(`[Image: source: ${images}/missing.png] [Image: source: /etc/passwd]`, () => { assert.fail("must not store an unsafe file"); });
   assert.equal(missing.images.length, 2);
   assert.ok(missing.images.every(part => !part.blob));
+});
+
+test("the attachment folder is created 0700, not 0755", t => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-attach-"));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  attachmentContent(cwd, "see attached", [{ blob: "b1", name: "note.txt", mediaType: "text/plain" }], () => Buffer.from("hello").toString("base64"));
+  assert.equal(fs.statSync(path.join(cwd, ".ripple-attachments")).mode & 0o777, 0o700);
 });
