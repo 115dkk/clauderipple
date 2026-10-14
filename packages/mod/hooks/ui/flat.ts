@@ -8,7 +8,7 @@
 // laid over the pictures line up (kit.tsx). Pure: SVG only, so node tests can load it.
 
 import { AGENTS_W, CELL_PX, CLOSE_PX, CONTROL_PX, FLAME, GLYPH, ICON, ICON_PX, METER_H, METER_W, SWITCH_H, SWITCH_W, TILE_PX, esc, labelPx, r } from './art.ts'
-import type { PillLook, TileArt, Tone } from './art.ts'
+import type { Tone } from './art.ts'
 import type { Paint } from './look.ts'
 import { svgDoc } from './theme.ts'
 import type { Appearance } from './theme.ts'
@@ -252,7 +252,3 @@ export function flatPictures(appearance: Appearance): Paint {
     },
   }
 }
-
-// Keep the look's names in one place: a tone's colour for a figure drawn outside these pictures.
-export { toneVar as flatToneVar }
-export type { PillLook as FlatPillLook, TileArt as FlatTileArt }
