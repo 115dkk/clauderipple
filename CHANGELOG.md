@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.5 — 2026-10-14
+
+### Fixed
+
+- **Routed reasoning models keep their train of thought between tool calls.** The router dropped
+  every translated model's previous reasoning, so on each tool call Muse, GPT and DeepSeek reasoned
+  the whole task again from scratch. Workers took minutes per step, kept re-deriving the same plan,
+  and sometimes stopped with no answer. The model's own reasoning now travels in Claude Code's
+  transcript and goes back to it unchanged, the way OpenCode's and Codex's own clients do it. On four
+  real fixes graded by their hidden tests, Muse Spark 1.3 at xhigh finished in 90–584 seconds, where
+  0.9.4 took up to 13 minutes and twice ran past 30 minutes without finishing. Switching a session
+  to a Claude model still works: the carried reasoning is left out of requests to Anthropic.
+
 ## 0.9.4 — 2026-10-14
 
 ### Fixed
