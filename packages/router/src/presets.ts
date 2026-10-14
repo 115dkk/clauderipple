@@ -50,6 +50,12 @@ export type ProviderPreset = {
    * on another wire. Only ever set from a measured reply, like `serverTools`.
    */
   anthropicSearch?: { url: string; authHeader: "x-api-key" | "authorization-bearer"; models: string[] };
+  /**
+   * Ask the Responses wire for its reasoning sealed (`include: ["reasoning.encrypted_content"]`,
+   * `reasoning.summary: "auto"`), so the conversation can carry it back (reasoning.ts). Only ever set
+   * from a measured reply: a vendor that does not know the field may refuse the turn outright.
+   */
+  sealedReasoning?: boolean;
   verified: boolean;
   notes?: string;
   docsUrl: string;
@@ -253,6 +259,9 @@ export const PRESETS: ProviderPreset[] = [
     authHeader: "authorization-bearer",
     wire: "responses",
     sessionHeader: "x-opencode-session",
+    // Measured 2026-10-14 on muse-spark-1.3-contributor: `include` and `summary` are accepted, the
+    // sealed item comes back on a tool-bearing turn, and replaying it in place answers 200.
+    sealedReasoning: true,
     modelsUrl: "https://opencode.ai/zen/go/v1/models",
     modelsAuthHeader: "authorization-bearer",
     // Every wire below is from the endpoint table OpenCode publishes per model

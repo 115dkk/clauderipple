@@ -10,7 +10,8 @@ import { ChatGptAccountPool, type ChatGptAccountSummary, type ChatGptCredential,
 import { SseParser } from "./sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { looksLikeAuth } from "../openai/index.ts";
-import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest } from "./translate.ts";
+import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNames, toResponsesRequest, toolNameRestoreMap, type AnthropicRequest, type TranslateOptions } from "./translate.ts";
+import { refusesReplayedReasoning } from "../../reasoning.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { providerExhaustion, type ProviderExhaustion } from "../../health.ts";
 import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
@@ -985,6 +986,28 @@ export class ChatGptAdapter {
     return { status: upstream.status, bytes, ...(usage ? { usage } : {}), note: `codex passthrough account=${owner ? owner.slice(0, 8) : "caller"}` };
   }
 
+  /**
+   * The options one turn is translated with. The conversation is the storage (reasoning.ts), so what
+   * to replay is read out of the request itself; `carried` is filled in as the input is built and the
+   * outcome lands in the request log. `replay: false` is the retry after the backend refused that
+   * carrier, and it puts back exactly the request this adapter sent before any of this existed.
+   */
+  private responsesOptions(carried: { replayed: number; undecodable: number }, model: string, effort: string | undefined, replay = true): TranslateOptions {
+    return {
+      model,
+      effort: effort ?? this.cfg.defaultEffort ?? "high",
+      identity: this.cfg.identity ?? true,
+      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
+      replay,
+      // The envelope names this provider and this model, and the request builder refuses anything
+      // else: reasoning outlives the turn that made it, and a conversation moved to another model
+      // must not carry the old one's sealed state with it (reasoning.ts).
+      env: { p: this.name, m: model },
+      carried,
+      log: (line) => this.log.info(`chatgpt ${this.name}: ${line} (${model})`),
+    };
+  }
+
   /** Handle a fully-read Messages request. `model`/`effort` already resolved by routing. */
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<ChatGptOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
@@ -998,13 +1021,9 @@ export class ChatGptAdapter {
     const serverTools = serverToolNames(json.tools);
     if (serverTools.size > 0) this.log.warn(`chatgpt ${this.name}: dropped server tools for ${model}: ${[...serverTools].join(", ")} (Anthropic runs these; this provider cannot)`);
 
-    const upstreamReq = toResponsesRequest(json, {
-      model,
-      effort: effort ?? this.cfg.defaultEffort ?? "high",
-      identity: this.cfg.identity ?? true,
-      ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
-    });
-    const body = JSON.stringify(upstreamReq);
+    const carried = { replayed: 0, undecodable: 0 };
+    let upstreamReq = toResponsesRequest(json, this.responsesOptions(carried, model, effort));
+    let body = JSON.stringify(upstreamReq);
     const cacheKey = upstreamReq.prompt_cache_key;
     // Input estimate for message_start: a conversation only grows, so the last measured total is a floor.
     const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(cacheKey) ?? 0);
@@ -1015,7 +1034,7 @@ export class ChatGptAdapter {
     // One account answers the turn. Which one is decided here, and a refusal before any byte has
     // reached the client moves the same turn to the next account, so the client is answered on its
     // first ask. The conversation stays on the account that answered: moving it costs the cache.
-    const sent = await this.sendToAnAccount({
+    const ask = (): Promise<SendResult> => this.sendToAnAccount({
       conversation: cacheKey,
       path: "/codex/responses",
       body,
@@ -1038,6 +1057,18 @@ export class ChatGptAdapter {
         };
       },
     });
+    let sent = await ask();
+    // A 4xx that names reasoning is the backend refusing the sealed reasoning we replayed — the blob
+    // was minted by the model that is no longer answering, or by another account. The summary is
+    // worth nothing without it, so the turn is asked once without: replaying is an optimisation and
+    // must never be the reason a user's turn fails (reasoning.ts).
+    if (carried.replayed > 0 && sent.kind === "refused" && refusesReplayedReasoning(sent.status, sent.text)) {
+      this.log.warn(`chatgpt ${this.name}: upstream ${sent.status} refused ${carried.replayed} replayed reasoning item(s) for ${model}; asking again without them: ${sent.text.slice(0, 200)}`);
+      upstreamReq = toResponsesRequest(json, this.responsesOptions({ replayed: 0, undecodable: 0 }, model, effort, false));
+      body = JSON.stringify(upstreamReq);
+      carried.replayed = 0;
+      sent = await ask();
+    }
     if (sent.kind !== "ok") {
       res.off("close", onClose);
       if (sent.kind === "aborted") return { status: 0, bytes: 0, note: "client closed" };
@@ -1079,7 +1110,7 @@ export class ChatGptAdapter {
 
     if (this.cfg.debugDump === "all") this.dump(upstream.status, json, upstreamReq, "");
     const wantStream = json.stream === true;
-    const mapper = new StreamMapper(model, startInput, toolNameRestoreMap(json));
+    const mapper = new StreamMapper(model, startInput, toolNameRestoreMap(json), this.name);
     const parser = new SseParser();
     let bytes = 0;
     let ping: NodeJS.Timeout | null = null;
@@ -1183,8 +1214,8 @@ export class ChatGptAdapter {
       exhaustion,
       bytes,
       note: failure
-        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens})`
-        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason}${upstreamReq.service_tier ? " fast" : ""}`,
+        ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} replayed=${carried.replayed} reasoning=${mapper.reasoningCount})`
+        : `in=${u.input_tokens} cached=${u.cache_read_input_tokens} out=${u.output_tokens} stop=${mapper.stopReason} replayed=${carried.replayed} reasoning=${mapper.reasoningCount}${upstreamReq.service_tier ? " fast" : ""}`,
       usage: {
         input: u.input_tokens,
         cached: u.cache_read_input_tokens,
