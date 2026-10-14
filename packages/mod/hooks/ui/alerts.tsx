@@ -12,7 +12,7 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
-import { CELL_PX, MUTE, SUB, TONE, pillArt } from './art'
+import { CELL_PX, MUTE, ROW_PX, SUB, TONE, pillArt } from './art'
 import type { Sea, Tone } from './art'
 import { capsule, closeButton, pill, ripple, segmented as drawnSegmented, well } from './kit'
 import type { SegmentOption } from './kit'
@@ -339,7 +339,8 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
     </Box>
   ) : (
     <Box key="top" flexDirection="row" alignItems="flex-start" columnGap={2} width="100%" minWidth={0}>
-      {face}
+      {/* Beside two lines 리플이 sits at their middle, not on the title's line (2026-10-14: it rode high). */}
+      <Box key="face" alignSelf="center" flexShrink={0}>{face}</Box>
       <Box key="say" flexDirection="column" rowGap={1} flexGrow={1} flexShrink={1} minWidth={0}>
         {title}
         {body}
@@ -349,10 +350,12 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
       {actionsBelow ? null : buttons}
     </Box>
   )
+  const rows = oneRow ? 2 : 4 + (more.length ? 3.2 : 0) + (actionsBelow ? 2 : 0) + (frame.columns < 60 ? 3 : 0)
   return capsule(el, frame, {
     key: 'alert-' + card.key,
-    sea: { ...sea, reach: 130, at: { x: 1.5 * CELL_PX + CARD_FACE / 2, y: 0.5 * 19 * 0.5 + CARD_FACE / 2 } },
-    rows: oneRow ? 2 : 4 + (more.length ? 3.2 : 0) + (actionsBelow ? 2 : 0) + (frame.columns < 60 ? 3 : 0),
+    // The light comes from 리플이: on the title's line in one row, at the card's middle beside more.
+    sea: { ...sea, reach: 130, at: { x: 1.5 * CELL_PX + CARD_FACE / 2, y: oneRow ? 0.5 * ROW_PX * 0.5 + CARD_FACE / 2 : rows * ROW_PX / 2 } },
+    rows,
     children: [top],
   })
 }
