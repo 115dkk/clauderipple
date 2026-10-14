@@ -364,6 +364,16 @@ export class DesktopSessions {
 
   transcriptSize(id: string): number { return this.sources.get(id)?.size ?? 0; }
 
+  /** The transcript's current title (a Mac rename lands as a custom-title line), without liveness checks. Read-only. */
+  titleOf(id: string): string | null {
+    const source = this.sources.get(id);
+    if (!source) return null;
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(source.file); } catch (error) { if (!missing(error)) throw error; return null; }
+    if (!stat.isFile()) return null;
+    return this.readSummary(id, source.file, stat)?.summary.title ?? null;
+  }
+
   continuation(id: string): { summary: SessionSummary; open: boolean } {
     if (!this.has(id)) throw new Error("no such session");
     const source = this.sources.get(id)!;

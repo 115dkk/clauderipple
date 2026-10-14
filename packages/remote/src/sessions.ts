@@ -349,9 +349,15 @@ export class Sessions {
       if (!r.desktopBridge) continue;
       try {
         r.transcriptOffset = this.desktop.tail(r.sdkSessionId ?? r.id, r.transcriptOffset ?? 0, body => {
-          if (body.kind !== "user" || !(this.seen(r.id, body.clientMsgId) || this.bridgeEchoes.has(body.clientMsgId))) this.append(r.id, body);
+          // Our own Remote Control echo: drop it from the bounded set and skip it, once.
+          if (body.kind === "user" && this.bridgeEchoes.delete(body.clientMsgId)) return;
+          if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) {
+            if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
+            this.append(r.id, body);
+          }
         }, data => this.log(r.id).image(data));
         this.save();
+        this.refreshBridgeTitle(r);
         const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
         this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
         if (process?.bridgeSessionId) this.ensureBridge(r.id, process.bridgeSessionId);
@@ -646,6 +652,7 @@ export class Sessions {
     const converted = attachmentContent(r.cwd, text, attachments, blob => this.log(id).blob(blob));
     this.opts.permissions.denySession(id, "superseded by a new message from the user");
     this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
+    this.rememberClientMsgId(id, clientMsgId);
     let live = this.live.get(id);
     const handoff = this.handingOff.get(id);
     if (!live && !handoff) live = this.start(r);
@@ -678,6 +685,7 @@ export class Sessions {
     catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
     this.append(id, { kind: "user", text, clientMsgId });
+    this.rememberClientMsgId(id, clientMsgId);
     // A turn the desktop app finished while no phone was polling left the record "running";
     // without a fresh state event the phone would time this turn from that old one.
     if (r.state === "running" || r.state === "waiting") this.setState(r, "idle");
@@ -698,12 +706,34 @@ export class Sessions {
     const dir = path.join(this.opts.dir, "sessions", r.id);
     this.logs.get(r.id)?.close();
     this.logs.delete(r.id);
+    // The log is rebuilt from the transcript: ids the old log held may be gone, so the
+    // duplicate index must not claim them as seen or a resend would be dropped unsent.
+    this.seenIds.delete(r.id);
     fs.rmSync(dir, { recursive: true, force: true });
     this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
     r.desktopBridge = true;
     r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
     this.save();
     this.opts.onSessions();
+  }
+
+  /**
+   * A rename on the Mac lands in the transcript as a custom-title line. The session list and
+   * pushes read the record title, so refresh it when the transcript grew since the last check.
+   * Read-only: never writes the transcript, and a failed read only logs.
+   */
+  private refreshBridgeTitle(r: SessionRecord): void {
+    if (!this.desktop) return;
+    try {
+      const transcript = r.sdkSessionId ?? r.id;
+      const size = this.desktop.transcriptSize(transcript);
+      if (size === this.bridgeTitleSize.get(r.id)) return;
+      this.bridgeTitleSize.set(r.id, size);
+      const title = this.desktop.titleOf(transcript);
+      if (title && title !== r.title) { r.title = title; this.save(); this.opts.onSessions(); }
+    } catch (error) {
+      (this.opts.log ?? console.error)(`[bridge title] ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private ensureBridge(id: string, bridgeId: string) {
