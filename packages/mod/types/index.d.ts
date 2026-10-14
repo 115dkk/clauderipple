@@ -307,6 +307,7 @@ declare module 'claude-code' {
       saveUntil: number | null
       swampHidden: number | null
       coldHidden: boolean
+      kept: { pings: number; tokens: number } | null
       judgeDown: string | null
       advice: string | null
       handoff: { stage: HandoffStage; kind: HandoffKind; text?: string } | null
@@ -345,7 +346,7 @@ declare module 'claude-code' {
       judgeRuns: JudgeRun[]
       judgeDownNetwork: boolean
       limit: Hot | null
-      demo: 'cold' | 'swamp' | 'hot' | 'down' | null
+      demo: 'cold' | 'swamp' | 'hot' | 'down' | 'kept' | null
     }
   }
 }

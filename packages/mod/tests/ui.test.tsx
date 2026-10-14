@@ -265,6 +265,7 @@ test('a ko frame resolves temporary Korean text in labels and hover cards', asyn
 
 const ALERTS: AlertView[] = [
   { kind: 'cold', tokens: 182_000, idleMinutes: 74 },
+  { kind: 'kept', pings: 2, tokens: 312_000, minutesLeft: 47 },
   { kind: 'swamp', percent: 63, tokens: 126_000 },
   { kind: 'hot', limitKind: 'five_hour', percent: 86, resetsAt: '2026-10-10T15:40:00', save: false },
   { kind: 'judgeDown', judge: 'jev', reason: 'key rejected (401)' },
@@ -297,14 +298,17 @@ test('alert choices reach their callbacks', async ($, on) => {
     setHandoffKind: fn('kind'), setHandoffAfter: fn('after'), go: fn('go'), copy: fn('copy'), openNew: fn('open-new'),
   }
   drawPane(on, 'cold', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[0]!, actions))
-  drawPane(on, 'hot', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[2]!, actions))
+  drawPane(on, 'kept', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[1]!, actions))
+  drawPane(on, 'hot', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[3]!, actions))
   drawPane(on, 'note', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'compactNote', draft: '' }, actions))
-  drawPane(on, 'choice', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[10]!, actions))
+  drawPane(on, 'choice', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[11]!, actions))
   for (const surface of SURFACES) {
     const cold = await mount($, 'cold', surface)
     await cold.press({ key: 'compact' })
     await cold.press({ key: 'handoff' })
     await cold.press({ key: 'dismiss' })
+    const kept = await mount($, 'kept', surface)
+    await kept.press({ key: 'dismiss' })
     const hot = await mount($, 'hot', surface)
     await hot.press({ key: 'save' })
     const note = await mount($, 'note', surface)
@@ -314,7 +318,7 @@ test('alert choices reach their callbacks', async ($, on) => {
     await choice.press({ key: 'after-copy' })
     await choice.press({ key: 'go' })
   }
-  const once = ['compact', 'handoff', 'dismiss', 'save', 'compact:["keep the API decision"]', 'kind:["full"]', 'after:["copy"]', 'go']
+  const once = ['compact', 'handoff', 'dismiss', 'dismiss', 'save', 'compact:["keep the API decision"]', 'kind:["full"]', 'after:["copy"]', 'go']
   expect(calls).toEqual([...once, ...once])
 })
 
@@ -354,9 +358,9 @@ test('each alert shows 리플이 with the face of its state, its gauge in 5% ste
     expect(mascots(await terminal.drawn()).length).toBe(0)
     await terminal.unmount()
   }
-  // handoffDone and compacted share the pleased face, compactNote and handoffChoice the asking
-  // one; every other state has its own.
-  expect(new Set(sources).size).toBe(ALERTS.length - 2)
+  // handoffDone, compacted and kept share the pleased face, compactNote and handoffChoice the
+  // asking one; every other state has its own.
+  expect(new Set(sources).size).toBe(ALERTS.length - 3)
   const source = async (id: string) => {
     const ui = await mount($, id, 'desktop')
     const s = String(mascots(await ui.drawn())[0]?.props?.source)

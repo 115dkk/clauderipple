@@ -918,6 +918,42 @@ test('keep-warm forks near expiry, refreshes the memo and stops once on a null f
   expect(stats.text).toContain('Warm: 1 pings')
 })
 
+test('a cache-reading ping keeps the card, a real reply and /clear drop it, and the demo draws it', async ($, on) => {
+  const b = boundaries(on, { keepWarm: true })
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'ok', usage: USAGE } }))
+  await start($)
+  await step($)
+  await complete($)
+  await b.clock.advance(3375000)
+  // The ping read 40000 cache tokens: the card tells it, with the memo's minutes left.
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /held 40k tokens in cache/ })).toBeDefined()
+  await ui.unmount()
+  // A prompt counts as having seen the card; the next is a real reply, which clears the count.
+  await submit($)
+  await step($)
+  await complete($)
+  const after = await band($)
+  expect(await after.find({ type: 'Text', text: /held 40k tokens in cache/ })).toBeUndefined()
+  await after.unmount()
+  await b.clock.advance(3375000)
+  await b.clock.settle()
+  const again = await band($)
+  expect(await again.find({ type: 'Text', text: /held 40k tokens in cache/ })).toBeDefined()
+  await again.unmount()
+  await $.classic.SessionStart({ source: 'clear' })
+  const cleared = await band($)
+  expect(await cleared.find({ type: 'Text', text: /held 40k tokens in cache/ })).toBeUndefined()
+  await cleared.unmount()
+  // The demo shows the card with sample values, whatever the state.
+  await command($, 'kept')
+  const demo = await band($)
+  expect(await demo.find({ type: 'Text', text: /held 312k tokens in cache/ })).toBeDefined()
+})
+
 test('fork turn.step is not effort-steered, busy or main-request cost', async ($, on) => {
   const b = boundaries(on, { keepWarm: true })
   http(on)

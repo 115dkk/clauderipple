@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { hottest, limitLabel, saveUntil, swamped, coldAlert, hotAlert, swampAlert, bandPriority } from '../../packages/mod/hooks/session.ts'
+import { hottest, limitLabel, saveUntil, swamped, coldAlert, hotAlert, swampAlert, keptAlert, bandPriority } from '../../packages/mod/hooks/session.ts'
 const now = Date.parse('2026-10-10T00:00:00Z')
 const hot = { kind: 'five_hour', percent: 80, resetsAt: '2026-10-10T05:00:00Z' }
 
@@ -47,6 +47,16 @@ test('cold is large expired cache only; dismissal hides until caller resets it o
   assert.equal(coldAlert(null, 150000, now, false), false)
 })
 
+test('kept is counted pings while the memo still holds; an expired cache is the cold card', () => {
+  const memo = { ttlMs: 3600000, lastReplyAt: now - 60000, expiresAt: now + 3600000 }
+  assert.equal(keptAlert({ pings: 1, tokens: 40000 }, memo, now), true)
+  assert.equal(keptAlert({ pings: 0, tokens: 40000 }, memo, now), false)
+  assert.equal(keptAlert(null, memo, now), false)
+  assert.equal(keptAlert({ pings: 2, tokens: 40000 }, null, now), false)
+  // The cache the pings held has expired: claiming it would lie, the cold card is the truth.
+  assert.equal(keptAlert({ pings: 2, tokens: 40000 }, { ...memo, expiresAt: now }, now), false)
+})
+
 test('dismissed hot returns at +10 points and swamp at +15 points of context, inclusively', () => {
   assert.equal(hotAlert(hot, null), true)
   assert.equal(hotAlert(null, null), false)
@@ -61,13 +71,18 @@ test('dismissed hot returns at +10 points and swamp at +15 points of context, in
   assert.equal(swampAlert(55, 126000), true)
 })
 
-test('band priority is exactly panels, failure, hot, results, cold, swamp, dashboard', () => {
-  const all = { judgeDown: true, hot: true, result: true, cold: true, swamp: true }
+test('band priority is exactly panels, failure, hot, results, cold, swamp, kept, dashboard', () => {
+  const all = { judgeDown: true, hot: true, result: true, cold: true, swamp: true, kept: true }
   for (const panel of ['settings', 'compact', 'handoff', 'setup'] as const) assert.equal(bandPriority({ ...all, panel }), panel)
   assert.equal(bandPriority(all), 'judgeDown')
   assert.equal(bandPriority({ ...all, judgeDown: false }), 'hot')
   assert.equal(bandPriority({ ...all, judgeDown: false, hot: false }), 'result')
   assert.equal(bandPriority({ cold: true, swamp: true }), 'cold')
+  // A cold cache cannot be kept: cold beats kept. Kept, the lowest card, sits under swamp.
+  assert.equal(bandPriority({ cold: true, kept: true, swamp: true }), 'cold')
+  assert.equal(bandPriority({ kept: true, swamp: true }), 'swamp')
+  assert.equal(bandPriority({ swamp: true, kept: false }), 'swamp')
+  assert.equal(bandPriority({ kept: true }), 'kept')
   assert.equal(bandPriority({ swamp: true }), 'swamp')
   assert.equal(bandPriority({}), 'dashboard')
 })

@@ -113,6 +113,8 @@ export type ResultStage = 'handingOff' | 'handoffReady' | 'handoffDone' | 'compa
 export type AlertView =
   /** The cache expired on a big chat: the next prompt re-reads it all. */
   | { kind: 'cold'; tokens: number; idleMinutes: number }
+  /** Keep-warm held the cache while the person was away. */
+  | { kind: 'kept'; pings: number; tokens: number; minutesLeft: number }
   /** Context is heavy. */
   | { kind: 'swamp'; percent: number; tokens: number }
   /** A plan window at or above 80%. */

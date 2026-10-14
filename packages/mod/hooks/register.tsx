@@ -13,7 +13,7 @@ import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, quotaWindows,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { bandPriority, coldAlert, hotAlert, hottest, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { bandPriority, coldAlert, hotAlert, hottest, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
 import { addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, weighted } from './stats'
@@ -56,6 +56,7 @@ const hotHidden = atom({ plugin: 'ripple', key: 'hotHidden' } as const, null)
 const saveUntil = atom({ plugin: 'ripple', key: 'saveUntil' } as const, null)
 const swampHidden = atom({ plugin: 'ripple', key: 'swampHidden' } as const, null)
 const coldHidden = atom({ plugin: 'ripple', key: 'coldHidden' } as const, false)
+const kept = atom({ plugin: 'ripple', key: 'kept' } as const, null)
 const judgeDown = atom({ plugin: 'ripple', key: 'judgeDown' } as const, null)
 const judgeDownHidden = atom({ plugin: 'ripple', key: 'judgeDownHidden' } as const, null)
 const judgeSeen = atom({ plugin: 'ripple', key: 'judgeSeen' } as const, [])
@@ -997,6 +998,15 @@ async function tick($: EngineInterface): Promise<void> {
       const after = afterPing(before, answer, await $.clock.now(), language)
       await update($, warm, () => after)
       if (after.stopped && !before.stopped) await $.ui.toast(t(language, 'toasts.warmStopped', { reason: after.stopped }))
+      // A ping read cache tokens: the cache held while the person was away. One card counts them all
+      // (a real reply or the expiry clears it; register.tsx kept), until then each ping adds up.
+      const usage = answer && 'usage' in answer ? answer.usage : null
+      if ((usage?.cache_read_input_tokens ?? 0) > 0) {
+        await update($, kept, prev => ({
+          pings: (prev?.pings ?? 0) + 1,
+          tokens: usage!.cache_read_input_tokens,
+        }))
+      }
     } else if (s.keepWarm && !await read($, busy) && decision.reason === 'keep warm time bound reached' && !(await read($, warm)).stopped) {
       await update($, warm, value => ({ ...value, stopped: t(language, 'toasts.warmBoundReason') }))
       await $.ui.toast(t(language, 'toasts.warmBound'))
@@ -1056,6 +1066,7 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
   const which = bandPriority({ panel: await read($, panel), judgeDown: d === 'down' || (!!downReason && downReason !== await read($, judgeDownHidden)),
     hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!writing || !!result,
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
+    kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
   if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
   if (which === 'handoff') return { kind: 'handoffChoice', handoffKind: await read($, handoffChoiceKind), after: await read($, handoffChoiceAfter) }
@@ -1068,22 +1079,27 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     return { kind: 'result', stage, handoffKind: writing.kind, ...(detail ? { detail } : {}) }
   }
   if (which === 'cold') return { kind: 'cold', tokens: d === 'cold' ? 180000 : c!.tokens, idleMinutes: m ? Math.round((now - m.lastReplyAt) / 60000) : 61 }
+  if (which === 'kept') {
+    const k = d === 'kept' ? { pings: 2, tokens: 312000 } : (await read($, kept)) ?? { pings: 0, tokens: 0 }
+    return { kind: 'kept', pings: k.pings, tokens: k.tokens, minutesLeft: Math.ceil(((d === 'kept' ? now + 47 * 60000 : m!.expiresAt) - now) / 60000) }
+  }
   if (which === 'swamp') return { kind: 'swamp', percent: d === 'swamp' ? 65 : c!.percent, tokens: d === 'swamp' ? 160000 : c!.tokens }
   return null
 }
 /**
- * A prompt sent while the cold, heavy or hot band shows counts as having seen it: it comes back
- * only on its own next occasion (the next expiry, 15 more points of context, 10 more of the plan
- * window), never after every message.
+ * A prompt sent while the cold, kept, heavy or hot band shows counts as having seen it: it comes
+ * back only on its own next occasion (the next expiry, one more ping, 15 more points of context,
+ * 10 more of the plan window), never after every message.
  */
 async function markSeen($: EngineInterface): Promise<void> {
   const view = await alertView($, await $.clock.now())
-  if (view && (view.kind === 'cold' || view.kind === 'swamp' || view.kind === 'hot')) await dismiss($, view)
+  if (view && (view.kind === 'cold' || view.kind === 'kept' || view.kind === 'swamp' || view.kind === 'hot')) await dismiss($, view)
 }
 async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
   await update($, demo, () => null)
   if (view.kind === 'hot') await update($, hotHidden, () => view.percent)
   else if (view.kind === 'cold') await update($, coldHidden, () => true)
+  else if (view.kind === 'kept') await update($, kept, () => null)
   else if (view.kind === 'swamp') await update($, swampHidden, () => view.percent)
   else if (view.kind === 'judgeDown') await update($, judgeDownHidden, () => view.reason)
   else if (view.kind === 'result') { await update($, resultCard, () => null); await update($, handoff, () => null) }
@@ -1133,6 +1149,7 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
     if (previousModel !== null) {
       await update($, cache, () => null)
       await update($, lastRealReplyAt, () => null)
+      if (await read($, kept)) await update($, kept, () => null)
     }
   }
   const safe = isCacheSafeModel(e.model)
@@ -1200,6 +1217,7 @@ export const register: Register = on => {
           await update($, cache, () => null)
           await update($, context, () => null)
           await update($, lastRealReplyAt, () => null)
+          if (await read($, kept)) await update($, kept, () => null)
         }
         if (e.model) await update($, modelIs, () => e.model!)
         await update($, paused, () => e.model ? !isCacheSafeModel(e.model) : false)
@@ -1291,6 +1309,7 @@ export const register: Register = on => {
           const memo = nextMemo(await read($, cache), answer.usage, now)
           await update($, cache, () => memo)
           if (await read($, coldHidden)) await update($, coldHidden, () => false)
+          if (await read($, kept)) await update($, kept, () => null)
           await update($, lastRealReplyAt, () => now)
           if ((await read($, warm)).stopped !== undefined) await update($, warm, value => ({ ...value, stopped: undefined }))
         }
@@ -1403,6 +1422,7 @@ export const register: Register = on => {
       if (!answer.isAnswered || answer.text.trim().length <= 200) throw new Error(t(language, 'toasts.summaryEmpty'))
       await update($, cache, () => null)
       await update($, context, () => null)
+      if (await read($, kept)) await update($, kept, () => null)
       await update($, resultCard, () => ({ stage: 'compacted' }))
       return compactResult(answer.text)
     } catch (error) {
@@ -1425,7 +1445,7 @@ export const register: Register = on => {
       else if (sub === 'log') await toggleLog($)
       else if (sub === 'agents') await toggleAgents($)
       else if (sub === 'bar') await toggleBar($)
-      else if (['cold', 'swamp', 'hot', 'down'].includes(sub)) { await update($, panel, () => null); await update($, demo, () => sub as 'cold' | 'swamp' | 'hot' | 'down') }
+      else if (['cold', 'swamp', 'hot', 'down', 'kept'].includes(sub)) { await update($, panel, () => null); await update($, demo, () => sub as 'cold' | 'swamp' | 'hot' | 'down' | 'kept') }
       else return { text: t(language, 'commands.help') }
       return { text: t(language, 'commands.done', { command: sub }) }
     } catch (error) { await report($, 'ripple command', error); return next(e) }

@@ -37,6 +37,14 @@ export function coldAlert(memo: CacheMemo | null, contextTokens: number, now: nu
   return !hidden && memo !== null && memo.expiresAt <= now && contextTokens >= 150000
 }
 
+/**
+ * Keep-warm held the cache while the person was away: at least one ping read cache tokens and the
+ * memo says the cache is still warm. Once it has expired the cold card is the truth, never this.
+ */
+export function keptAlert(kept: { pings: number; tokens: number } | null, memo: CacheMemo | null, now: number): boolean {
+  return kept !== null && kept.pings > 0 && memo !== null && memo.expiresAt > now
+}
+
 export function hotAlert(hot: Hot | null, hidden: number | null): boolean {
   return hot !== null && hot.percent >= 80 && (hidden === null || hot.percent >= hidden + 10)
 }
@@ -54,9 +62,9 @@ export function swampAlert(percent: number | null, hidden: number | null): boole
 /** Rendering consumes eligibility, keeping dismissal and idle decisions outside drawing code. */
 export function bandPriority(state: {
   panel?: 'settings' | 'compact' | 'handoff' | 'setup' | null
-  judgeDown?: boolean; hot?: boolean; result?: boolean; cold?: boolean; swamp?: boolean
-}): 'settings' | 'compact' | 'handoff' | 'setup' | 'judgeDown' | 'hot' | 'result' | 'cold' | 'swamp' | 'dashboard' {
+  judgeDown?: boolean; hot?: boolean; result?: boolean; cold?: boolean; swamp?: boolean; kept?: boolean
+}): 'settings' | 'compact' | 'handoff' | 'setup' | 'judgeDown' | 'hot' | 'result' | 'cold' | 'swamp' | 'kept' | 'dashboard' {
   if (state.panel) return state.panel
-  for (const band of ['judgeDown', 'hot', 'result', 'cold', 'swamp'] as const) if (state[band]) return band
+  for (const band of ['judgeDown', 'hot', 'result', 'cold', 'swamp', 'kept'] as const) if (state[band]) return band
   return 'dashboard'
 }

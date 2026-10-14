@@ -61,6 +61,14 @@ function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         quiet: [handoff],
         close: notNow,
       }
+    case 'kept':
+      return {
+        key: 'kept',
+        face: 'pleased',
+        title: t(L, 'alerts.keptTitle'),
+        body: t(L, 'alerts.keptBody', { pings: alert.pings, tokens: compactNumber(alert.tokens), minutes: alert.minutesLeft }),
+        close: { key: 'dismiss', label: t(L, 'alerts.gotIt'), hotkey: 'x', onPress: a.dismiss },
+      }
     case 'swamp':
       return {
         key: 'swamp',
@@ -205,6 +213,8 @@ function seaOf(card: Card, alert: AlertView): Omit<Sea, 'at'> {
   switch (card.key) {
     case 'cold':
       return { tone: 'ice', weather: 'snow', motes: true }
+    case 'kept':
+      return { tone: 'amber', weather: 'sparkles', ripples: 'calm' }
     case 'swamp':
       return { tone: 'amber', weather: 'bubbles', ripples: 'calm' }
     case 'hot':
