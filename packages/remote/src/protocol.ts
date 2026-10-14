@@ -46,6 +46,16 @@ export type SessionState =
   | "stopped" // no live query (host restarted, or closed); the next message resumes it
   | "error"; // last turn ended in an error; the next message retries
 
+/** How a new session branches the folder it starts in. */
+export type Isolation = "local" | "worktree";
+
+/**
+ * Why a session wants the person's eye. The phone clears it when it opens that session, except
+ * `permission`, which clears only when the approval itself is answered (a phone can look and leave).
+ */
+export type AttentionReason = "permission" | "failed" | "finished";
+export interface Attention { reason: AttentionReason; at: number }
+
 /** A string moved out of an event (INLINE_CAP); the client fetches `/api/blob/<session>/<id>`. */
 export interface BlobRef { blob: string; bytes: number; preview: string }
 export type Text = string | BlobRef;
@@ -126,6 +136,12 @@ export interface SessionSummary {
   background?: boolean;
   /** open permission requests */
   pending: number;
+  /** The host's archive flag: an archived session leaves the default list but is never deleted
+   * (transcripts and files stay). Absent on older hosts. */
+  archived?: boolean;
+  /** The session wants the person's eye; the phone's `seen` clears all but a permission request.
+   * Absent on older hosts; null means nothing is waiting. */
+  attention?: Attention | null;
   createdAt: number;
   updatedAt: number;
   lastSeq: number;
@@ -150,7 +166,13 @@ export type ClientMsg =
   | { t: "attach"; session: string; epoch?: string; afterSeq?: number }
   | { t: "detach"; session: string }
   | { t: "history"; session: string; beforeSeq: number; reqId: string }
-  | { t: "create"; clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode }
+  | { t: "create"; clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }
+  /** The phone is looking at this session now; clears its attention (a permission request stays). */
+  | { t: "seen"; session: string }
+  /** Archive/unarchive: a flag only, the session's transcripts and files stay. */
+  | { t: "archive"; session: string; archived: boolean }
+  /** "Mark unread": put the attention back, guessed from what the session is doing now. */
+  | { t: "unread"; session: string }
   | { t: "set_mode"; reqId: string; sessionId: string; mode: PermissionMode }
   | { t: "send"; session: string; clientMsgId: string; text: string; behavior?: SendBehavior; attachments?: Attachment[] }
   | { t: "decide"; session: string; id: string; decision: "allow" | "allow_always" | "deny"; reqId?: string; message?: string; answers?: Record<string, string> }
@@ -166,6 +188,10 @@ export type ReqOp =
   | { op: "upload"; session: string; uploadId: string; offset: number; data: string; done: boolean }
   | { op: "folders" }
   | { op: "browse"; path?: string; hidden?: boolean }
+  /** Make a folder directly inside `parent`; `name` is one path segment, validated on the host. */
+  | { op: "mkdir"; parent: string; name: string }
+  /** What a folder's git situation is, for the new-session isolation choice. */
+  | { op: "git"; path: string }
   | { op: "blob"; session: string; id: string; offset?: number }
   | { op: "sub"; session: string; sub: string; afterSeq?: number }
   /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
@@ -182,6 +208,8 @@ export type ReqOp =
 export interface PushSubscriptionJSON { endpoint: string; expirationTime?: number | null; keys: { p256dh: string; auth: string } }
 
 export interface BrowseResult { path: string; parent: string | null; home: string; entries: FolderEntry[]; truncated: boolean }
+/** A folder's git situation: whether it is inside a repo, that repo's root, its branch and local branches. */
+export interface GitInfo { isRepo: boolean; root: string | null; branch: string | null; branches: string[] }
 export interface BlobChunk { text: string; offset: number; next: number | null; bytes: number }
 export interface SubPage { events: SessionEvent[]; more: boolean }
 

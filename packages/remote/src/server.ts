@@ -7,8 +7,9 @@ import module from "node:module";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 import { tokenMatches } from "./config.ts";
-import { browse, recentFolders } from "./folders.ts";
+import { browse, makeFolder, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
+import { gitInfo } from "./worktree.ts";
 import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp } from "./protocol.ts";
 import { VISIBLE_MS } from "./push.ts";
@@ -263,6 +264,15 @@ export class HostServer {
       case "hello": return;
       case "attach": this.attach(c, msg.session, msg.epoch, msg.afterSeq); return;
       case "detach": c.attached.delete(msg.session); return;
+      case "seen": if (s.has(msg.session)) s.markSeen(msg.session); return;
+      case "archive":
+        try { s.setArchived(msg.session, msg.archived === true); }
+        catch (e) { this.send(c, { t: "error", code: "archive", message: (e as Error).message, session: msg.session }); }
+        return;
+      case "unread":
+        try { s.markUnread(msg.session); }
+        catch (e) { this.send(c, { t: "error", code: "unread", message: (e as Error).message, session: msg.session }); }
+        return;
       case "history": {
         if (!s.has(msg.session)) return;
         const page = s.log(msg.session).before(msg.beforeSeq);
@@ -352,6 +362,8 @@ export class HostServer {
         return recentFolders([...s.recentSources(), ...cli]);
       }
       case "browse": return browse(op.path, op.hidden ?? false);
+      case "mkdir": return { path: await makeFolder(op.parent, op.name) };
+      case "git": return gitInfo(op.path);
       case "commands": return s.commands(op.session);
       case "blob": {
         if (!s.has(op.session)) throw new Error("no such session");

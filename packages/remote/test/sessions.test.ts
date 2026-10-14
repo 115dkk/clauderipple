@@ -9,7 +9,7 @@ import { PermissionQueue } from "../src/permissions.ts";
 import { reduce } from "../web/timeline.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
-import { Sessions, modelArg, summarize } from "../src/sessions.ts";
+import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 
 const router = {
@@ -480,6 +480,64 @@ test("desktop handoff failure is logged and never retried", async t => {
   await waitFor(() => f.fake.users.length === 2 && f.sessions.summaryOf(id)?.state === "idle");
   assert.equal(calls, 1);
   assert.match(logs[0]!, /failed: timeout/);
+});
+
+test("attention: a permission request is set, survives `seen`, and clears when the approval is answered", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+  // Looking at the session (seen) must NOT clear a permission request.
+  assert.equal(f.sessions.markSeen(id), false);
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+  // Answering it clears the permission attention; the turn then finishes unseen, so "finished" appears.
+  await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.notEqual(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+});
+
+test("attention: a finished turn is marked unseen, cleared by seen, and restorable", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "finished");
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(f.sessions.summaryOf(id)?.attention, null);
+  assert.equal(f.sessions.markUnread(id).reason, "finished");
+  assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "finished");
+});
+
+test("nextAttention maps a state change to the right reason", () => {
+  const at = 100;
+  assert.deepEqual(nextAttention(null, "running", "waiting", at), { reason: "permission", at });
+  assert.deepEqual(nextAttention(null, "starting", "error", at), { reason: "failed", at });
+  assert.deepEqual(nextAttention(null, "running", "idle", at), { reason: "finished", at });
+  assert.equal(nextAttention(null, "starting", "idle", at), null); // a fresh session that never ran
+  assert.equal(nextAttention({ reason: "finished", at }, "idle", "running", at), null);
+  assert.equal(nextAttention({ reason: "permission", at }, "waiting", "idle", at)?.reason, "finished");
+  // No transition keeps what is there.
+  assert.deepEqual(nextAttention({ reason: "failed", at }, "error", "error", at), { reason: "failed", at });
+});
+
+test("archive: the flag round-trips, /exit archives, and nothing is deleted", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.archived, undefined);
+  const seq = f.sessions.log(id).lastSeq;
+  assert.equal(f.sessions.setArchived(id, true), true);
+  assert.equal(f.sessions.summaryOf(id)?.archived, true);
+  assert.equal(f.sessions.list().find(x => x.id === id)?.archived, true);
+  assert.equal(f.sessions.setArchived(id, true), false, "archiving twice changes nothing");
+  assert.equal(f.sessions.log(id).lastSeq, seq, "archiving touches no log");
+  assert.equal(f.sessions.setArchived(id, false), true);
+  assert.equal(f.sessions.summaryOf(id)?.archived, undefined);
+  // /exit is the composer's archive path: it sets the flag and sends no turn.
+  f.sessions.send(id, "exit-1", "/exit");
+  assert.equal(f.sessions.summaryOf(id)?.archived, true);
+  assert.equal(f.sessions.log(id).lastSeq, seq, "no turn is sent for /exit");
+  // Durable: the flag is in list-state.json, so a restart keeps it.
+  assert.ok((JSON.parse(fs.readFileSync(path.join(f.dir, "list-state.json"), "utf8")) as { archived: string[] }).archived.includes(id));
 });
 
 test("summarize uses Bash's first line, cwd-relative Read paths and Grep pattern plus path", () => {
