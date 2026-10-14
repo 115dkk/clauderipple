@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
+import { MessageReceipts } from "../src/receipts.ts";
 import { FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { HostServer } from "../src/server.ts";
@@ -195,7 +196,7 @@ test("set_mode returns correlated success/error and broadcasts the mode event", 
   assert.equal((await peer.take('res', m => m.reqId === 'mode-error')).msg.ok, false);
 });
 
-test("desktop polling broadcasts changed lists only to an authenticated visible connection", { timeout: 15_000 }, async t => {
+test("desktop polling runs on its own timer with no phone connected, so completion is detected", { timeout: 15_000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-live-wire-"));
   const project = path.join(root, "project");
   fs.mkdirSync(project);
@@ -207,28 +208,19 @@ test("desktop polling broadcasts changed lists only to an authenticated visible 
   let calls = 0;
   fs.writeFileSync(file, JSON.stringify({ type: "user", cwd: project, message: { content: "synthetic prompt" } }) + "\n");
   const f = await fixture(t, { now: () => now }, root, () => { calls++; return processes; });
-  const peer = await f.auth();
   const baseline = calls;
   processes = `42 claude --resume=${id}`;
   now += 3000;
   await delay(3100);
-  assert.equal(calls, baseline, "no presence, no ps polling");
-  peer.send({ t: "presence", visible: true });
-  await peer.barrier();
-  await delay(3100);
-  const active = await peer.take("sessions", msg => msg.sessions.some(s => s.id === id && s.state === "running"));
-  assert.equal(active.msg.sessions[0]?.pending, 0);
-  const unchanged = peer.received.filter(f => f.msg.t === "sessions").length;
-  now += 3000;
-  await delay(3100);
-  assert.equal(peer.received.filter(f => f.msg.t === "sessions").length, unchanged, "unchanged state is not broadcast");
-  peer.send({ t: "presence", visible: false });
-  await peer.barrier();
-  const hidden = calls;
+  assert.ok(calls > baseline, "no phone connected: the desktop poll still runs on its timer");
+  assert.ok(f.sessions.list().some(s => s.id === id && s.state === "running"), "a Mac turn is detected with no clients");
+  const peer = await f.auth();
   processes = "";
-  now += 3000;
+  now += 6000;
   await delay(3100);
-  assert.equal(calls, hidden, "hidden phone stops polling");
+  assert.ok(f.sessions.list().some(s => s.id === id && s.state === "stopped"), "completion is detected with no phone watching");
+  const changed = await peer.take("sessions", msg => msg.sessions.some(s => s.id === id && s.state === "stopped"));
+  assert.equal(changed.msg.sessions[0]?.pending, 0);
 });
 
 test("desktop sessions use ready, history, blobs and continue through a same-session ACK", async t => {
@@ -551,8 +543,92 @@ test("concurrent socket create retries ack the same session and start one query"
   assert.equal(f.fake.options.length, 1);
 });
 
-test("a client silent after hello is terminated after STALE_MS using virtual Date and intervals", { timeout: 4500 }, async t => {
-  // Node's public timer mocks cover both Date.now() and the host's periodic reaper;
+test("a send resend of a completed id acks without re-running; an orphaned one answers outcome_unknown", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const peer = await f.auth();
+  peer.send({ t: "send", session: id, clientMsgId: "socket-send", text: "again" });
+  const first = (await peer.take("ack")).msg;
+  assert.equal(first.clientMsgId, "socket-send");
+  await waitFor(() => f.fake.users.length === 2);
+  peer.send({ t: "send", session: id, clientMsgId: "socket-send", text: "again" });
+  assert.deepEqual((await peer.take("ack")).msg, first);
+  assert.equal(f.fake.users.length, 2, "completed resend acks without running again");
+});
+
+test("a send orphaned by a host restart answers outcome_unknown over the socket without running", { timeout: 4500 }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-restart-wire-"));
+  const cwd = path.join(dir, "project");
+  fs.mkdirSync(cwd);
+  const permissionsFile = path.join(dir, "permissions.json");
+  const fake = scriptedQuery();
+  const peers: Peer[] = [];
+  let sessions = new Sessions({ dir, router, permissions: PermissionQueue.open(permissionsFile), queryFn: fake.queryFn, coalesceMs: 5, onEvent: () => {}, onSessions: () => {} });
+  let server: HostServer | undefined;
+  t.after(async () => {
+    for (const peer of peers) peer.ws.terminate();
+    await server?.close();
+    for (const session of sessions.list()) sessions.stop(session.id);
+    await nextTick();
+    sessions.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const id = await sessions.create({ clientMsgId: "restart-1", cwd, model: "claude-test", effort: "high", text: "ping" });
+  await waitFor(() => sessions.list()[0]?.state === "idle");
+  // The first attempt wrote pending, then the host died before completing it.
+  MessageReceipts.open(path.join(dir, "receipts.json")).begin(`send:${id}:lost-1`, id);
+  sessions.shutdown();
+  sessions = new Sessions({ dir, router, permissions: PermissionQueue.open(permissionsFile), queryFn: fake.queryFn, coalesceMs: 5, onEvent: () => {}, onSessions: () => {} });
+  server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router, hostName: "test-host", version: "test-version", recentCli: async () => [], log: () => {} });
+  await server.listen();
+  const peer = new Peer(`ws://127.0.0.1:${server.address().port}/ws`);
+  peers.push(peer);
+  await peer.open();
+  peer.send({ t: "hello", token, clientId: "restart-client" });
+  await peer.take("ready");
+  peer.send({ t: "send", session: id, clientMsgId: "lost-1", text: "lost turn" });
+  const unknown = await peer.take("error", m => m.clientMsgId === "lost-1");
+  assert.equal(unknown.msg.code, "outcome_unknown");
+  assert.equal(unknown.msg.message, "전송 결과를 확인할 수 없음");
+  assert.equal(fake.users.length, 1, "the orphaned turn never reached the SDK again");
+  peer.send({ t: "send", session: id, clientMsgId: "fresh-1", text: "new turn" });
+  await peer.take("ack", m => m.clientMsgId === "fresh-1");
+  await waitFor(() => fake.users.length === 2);
+});
+
+test("answering the same approval twice resolves once; the second answer gets 이미 처리됨", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  await f.create();
+  const peer = await f.auth();
+  peer.send({ t: "decide", session: "missing", id: "unknown", decision: "allow", reqId: "twice-1" });
+  assert.deepEqual((await peer.take("res", m => m.reqId === "twice-1")).msg, { t: "res", reqId: "twice-1", ok: false, error: "이미 처리됨" });
+  peer.send({ t: "decide", session: "missing", id: "unknown", decision: "allow" });
+  const error = await peer.take("error");
+  assert.equal(error.msg.code, "permission");
+  assert.equal(error.msg.message, "이미 처리됨");
+});
+
+test("a looked-at session suppresses push for 180 s; other sessions are unaffected", { timeout: 4500 }, async t => {
+  let now = 1_000_000;
+  const f = await fixture(t, { now: () => now });
+  const id = await f.create();
+  const peer = await f.auth();
+  assert.equal(f.server.sessionSeenRecently(id), false);
+  peer.send({ t: "attach", session: id });
+  await peer.take("events");
+  await peer.barrier();
+  assert.equal(f.server.sessionSeenRecently(id), true);
+  now += 179_000;
+  assert.equal(f.server.sessionSeenRecently(id), true);
+  now += 2_000;
+  assert.equal(f.server.sessionSeenRecently(id), false, "180 s with no look: push goes out");
+  peer.send({ t: "presence", visible: true });
+  await peer.barrier();
+  assert.equal(f.server.sessionSeenRecently(id), true, "visible presence while attached refreshes the look");
+  assert.equal(f.server.sessionSeenRecently("other-session"), false);
+});
+
+test("a client silent after hello is terminated after STALE_MS using virtual Date and intervals", { timeout: 4500 }, async t => {  // Node's public timer mocks cover both Date.now() and the host's periodic reaper;
   // network I/O and the test's promise-based deadlines still use real time.
   t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000_000 });
   const f = await fixture(t);

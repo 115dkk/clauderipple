@@ -79,3 +79,20 @@ test("stream HTTP auth refusal is terminal", async () => {
   await assert.rejects(client.stream("b", new AbortController().signal, () => {}), /\(403\)/);
   assert.equal(calls, 1);
 });
+
+test("openRequests replays from the start cursor, skipping answered and withdrawn ones", async () => {
+  const requested = (request_id: string, input: unknown) => ({ payload: { type: "control_request", request_id, request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: `t-${request_id}`, input } } });
+  const stored = [
+    requested("r1", { command: "a" }),
+    { payload: { type: "system", subtype: "init" } },
+    requested("r2", { command: "b" }),
+    { payload: { type: "control_response", request_id: "r1", response: { subtype: "success" } } },
+    requested("r3", { command: "c" }),
+    { payload: { type: "control_cancel_request", request_id: "r3" } },
+    { source: "client", payload: { type: "control_request", request_id: "r4", request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: "t-r4", input: { command: "d" } } } },
+  ];
+  const urls: string[] = [];
+  const client = new BridgeClient({ auth, fetch: async url => { urls.push(String(url)); return Response.json({ data: stored }); } });
+  assert.deepEqual(await client.openRequests("b"), [{ requestId: "r2", tool: "Bash", input: { command: "b" }, toolUseId: "t-r2" }]);
+  assert.deepEqual(urls, ["https://api.anthropic.com/v1/code/sessions/b/events?sort_order=asc"]);
+});

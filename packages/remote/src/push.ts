@@ -1,8 +1,8 @@
 // Web push to the phone (RFC 8030 delivery, RFC 8291 payload encryption, RFC 8292 VAPID, via the
-// `web-push` package). Three moments, and only when nobody is looking: a permission request is
-// waiting, a turn finished, a turn failed. "Looking" means a connected phone reported the app
-// visible in the last 30 s (the phone re-reports every 10 s while visible, so a frozen or
-// backgrounded app stops counting within 30 s even if its socket lingers).
+// `web-push` package). Three moments, and only when no connected phone looked at that session in
+// the last SEEN_MS (180 s): a permission request is waiting, a turn finished, a turn failed.
+// Tapping the push opens exactly that session (its id is in the payload's session field).
+// The payload is metadata only — session title plus fixed state words, never conversation text.
 //
 // The VAPID key pair is made once and kept under the host's config dir (0600); a new pair would
 // orphan every subscription. Subscriptions are per device (the phone's clientId) and a push
@@ -13,6 +13,8 @@ import { readJson, writeFileAtomic } from "./fsutil.ts";
 import type { EventBody, PushSubscriptionJSON, SessionSummary } from "./protocol.ts";
 
 export const VISIBLE_MS = 30_000;
+/** A session a connected phone looked at within this needs no push (Paseo agent-attention-policy PRESENCE_THRESHOLD_MS). */
+export const SEEN_MS = 180_000;
 
 export interface Vapid { publicKey: string; privateKey: string; subject: string }
 
@@ -54,34 +56,34 @@ export interface PushPayload { title: string; body: string; session: string; tag
 
 const COPY = {
   ko: {
-    permission: "허락이 필요해요",
-    done: "작업을 마쳤어요",
-    failed: "작업이 멈췄어요",
-    failedBody: "{title} — {error}",
+    permission: "승인을 기다립니다",
+    done: "작업을 마쳤습니다",
+    failed: "작업이 실패했습니다",
   },
   en: {
-    permission: "Needs your OK",
-    done: "Finished",
-    failed: "Stopped with an error",
-    failedBody: "{title} — {error}",
+    permission: "Waiting for approval",
+    done: "Work finished",
+    failed: "Work failed",
   },
 } as const;
 
 const clip = (s: string, n: number): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const folderOf = (cwd: string): string => path.basename(cwd) || cwd;
 
-/** The push for an event, or null if this event is not one of the three moments. */
+/** The push for an event, or null if this event is not one of the three moments.
+ * Metadata only: the session title plus fixed state words. Neither Expo/Apple nor the web push
+ * service ever receives assistant text, tool input, or error detail. */
 export function pushFor(event: EventBody, s: Pick<SessionSummary, "id" | "title" | "cwd">, lang: "ko" | "en"): PushPayload | null {
   const c = COPY[lang];
-  const where = folderOf(s.cwd);
+  const title = clip(s.title || folderOf(s.cwd), 140);
   if (event.kind === "permission") {
-    return { title: `${c.permission} · ${where}`, body: clip(`${event.tool}: ${event.summary || event.title}`, 140), session: s.id, tag: `perm-${s.id}` };
+    return { title, body: c.permission, session: s.id, tag: `perm-${s.id}` };
   }
   if (event.kind === "result" && event.ok) {
-    return { title: `${c.done} · ${where}`, body: clip(s.title, 140), session: s.id, tag: `turn-${s.id}` };
+    return { title, body: c.done, session: s.id, tag: `turn-${s.id}` };
   }
   if (event.kind === "result" && !event.ok) {
-    return { title: `${c.failed} · ${where}`, body: clip(c.failedBody.replace("{title}", clip(s.title, 60)).replace("{error}", event.error ?? ""), 140), session: s.id, tag: `turn-${s.id}` };
+    return { title, body: c.failed, session: s.id, tag: `turn-${s.id}` };
   }
   return null;
 }
@@ -89,8 +91,8 @@ export function pushFor(event: EventBody, s: Pick<SessionSummary, "id" | "title"
 export interface NotifierOptions {
   dir: string;
   send: Sender;
-  /** true while a phone reported the app visible in the last VISIBLE_MS */
-  someoneLooking: () => boolean;
+  /** true while a connected phone looked at this session in the last SEEN_MS */
+  seenRecently: (session: string) => boolean;
   summary: (session: string) => SessionSummary | undefined;
   log?: (line: string) => void;
 }
@@ -126,7 +128,7 @@ export class Notifier {
   /** Called for every appended session event. Resolves when every send finished (tests wait on it). */
   async onEvent(session: string, event: EventBody): Promise<void> {
     if (event.kind !== "permission" && event.kind !== "result") return;
-    if (!Object.keys(this.subs).length || this.opts.someoneLooking()) return;
+    if (!Object.keys(this.subs).length || this.opts.seenRecently(session)) return;
     const s = this.opts.summary(session);
     if (!s) return;
     await Promise.all(Object.entries(this.subs).map(async ([clientId, stored]) => {

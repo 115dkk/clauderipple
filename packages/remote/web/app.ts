@@ -268,7 +268,9 @@ export class App {
         break;
       }
       case "error":
-        if (m.clientMsgId) this.dropOutbox(m.clientMsgId);
+        // outcome_unknown: the host restarted mid-send and cannot say whether the first attempt
+        // ran. Keep the typed text in the outbox (it flushes again on reconnect) and say so.
+        if (m.clientMsgId && m.code !== "outcome_unknown") this.dropOutbox(m.clientMsgId);
         this.toast(t("error.generic", { text: m.message }));
         break;
       default:

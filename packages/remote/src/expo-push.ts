@@ -58,8 +58,8 @@ export function expoSender(fetcher: typeof fetch = fetch, wait: () => Promise<vo
 export class ExpoNotifier {
   private file: string;
   private tokens: Record<string, Stored>;
-  private opts: { dir: string; send: ExpoSender; someoneLooking: () => boolean; log: (line: string) => void };
-  constructor(opts: { dir: string; send: ExpoSender; someoneLooking: () => boolean; log: (line: string) => void }) {
+  private opts: { dir: string; send: ExpoSender; seenRecently: (session: string) => boolean; log: (line: string) => void };
+  constructor(opts: { dir: string; send: ExpoSender; seenRecently: (session: string) => boolean; log: (line: string) => void }) {
     this.opts = opts;
     this.file = path.join(opts.dir, "expo-push.json");
     this.tokens = readJson<Record<string, Stored>>(this.file) ?? {};
@@ -76,7 +76,7 @@ export class ExpoNotifier {
     this.save();
   }
   async onEvent(session: string, event: EventBody): Promise<void> {
-    if (this.opts.someoneLooking()) return;
+    if (this.opts.seenRecently(session)) return;
     await Promise.all(Object.entries(this.tokens).map(async ([id, stored]) => {
       const body = expoBody(event, stored.lang);
       if (!body) return;

@@ -12,8 +12,9 @@ import type { RecentSource } from "./folders.ts";
 import { gitInfo } from "./worktree.ts";
 import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp } from "./protocol.ts";
-import { VISIBLE_MS } from "./push.ts";
+import { SEEN_MS, VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
+import { OutcomeUnknownError } from "./receipts.ts";
 import type { RouterClient } from "./router.ts";
 import type { Sessions } from "./sessions.ts";
 
@@ -92,6 +93,10 @@ export class HostServer {
   private hostInfo: HostInfo;
   private timers: ReturnType<typeof setInterval>[] = [];
   private sessionsTimer: ReturnType<typeof setTimeout> | null = null;
+  /** session → last time a connected phone looked at it (attach, or visible presence while
+   * attached). Push goes out only when nobody looked in the last SEEN_MS (Paseo's
+   * agent-attention-policy PRESENCE_THRESHOLD_MS, 180 s). */
+  private seenAt = new Map<string, number>();
 
   constructor(opts: ServerOptions) {
     this.opts = opts;
@@ -118,10 +123,25 @@ export class HostServer {
     return false;
   }
 
+  /** True while a connected phone looked at this session in the last SEEN_MS: then it needs no push. */
+  sessionSeenRecently(session: string): boolean {
+    return this.now() - (this.seenAt.get(session) ?? 0) < SEEN_MS;
+  }
+
+  private markSeen(c: Client, session: string): void {
+    if (!c.authed) return;
+    this.seenAt.set(session, this.now());
+    if (this.seenAt.size > 500) {
+      const cutoff = this.now() - SEEN_MS;
+      for (const [id, at] of this.seenAt) if (at < cutoff) this.seenAt.delete(id);
+    }
+  }
+
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
   private pollDesktop(): void {
-    if (!this.someoneLooking()) return;
+    // The desktop poll runs on its own timer even with no phone connected, so a Mac session that
+    // finishes while nobody watches still appends its result — and the push for it goes out.
     void this.opts.sessions.pollDesktop().catch(error => {
       this.opts.log?.(`desktop poll failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -191,6 +211,12 @@ export class HostServer {
 
   private attach(c: Client, session: string, epoch: string | undefined, afterSeq: number | undefined): void {
     if (!this.opts.sessions.has(session)) { this.send(c, { t: "error", code: "no_session", message: "no such session", session }); return; }
+    this.markSeen(c, session);
+    // A Mac session may already have approvals waiting from before this attach (or before the
+    // host's Remote Control stream connected): fetch them so no approval card is missed.
+    void this.opts.sessions.syncBridge(session).catch(error => {
+      this.opts.log?.(`bridge sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
     const log = this.opts.sessions.log(session);
     if (epoch === log.epoch && afterSeq !== undefined && afterSeq > 0 && afterSeq <= log.lastSeq) {
       // Resume by seq, unless the gap is so large that replaying it would be slower than starting from the tail.
@@ -284,7 +310,11 @@ export class HostServer {
           const id = await s.create(msg);
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
         } catch (e) {
-          this.send(c, { t: "error", code: "create", message: (e as Error).message, clientMsgId: msg.clientMsgId });
+          if (e instanceof OutcomeUnknownError) {
+            this.send(c, { t: "error", code: "outcome_unknown", message: e.message, clientMsgId: msg.clientMsgId });
+          } else {
+            this.send(c, { t: "error", code: "create", message: (e as Error).message, clientMsgId: msg.clientMsgId });
+          }
         }
         return;
       case "send":
@@ -294,12 +324,16 @@ export class HostServer {
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
           if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
-          this.send(c, { t: "error", code: "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
+          if (e instanceof OutcomeUnknownError) {
+            this.send(c, { t: "error", code: "outcome_unknown", message: e.message, clientMsgId: msg.clientMsgId, session: msg.session });
+          } else {
+            this.send(c, { t: "error", code: "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
+          }
         }
         return;
       case "decide":
         try {
-          if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers)) throw new Error("already answered or expired");
+          if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers)) throw new Error("이미 처리됨");
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
         } catch (e) {
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
@@ -325,7 +359,7 @@ export class HostServer {
           else this.send(c, { t: "error", code: msg.t, session: msg.session, message: (e as Error).message });
         }
         return;
-      case "presence": c.visibleAt = msg.visible === true ? this.now() : 0; return;
+      case "presence": c.visibleAt = msg.visible === true ? this.now() : 0; if (msg.visible === true) for (const session of c.attached.keys()) this.markSeen(c, session); return;
       case "req":
         try {
           this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: await this.request(msg.op, c) });

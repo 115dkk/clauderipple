@@ -16,6 +16,7 @@ import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { createWorktree } from "./worktree.ts";
+import { MessageReceipts, OutcomeUnknownError } from "./receipts.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
 import { PERMISSION_MODES, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
@@ -219,6 +220,9 @@ export class Sessions {
   private archived = new Set<string>();
   private listFile: string;
   private now: () => number;
+  private receipts: MessageReceipts;
+  /** In-flight turns keyed by receipt key, so a concurrent resend rides the first attempt. */
+  private sending = new Map<string, Promise<string>>();
   private desktop: DesktopSessions | null;
   private sidebar: DesktopSidebar | null;
   private sidebarFingerprint = "";
@@ -263,6 +267,7 @@ export class Sessions {
     this.now = opts.now ?? Date.now;
     this.file = path.join(opts.dir, "sessions.json");
     this.listFile = path.join(opts.dir, "list-state.json");
+    this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
@@ -288,7 +293,7 @@ export class Sessions {
     }
     for (const r of this.records.values()) {
       if (r.state === "running" || r.state === "starting" || r.state === "waiting") {
-        this.append(r.id, { kind: "notice", code: "host_restarted" }, false);
+        this.append(r.id, { kind: "notice", code: "host_restarted", text: "호스트가 다시 시작되어 이 턴이 중단되었습니다" }, false);
         this.setState(r, "stopped", undefined, false);
       }
     }
@@ -507,13 +512,31 @@ export class Sessions {
 
   // ---- what the phone asks for --------------------------------------------------------------
 
-  /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session. */
+  /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session.
+   * A resend that finds a pending receipt left from before a host restart throws
+   * OutcomeUnknownError instead of running again: the first attempt may or may not have run. */
   create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
     for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
+    const key = `create:${req.clientMsgId}`;
+    if (this.receipts.status(key) === "completed") {
+      const session = this.receipts.sessionOf(key);
+      if (session && this.records.has(session)) return Promise.resolve(session);
+      if (session) return Promise.resolve(session);
+    }
+    if (this.receipts.status(key) === "pending") {
+      // A resend can arrive while the first create is still checking the folder; both get the one session.
+      const riding = this.creating.get(req.clientMsgId);
+      if (riding) return riding;
+      throw new OutcomeUnknownError();
+    }
+    this.receipts.begin(key, "");
     // A resend can arrive while the first create is still checking the folder; both get the one session.
     let pending = this.creating.get(req.clientMsgId);
     if (!pending) {
-      pending = this.createNew(req).finally(() => this.creating.delete(req.clientMsgId));
+      pending = this.createNew(req).then(
+        id => { this.receipts.complete(key, id); return id; },
+        (error: unknown) => { this.receipts.abandon(key); throw error; },
+      ).finally(() => this.creating.delete(req.clientMsgId));
       this.creating.set(req.clientMsgId, pending);
     }
     return pending;
@@ -541,10 +564,21 @@ export class Sessions {
     return r.id;
   }
 
-  /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live. */
+  /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live.
+   * The receipt is written pending before the input reaches the SDK and completed once the SDK
+   * has accepted it; a resend of a completed id returns without running again, and a resend that
+   * finds a pending receipt from before a host restart throws OutcomeUnknownError. */
   send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
+    const key = `send:${id}:${clientMsgId}`;
+    if (this.receipts.status(key) === "completed") return id;
+    if (this.receipts.status(key) === "pending") {
+      const riding = this.sending.get(key) ?? this.bridgeSends.get(`${id}/${clientMsgId}`);
+      if (riding) return riding;
+      throw new OutcomeUnknownError();
+    }
     if (this.seen(id, clientMsgId)) return id;
+    // Delegated turns own their own receipts; this wrapper only forwards them.
     if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
       const s = this.list().find(s => s.id === id);
       if (!s) throw new Error("no such session");
@@ -553,6 +587,28 @@ export class Sessions {
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
     if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
+    this.receipts.begin(key, id);
+    try {
+      return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
+    } catch (error) {
+      this.receipts.abandon(key);
+      throw error;
+    }
+  }
+
+  /** Complete the receipt once the SDK accepted the input; abandon it when the attempt never got there. */
+  private trackReceipt(key: string, work: string | Promise<string>): string | Promise<string> {
+    if (typeof work === "string") { this.receipts.complete(key); return work; }
+    const tracked = work.then(
+      session => { this.receipts.complete(key, session); return session; },
+      (error: unknown) => { this.receipts.abandon(key); throw error; },
+    );
+    this.sending.set(key, tracked);
+    void tracked.finally(() => { if (this.sending.get(key) === tracked) this.sending.delete(key); }).catch(() => {});
+    return tracked;
+  }
+
+  private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[]): string | Promise<string> {
     const existing = this.records.get(id);
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
@@ -639,9 +695,17 @@ export class Sessions {
     this.closeBridge(id);
     const connection = { bridgeId, abort: new AbortController(), failed: false, permissions: new Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }>() };
     this.bridges.set(id, connection);
-    void this.bridge.stream(bridgeId, connection.abort.signal, frame => this.bridgeFrame(id, frame)).catch(error => {
+    const replay = (): void => {
+      // After every stream (re)connect, re-read approvals already waiting: the stream starts at
+      // the newest event, so anything requested before it connected would otherwise never card.
+      void this.syncBridgeApprovals(id, bridgeId).catch(error => {
+        (this.opts.log ?? console.error)(`[bridge replay] ${error instanceof Error ? error.message : String(error)}`);
+      });
+    };
+    void this.bridge.stream(bridgeId, connection.abort.signal, frame => this.bridgeFrame(id, frame), replay).catch(error => {
       if (!connection.abort.signal.aborted) this.bridgeFailure(id, error);
     });
+    replay();
     return connection;
   }
 
@@ -689,15 +753,47 @@ export class Sessions {
     if (payload.type !== "control_request" || request?.subtype !== "can_use_tool" || typeof request.tool_name !== "string" || !input || typeof request.tool_use_id !== "string" || connection.permissions.has(requestId)) return;
     const r = this.records.get(id);
     if (!r) return;
-    const { record, decision } = this.opts.permissions.request({ session: id, tool: request.tool_name, title: "", summary: summarize(request.tool_name, input, r.cwd), input }, connection.abort.signal);
-    connection.permissions.set(requestId, { id: record.id, input, toolUseId: request.tool_use_id });
-    this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, input, r.cwd), canAlways: false });
+    this.openBridgePermission(id, connection, r, { requestId, tool: request.tool_name, input, toolUseId: request.tool_use_id });
+  }
+
+  /** A permission prompt from Remote Control, live or replayed: one record, one card, one decision. */
+  private openBridgePermission(id: string, connection: { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }, r: SessionRecord, req: { requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }): void {
+    if (connection.permissions.has(req.requestId)) return;
+    const { record, decision } = this.opts.permissions.request({ session: id, tool: req.tool, title: "", summary: summarize(req.tool, req.input, r.cwd), input: req.input }, connection.abort.signal);
+    connection.permissions.set(req.requestId, { id: record.id, input: req.input, toolUseId: req.toolUseId });
+    this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, req.input, r.cwd), canAlways: false });
     this.setState(r, "waiting");
     void decision.then(answer => {
       this.append(id, { kind: "permission_decided", id: record.id, decision: answer.decision, ...(answer.reason ? { reason: answer.reason } : {}) });
-      if (answer.decision === "expired") connection.permissions.delete(requestId);
+      if (answer.decision === "expired") connection.permissions.delete(req.requestId);
       this.opts.onSessions();
     });
+  }
+
+  /** Re-read approvals already waiting on a Mac session (phone attach and every stream
+   * reconnect), so no approval card is missed. Reads the session's events from the start cursor
+   * (BridgeClient.events, `sort_order=asc`) instead of the stream's newest-event cursor. */
+  async syncBridge(id: string): Promise<void> {
+    const bridgeId = this.bridges.get(id)?.bridgeId
+      ?? this.desktop?.liveProcess(this.records.get(id)?.sdkSessionId ?? id)?.bridgeSessionId;
+    if (!bridgeId) return;
+    // A Mac session the host never opened has no record yet: import it (bridge mode) first.
+    if (!this.records.has(id)) {
+      try { this.log(id); } catch { return; }
+    }
+    this.ensureBridge(id, bridgeId);
+    await this.syncBridgeApprovals(id, bridgeId);
+  }
+
+  private async syncBridgeApprovals(id: string, bridgeId: string): Promise<void> {
+    const connection = this.bridges.get(id);
+    const r = this.records.get(id);
+    if (!connection || connection.bridgeId !== bridgeId || !r) return;
+    let open;
+    try { open = await this.bridge.openRequests(bridgeId); }
+    catch (error) { this.bridgeFailure(id, error); return; }
+    if (this.bridges.get(id) !== connection) return;
+    for (const req of open) this.openBridgePermission(id, connection, r, req);
   }
 
   private seen(id: string, clientMsgId: string): boolean {
