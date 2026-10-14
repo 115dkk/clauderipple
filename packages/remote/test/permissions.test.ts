@@ -196,3 +196,13 @@ test("atomic helpers create private files; missing JSON is null but corrupt stat
   writeFileSync(path, '[{"id":"bad"}]');
   assert.throws(() => PermissionQueue.open(path), /Invalid permission record/);
 });
+
+test("decide rejects forged decision strings instead of corrupting the record", t => {
+  const path = file(t);
+  const queue = PermissionQueue.open(path);
+  const { record } = queue.request(request);
+  assert.throws(() => queue.decide(record.id, "expired" as never), /invalid decision/);
+  assert.equal(queue.pending("s1").length, 1);
+  assert.deepEqual(saved(path).map(r => r.state), ["pending"]);
+  assert.equal(queue.decide(record.id, "deny")?.state, "deny");
+});

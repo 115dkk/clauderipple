@@ -944,6 +944,11 @@ export class Sessions {
     return change;
   }
 
+  /** The control_response the Remote Control side accepts for a permission answer (bridge-client.ts post). */
+  private bridgeDecisionPayload(requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }, decision: "allow" | "deny", message?: string): Record<string, unknown> {
+    return { type: "control_response", uuid: randomUUID(), response: { subtype: "success", request_id: requestId, response: { behavior: decision, updatedInput: pending.input, toolUseID: pending.toolUseId, ...(message ? { message } : {}) } } };
+  }
+
   private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }): Promise<boolean> {
     const connection = this.bridges.get(id);
     if (!connection || connection.failed || this.opts.permissions.get(permId)?.state !== "pending") return false;

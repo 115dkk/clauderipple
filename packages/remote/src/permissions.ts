@@ -105,6 +105,9 @@ export class PermissionQueue {
   }
 
   decide(id: string, decision: "allow" | "allow_always" | "deny", reason?: string, answers?: Record<string, string>): PermissionRecord | null {
+    // The type says the union, but a phone frame is runtime data: anything else would corrupt the
+    // record (a forged "expired" would close a card without answering it).
+    if (decision !== "allow" && decision !== "allow_always" && decision !== "deny") throw new Error("invalid decision");
     return this.finish([id], decision, reason, answers)[0] ?? null;
   }
 
