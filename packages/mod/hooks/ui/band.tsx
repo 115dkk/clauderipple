@@ -548,7 +548,7 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
  * is refused as a hover scope (the pointer could never be over it), so each tip reveals through its
  * own `hover.scope`, which the fact's or control's hover lights.
  */
-function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], at: number): RenderNode {
+function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string; onPress?: () => void }[], at: number): RenderNode {
   const { Box, Text } = el
   // Placed Box offsets are whole cells; the layer starts at the first cell past 리플이 and the effort.
   const left = Math.ceil(at)
@@ -564,6 +564,10 @@ function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], 
             {lift(el)}
             <Text color={INK} wrap="truncate">{tip.text}</Text>
           </Box>
+          {/* A fact that is itself a button lies under its own tip while the pointer is on it, and the
+              app passes no press through a drawn Box: the tip takes the press instead (seen 2026-10-14,
+              the route stopped opening the log once tips were laid over the facts). */}
+          {tip.onPress ? press(el, 'tip-press-' + tip.key, width, tip.onPress) : null}
         </Box>
       ))}
     </Box>
@@ -680,9 +684,9 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
     else facts = facts.filter(f => f.key !== drop)
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
-  const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
+  const tips: { key: string; text: string; onPress?: () => void }[] = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
   const routeTip = route > 0 && view.route ? routeFact(frame, view, 200, actions.toggleLog)?.card?.join(' · ') : undefined
-  if (routeTip) tips.push({ key: 'route', text: routeTip })
+  if (routeTip) tips.push({ key: 'route', text: routeTip, onPress: actions.toggleLog })
   for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
