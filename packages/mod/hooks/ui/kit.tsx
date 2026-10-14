@@ -17,8 +17,7 @@
 // - A plain Button's label takes the host's ink, which a dark capsule would swallow; nothing on a
 //   capsule is a labelled host Button. A keyed Box's `hover` lights a control on our own terms.
 // - A skin that has no backdrop (flat) is the Box's own `backgroundColor` and `borderStyle`, which
-//   the host paints with the theme; one that frames its surfaces itself (the matrix) lays its four
-//   corners in placed Boxes at the Box's corners, as `press` is placed.
+//   the host paints with the theme.
 
 import type { RenderNode } from 'claude-code'
 
@@ -27,7 +26,7 @@ import type { Face } from './ripple'
 import type { Frame } from './view'
 import { CELL_PX, CLOSE_PX, CONTROL_PX, ROW_PX, SWITCH_H, SWITCH_W, WELL_PX, labelPx } from './art'
 import type { Glyph, PillLook, Sea, Tone } from './art'
-import { CORNER_PX, lookOf } from './look'
+import { lookOf } from './look'
 import { chOf } from './theme'
 
 /** Width of one U+00A0 in the host's 12 px button font, px, taken a little wide. */
@@ -101,22 +100,6 @@ export function ripple(el: Els, frame: Frame, key: string, face: Face, alt: stri
 }
 
 /**
- * The four corners of a Box, when the skin frames its surfaces itself: each a picture in a placed
- * Box at that corner, after the Box's other children. Nothing for a skin that leaves the frame to
- * the host's border.
- */
-export function corners(el: Els, frame: Frame, key: string): RenderNode[] {
-  const draw = lookOf(frame).art.corner
-  if (!draw) return []
-  const { Box } = el
-  return ([['tl', { top: 0, left: 0 }], ['tr', { top: 0, right: 0 }], ['bl', { bottom: 0, left: 0 }], ['br', { bottom: 0, right: 0 }]] as const).map(([at, where]) => (
-    <Box key={'corner-' + key + '-' + at} position="absolute" {...where}>
-      {pic(el, 'corner-' + key + '-' + at, draw(at), '', CORNER_PX, CORNER_PX)}
-    </Box>
-  ))
-}
-
-/**
  * A control that lights under the pointer: a keyed, positioned Box with the skin's light as its
  * hover, holding what it shows and, last, its press. `scope` joins a hover group, so pointing at
  * the control also shows what it does elsewhere (the band's tip).
@@ -140,10 +123,10 @@ function extraHover(el: Els, frame: Frame, cells: number): RenderNode[] {
 }
 
 /**
- * A capsule: a Box in the skin's edge and colour, the skin's backdrop (the deep's sea, the matrix's
- * grid; flat has none) painted behind it from its top left, everything it holds in one positioned
- * layer above that, and the skin's corners last. `rows` is about how tall it draws; the backdrop is
- * taken taller and wider than that, and the capsule clips it.
+ * A capsule: a Box in the skin's edge and colour, the skin's backdrop (the deep's sea; flat has
+ * none) painted behind it from its top left, and everything it holds in one positioned layer above
+ * that. `rows` is about how tall it draws; the backdrop is taken taller and wider than that, and
+ * the capsule clips it. The matrix draws its own board (board.tsx) and never comes here.
  */
 export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 'at'> & { at?: Sea['at'] }; rows: number; paddingX?: number; paddingY?: number; gap?: number; children: RenderNode[] }): RenderNode {
   const { Box } = el
@@ -167,7 +150,6 @@ export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 
         {lift(el)}
         {c.children}
       </Box>
-      {corners(el, frame, c.key)}
     </Box>
   )
 }

@@ -7,7 +7,7 @@
 
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On, RenderElement, RenderPropsOf } from 'claude-code'
+import type { On, RenderElement, RenderNode, RenderPropsOf } from 'claude-code'
 
 import type { AgentRec, Settings, Skin, StatusRequest } from '../types'
 import { STRINGS } from '../hooks/i18n'
@@ -16,6 +16,7 @@ import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
 import { rippleSource } from '../hooks/ui/parts'
+import type { Els } from '../hooks/ui/parts'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
@@ -498,9 +499,9 @@ test('every skin draws the band, the quick settings and a card on the desktop; f
       // The capsule's backdrop: a picture as wide as the frame; flat is the Box's own colour instead.
       const backdrop = svgs.some(svg => svg.props.alt === 'ClaudeRipple' && Number(svg.props.width) > 300)
       expect(backdrop, skin + ' ' + what + ' backdrop').toBe(skin !== 'flat')
-      // The matrix frames itself: four corners; the others leave the frame to the host's border.
-      const corners = svgs.filter(svg => Number(svg.props.width) === 10 && Number(svg.props.height) === 10).length
-      expect(corners > 0, skin + ' ' + what + ' corners').toBe(skin === 'matrix')
+      // The board follows the theme in every picture and never glows.
+      if (skin === 'matrix') for (const svg of svgs) expect(String(svg.props.source), skin + ' ' + what + ' ' + svg.props.alt).not.toMatch(/feGaussianBlur/)
+      if (skin === 'matrix') expect(svgs.every(svg => String(svg.props.source).includes('prefers-color-scheme')), skin + ' ' + what + ' theme').toBe(true)
       const colours = new Set((await ui.findAll({ type: 'Text' })).map(text => String(text.props.color ?? '')))
       if (skin === 'deep') expect(DEEP_INKS.some(ink => colours.has(ink)), skin + ' ' + what + ' ink').toBe(true)
       else for (const ink of DEEP_INKS) expect(colours.has(ink), skin + ' ' + what + ' ' + ink).toBe(false)
@@ -511,6 +512,47 @@ test('every skin draws the band, the quick settings and a card on the desktop; f
       }
       await ui.unmount()
     }
+  }
+})
+
+/**
+ * The matrix is a board of its own (board.tsx), not the deep's layout: what it must keep is the
+ * function. Every press, field and select the deep draws is on the board under the same key, so a
+ * thing that can be switched there can be switched here.
+ */
+test('the board keeps every key the deep draws, on the band, the quick settings, the cards and the setup', async ($, on) => {
+  const noop = () => undefined
+  const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
+  const alertActions = { compact: noop, clear: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
+  const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
+  const idle: JevState = { source: null, test: { state: 'idle' } }
+  const full: DashboardView = { ...DASH, handoff: 'advised', effortMenu: true, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, save: true }, mode: 'Burn GPT' }
+  const scenes: [string, (el: Els, skin: Skin) => RenderNode][] = [
+    ['band', (el, skin) => renderBand(el, frameOf('desktop', 120, 12, skin), full, bandActions)],
+    ['quick', (el, skin) => renderSettings(el, frameOf('desktop', 140, 12, skin), { settings: { ...SETTINGS, judge: 'jev', jevSource: 'typesafe', modes: [{ id: 'm1', name: 'Burn', rungs: {}, delegation: 'normal', until: 'none' }] }, jev: idle }, QUICK_ACTIONS)],
+    ['quick-model', (el, skin) => renderSettings(el, frameOf('desktop', 140, 12, skin), { settings: { ...SETTINGS, judge: 'model', effortAuto: false }, jev: idle }, QUICK_ACTIONS)],
+    ['handoff', (el, skin) => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'handoffChoice', handoffKind: 'quick', after: 'continue' }, alertActions)],
+    ['note', (el, skin) => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'compactNote', draft: '' }, alertActions)],
+    ['cold', (el, skin) => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'cold', tokens: 182_000, idleMinutes: 74 }, alertActions)],
+    ['hot', (el, skin) => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'hot', limitKind: 'five_hour', percent: 86, save: false }, alertActions)],
+    ['ready', (el, skin) => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'result', stage: 'handoffReady', handoffKind: 'quick' }, alertActions)],
+    ['setup-1', (el, skin) => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 1, draft: SETTINGS, jev: idle }, setupActions)],
+    ['setup-2', (el, skin) => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 2, draft: SETTINGS, jev: idle }, setupActions)],
+    ['setup-3', (el, skin) => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 3, draft: SETTINGS, jev: idle }, setupActions)],
+    ['setup-4', (el, skin) => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 4, draft: SETTINGS, jev: idle }, setupActions)],
+  ]
+  for (const [name, draw] of scenes) for (const skin of ['deep', 'matrix'] as const) drawPane(on, name + '-' + skin, el => draw(el, skin))
+  const keysOf = async (name: string, skin: Skin) => {
+    const ui = await mount($, name + '-' + skin, 'desktop')
+    const found = [...await ui.findAll({ type: 'Button' }), ...await ui.findAll({ type: 'Input' }), ...await ui.findAll({ type: 'Select' })]
+    const keys = found.map(e => String((e.props as { key?: string }).key ?? '')).filter(Boolean).sort()
+    await ui.unmount()
+    return keys
+  }
+  for (const [name] of scenes) {
+    const deepKeys = await keysOf(name, 'deep')
+    expect(deepKeys.length, name + ' has keys').toBeGreaterThan(0)
+    expect(await keysOf(name, 'matrix'), name).toEqual(deepKeys)
   }
 })
 

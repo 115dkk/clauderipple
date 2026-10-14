@@ -34,6 +34,7 @@ import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
 import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, ROW_PX, textPx } from './art'
+import { boardBand } from './board'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -90,7 +91,7 @@ const WHY_CELLS = 28
 type Run = { text: string; color?: string; dim?: boolean; bold?: boolean }
 
 /** One fact of the band: a slot of fixed width holding a glyph, a value and quiet trailing runs. */
-type Fact = {
+export type Fact = {
   key: string
   /** Cells the slot takes, whatever it shows. */
   width: number
@@ -132,7 +133,7 @@ function effortWords(lang: Lang, rich: boolean): string[] {
 
 // ---- Facts -------------------------------------------------------------------------------------
 
-function effortFact(frame: Frame, view: DashboardView, onPress: () => void): Fact {
+export function effortFact(frame: Frame, view: DashboardView, onPress: () => void): Fact {
   const rich = isRich(frame)
   const accent = textTone(frame.appearance).accent
   const { level, mode, why } = view.effort
@@ -175,7 +176,7 @@ export function modeLabel(name: string): string {
  * The active operating mode, when one is on: "Mode Burn GPT" in the accent, its slot the same
  * width whatever the name (cut past MODE_CELLS), the whole name in the hover card.
  */
-function modeFact(frame: Frame, view: DashboardView): Fact | null {
+export function modeFact(frame: Frame, view: DashboardView): Fact | null {
   if (!view.mode) return null
   const rich = isRich(frame)
   const name = t(frame.lang, 'band.mode')
@@ -191,7 +192,7 @@ function pie(frac: number): string {
   return frac > 0.875 ? '●' : frac > 0.625 ? '◕' : frac > 0.375 ? '◑' : frac > 0.125 ? '◔' : '○'
 }
 
-function cacheFact(frame: Frame, view: DashboardView): Fact | null {
+export function cacheFact(frame: Frame, view: DashboardView): Fact | null {
   if (view.hide.includes('timer')) return null
   const accent = textTone(frame.appearance).accent
   const cache = view.cache
@@ -217,7 +218,7 @@ function cacheFact(frame: Frame, view: DashboardView): Fact | null {
   return { key: 'cache', width: Math.ceil(chOf(name) + 1 + Math.max(...words.map(chOf))), label: { text: name, dim: true }, value, card: [tip] }
 }
 
-function contextFact(frame: Frame, view: DashboardView): Fact | null {
+export function contextFact(frame: Frame, view: DashboardView): Fact | null {
   const ctx = view.context
   if (!ctx || !view.extras.includes('context')) return null
   const tone = contextTone(ctx.percent, view.swampAt)
@@ -230,7 +231,7 @@ function contextFact(frame: Frame, view: DashboardView): Fact | null {
   return { key: 'context', width, ...(rich ? { label: { text: name, dim: true } } : {}), value, card: [t(frame.lang, 'band.contextAlt', { value: Math.round(ctx.percent) + '%', window: compactNumber(ctx.window), tokens: compactNumber(ctx.tokens) })] }
 }
 
-function limitFact(frame: Frame, view: DashboardView): Fact | null {
+export function limitFact(frame: Frame, view: DashboardView): Fact | null {
   const limit = view.limit
   if (!limit || !view.extras.includes('limits')) return null
   const tone = limitTone(limit.percent)
@@ -254,7 +255,7 @@ function limitFact(frame: Frame, view: DashboardView): Fact | null {
 }
 
 /** The last route in `room` cells, or the router's notice; null when there is neither or no room. */
-function routeFact(frame: Frame, view: DashboardView, room: number, onPress: () => void): Fact | null {
+export function routeFact(frame: Frame, view: DashboardView, room: number, onPress: () => void): Fact | null {
   const rich = isRich(frame)
   if (view.hide.includes('route') || room < (rich ? RICH_ROUTE_MIN : ROUTE_MIN)) return null
   const r = view.route
@@ -501,7 +502,7 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
  * The routed model as the band names it: what was asked dropped, and Claude's ids by their
  * family and version ("claude-opus-5-5" → "Opus 5.5"); the whole route is in the tip.
  */
-function routeName(model: string): string {
+export function routeName(model: string): string {
   return modelName(model.replace(/\s*\(.*\)$/, ''))
 }
 
@@ -830,7 +831,9 @@ export function besideBand(frame: Frame): number {
 
 /** The dashboard band, `frame.columns` being its own width (see besideBand). */
 export function renderBand(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
-  return isRich(frame) && 'Svg' in el ? bandDrawn(el, frame, view, actions) : bandText(el, frame, view, actions)
+  if (!isRich(frame) || !('Svg' in el)) return bandText(el, frame, view, actions)
+  // The matrix is a board of its own (board.tsx), not the deep's row in other colours.
+  return frame.skin === 'matrix' ? boardBand(el, frame, view, actions) : bandDrawn(el, frame, view, actions)
 }
 
 // ---- Minimal: the footer -----------------------------------------------------------------------

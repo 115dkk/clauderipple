@@ -32,7 +32,7 @@ import { isRich } from './view'
 import { GAUGE_FACES, GRID, detailOf, gaugeStep, rippleBody, rippleCss } from './ripple'
 import type { Face } from './ripple'
 import { svgDoc } from './theme'
-import type { Appearance, Palette } from './theme'
+import type { Appearance, Palette, PaletteSet } from './theme'
 
 export type Els = ElementTable
 
@@ -49,7 +49,7 @@ const sources = new Map<string, string>()
  * when a skin has one of its own. One fixed string per state, built once: the host is handed the
  * same source until the state changes.
  */
-export function rippleSource(face: Face, size: number, appearance: Appearance, percent?: number, dim = false, palette?: Palette, paletteName = ''): string {
+export function rippleSource(face: Face, size: number, appearance: Appearance, percent?: number, dim = false, palette?: Palette | PaletteSet, paletteName = ''): string {
   const step = percent !== undefined && GAUGE_FACES.includes(face) ? gaugeStep(percent) : undefined
   const key = [face, size, appearance, step ?? '', dim ? 'dim' : '', paletteName].join('|')
   let source = sources.get(key)

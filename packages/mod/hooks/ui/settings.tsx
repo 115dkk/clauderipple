@@ -14,7 +14,8 @@ import type { Settings, Skin } from '../../types'
 import { SKINS } from '../settings'
 import { CELL_PX, TILE_PX } from './art'
 import type { TileArt } from './art'
-import { capsule, corners, pill, pic, ripple, segmented, slider, toggle, well } from './kit'
+import { boardSettings } from './board'
+import { capsule, pill, pic, ripple, segmented, slider, toggle, well } from './kit'
 import { lookOf } from './look'
 import type { Word } from './look'
 import { action, actions, canDraw, dismiss, segmented as textSegmented, speak, toggle as textToggle } from './parts'
@@ -76,7 +77,7 @@ export function effortRows(el: Els, frame: Frame, d: Settings, a: SettingsAction
 }
 
 /** The Jev key field and its test, when TypeSafe's Jev judges and no key is known. */
-function needsKey(view: SettingsView): boolean {
+export function needsKey(view: SettingsView): boolean {
   return view.settings.judge === 'jev' && view.settings.jevSource === 'typesafe' && !['env', 'file', 'pasted'].includes(view.jev.source ?? '')
 }
 
@@ -154,7 +155,7 @@ export function keepWarmRow(el: Els, frame: Frame, d: Settings, a: SettingsActio
   return row(el, frame, 'warm', t(frame.lang, 'settings.keepWarm'), textToggle(el, frame, 'set-warm', d.keepWarm ? t(frame.lang, 'band.on') : t(frame.lang, 'band.off'), d.keepWarm, () => a.patch({ keepWarm: !d.keepWarm })), t(frame.lang, 'settings.keepWarmHint'))
 }
 
-function modeItems(frame: Frame, d: Settings): { value: string; label: string }[] {
+export function modeItems(frame: Frame, d: Settings): { value: string; label: string }[] {
   return [{ value: '', label: t(frame.lang, 'settings.modeNone') }, ...d.modes.map(m => ({ value: m.id, label: m.name }))]
 }
 
@@ -184,7 +185,7 @@ function tileInner(frame: Frame): number {
 
 type Tile = { id: string; art: TileArt; title: string; head?: RenderNode; line: string; body: RenderNode[] }
 
-/** A tile in the skin's edge and glass (look.ts `tile`), its corners the skin's own where it has them. */
+/** A tile in the skin's edge and glass (look.ts `tile`). */
 function tile(el: Els, frame: Frame, x: Tile): RenderNode {
   const { Box, Text } = el
   const k = lookOf(frame)
@@ -201,7 +202,6 @@ function tile(el: Els, frame: Frame, x: Tile): RenderNode {
         <Text {...k.sub} wrap="wrap">{x.line}</Text>
         {x.body}
       </Box>
-      {corners(el, frame, 'tile-' + x.id)}
     </Box>
   )
 }
@@ -379,7 +379,8 @@ function settingsDrawn(el: Els, frame: Frame, view: SettingsView, a: SettingsAct
 
 /** Session-time controls only; the full settings live on the router dashboard. */
 export function renderSettings(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
-  if (canDraw(el, frame)) return settingsDrawn(el, frame, view, a)
+  // The matrix posts the settings as rows of a board (board.tsx).
+  if (canDraw(el, frame)) return frame.skin === 'matrix' ? boardSettings(el, frame, view, a) : settingsDrawn(el, frame, view, a)
   const { Box } = el
   const rich = isRich(frame)
   const close = dismiss(el, frame, 'close', t(frame.lang, 'settings.close'), a.close, 'x')

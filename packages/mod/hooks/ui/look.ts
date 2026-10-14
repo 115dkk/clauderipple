@@ -1,18 +1,16 @@
 // The skin (2026-10-14): which pictures the desktop draws with and what colours its host Text takes.
-// Three skins, one seam. The deep (art.ts) is the first look: dark water on either theme, 리플이's
-// glow, drawn controls in glass. Flat (flat.ts) is the app's own surfaces: a hairline card that
-// follows the theme, the host's own ink, the accent only where something is on. The matrix
-// (matrix.ts) is an instrument panel: near-black, phosphor green, square corners. A skin changes
-// paint alone: every size is art.ts's and every cell count the same under all three, so band.tsx's
+// The deep (art.ts) is the first look: dark water on either theme, 리플이's glow, drawn controls in
+// glass. Flat (flat.ts) is the app's own surfaces: a hairline card that follows the theme, the
+// host's own ink, the accent only where something is on. Those two share one layout and change
+// paint alone: every size is art.ts's and every cell count the same under both, so band.tsx's
 // arithmetic and the blank presses laid over the pictures (kit.tsx) hold whatever the skin. The
-// terminal draws text and knows nothing of skins.
+// matrix is a board of its own (board.tsx, cells.ts): a different composition, dispatched before
+// any of this is asked. The terminal draws text and knows nothing of skins.
 
 import type { Skin } from '../../types'
 import * as deep from './art'
 import type { Glyph, Icon, PillLook, Sea, TileArt, Tone } from './art'
 import { flatPictures } from './flat'
-import { MATRIX, MATRIX_PALETTE, matrixPictures, matrixTone } from './matrix'
-import type { Corner } from './matrix'
 import { rippleSource } from './parts'
 import type { Face } from './ripple'
 import { textTone } from './theme'
@@ -29,8 +27,6 @@ export type Surface = { borderStyle?: string; borderColor?: string; backgroundCo
 export type Paint = {
   /** Every capsule's backdrop, `width` × `height` px; '' when the skin paints none and the Box's own colour shows. */
   sea: (width: number, height: number, sea: Sea) => string
-  /** A corner of a capsule or a tile, CORNER_PX square, when the skin frames them itself. */
-  corner?: (at: Corner) => string
   plate: (width: number, height: number) => string
   switch: (on: boolean, busy?: boolean) => string
   word: (label: string, on: boolean, busy?: boolean) => { source: string; cells: number }
@@ -50,9 +46,6 @@ export type Paint = {
   tile: (art: TileArt) => string
   beads: (step: number, total: number) => { source: string; width: number }
 }
-
-export { CORNER_PX } from './matrix'
-export type { Corner } from './matrix'
 
 export type Pictures = Paint & {
   /** 리플이's document at `size` px, in the skin's palette (parts.tsx `rippleSource`). */
@@ -124,22 +117,10 @@ function flat(appearance: Appearance): Look {
   return look
 }
 
-/** The matrix: always dark, like the deep, so every colour is its own; its frames are its corners. */
-const MATRIX_LOOK: Look = {
-  skin: 'matrix',
-  ink: { color: MATRIX.ink },
-  sub: { color: MATRIX.sub },
-  mute: { color: MATRIX.mute },
-  tone: tone => matrixTone(tone).text,
-  capsule: {},
-  tile: { backgroundColor: 'rgba(77,255,134,0.035)', hover: { backgroundColor: 'rgba(77,255,134,0.07)' } },
-  lit: { hover: { backgroundColor: 'rgba(77,255,134,0.1)' } },
-  art: { ...matrixPictures(), mascot: (face, size, percent, dim) => rippleSource(face, size, 'dark', percent, dim, MATRIX_PALETTE, 'matrix') },
-}
-
-/** The look a frame draws in. */
+/**
+ * The look a frame draws in. The matrix never asks: its renderers are dispatched to board.tsx
+ * before any drawn control is built; were one to ask, it would get the deep.
+ */
 export function lookOf(frame: Frame): Look {
-  if (frame.skin === 'flat') return flat(frame.appearance)
-  if (frame.skin === 'matrix') return MATRIX_LOOK
-  return DEEP
+  return frame.skin === 'flat' ? flat(frame.appearance) : DEEP
 }
