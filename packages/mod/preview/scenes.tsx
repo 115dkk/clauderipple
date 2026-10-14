@@ -60,6 +60,7 @@ const SCENES: Scene[] = [
   { name: 'band-deciding', draw: (el, f) => site(el, f, { ...DASH, effort: { level: null, mode: 'deciding', since: NOW - 500 } }) },
   { name: 'band-working-handoff', draw: (el, f) => site(el, f, { ...DASH, isWorking: true, handoff: 'advised', warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, context: { percent: 64, tokens: 128_000, window: 200_000 }, mode: 'GPT 우선' }) },
   { name: 'band-drowsy-off', draw: (el, f) => site(el, f, { ...DASH, auto: false, effort: { level: 'medium', mode: 'off' }, cache: { expiresAt: NOW + 60_000, ttlMs: 3_600_000 }, limit: { kind: 'five_hour', percent: 86, resetsAt: '2026-10-12T15:40:00', save: false }, extras: ['context', 'limits'] }) },
+  { name: 'band-warm-here', draw: (el, f) => site(el, f, { ...DASH, warm: { on: false, pings: 0, cost: 0, here: true } }) },
   { name: 'band-asleep', draw: (el, f) => site(el, f, { ...DASH, cache: { expiresAt: NOW - 1, ttlMs: 3_600_000 } }) },
   { name: 'band-menu', draw: (el, f) => site(el, f, { ...DASH, effortMenu: true, effort: { level: 'xhigh', mode: 'manual' } }) },
   { name: 'band-narrow', columns: 70, draw: (el, f) => site(el, f, DASH) },
