@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { PermissionQueue } from "../src/permissions.ts";
+import { reduce } from "../web/timeline.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, summarize } from "../src/sessions.ts";
@@ -17,7 +18,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean } = {}) {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean } = {}) {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -33,6 +34,15 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
           if (turn++ === 0) yield { type: "system", subtype: "init", session_id: "sdk-1" };
           const id = `m${turn}`;
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id } } };
+          if (script.thinking) {
+            // Two streamed indices, each finalized by an SDK message with local index zero.
+            for (const index of [2, 4]) {
+              yield { type: "stream_event", event: { type: "content_block_start", index, content_block: { type: "thinking" } } };
+              yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: `thought ${index}` } } };
+              yield { type: "stream_event", event: { type: "content_block_delta", index, delta: { type: "signature_delta", signature: "private signature" } } };
+              yield { type: "assistant", message: { id, model: "x", content: [{ type: "thinking", thinking: `thought ${index} complete`, signature: "private signature" }] } };
+            }
+          }
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", delta: { type: "text_delta", text: "po" } } };
           if (script.permission) {
             const fn = params.options.canUseTool;
@@ -82,6 +92,17 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
     sessions.create({ clientMsgId, cwd, model, effort, text: "ping" });
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
+
+test("thinking streams finalize at original block indices without exposing signatures", async t => {
+  const f = fixture(t, { thinking: true });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const stored = f.sessions.log(id).readAfter(0).events;
+  const thoughts = stored.filter(e => e.kind === "thinking");
+  assert.deepEqual(thoughts.map(e => [e.block, e.text, e.delta === true]), [[2, "thought 2", true], [2, "thought 2 complete", false], [4, "thought 4", true], [4, "thought 4 complete", false]]);
+  assert.ok(!JSON.stringify(stored).includes("private signature"));
+  assert.deepEqual(reduce(stored).items.filter(i => i.type === "thinking").map(i => i.text), ["thought 2 complete", "thought 4 complete"]);
+});
 
 test("steer keeps the running query; interrupt closes it and withdraws unstarted inputs", async t => {
   const f = fixture(t, { permission: true });

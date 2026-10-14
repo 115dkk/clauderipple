@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Image, Modal, Pressable, ScrollView, Text, View } from 'react-native';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Clipboard, Image, Modal, Pressable, ScrollView, Text, View } from 'react-native';
 import type { ImagePart } from '../../../packages/remote/src/protocol.ts';
 import type { BlobChunk, SubPage, Text as WireText } from '../../../packages/remote/src/protocol.ts';
 import { reduce, timelineItems, type Item, type TimelineItem as DisplayItem } from '../../../packages/remote/web/timeline.ts';
@@ -10,16 +10,35 @@ import { Icon, toolIconName } from './icons';
 import { Markdown } from './markdown';
 import { StateRing } from './mascot';
 import { mono, shadow } from './theme';
+import { activitySummary } from '../../../packages/remote/src/tool-details.ts';
+import type { ActivityRow, ToolView } from '../../../packages/remote/web/timeline.ts';
+import { loadEventText, ToolSheet } from './tool-sheet';
+import { useTextReveal } from './text-reveal';
+
+export const TimelineItem = React.memo(TimelineRow, (before, after) => before.session === after.session && before.readOnly === after.readOnly && before.item.key === after.item.key && before.item.ver === after.item.ver);
+
+const OpenTool = createContext<(row: ActivityRow) => void>(() => {});
+/** Selection survives row virtualization; resolve it from the latest reduction on every update. */
+export function TimelineTools({ items, session, children }: { items: DisplayItem[]; session: string; children: React.ReactNode }) {
+  const [selected, setSelected] = useState<ActivityRow | null>(null);
+  const id = selected?.type === 'tool' ? selected.tool.id : selected?.toolUseId;
+  const rows: ActivityRow[] = items.flatMap(item => item.type === 'toolGroup' ? item.rows : item.type === 'assistant' ? item.tools.map(tool => ({ type: 'tool' as const, tool })) : item.type === 'subagent' ? [item] : []);
+  const current = rows.find(row => (row.type === 'tool' ? row.tool.id : row.toolUseId) === id) ?? selected;
+  const tool: ToolView | null = current?.type === 'tool' ? current.tool : current ? current.call ?? { id: current.toolUseId, name: 'Agent', summary: current.description, ...(current.status !== 'running' ? { result: { ok: current.status === 'done', text: '' } } : {}) } : null;
+  useEffect(() => setSelected(null), [session]);
+  return <OpenTool.Provider value={setSelected}>{children}{tool && <ToolSheet key={tool.id} tool={tool} session={session} onClose={() => setSelected(null)} worker={current?.type === 'subagent' ? <Worker item={current} session={session} initiallyOpen /> : undefined} />}</OpenTool.Provider>;
+}
 export function EventText({ value, session, markdown = false, mono: monoText = false, streaming = false, initiallyExpanded = false }: { value: WireText; session: string; markdown?: boolean; mono?: boolean; streaming?: boolean; initiallyExpanded?: boolean }) {
   const { c } = useStyles();
   const [full, setFull] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(initiallyExpanded);
+  const revealed = useTextReveal(typeof value === 'string' ? value : value.preview, streaming);
   const draw = (text: string) => markdown ? <Markdown text={text} caret={streaming} /> : <Text selectable style={monoText ? { fontFamily: mono, fontSize: 12.5, lineHeight: 19, color: c.ink2 } : { fontSize: 16, lineHeight: 25.6, color: c.ink }}>{text}</Text>;
   if (typeof value === 'string') {
     if (!value && !streaming) return null;
     const long = !markdown && (value.length > 1200 || value.split('\n').length > 12);
-    return <View style={{ gap: 6 }}>{draw(long && !expanded ? value.slice(0, 1200).split('\n').slice(0, 12).join('\n') + '\n…' : value)}{long && <Pressable accessibilityRole="button" onPress={() => setExpanded(!expanded)}><Text style={{ fontSize: 13, fontWeight: '600', color: c.accent, paddingVertical: 4 }}>{expanded ? t('tool.less') : t('perm.showAll')}</Text></Pressable>}</View>;
+    return <View style={{ gap: 6 }}>{draw(long && !expanded ? revealed.slice(0, 1200).split('\n').slice(0, 12).join('\n') + '\n…' : revealed)}{long && <Pressable accessibilityRole="button" onPress={() => setExpanded(!expanded)}><Text style={{ fontSize: 13, fontWeight: '600', color: c.accent, paddingVertical: 4 }}>{expanded ? t('tool.less') : t('perm.showAll')}</Text></Pressable>}</View>;
   }
   const load = async () => {
     setBusy(true);
@@ -81,25 +100,37 @@ function ConversationImages({ images, session }: { images?: ImagePart[]; session
   return <>{images?.map((part, i) => <ConversationImage key={`${part.blob ?? 'missing'}-${i}`} part={part} session={session} />)}</>;
 }
 
-function ToolRow({ tool, session }: { tool: Extract<Item, { type: 'assistant' }>['tools'][number]; session: string }) {
+function ToolRow({ tool }: { tool: ToolView }) {
   const { c } = useStyles();
-  const [open, setOpen] = useState(false);
+  const open = useContext(OpenTool);
   const status = !tool.result ? <Icon name="clock" size={15} color={c.faint} /> : tool.result.ok ? <Icon name="check" size={15} color={c.ok} /> : <Icon name="x" size={15} color={c.bad} />;
-  return <View style={{ gap: 4 }}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`${tool.name} ${tool.summary}`} accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
-      <Icon name={toolIconName(tool.name)} size={16} color={c.ink2} />
-      <Text style={{ fontSize: 13.5, fontWeight: '700', color: c.ink }}>{tool.name}</Text>
-      <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontFamily: mono, fontSize: 12.5, color: c.muted }}>{tool.summary}</Text>
-      {status}
-    </Pressable>
-    {open && <View style={{ marginTop: 2, marginBottom: 4, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: c.sunk, gap: 12 }}>
-      {tool.input && <EventText value={tool.input} session={session} mono />}
-      {tool.result && <View style={{ borderTopWidth: tool.input ? 1 : 0, borderTopColor: c.line2, paddingTop: tool.input ? 10 : 0 }}><EventText value={tool.result.text} session={session} mono /><ConversationImages images={tool.result.images} session={session} /></View>}
-    </View>}
-  </View>;
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${tool.name} ${tool.summary}`} onPress={() => open({ type: 'tool', tool })} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
+    <Icon name={toolIconName(tool.name)} size={16} color={c.ink2} />
+    <Text style={{ fontSize: 13.5, fontWeight: '700', color: c.ink }}>{tool.name}</Text>
+    <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontFamily: mono, fontSize: 12.5, color: c.muted }}>{tool.summary}</Text>
+    {status}<Icon name="chevron" size={14} color={c.muted} />
+  </Pressable>;
+}
+function CopyAnswer({ value, session }: { value: WireText; session: string }) {
+  const { c } = useStyles();
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const copyText = async () => {
+    setBusy(true);
+    try {
+      Clipboard.setString(await loadEventText(value, session));
+      setCopied(true);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopied(false), 1400);
+    } catch (e) { remote.report(e); }
+    finally { setBusy(false); }
+  };
+  return <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 }}><Pressable accessibilityRole="button" accessibilityLabel={copy('답변 복사', 'Copy answer')} disabled={busy} onPress={() => { void copyText(); }} style={{ padding: 10 }}><Icon name="copy" size={17} color={c.muted} /></Pressable>{copied && <Text accessibilityLiveRegion="polite" style={{ fontSize: 12.5, color: c.bg, backgroundColor: c.ink, paddingVertical: 5, paddingHorizontal: 10, borderRadius: 8 }}>{copy('복사됨', 'Copied')}</Text>}</View>;
 }
 
-function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; session: string }) {
+function Worker({ item, session, initiallyOpen = false }: { item: Extract<Item, { type: 'subagent' }>; session: string; initiallyOpen?: boolean }) {
   const { c } = useStyles();
   const [items, setItems] = useState<DisplayItem[] | null>(null);
   const load = async () => {
@@ -114,6 +145,10 @@ function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; 
       setItems(timelineItems(reduce(events)));
     } catch (e) { remote.report(e); }
   };
+  useEffect(() => {
+    if (!initiallyOpen && !items) return;
+    void load();
+  }, [item.sub, item.steps, item.status, initiallyOpen]);
   const status = item.status === 'running' ? t('sub.running') : item.status === 'done' ? t('sub.done') : t('sub.failed');
   return <View style={{ gap: 12 }}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${t('sub.worker')} ${item.description}`} onPress={() => { if (items) setItems(null); else void load(); }} style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 14, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
@@ -132,8 +167,9 @@ function Worker({ item, session }: { item: Extract<Item, { type: 'subagent' }>; 
   </View>;
 }
 
-export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; session: string; readOnly: boolean }) {
+function TimelineRow({ item, session, readOnly }: { item: DisplayItem; session: string; readOnly: boolean }) {
   const { c, s } = useStyles();
+  const openTool = useContext(OpenTool);
   const [expanded, setExpanded] = useState(item.type === 'permission');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
@@ -149,14 +185,17 @@ export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; s
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const host = remote.snapshot.host?.name ?? t('host.fallback');
   if (item.type === 'toolGroup') {
-    const label = item.running ? item.latest : item.workers ? t('tool.groupWorkers', { n: item.tools, w: item.workers }) : t('tool.group', { n: item.tools });
+    const summary = activitySummary(item.rows, item.running, lang());
+    const label = summary.text;
     return <View style={{ gap: 4 }}>
       <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 36, paddingVertical: 6, paddingHorizontal: 10, borderRadius: 10, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line }}>
-        {item.running ? <StateRing state="running" size={16} spin /> : <Icon name="terminal" size={16} color={c.ink2} />}
-        <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: c.muted }}>{label}</Text>
+        {item.running ? <ActivityIndicator size="small" color={c.muted} /> : <Icon name="terminal" size={16} color={c.ink2} />}
+        <Text style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: c.muted }}>{label}</Text>
+        {(summary.added > 0 || summary.removed > 0) && <View style={{ flexDirection: 'row', gap: 4 }}><Text style={{ color: c.ok, backgroundColor: c.okSoft, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 2, fontFamily: mono, fontSize: 12.5 }}>+{summary.added}</Text><Text style={{ color: c.bad, backgroundColor: c.badSoft, borderRadius: 4, paddingHorizontal: 4, paddingVertical: 2, fontFamily: mono, fontSize: 12.5 }}>−{summary.removed}</Text></View>}
+        {summary.failed && <Icon name="x" size={16} color={c.bad} />}
         <View style={expanded ? { transform: [{ rotate: '90deg' }] } : undefined}><Icon name="chevron" size={16} color={c.muted} /></View>
       </Pressable>
-      {expanded && item.rows.map(row => row.type === 'tool' ? <ToolRow key={row.tool.id} tool={row.tool} session={session} /> : <Worker key={row.key} item={row} session={session} />)}
+      {expanded && item.rows.map(row => row.type === 'tool' ? <ToolRow key={row.tool.id} tool={row.tool} /> : <Pressable key={row.key} accessibilityRole="button" accessibilityLabel={row.description} onPress={() => openTool(row)} style={{ flexDirection: 'row', gap: 8, alignItems: 'center', padding: 10, minHeight: 44 }}><StateRing state={row.status === 'running' ? 'running' : row.status === 'done' ? 'idle' : 'error'} size={20} /><Text style={{ flex: 1, color: c.ink2 }}>{row.description}</Text><Icon name="chevron" size={16} color={c.muted} /></Pressable>)}
     </View>;
   }
   if (item.type === 'start') return <Text style={{ alignSelf: 'center', fontSize: 12.5, color: c.faint, paddingVertical: 4 }}>{t('history.start')}</Text>;
@@ -165,10 +204,15 @@ export function TimelineItem({ item, session, readOnly }: { item: DisplayItem; s
     <ConversationImages images={item.images} session={session} />
     {item.queued && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4, justifyContent: 'flex-end' }}><Icon name="clock" size={13} color={c.muted} /><Text style={{ fontSize: 12.5, color: c.muted }}>{t(`queue.${item.queued}`)}</Text></View>}
   </View>;
+  if (item.type === 'thinking') return <View style={{ gap: 8 }}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(v => !v)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44 }}><Icon name="clock" size={16} color={c.muted} /><Text style={{ color: c.muted, fontSize: 13.5 }}>{copy('사고 과정', 'Thinking')}</Text><Icon name={expanded ? 'down' : 'chevron'} size={15} color={c.muted} /></Pressable>
+    {expanded && <View style={{ paddingLeft: 12, borderLeftWidth: 2, borderColor: c.line2 }}><EventText value={item.text} session={session} streaming={item.streaming} /></View>}
+  </View>;
   if (item.type === 'assistant') return <View>
     <EventText value={item.text} session={session} markdown streaming={item.streaming} />
     <ConversationImages images={item.images} session={session} />
-    {item.tools.length > 0 && <View style={{ gap: 4, marginTop: 8 }}>{item.tools.map(tool => <ToolRow key={tool.id} tool={tool} session={session} />)}</View>}
+    {!item.streaming && (typeof item.text !== 'string' || !!item.text.trim()) && <CopyAnswer value={item.text} session={session} />}
+    {item.tools.length > 0 && <View style={{ gap: 4, marginTop: 8 }}>{item.tools.map(tool => <ToolRow key={tool.id} tool={tool} />)}</View>}
   </View>;
   if (item.type === 'permission') {
     const answers = Object.fromEntries((item.questions ?? []).map(q => [q.question, [...(selected[q.question] ?? []), ...(free[q.question]?.trim() ? [free[q.question]!.trim()] : [])].join(', ')]));

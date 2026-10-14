@@ -60,10 +60,10 @@ interface Live {
   input: Inbox;
   abort: AbortController;
   /** Text deltas waiting to be written (coalesced, ~80 ms). */
-  buffer: { msg: string; text: string } | null;
+  buffer: { msg: string; text: string; thinking?: { block: number; text: string } } | null;
   flushTimer: ReturnType<typeof setTimeout> | null;
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
-  current: { msg: string; text: string; images?: ImagePart[]; tools: ToolCall[]; model: string } | null;
+  current: { msg: string; text: string; images?: ImagePart[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
   /** Task/Agent tool ids → their subagent while it runs */
   subs: Map<string, { description: string; model: string | null; steps: number }>;
   turnStart: number;
@@ -858,25 +858,44 @@ export class Sessions {
       }
       case "stream_event": {
         if (parent) return;
-        const ev = msg.event as { type?: string; message?: { id?: string }; delta?: { type?: string; text?: string } } | undefined;
+        const ev = msg.event as { type?: string; index?: number; message?: { id?: string }; content_block?: { type?: string }; delta?: { type?: string; text?: string; thinking?: string } } | undefined;
         if (ev?.type === "message_start" && ev.message?.id) {
           this.flush(r.id, live);
-          live.current = { msg: ev.message.id, text: "", tools: [], model: r.model };
-        } else if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta" && ev.delta.text && live.current) {
+          live.current = { msg: ev.message.id, text: "", tools: [], model: r.model, thinkingBlocks: [], nextThinkingBlock: 0 };
+        } else if (ev?.type === "content_block_start" && ev.content_block?.type === "thinking" && live.current) {
+          const index = ev.index ?? 0;
+          if (!live.current.thinkingBlocks.includes(index)) live.current.thinkingBlocks.push(index);
+        } else if (ev?.type === "content_block_delta" && live.current) {
+          const thinking = ev.delta?.type === "thinking_delta" ? ev.delta.thinking : undefined;
+          const text = ev.delta?.type === "text_delta" ? ev.delta.text : undefined;
+          if (!thinking && !text) return;
+          const block = ev.index ?? 0;
+          if (thinking && !live.current.thinkingBlocks.includes(block)) live.current.thinkingBlocks.push(block);
+          if (live.buffer && (text && live.buffer.thinking || thinking && (!live.buffer.thinking || live.buffer.thinking.block !== block))) this.flush(r.id, live);
           if (!live.buffer) live.buffer = { msg: live.current.msg, text: "" };
-          live.buffer.text += ev.delta.text;
+          if (thinking) {
+            if (!live.buffer.thinking) live.buffer.thinking = { block, text: "" };
+            live.buffer.thinking.text += thinking;
+          } else if (text) live.buffer.text += text;
           if (!live.flushTimer) live.flushTimer = setTimeout(() => this.flush(r.id, live), this.opts.coalesceMs ?? 80);
         }
         return;
       }
       case "assistant": {
-        const message = msg.message as { id?: string; model?: string; content?: { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[] } | undefined;
+        const message = msg.message as { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: Record<string, unknown> }[] } | undefined;
         if (!message) return;
         if (parent) { this.subAssistant(r, live, parent, message); return; }
         this.flush(r.id, live);
         const id = message.id ?? randomUUID();
-        if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? r.model };
+        if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? r.model, thinkingBlocks: [], nextThinkingBlock: 0 };
         const cur = live.current;
+        (message.content ?? []).forEach((block, index) => {
+          if (block.type !== "thinking" || typeof block.thinking !== "string") return;
+          // SDK assistant messages can contain just one completed block: local index 0
+          // is not necessarily the block's index in the original stream.
+          const streamedIndex = cur.thinkingBlocks[cur.nextThinkingBlock++] ?? index;
+          this.append(r.id, { kind: "thinking", msg: id, block: streamedIndex, text: block.thinking });
+        });
         const converted = messageContent(message.content, data => this.log(r.id).image(data));
         if (converted.text) cur.text += (cur.text ? "\n\n" : "") + converted.text;
         cur.images = [...(cur.images ?? []), ...converted.images];
@@ -892,7 +911,9 @@ export class Sessions {
           }
         }
         if (message.model) cur.model = message.model;
-        this.append(r.id, { kind: "assistant", msg: cur.msg, model: cur.model, text: cur.text, images: cur.images, tools: cur.tools });
+        // Thinking-only SDK block completions must not reserve the answer's position
+        // before subsequent thinking blocks have arrived.
+        if (cur.text || cur.images.length || cur.tools.length) this.append(r.id, { kind: "assistant", msg: cur.msg, model: cur.model, text: cur.text, images: cur.images, tools: cur.tools });
         return;
       }
       case "user": {
@@ -974,11 +995,14 @@ export class Sessions {
     });
   }
 
-  private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {
+  private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {
     const log = this.subLog(r.id, `sub-${parent}`);
     if (!log) return;
+    (message.content ?? []).forEach((block, index) => {
+      if (block.type === "thinking" && typeof block.thinking === "string") log.append({ kind: "thinking", msg: message.id ?? parent, block: index, text: block.thinking });
+    });
     const converted = messageContent(message.content, data => this.log(r.id).image(data));
-    const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b) => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd) }));
+    const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b) => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2) }));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     const sub = live.subs.get(parent);
     if (sub) { sub.steps++; if (message.model) sub.model = message.model; }
@@ -988,6 +1012,7 @@ export class Sessions {
     if (live.flushTimer) { clearTimeout(live.flushTimer); live.flushTimer = null; }
     const b = live.buffer;
     live.buffer = null;
+    if (b?.thinking?.text) this.append(id, { kind: "thinking", msg: b.msg, block: b.thinking.block, text: b.thinking.text, delta: true });
     if (b && b.text) this.append(id, { kind: "delta", msg: b.msg, text: b.text });
     const r = this.records.get(id);
     if (r && r.state === "running") void this.refreshFigures(r, false);

@@ -4,7 +4,8 @@ import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, Sessio
 import type { LinkStatus } from "./conn.ts";
 import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
-import { t } from "./i18n.ts";
+import { t, lang } from "./i18n.ts";
+import { activitySummary } from "../src/tool-details.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
@@ -204,7 +205,8 @@ export function item(it: TimelineItem, ui: UI): string {
   switch (it.type) {
     case "toolGroup": {
       const open = ui.expanded.has(it.key);
-      const label = it.running ? it.latest : it.workers ? t("tool.groupWorkers", { n: it.tools, w: it.workers }) : t("tool.group", { n: it.tools });
+      const summary = activitySummary(it.rows, it.running, lang());
+      const label = summary.text + (summary.added || summary.removed ? ` [+${summary.added} −${summary.removed}]` : "") + (summary.failed ? (lang() === "ko" ? " · 실패" : " · Failed") : "");
       return `<div class="tools"><button class="tool" data-act="tool-group" data-id="${esc(it.key)}" aria-expanded="${open}">${it.running ? stateRing("running", 16) : toolIcon("Bash")}<span class="sm">${esc(label)}</span><span style="transform:rotate(${open ? 90 : 0}deg)">${icon.chevron(16)}</span></button>${open ? it.rows.map(row => row.type === "tool" ? toolRow(row.tool, ui) : item(row, ui)).join("") : ""}</div>`;
     }
     case "start":
@@ -213,6 +215,8 @@ export function item(it: TimelineItem, ui: UI): string {
       const q = it.queued ? `<div class="q">${icon.clock(13)}${esc(it.queued === "pending" ? t("queue.pending") : t("queue.sending"))}</div>` : "";
       return `<div class="msg-user${it.queued ? " queued" : ""}">${esc(it.text)}${images(it.images)}${q}</div>`;
     }
+    case "thinking":
+      return `<details class="tool-details"><summary>${icon.clock(15)} ${lang() === "ko" ? "사고 과정" : "Thinking"}</summary><div class="tool-out">${esc(textOf(it.text))}</div></details>`;
     case "assistant": {
       const text = textOf(it.text);
       const caret = it.streaming ? `<span class="caret"></span>` : "";

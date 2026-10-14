@@ -3,6 +3,7 @@ import { closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, readSync, 
 import { join } from "node:path";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { FRAME_CAP, INLINE_CAP } from "./protocol.ts";
+import { changeCount, toolInput } from "./tool-details.ts";
 import type { BlobRef, EventBody, SessionEvent, Text } from "./protocol.ts";
 
 export interface EventLogOptions { dir: string; segmentBytes?: number; now?: () => number }
@@ -160,8 +161,11 @@ export class EventLog {
     }
     if (event.kind === "assistant") {
       event.text = externalize(event.text);
-      for (const tool of event.tools) if (tool.input !== undefined) tool.input = externalize(tool.input);
-    } else if (event.kind === "tool_result") event.text = externalize(event.text);
+      for (const tool of event.tools) {
+        if (["Edit", "MultiEdit", "Write"].includes(tool.name) && !tool.changes) tool.changes = changeCount(tool.name, toolInput(tool.input));
+        if (tool.input !== undefined) tool.input = externalize(tool.input);
+      }
+    } else if (event.kind === "tool_result" || event.kind === "thinking") event.text = externalize(event.text);
     else if (event.kind === "permission") event.input = externalize(event.input);
     const line = fitLine(event);
     for (const { id, text } of blobs) writeFileAtomic(join(this.dir, "blobs", `${id}.txt`), text);

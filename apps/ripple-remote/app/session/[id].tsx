@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Keyboard, Pressable, ScrollView, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FlatList, Pressable, ScrollView, Text, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { remote } from '../../src/client';
@@ -7,8 +7,8 @@ import { Button, ConnectionBanner, Frame, IconButton, copy, useKeyboardOpen, use
 import { StateRing } from '../../src/mascot';
 import { Icon } from '../../src/icons';
 import { radius } from '../../src/theme';
-import { TimelineItem } from '../../src/timeline';
-import { reduce, timelineItems } from '../../../../packages/remote/web/timeline.ts';
+import { TimelineItem, TimelineTools } from '../../src/timeline';
+import { reduce, timelineItems, type TimelineItem as DisplayItem } from '../../../../packages/remote/web/timeline.ts';
 import { t } from '../../../../packages/remote/web/i18n.ts';
 import { clock, duration, folderName } from '../../../../packages/remote/web/dom.ts';
 import { SessionComposer } from '../../src/composer';
@@ -23,21 +23,25 @@ export default function Session() {
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const session = state.sessions.find(s => s.id === id);
   const history = state.histories[id];
-  const view = reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder);
+  const outboxKey = remote.outgoing(id).map(o => `${o.clientMsgId}:${o.state}`).join('|');
+  const view = useMemo(() => reduce(history?.events ?? [], remote.outgoing(id), !history?.hasOlder), [history?.events, history?.hasOlder, id, outboxKey]);
+  const items = useMemo(() => timelineItems(view), [view]);
+  // Offset zero is always the bottom, even before older variable-height rows are measured.
+  const listItems = useMemo(() => [...items].reverse(), [items]);
   const readOnly = session?.readOnly === true && session?.origin !== 'desktop';
-  const scroll = useRef<ScrollView>(null);
+  const scroll = useRef<FlatList<DisplayItem>>(null);
   const pinned = useRef(true);
   const dragging = useRef(false);
-  const follow = () => { if (pinned.current) scroll.current?.scrollToEnd({ animated: false }); };
-  useEffect(() => { pinned.current = true; dragging.current = false; remote.open(id); }, [id]);
-  useEffect(() => {
-    const shown = Keyboard.addListener('keyboardDidShow', () => {
-      pinned.current = true;
-      dragging.current = false;
-      scroll.current?.scrollToEnd({ animated: false });
-    });
-    return () => shown.remove();
+  const [jumpVisible, setJumpVisible] = useState(false);
+  const followFrame = useRef<number | null>(null);
+  const follow = useCallback(() => {
+    if (!pinned.current || followFrame.current !== null) return;
+    followFrame.current = requestAnimationFrame(() => { followFrame.current = null; if (pinned.current) scroll.current?.scrollToOffset({ offset: 0, animated: false }); });
   }, []);
+  const jump = useCallback(() => { pinned.current = true; dragging.current = false; setJumpVisible(false); scroll.current?.scrollToOffset({ offset: 0, animated: false }); follow(); }, [follow]);
+  const renderItem = useCallback(({ item }: { item: DisplayItem }) => <View style={{ marginBottom: 14 }}><TimelineItem item={item} session={id} readOnly={readOnly} /></View>, [id, readOnly]);
+  useEffect(() => { pinned.current = true; dragging.current = false; setJumpVisible(false); remote.open(id); }, [id]);
+  useEffect(() => () => { if (followFrame.current !== null) cancelAnimationFrame(followFrame.current); }, []);
   const switchSession = (next: string) => { setSessionsOpen(false); router.replace({ pathname: '/session/[id]', params: { id: next } }); };
   const link = state.status;
   const live = link?.state === 'open';
@@ -81,18 +85,25 @@ export default function Session() {
       {cell(t('band.fiveHour'), pct(f.fiveHourPct), f.fiveHourPct ?? null, false, true)}
     </View>}
     <ConnectionBanner />
-    <ScrollView key={id} ref={scroll} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 16, gap: 14 }} keyboardShouldPersistTaps="handled"
-      onContentSizeChange={follow} onLayout={follow} scrollEventThrottle={16}
-      onScrollBeginDrag={() => { dragging.current = true; }}
-      onScrollEndDrag={() => { dragging.current = false; }}
-      onMomentumScrollBegin={() => { dragging.current = true; }}
-      onMomentumScrollEnd={() => { dragging.current = false; }}
-      onScroll={({ nativeEvent: e }) => {
-        if (dragging.current) pinned.current = e.contentSize.height - e.contentOffset.y - e.layoutMeasurement.height < 80;
-      }}>
-      {history?.hasOlder && <Button title={t('history.loading')} ghost onPress={() => { try { remote.older(id); } catch (e) { remote.report(e); } }} />}
-      {timelineItems(view).map(item => <TimelineItem key={item.key} item={item} session={id} readOnly={readOnly} />)}
-    </ScrollView>
+    <TimelineTools items={items} session={id}>
+      <View style={{ flex: 1 }}>
+        <FlatList key={id} ref={scroll} inverted data={listItems} keyExtractor={item => item.key} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 16, paddingHorizontal: 16, paddingBottom: 8 }} keyboardShouldPersistTaps="handled"
+          initialNumToRender={12} maxToRenderPerBatch={10} windowSize={7} maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+          ListFooterComponent={history?.hasOlder ? <Button title={copy('이전 기록 불러오기', 'Load older messages')} ghost onPress={() => { pinned.current = false; setJumpVisible(true); try { remote.older(id); } catch (e) { remote.report(e); } }} /> : null}
+          renderItem={renderItem}
+          onContentSizeChange={follow} onLayout={follow} scrollEventThrottle={16}
+          onScrollBeginDrag={() => { dragging.current = true; pinned.current = false; }}
+          onScrollEndDrag={({ nativeEvent: e }) => { const near = e.contentOffset.y < 80; pinned.current = near; setJumpVisible(!near); dragging.current = false; }}
+          onMomentumScrollBegin={() => { dragging.current = true; }}
+          onMomentumScrollEnd={({ nativeEvent: e }) => { const near = e.contentOffset.y < 80; pinned.current = near; setJumpVisible(!near); dragging.current = false; }}
+          onScroll={({ nativeEvent: e }) => {
+            if (!dragging.current) return;
+            const near = e.contentOffset.y < 80;
+            pinned.current = near; setJumpVisible(!near);
+          }} />
+        {jumpVisible && <Pressable accessibilityRole="button" accessibilityLabel={copy('맨 아래로', 'Jump to bottom')} onPress={jump} style={{ position: 'absolute', bottom: 12, right: 18, width: 44, height: 44, borderRadius: 22, backgroundColor: c.surface, borderWidth: 1, borderColor: c.line2, alignItems: 'center', justifyContent: 'center' }}><Text style={{ fontSize: 24, color: c.ink }}>↓</Text></Pressable>}
+      </View>
+    </TimelineTools>
     <View style={[s.dock, { paddingBottom: keyboard ? 10 : insets.bottom + 10 }]}>
       {readOnly && <Text style={{ fontSize: 12.5, color: c.muted, textAlign: 'center', marginBottom: 2 }}>{copy('이 대화는 여기서 읽기만 가능합니다.', 'This conversation is read-only here.')}</Text>}
       {!readOnly && running && !view.open.length && <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 6, marginBottom: 8 }}>
@@ -113,7 +124,7 @@ export default function Session() {
           {!!session!.taskList?.length && <Icon name={tasksOpen ? 'down' : 'chevron'} size={14} color={c.muted} />}
         </Pressable>
       </>}
-      {!readOnly && session && <SessionComposer key={id} session={session} busy={['running', 'starting', 'waiting'].includes(session.state)} connected={!!live} onSession={switchSession} />}
+      {!readOnly && session && <SessionComposer key={id} session={session} busy={['running', 'starting', 'waiting'].includes(session.state)} connected={!!live} onSession={switchSession} onSend={jump} />}
     </View>
   </Frame>;
 }

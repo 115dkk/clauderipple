@@ -32,6 +32,7 @@ const require = module.createRequire(import.meta.url);
 /** Published path → file, for what the PWA loads from outside web/. The relay's build serves the same paths. */
 export const SHARED: Record<string, (pkgDir: string) => string> = {
   "src/protocol.ts": (pkg) => path.join(pkg, "src", "protocol.ts"),
+  "src/tool-details.ts": (pkg) => path.join(pkg, "src", "tool-details.ts"),
   "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
   "vendor/nacl-fast.min.js": () => require.resolve("tweetnacl/nacl-fast.min.js"),
 };

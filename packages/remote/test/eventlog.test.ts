@@ -33,6 +33,19 @@ function blobRoundTrip(log: EventLog, text: Text, original: string): void {
   assert.equal(log.blob(text.blob), original);
 }
 
+test("large edits retain counts before externalization, thinking blobs round-trip without loss", t => {
+  const log = open(t, directory(t));
+  const after = "new line\n".repeat(INLINE_CAP);
+  const event = log.append({ kind: "assistant", msg: "m", model: "test", text: "", tools: [{ id: "e", name: "Edit", summary: "file.ts", input: JSON.stringify({ file_path: "file.ts", old_string: "old\n", new_string: after }) }] });
+  assert.ok(event.kind === "assistant");
+  assert.deepEqual(event.tools[0]?.changes, { added: INLINE_CAP, removed: 1 });
+  assert.equal(typeof event.tools[0]?.input, "object");
+  const text = "thinking ".repeat(INLINE_CAP);
+  const thinking = log.append({ kind: "thinking", msg: "m", block: 0, text });
+  assert.ok(thinking.kind === "thinking");
+  blobRoundTrip(log, thinking.text, text);
+});
+
 test("seq and epoch survive reopen; files are private", t => {
   const dir = directory(t);
   const log = open(t, dir);

@@ -106,10 +106,11 @@ test("background tasks survive bounded summary tails and incremental partial rec
 test("defensive transcript conversion preserves users, tools, failure and result", () => {
   const lines = [line(user), "not json", "null", line({ type: "unknown" }), line({ ...user, isSidechain: true }), line({ type: "assistant", message: { content: [null, 5, { type: "thinking", thinking: "not shown" }] } }), line(assistant), line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: [{ type: "text", text: "failed" }] }] } }), line({ type: "result", subtype: "success", duration_ms: 23, num_turns: 1 })];
   const bodies = lines.flatMap(l => transcriptEvents(l, user.cwd, summarize).bodies);
-  assert.deepEqual(bodies.map(b => b.kind), ["user", "assistant", "tool_result", "result"]);
-  const a = bodies[1];
+  assert.deepEqual(bodies.map(b => b.kind), ["user", "thinking", "assistant", "tool_result", "result"]);
+  assert.deepEqual(bodies[1], { kind: "thinking", msg: "", block: 2, text: "not shown" });
+  const a = bodies[2];
   assert.equal(a?.kind === "assistant" && a.tools[0]?.summary, "file.ts");
-  const result = bodies[2];
+  const result = bodies[3];
   assert.equal(result?.kind === "tool_result" && result.ok, false);
   assert.deepEqual(transcriptEvents(line({ type: "system", subtype: "turn_duration", durationMs: 99 }), "", summarize).bodies, [{ kind: "result", ok: true, ms: 99, turns: 1 }]);
   assert.equal(transcriptEvents(line({ ...user, isMeta: true }), "", summarize).bodies.length, 0);
@@ -124,7 +125,7 @@ test("desktop Agent and Task calls preserve prompts behind compact descriptions"
     if (event?.kind !== "assistant") throw new Error("missing assistant");
     assert.equal(event.text, "");
     assert.equal(event.tools[0]?.summary, "Review timeline · sol");
-    assert.equal(event.tools[0]?.input, prompt);
+    assert.deepEqual(JSON.parse(String(event.tools[0]?.input)), { description: "Review timeline", model: "sol", prompt });
     const result = transcriptEvents(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "worker", content: prompt }] } }), user.cwd, summarize);
     const view = reduce([...parsed.bodies, ...result.bodies].map((b, i) => ({ ...b, seq: i + 1, at: 0 })));
     assert.equal(view.items.length, 1);

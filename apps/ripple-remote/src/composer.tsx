@@ -25,7 +25,7 @@ export async function rememberEffort(model: string, effort: Effort | null): Prom
   await AsyncStorage.setItem(`effort:${model}`, effort ?? '');
 }
 
-export function SessionComposer({ session, busy, connected, onSession }: { session: SessionSummary; busy: boolean; connected: boolean; onSession: (id: string) => void }) {
+export function SessionComposer({ session, busy, connected, onSession, onSend }: { session: SessionSummary; busy: boolean; connected: boolean; onSession: (id: string) => void; onSend?: () => void }) {
   const { c, s } = useStyles();
   const [draft, setDraft] = useState<Draft>(newDraft);
   const [queue, setQueue] = useState<Draft[]>([]);
@@ -89,7 +89,9 @@ export function SessionComposer({ session, busy, connected, onSession }: { sessi
     try {
       await saves.current;
       const attachments = await upload(item);
-      const next = await remote.submit({ t: 'send', session: session.id, text: item.text.trim(), attachments, behavior: selected }, item.id);
+      const submitted = remote.submit({ t: 'send', session: session.id, text: item.text.trim(), attachments, behavior: selected }, item.id);
+      onSend?.();
+      const next = await submitted;
       waitingForTurn.current = next === session.id ? before : null;
       if (fromQueue) setQueue(q => q.filter(x => x.id !== item.id));
       else setDraft(value => value.id === item.id ? newDraft() : value);

@@ -6,6 +6,7 @@ export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text;
 export type Item =
   | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; at: number; queued?: "pending" | "sending" }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
+  | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
   | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
@@ -61,6 +62,13 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
       case "turn":
         model = e.model; effort = e.effort; turnStartedAt = e.at;
         break;
+      case "thinking": {
+        const key = `h${e.msg}:${e.block}`;
+        const prev = byKey.has(key) ? items[byKey.get(key)!] : undefined;
+        const text = e.delta ? (prev?.type === "thinking" && typeof prev.text === "string" ? prev.text : "") + (typeof e.text === "string" ? e.text : e.text.preview) : e.text;
+        put({ type: "thinking", key, ver: `h${e.seq}`, msg: e.msg, text, streaming: e.delta === true, at: e.at });
+        break;
+      }
       case "delta": {
         const key = `a${e.msg}`;
         const prev = byKey.has(key) ? items[byKey.get(key)!] : undefined;
@@ -70,7 +78,9 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
       }
       case "assistant": {
         const key = `a${e.msg}`;
-        const tools: ToolView[] = e.tools.map((tc) => ({ ...tc }));
+        const previous = byKey.has(key) ? items[byKey.get(key)!] : undefined;
+        const results = new Map(previous?.type === "assistant" ? previous.tools.map(tc => [tc.id, tc.result]) : []);
+        const tools: ToolView[] = e.tools.map(tc => ({ ...tc, ...(results.get(tc.id) ? { result: results.get(tc.id)! } : {}) }));
         put({ type: "assistant", key, ver: `f${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), streaming: false, tools, model: e.model, at: e.at });
         const idx = byKey.get(key)!;
         tools.forEach((tc, i) => toolOwner.set(tc.id, { item: idx, tool: i }));
@@ -99,6 +109,9 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         break;
       }
       case "result":
+        // A queued next turn can already be running in the final snapshot.
+        // Completion belongs to this point in the log, not only to the final state.
+        for (const item of items) if ((item.type === "thinking" || item.type === "assistant") && item.streaming) { item.streaming = false; item.ver += "s"; }
         put({ type: "result", key: `r${e.seq}`, ver: "1", ok: e.ok, ...(e.error ? { error: e.error } : {}), ms: e.ms, model: model ?? "", effort });
         turnStartedAt = null;
         break;
@@ -120,12 +133,12 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
     if (seenUser.has(o.clientMsgId)) continue;
     put({ type: "user", key: `u${o.clientMsgId}`, ver: o.state, text: o.text, at: o.at, queued: o.state });
   }
-  for (const it of items) if (it.type === "assistant" && it.streaming && state !== "running" && state !== "starting" && state !== "waiting") { it.streaming = false; it.ver += "s"; }
+  for (const it of items) if ((it.type === "assistant" || it.type === "thinking") && it.streaming && state !== "running" && state !== "starting" && state !== "waiting") { it.streaming = false; it.ver += "s"; }
   const open = items.filter((i): i is Extract<Item, { type: "permission" }> => i.type === "permission" && i.decision === null);
   return { items, state, figures, model, effort, open, turnStartedAt, lastSeq };
 }
 
-export type ActivityRow = { type: "tool"; tool: ToolView } | Extract<Item, { type: "subagent" }>;
+export type ActivityRow = { type: "tool"; tool: ToolView } | (Extract<Item, { type: "subagent" }> & { call?: ToolView });
 export interface ToolGroup {
   type: "toolGroup"; key: string; ver: string; rows: ActivityRow[];
   tools: number; workers: number; running: boolean; latest: string;
@@ -164,7 +177,7 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
       }
       for (const tool of item.tools) {
         const worker = workers.get(tool.id);
-        if (worker) add(worker, worker.key, worker.ver);
+        if (worker) add({ ...worker, call: tool }, worker.key, `${worker.ver}:${item.ver}`);
         else add({ type: "tool", tool }, tool.id, item.ver);
       }
       continue;

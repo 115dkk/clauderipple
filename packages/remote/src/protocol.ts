@@ -59,13 +59,15 @@ export interface Attachment { blob: string; name: string; mediaType: string }
 export type SendBehavior = "steer" | "interrupt";
 export function defaultEffort(efforts: Effort[]): Effort | null { return efforts.includes("high") ? "high" : efforts[0] ?? null; }
 
-export interface ToolCall { id: string; name: string; /** one line a person reads: a command, a path */ summary: string; input?: Text }
+export interface ToolCall { id: string; name: string; /** one line a person reads: a command, a path */ summary: string; input?: Text; /** Computed before a large input becomes a blob. Counts describe supplied edits, not unseen file context. */ changes?: { added: number; removed: number } }
 
 export type EventBody = MessageImages & (
   | { kind: "user"; text: string; clientMsgId: string }
   | { kind: "turn"; model: string; effort: Effort | null }
   /** Streamed text, coalesced by the host (~80 ms). Superseded by the `assistant` event with the same `msg`. */
   | { kind: "delta"; msg: string; text: string }
+  /** One thinking block; deltas append, a final block replaces them (never expose signatures). */
+  | { kind: "thinking"; msg: string; block: number; text: Text; delta?: boolean }
   | { kind: "assistant"; msg: string; model: string; text: Text; tools: ToolCall[] }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */

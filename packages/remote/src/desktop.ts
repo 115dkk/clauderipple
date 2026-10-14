@@ -128,6 +128,11 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
     }
   } else if (r.type === "assistant" && message && Array.isArray(message.content)) {
     const tools: ToolCall[] = [];
+    const msg = str(r.uuid) || str(message.id);
+    message.content.forEach((value, index) => {
+      const block = object(value);
+      if (block?.type === "thinking" && typeof block.thinking === "string") bodies.push({ kind: "thinking", msg, block: index, text: block.thinking });
+    });
     for (const value of message.content) {
       const b = object(value);
       if (b?.type !== "tool_use" || typeof b.id !== "string" || typeof b.name !== "string") continue;
@@ -136,7 +141,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       const summary = summarize(b.name, input, cwd);
       tools.push({ id: b.id, name: b.name,
         summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
-        input: worker && typeof input.prompt === "string" ? input.prompt : JSON.stringify(input, null, 2) });
+        input: JSON.stringify(input, null, 2) });
     }
     const body = messageContent(message.content, sink);
     if (body.text || body.images.length || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), ...body, tools });
