@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BackgroundTasks, DesktopSessions, processHasSession, transcriptEvents } from "../src/desktop.ts";
+import { agentEnded, BackgroundTasks, DesktopSessions, processHasSession, transcriptEvents } from "../src/desktop.ts";
 import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
@@ -346,4 +346,16 @@ test("the phone's slash menu drops the commands the init marks terminal-only", a
   // Measured 2026-10-13 on a Mac session's Remote Control init: 85 commands, terminal_slash_commands ["focus"].
   assert.deepEqual(slashCommands({ slash_commands: ["compact", "focus", "context", 3, ""], terminal_slash_commands: ["focus"] }), ["compact", "context"]);
   assert.equal(slashCommands({}), null);
+});
+
+test("a background agent whose transcript ends on its answer is done without a notification", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-ended-"));
+  const file = path.join(dir, "agent-x.jsonl");
+  assert.equal(agentEnded(file), false, "no transcript yet");
+  fs.writeFileSync(file, line({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] } }));
+  assert.equal(agentEnded(file), false, "still calling tools");
+  fs.appendFileSync(file, line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }));
+  assert.equal(agentEnded(file), false, "waiting for the model");
+  fs.appendFileSync(file, line({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] } }));
+  assert.equal(agentEnded(file), true);
 });

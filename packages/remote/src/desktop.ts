@@ -188,6 +188,19 @@ function windowLines(fd: number, size: number, tail: boolean): string[] {
   if (start + n < size || !data.endsWith("\n")) data = data.slice(0, Math.max(0, data.lastIndexOf("\n")));
   return data.split("\n");
 }
+/** Whether a subagent transcript's last record is an answer that ends the agent's loop. */
+export function agentEnded(file: string): boolean {
+  let fd: number;
+  try { fd = fs.openSync(file, "r"); } catch { return false; }
+  try {
+    const last = windowLines(fd, fs.fstatSync(fd).size, true).filter(Boolean).at(-1);
+    const r = last ? record(last) : null;
+    const message = object(r?.message);
+    const content = message?.content;
+    return r?.type === "assistant" && ["end_turn", "stop_sequence"].includes(str(message?.stop_reason)) &&
+      !(Array.isArray(content) && content.some(b => object(b)?.type === "tool_use"));
+  } finally { fs.closeSync(fd); }
+}
 function missing(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "");
 }
@@ -316,7 +329,16 @@ export class DesktopSessions {
   }
 
   backgroundTasks(id: string): number { return this.backgroundTaskList(id).length; }
-  backgroundTaskList(id: string): BackgroundTask[] { return this.scan(id)?.list ?? []; }
+  /** A background agent whose own transcript ends on its final answer is done, notification or not:
+   * one read through TaskOutput, or finished before a compaction, never gets a <task-notification> line
+   * in the session's transcript and otherwise stays "running" for good (seen 2026-10-14, five hours). */
+  backgroundTaskList(id: string): BackgroundTask[] {
+    const list = this.scan(id)?.list ?? [];
+    const source = this.sources.get(id);
+    if (!source) return list;
+    const dir = path.join(path.dirname(source.file), path.basename(source.file, ".jsonl"), "subagents");
+    return list.filter(task => task.kind !== "agent" || !agentEnded(path.join(dir, `agent-${task.id}.jsonl`)));
+  }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
 
   private scan(id: string): BackgroundTasks | null {
