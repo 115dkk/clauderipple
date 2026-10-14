@@ -596,7 +596,7 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
     ? { key: 'auto', cells: toggleCells(autoLabel), node: toggle(el, 'auto', view.auto, autoLabel, actions.toggleAuto, view.effort.mode === 'deciding', tipScope('auto')), tip: autoTip }
     : { key: 'auto', cells: SWITCH_ONLY, node: lit(el, 'auto', SWITCH_ONLY, [pic(el, 'auto', switchArt(view.auto, view.effort.mode === 'deciding'), autoLabel, 36, 22), press(el, 'auto', SWITCH_ONLY * CELL_PX, actions.toggleAuto)], 0.25, tipScope('auto')), tip: autoTip })
   const warmLabel = t(L, 'band.warm')
-  out.push(iconControl(el, 'warm', iconArt('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? TONE.amber.text : SUB))
+  out.push(iconControl(el, 'warm', iconArt('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, view.warm.here ? 'band.warmHere' : 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? TONE.amber.text : SUB))
   const agentsLabel = t(L, 'band.agents')
   const live = view.agents.live
   // The live count sits on the icon's shoulder, in one picture of one width: no width change.

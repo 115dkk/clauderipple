@@ -301,6 +301,8 @@ declare module 'claude-code' {
       agents: AgentRec[]
       cache: CacheMemo | null
       warm: WarmState
+      /** Keep-warm for this chat alone, set by the band's flame; null follows Settings. */
+      warmHere: boolean | null
       context: { percent: number; tokens: number; window: number } | null
       hot: Hot | null
       hotHidden: number | null

@@ -977,6 +977,23 @@ test('fork turn.step is not effort-steered, busy or main-request cost', async ($
   expect(stats.text).toContain('Warm: 1 pings')
 })
 
+test('the flame turns keep-warm off for this chat only; Settings stay as they are', async ($, on) => {
+  const b = boundaries(on, { keepWarm: true })
+  http(on)
+  judgeStub(on, '{"effort":"high","why":"scope"}')
+  stepStub(on)
+  let forks = 0
+  on('model.fork', async () => { forks++; return { value: { isAnswered: true, text: 'ok', usage: USAGE } } })
+  await start($)
+  await submit($)
+  await step($)
+  await complete($)
+  await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'warm' })
+  await b.clock.advance(3375000)
+  expect(forks).toBe(0)
+  expect(b.router().settings.keepWarm).toBe(true)
+})
+
 test('Haiku compaction returns replacement messages and forwards the keep note', async ($, on) => {
   boundaries(on)
   http(on)

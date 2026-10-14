@@ -65,7 +65,8 @@ export type DashboardView = {
   context: { percent: number; tokens: number; window: number } | null
   /** The last main reply's cache; null when unknown. */
   cache: { expiresAt: number; ttlMs: number } | null
-  warm: { on: boolean; pings: number; cost: number; stopped?: string }
+  /** `here`: this chat differs from Settings, set by the band's flame. */
+  warm: { on: boolean; pings: number; cost: number; stopped?: string; here?: boolean }
   /** The hottest plan window, shown when present. */
   limit: { kind: string; percent: number; resetsAt?: string; save: boolean } | null
   route: RouteView | null

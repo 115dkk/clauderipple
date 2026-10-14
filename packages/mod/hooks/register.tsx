@@ -48,6 +48,7 @@ const lastSpawn = atom({ plugin: 'ripple', key: 'lastSpawn' } as const, null)
 const agents = atom({ plugin: 'ripple', key: 'agents' } as const, [])
 const cache = atom({ plugin: 'ripple', key: 'cache' } as const, null)
 const warm = atom({ plugin: 'ripple', key: 'warm' } as const, { pings: 0, cost: 0 })
+const warmHere = atom({ plugin: 'ripple', key: 'warmHere' } as const, null)
 const lastRealReplyAt = atom({ plugin: 'ripple', key: 'lastRealReplyAt' } as const, null)
 const context = atom({ plugin: 'ripple', key: 'context' } as const, null)
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
@@ -234,6 +235,8 @@ async function installSettings($: EngineInterface, s: Settings): Promise<void> {
   try { await registerAuto($, s) } catch (error) { await report($, 'agent register', error) }
   if (!s.effortAuto) await update($, heldPick, () => null)
   if (s.keepWarm && !previous.keepWarm) await update($, warm, value => ({ ...value, stopped: undefined }))
+  // Settings caught up with this chat's own choice: it follows Settings again.
+  if (await read($, warmHere) === s.keepWarm) await update($, warmHere, () => null)
 }
 function settingsSnapshot(text: string): ModSettingsSnapshot {
   const value = object(JSON.parse(text))
@@ -713,9 +716,15 @@ async function toggleAuto($: EngineInterface): Promise<void> {
   const s = await currentSettings($)
   await saveSettings($, { ...s, effortAuto: !s.effortAuto })
 }
+/** The band's flame turns keep-warm on or off for this chat only; Settings is what a new chat starts with. */
+async function keepWarmOn($: EngineInterface, s: Settings): Promise<boolean> {
+  return await read($, warmHere) ?? s.keepWarm
+}
 async function toggleWarm($: EngineInterface): Promise<void> {
   const s = await currentSettings($)
-  await saveSettings($, { ...s, keepWarm: !s.keepWarm })
+  const on = !await keepWarmOn($, s)
+  await update($, warmHere, () => on === s.keepWarm ? null : on)
+  if (on) await update($, warm, value => ({ ...value, stopped: undefined }))
 }
 async function toggleSave($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
@@ -987,7 +996,8 @@ async function tick($: EngineInterface): Promise<void> {
       const answer = await $.model.complete({ model: HAIKU, system: ADVICE_SYSTEM, prompt: queued, effort: 'low', maxTokens: 60, timeoutMs: 8000 })
       if (answer.isAnswered) await update($, advice, () => parseAdvice(answer.text))
     }
-    const s = await currentSettings($)
+    const s = { ...await currentSettings($) }
+    s.keepWarm = await keepWarmOn($, s)
     const decision = shouldPing({ settings: s, memo: await read($, cache), warm: await read($, warm), now: await $.clock.now(), idle: !await read($, busy) && !await read($, deciding) && !forking,
       contextTokens: (await read($, context))?.tokens ?? 0, lastRealReplyAt: await read($, lastRealReplyAt) })
     if (decision.ping) {
@@ -1035,7 +1045,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
       mode: await read($, deciding) ? 'deciding' : await read($, paused) ? 'paused' : p?.by === 'manual' ? 'manual' : s.effortAuto ? 'auto' : 'off',
       ...(p?.why ? { why: p.why, by: p.by } : {}), ...(await read($, decidingSince) !== null ? { since: (await read($, decidingSince))! } : {}) },
     model: await read($, modelIs) ? modelName((await read($, modelIs))!) : null,
-    context: await read($, context), cache: await read($, cache), warm: { ...w, on: s.keepWarm },
+    context: await read($, context), cache: await read($, cache), warm: { ...w, on: await keepWarmOn($, s), ...(await read($, warmHere) !== null ? { here: true } : {}) },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
     auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
     agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
