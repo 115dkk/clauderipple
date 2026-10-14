@@ -1184,6 +1184,16 @@ for (const surface of ['terminal', 'desktop'] as const) test('quick controls sav
   await ui.unmount()
 })
 
+test('ripple-bar says where the line is when the layout is minimal', async ($, on) => {
+  const b = boundaries(on, { layout: 'minimal' })
+  http(on)
+  await start($)
+  const run = () => $.command.run({ command: 'ripple-bar', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: '' })
+  expect((await run()).text).toContain('hidden')
+  expect(b.saved.get('bandHidden')).toBe(true)
+  expect((await run()).text).toContain('Minimal')
+})
+
 for (const surface of ['terminal', 'desktop'] as const) test('quick settings select a saved mode, never edit rungs, on ' + surface, async ($, on) => {
   const b = boundaries(on, { modes: BURN })
   http(on)

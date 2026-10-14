@@ -1469,7 +1469,9 @@ export const register: Register = on => {
   on('command.run', { command: 'ripple-bar' }, async ($, e, next) => {
     try {
       const language = await read($, lang)
-      return { text: await toggleBar($) ? t(language, 'commands.barShown') : t(language, 'commands.barHidden') } }
+      if (!await toggleBar($)) return { text: t(language, 'commands.barHidden') }
+      // The minimal layout draws no band above the prompt, only the short line under it (#56).
+      return { text: t(language, (await currentSettings($)).layout === 'minimal' ? 'commands.barShownMinimal' : 'commands.barShown') } }
     catch (error) { await report($, 'ripple-bar', error); return next(e) }
   })
   on('ui.close', { id: LOG_PANE }, async ($, e, next) => {
