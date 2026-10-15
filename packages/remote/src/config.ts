@@ -8,6 +8,8 @@ import path from "node:path";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 
 export const DEFAULT_PORT = 8797;
+/** ClaudeRipple's own relay: what phone access turns back on with after it was switched off. */
+export const DEFAULT_RELAY = "https://ripple-relay.clauderipple.workers.dev";
 
 export interface HostConfig {
   token: string;

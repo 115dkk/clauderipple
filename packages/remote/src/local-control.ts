@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type http from "node:http";
 import qrcode from "qrcode-generator";
-import { loadConfig, newToken, normalizeRelay, pairingUrl, relayPairingUrl, resolveBind, saveConfig, tokenMatches } from "./config.ts";
+import { DEFAULT_RELAY, loadConfig, newToken, normalizeRelay, pairingUrl, relayPairingUrl, resolveBind, saveConfig, tokenMatches } from "./config.ts";
 import type { HostConfig } from "./config.ts";
 
 export interface Phone { clientId: string; connected: boolean; lastSeen: number | null; push: boolean }
@@ -75,7 +75,7 @@ export class LocalControl {
           version: this.opts.version, mode: cfg.relay ? "relay" : this.where.reachableFromPhone ? "direct" : "local-only",
           ...(cfg.relay ? { relay: cfg.relay } : {}), bind: cfg.bind, port: cfg.port,
           reachableFromPhone: !!cfg.relay || this.where.reachableFromPhone, pushReady: !!cfg.relay,
-          phones: this.opts.phones(), settings: { bind: saved.bind, ...(saved.relay ? { relay: saved.relay } : {}) },
+          phones: this.opts.phones(), settings: { bind: saved.bind, ...(saved.relay ? { relay: saved.relay } : {}) }, defaultRelay: DEFAULT_RELAY,
           restartRequired: saved.bind !== cfg.bind || saved.relay !== cfg.relay,
         });
         return;

@@ -777,32 +777,28 @@ function renderPhoneStatus(data) {
   $("#phone-restart").hidden = !data.restartRequired;
 }
 function phoneSettings(data) {
+  // The phone app pairs through the Relay only, so phone access is on (Relay) or off. A custom
+  // relay address stays in the host's config file; the dashboard keeps whichever one is saved.
   const saved = data.settings;
-  const selected = saved.relay ? "relay" : saved.bind === "lan" || saved.bind === "tailscale" ? saved.bind : "local";
-  const relayUrl = el("input", { type: "url", value: saved.relay || "", placeholder: "https://", "aria-label": t("phone.relayUrl"), autocomplete: "off" });
-  const urlRow = cell(el("label", { for: "phone-relay-url", text: t("phone.relayUrl") }), relayUrl, t("phone.relayHelp"), "wide");
-  relayUrl.id = "phone-relay-url";
-  urlRow.hidden = selected !== "relay";
-  const choices = ["relay", "lan", "tailscale", "local"].map(value => {
+  const selected = saved.relay ? "relay" : "local";
+  const choices = ["relay", "local"].map(value => {
     const radio = el("input", { type: "radio", name: "phone-mode", value, checked: value === selected });
-    radio.addEventListener("change", () => { urlRow.hidden = value !== "relay"; });
     return el("label", { class: "cell phone-choice" }, [radio, el("span", { class: "cell-text" }, [el("span", { class: "cell-label", text: t(`phone.choice.${value}`) }), el("span", { class: "cell-sub", text: t(`phone.help.${value}`) })])]);
   });
   const save = el("button", { class: "btn", type: "button", text: t("common.save") });
   save.addEventListener("click", async () => {
     if (phoneBusy) return;
     const mode = $('#phone-content input[name="phone-mode"]:checked').value;
-    if (mode === "relay" && !relayUrl.value.trim()) { relayUrl.focus(); toast(t("phone.urlRequired"), true); return; }
     phoneBusy = true; save.disabled = true;
     hidePhoneQr();
     try {
-      const result = await phonePost("settings", mode === "relay" ? { relay: relayUrl.value.trim(), bind: "local" } : { relay: "off", bind: mode });
+      const result = await phonePost("settings", mode === "relay" ? { relay: saved.relay || data.defaultRelay, bind: "local" } : { relay: "off", bind: "local" });
       toast(t(result.restartRequired ? "phone.restartRequired" : "common.saved"));
       await refreshPhone();
     } catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { phoneBusy = false; save.disabled = false; }
   });
-  return section(t("phone.settings"), [...choices, urlRow, cell(t("phone.apply"), save)]);
+  return section(t("phone.settings"), [...choices, cell(t("phone.apply"), save)]);
 }
 function phoneRestart() {
   const button = el("button", { class: "btn secondary", type: "button", text: t("phone.restart") });
