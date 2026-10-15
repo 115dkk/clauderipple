@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
-import { attachmentContent, messageContent, type InputBlock } from "./images.ts";
+import { attachmentContent, messageContent, sendUserFileImages, type InputBlock } from "./images.ts";
 import type { Attachment, ImagePart, SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
@@ -142,6 +142,10 @@ export function summarize(tool: string, input: Record<string, unknown>, cwd: str
     case "WebFetch": return str(input.url);
     case "WebSearch": return str(input.query);
     case "Task": case "Agent": return oneLine(str(input.description));
+    case "SendUserFile": {
+      const files = (Array.isArray(input.files) ? input.files : []).filter((f): f is string => typeof f === "string").map(rel);
+      return oneLine([...files, str(input.caption)].filter(Boolean).join(", "));
+    }
     case "TodoWrite": return Array.isArray(input.todos) ? `${input.todos.length}` : "";
     default: {
       const first = Object.values(input).find((v) => typeof v === "string") as string | undefined;
@@ -1206,7 +1210,7 @@ export class Sessions {
         });
         const converted = messageContent(message.content, data => this.log(r.id).image(data));
         if (converted.text) cur.text += (cur.text ? "\n\n" : "") + converted.text;
-        cur.images = [...(cur.images ?? []), ...converted.images];
+        cur.images = [...(cur.images ?? []), ...converted.images, ...sendUserFileImages(message.content, r.cwd, data => this.log(r.id).image(data))];
         for (const b of message.content ?? []) {
           if (b.type === "tool_use" && b.id && b.name) {
             const input = b.input ?? {};
@@ -1310,6 +1314,7 @@ export class Sessions {
       if (block.type === "thinking" && typeof block.thinking === "string") log.append({ kind: "thinking", msg: message.id ?? parent, block: index, text: block.thinking });
     });
     const converted = messageContent(message.content, data => this.log(r.id).image(data));
+    converted.images.push(...sendUserFileImages(message.content, r.cwd, data => this.log(r.id).image(data)));
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b) => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2) }));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     const sub = live.subs.get(parent);

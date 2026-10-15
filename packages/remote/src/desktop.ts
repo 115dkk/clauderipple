@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
-import { messageContent, type ImageSink } from "./images.ts";
+import { messageContent, sendUserFileImages, type ImageSink } from "./images.ts";
 import type { BackgroundTask, EventBody, SessionSummary, ToolCall } from "./protocol.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -144,6 +144,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         input: JSON.stringify(input, null, 2) });
     }
     const body = messageContent(message.content, sink);
+    body.images.push(...sendUserFileImages(message.content, cwd, sink));
     if (body.text || body.images.length || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), ...body, tools });
   } else if (r.type === "result") {
     const ok = r.subtype === "success" && r.is_error !== true;

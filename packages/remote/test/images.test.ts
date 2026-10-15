@@ -4,8 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventLog } from "../src/eventlog.ts";
-import { attachmentContent, imageCachePath, messageContent } from "../src/images.ts";
+import { attachmentContent, imageCachePath, messageContent, sendUserFileImages } from "../src/images.ts";
 import { transcriptEvents } from "../src/desktop.ts";
+import { summarize } from "../src/sessions.ts";
+import { ATTACHMENT_CAP } from "../src/protocol.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
 
 const data = Buffer.from("synthetic image bytes").toString("base64");
@@ -72,4 +74,66 @@ test("the attachment folder is created 0700, not 0755", t => {
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   attachmentContent(cwd, "see attached", [{ blob: "b1", name: "note.txt", mediaType: "text/plain" }], () => Buffer.from("hello").toString("base64"));
   assert.equal(fs.statSync(path.join(cwd, ".ripple-attachments")).mode & 0o777, 0o700);
+});
+
+test("a SendUserFile image is read through the blob sink and relative paths resolve against cwd", t => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sendfile-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sendfile-log-"));
+  const log = EventLog.open({ dir });
+  t.after(() => { log.close(); fs.rmSync(cwd, { recursive: true, force: true }); fs.rmSync(dir, { recursive: true, force: true }); });
+  const bytes = Buffer.from("raster bytes");
+  fs.mkdirSync(path.join(cwd, "out"));
+  fs.writeFileSync(path.join(cwd, "out", "shot.png"), bytes);
+  const line = JSON.stringify({ type: "assistant", uuid: "a1", message: { id: "m1", model: "x", content: [
+    { type: "text", text: "Here it is." },
+    { type: "tool_use", id: "f1", name: "SendUserFile", input: { files: ["out/shot.png"], caption: "the shot", status: "normal" } },
+  ] } });
+  const bodies = transcriptEvents(line, cwd, summarize, value => log.image(value)).bodies;
+  const event = log.append(bodies[0]!);
+  assert.equal(event.kind, "assistant");
+  assert.equal(event.text, "Here it is.");
+  assert.equal(event.images?.[0]?.type, "image");
+  assert.equal(event.images?.[0]?.mediaType, "image/png");
+  assert.ok(event.images?.[0]?.blob);
+  assert.equal(log.blob(event.images![0]!.blob!), bytes.toString("base64"));
+  assert.equal(event.tools?.[0]?.summary, "out/shot.png, the shot");
+});
+
+test("a SendUserFile non-image, missing or oversized file yields no image and never throws", t => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sendfile-bad-"));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, "notes.txt"), "text, not an image");
+  fs.writeFileSync(path.join(cwd, "big.png"), Buffer.alloc(ATTACHMENT_CAP + 1));
+  fs.mkdirSync(path.join(cwd, "folder.png"));
+  const stored: string[] = [];
+  const sink = (value: string): string => { stored.push(value); return "blob"; };
+  const content = [{ type: "tool_use", id: "f1", name: "SendUserFile", input: { files: ["notes.txt", "missing.png", "big.png", "folder.png", 7], status: "normal" } }];
+  assert.deepEqual(sendUserFileImages(content, cwd, sink), []);
+  assert.deepEqual(stored, []);
+  const parsed = transcriptEvents(JSON.stringify({ type: "assistant", message: { content } }), cwd, summarize, sink);
+  const event = parsed.bodies[0];
+  assert.equal(event?.kind, "assistant");
+  assert.deepEqual(event?.images, []);
+  assert.match(String(event?.kind === "assistant" ? event.tools[0]?.summary : ""), /notes\.txt/);
+});
+
+test("a SendUserFile image outside the cwd is shown, as the tool's scratchpad files are", t => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sendfile-link-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sendfile-out-"));
+  t.after(() => { fs.rmSync(cwd, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }); });
+  fs.writeFileSync(path.join(outside, "shot.png"), Buffer.from("png"));
+  fs.mkdirSync(path.join(outside, "dir.png"));
+  const stored: string[] = [];
+  const content = [{ type: "tool_use", id: "f1", name: "SendUserFile", input: { files: [path.join(outside, "shot.png"), path.join(outside, "dir.png")], status: "normal" } }];
+  assert.deepEqual(sendUserFileImages(content, cwd, value => { stored.push(value); return "blob"; }), [{ type: "image", mediaType: "image/png", blob: "blob" }]);
+  assert.deepEqual(stored, [Buffer.from("png").toString("base64")]);
+});
+
+test("summarize names a SendUserFile's files and caption without a caption, and blank input is empty", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sendfile-sum-"));
+  try {
+    assert.equal(summarize("SendUserFile", { files: ["a.png", path.join(cwd, "b.jpg")], caption: "before vs after" }, cwd), "a.png, b.jpg, before vs after");
+    assert.equal(summarize("SendUserFile", { files: ["only.gif"], status: "proactive" }, cwd), "only.gif");
+    assert.equal(summarize("SendUserFile", {}, cwd), "");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });

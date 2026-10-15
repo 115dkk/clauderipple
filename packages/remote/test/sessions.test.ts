@@ -19,7 +19,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean } = {}) {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string } = {}) {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -57,7 +57,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
           }
           const image = { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from("sdk image").toString("base64") } };
           if (script.images) yield { type: "user", uuid: "sdk-image-user", message: { content: [image] } };
-          yield { type: "assistant", parent_tool_use_id: null, message: { id, model: "x", content: [{ type: "text", text: "pong" }, ...(script.images ? [image] : [])] } };
+          yield { type: "assistant", parent_tool_use_id: null, message: { id, model: "x", content: [{ type: "text", text: "pong" }, ...(script.images ? [image] : []), ...(script.sendFile ? [{ type: "tool_use", id: "suf-1", name: "SendUserFile", input: { files: [script.sendFile], caption: "shot", status: "normal" } }] : [])] } };
           yield { type: "result", subtype: "success", is_error: false, duration_ms: 5, num_turns: 1, modelUsage: { x: { contextWindow: 1000 } } };
         }
       },
@@ -141,6 +141,21 @@ test("phone images reach SDK blocks and files are written under cwd", async t =>
   assert.equal(fs.readFileSync(path.join(f.cwd, '.ripple-attachments', files[0]!), 'utf8'), 'file bytes');
   assert.match(String(f.fake.users[2]!.message.content), /Attached file:/);
   assert.throws(() => f.sessions.send(id, 'missing-file', 'read', [{ blob: 'missing', name: 'a', mediaType: 'text/plain' }]), /missing/);
+});
+
+test("a live SDK SendUserFile image joins the assistant event through the blob transport", async t => {
+  const f = fixture(t, { sendFile: "shot.png" });
+  const bytes = Buffer.from("live shot bytes");
+  fs.writeFileSync(path.join(f.cwd, "shot.png"), bytes);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const assistant = f.sessions.log(id).readAfter(0).events.filter(e => e.kind === "assistant").at(-1);
+  assert.ok(assistant?.kind === "assistant");
+  const image = assistant.images?.[0];
+  assert.ok(image?.blob);
+  assert.equal(image.mediaType, "image/png");
+  assert.equal(f.sessions.log(id).blob(image.blob!), bytes.toString("base64"));
+  assert.equal(assistant.tools.find(tool => tool.name === "SendUserFile")?.summary, "shot.png, shot");
 });
 
 test("clear and new create an empty fresh session with identical settings", async t => {

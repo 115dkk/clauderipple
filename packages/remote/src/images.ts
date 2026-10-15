@@ -49,6 +49,8 @@ export function attachmentContent(cwd: string, text: string, attachments: Attach
 
 export type ImageSink = (base64: string) => string;
 const MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** Extension → media type for the raster formats the app shows; anything else is not an image. */
+const EXT_MEDIA: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
 const MAX_BYTES = 32 * 1024 * 1024;
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -83,7 +85,7 @@ export function imageCachePath(file: string, home = os.homedir()): string | null
 }
 
 function fileImage(file: string, sink?: ImageSink): ImagePart {
-  const mediaType = ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" } as Record<string, string>)[path.extname(file).toLowerCase()] ?? "image/png";
+  const mediaType = EXT_MEDIA[path.extname(file).toLowerCase()] ?? "image/png";
   const unavailable: ImagePart = { type: "image", mediaType };
   const real = imageCachePath(file);
   if (!real || !sink || !/\.(png|jpe?g|gif|webp)$/i.test(file)) return unavailable;
@@ -131,4 +133,42 @@ export function messageContent(content: unknown, sink?: ImageSink): { text: stri
     images.push(part);
   }
   return { text: texts.join("\n\n"), images };
+}
+
+/**
+ * The images a `SendUserFile` tool call hands the person. Each listed path that is a regular raster
+ * image of ATTACHMENT_CAP or less is read through the blob sink (bytes travel in the chunked blob
+ * transport, never inline in an event). A relative path resolves against cwd; an absolute one may sit
+ * anywhere (the tool's own files usually live in a scratchpad outside the project), as the official app
+ * shows them too, and they only ever reach the paired phone. A non-regular file, a missing file, a
+ * non-image extension or an oversized file yields no image and throws nothing, so the tool row stands
+ * on its own.
+ */
+export function sendUserFileImages(content: unknown, cwd: string, sink?: ImageSink): ImagePart[] {
+  if (!sink) return [];
+  const images: ImagePart[] = [];
+  for (const value of Array.isArray(content) ? content : []) {
+    const block = object(value);
+    if (block?.type !== "tool_use" || block.name !== "SendUserFile") continue;
+    const files = object(block.input)?.files;
+    for (const file of Array.isArray(files) ? files : []) {
+      const part = userFileImage(typeof file === "string" ? file : "", cwd, sink);
+      if (part) images.push(part);
+    }
+  }
+  return images;
+}
+
+/** One listed file as an ImagePart, or null when it is not a regular raster image within the cap. */
+function userFileImage(file: string, cwd: string, sink: ImageSink): ImagePart | null {
+  const mediaType = EXT_MEDIA[path.extname(file).toLowerCase()];
+  if (!file || !mediaType || !MIME.has(mediaType)) return null;
+  let fd: number;
+  try { fd = fs.openSync(fs.realpathSync(path.resolve(cwd, file)), fs.constants.O_RDONLY); }
+  catch { return null; } // Missing, unreadable or a broken link: the event must still be written.
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > ATTACHMENT_CAP) return null; // Never a directory, FIFO or device.
+    return { type: "image", mediaType, blob: sink(fs.readFileSync(fd).toString("base64")) };
+  } catch { return null; } finally { fs.closeSync(fd); }
 }
