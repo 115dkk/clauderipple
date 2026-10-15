@@ -85,6 +85,7 @@ export function banner(ui: UI): string {
   const seen = ui.link.lastRx ? t("conn.lastSeen", { time: clock(ui.link.lastRx) }) : "";
   if (kind === "open") {
     if (ui.host && !ui.host.routerOk) return `<div class="banner warn">${ripple("uneasy", 34)}<div class="txt">${esc(t("conn.router", { host: hostName(ui) }))}</div></div>`;
+    if (ui.host?.desktopProblem) return `<div class="banner warn">${ripple("uneasy", 34)}<div class="txt">${esc(t("conn.desktop", { problem: ui.host.desktopProblem }))}</div></div>`;
     return "";
   }
   if (kind === "denied") {

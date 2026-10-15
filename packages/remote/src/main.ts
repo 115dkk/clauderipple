@@ -94,7 +94,29 @@ function printPairing(cfg: HostConfig, dir: string): void {
   out(`\nScan with the phone's camera (the link carries the pairing key — do not share it):\n\n${qr(url)}\n\n${url}\n\n`);
 }
 
+/**
+ * Under launchd both streams are the log file: start every line with an ISO time, so a run of
+ * reconnects or errors can be placed next to sleep, network and relay events afterwards. Wraps the
+ * stream itself, so lines written by libraries and child processes' relayed output get one too.
+ */
+function stampLines(stream: NodeJS.WriteStream): void {
+  const write = stream.write.bind(stream) as (chunk: string | Uint8Array, ...rest: unknown[]) => boolean;
+  let lineStart = true;
+  stream.write = ((chunk: string | Uint8Array, ...rest: unknown[]): boolean => {
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    if (!text) return write(chunk, ...rest);
+    let stamped = "";
+    for (const piece of text.split(/(?<=\n)/)) {
+      stamped += (lineStart && piece !== "\n" ? `${new Date().toISOString()} ` : "") + piece;
+      lineStart = piece.endsWith("\n");
+    }
+    return write(stamped, ...rest);
+  }) as typeof stream.write;
+}
+
 async function runHost(): Promise<void> {
+  if (!process.stdout.isTTY) stampLines(process.stdout);
+  if (!process.stderr.isTTY) stampLines(process.stderr);
   const dir = remoteHome();
   const cfg = configFromArgs(dir);
   const where = resolveBind(cfg.bind);
@@ -122,6 +144,7 @@ async function runHost(): Promise<void> {
     log,
     onEvent: (id, event) => { server?.onEvent(id); void notifier.onEvent(id, event); void expoNotifier.onEvent(id, event); },
     onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },
+    onDesktopProblem: (problem) => server?.setDesktopProblem(problem),
   });
   sessions.recover();
   const live = sessions;

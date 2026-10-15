@@ -101,6 +101,8 @@ function fakeRoom() {
     accept: (ws, t) => { tags.set(ws, t); },
     sockets: (tag) => [...tags].filter(([ws, t]) => !ws.closed && t.includes(tag)).map(([ws]) => ws),
     tags: (ws) => tags.get(ws) ?? [],
+    lastPing: () => null,
+    now: () => Date.now(),
     get: async (k) => store.get(k),
     put: async (k, v) => { store.set(k, v); },
     newId: () => `conn-${String(++n).padStart(4, "0")}`,
@@ -217,7 +219,13 @@ function relayHost(onPeer: (p: Peer) => void = () => {}) {
   const sockets: FakeWs[] = [];
   const host = new RelayHost({
     relay: "https://relay.example", serverId: "server-id-0123456789", secret: "s".repeat(43), hostKey: nacl.box.keyPair(), nacl,
-    makeSocket: (url, headers) => { const ws = new FakeWs(url, headers); sockets.push(ws); return ws; },
+    makeSocket: (url, headers) => {
+      const ws = new FakeWs(url, headers);
+      // The host's route checks (a probe phone) are let through at once here; relay-reconnect.test.ts covers them.
+      if (url.includes("/ws/client")) { clock.set(() => { ws.open(); ws.text(`{"relay":"open"}`); }, 1); return ws; }
+      sockets.push(ws);
+      return ws;
+    },
     onPeer, now: () => clock.now, setTimer: clock.set, clearTimer: clock.clear,
   });
   return { clock, sockets, host };

@@ -11,7 +11,7 @@ import { attachmentContent, messageContent, sendUserFileImages, type InputBlock 
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeClient, DESKTOP_BLOCKED, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, DESKTOP_BLOCKED, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -85,6 +85,8 @@ export interface SessionsOptions {
   log?: (line: string) => void;
   onEvent: (session: string, event: SessionEvent) => void;
   onSessions: () => void;
+  /** Claude app sessions became unreachable for the whole host (the Mac's Claude login), or reachable again (null). */
+  onDesktopProblem?: (problem: string | null) => void;
   now?: () => number;
   coalesceMs?: number;
   /** Enabled by main; tests can use an isolated synthetic projects directory. */
@@ -253,14 +255,52 @@ export class Sessions {
     this.bridgeStates.set(id, entry);
     let changed = false;
     entry.pending = this.bridge.session(id).then(session => {
+      this.noteBridge(id, null);
       const next: SessionState = session.worker_status === "requires_action" ? "waiting" : session.worker_status;
       // Phones are told only when the state actually moved; every desktop poll re-reads this.
       if (entry.state !== next) { entry.state = next; changed = true; }
     }).catch(error => {
       if (entry.state !== undefined) { delete entry.state; changed = true; } // The registry is the fallback only on a failed read.
-      (this.opts.log ?? console.error)(`[desktop state] ${error instanceof Error ? error.message : String(error)}`);
+      this.noteBridge(id, error, "desktop state");
     }).finally(() => { delete entry.pending; if (changed) this.opts.onSessions(); });
     return entry.pending;
+  }
+
+  /** Why Claude app sessions cannot be reached at all right now (the Mac's Claude login), or null. */
+  private bridgeProblem: string | null = null;
+  /** The last error logged per Remote Control session, so a poll that keeps failing logs once. */
+  private bridgeErrors = new Map<string, string>();
+
+  desktopProblem(): string | null { return this.bridgeProblem; }
+
+  /**
+   * Record how a Remote Control request went. Every poll re-asks, so the log gets a line when
+   * something changes, not per request (an expired login wrote one every few seconds per session,
+   * 2026-10-15). A login problem is the host's, not a session's: phones are told through
+   * onDesktopProblem, and it clears on the first request that succeeds.
+   */
+  private noteBridge(bridgeId: string, error: unknown, label = "desktop state"): void {
+    const log = this.opts.log ?? console.error;
+    if (error === null) {
+      this.bridgeErrors.delete(bridgeId);
+      if (this.bridgeProblem === null) return;
+      this.bridgeProblem = null;
+      log("[desktop] Claude app sessions answer again");
+      this.opts.onDesktopProblem?.(null);
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof BridgeAuthError) {
+      if (this.bridgeProblem === message) return;
+      this.bridgeProblem = message;
+      log(`[desktop] Claude app sessions cannot be reached: ${message}`);
+      this.opts.onDesktopProblem?.(message);
+      return;
+    }
+    if (this.bridgeErrors.get(bridgeId) === message) return;
+    this.bridgeErrors.set(bridgeId, message);
+    if (this.bridgeErrors.size > 200) this.bridgeErrors.delete(this.bridgeErrors.keys().next().value!);
+    log(`[${label}] ${bridgeId}: ${message}`);
   }
   private bridges = new Map<string, { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }> }>();
   private bridgeSends = new Map<string, Promise<string>>();
@@ -707,7 +747,11 @@ export class Sessions {
     while (this.bridgeEchoes.size >= Sessions.ECHO_CAP) this.bridgeEchoes.delete(this.bridgeEchoes.values().next().value!);
     this.bridgeEchoes.add(uuid);
     try { await this.bridge.send(bridgeId, uuid, converted.content); }
-    catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
+    catch (error) {
+      this.noteBridge(bridgeId, error, "bridge send");
+      throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED);
+    }
+    this.noteBridge(bridgeId, null);
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
     this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
     this.rememberClientMsgId(id, clientMsgId);
@@ -771,9 +815,7 @@ export class Sessions {
     const replay = (): void => {
       // After every stream (re)connect, re-read approvals already waiting: the stream starts at
       // the newest event, so anything requested before it connected would otherwise never card.
-      void this.syncBridgeApprovals(id, bridgeId).catch(error => {
-        (this.opts.log ?? console.error)(`[bridge replay] ${error instanceof Error ? error.message : String(error)}`);
-      });
+      void this.syncBridgeApprovals(id, bridgeId).catch(error => this.noteBridge(bridgeId, error, "bridge replay"));
     };
     void this.bridge.stream(bridgeId, connection.abort.signal, frame => this.bridgeFrame(id, frame), replay).catch(error => {
       if (!connection.abort.signal.aborted) this.bridgeFailure(id, error);
@@ -798,8 +840,9 @@ export class Sessions {
     if (connection) { connection.failed = true; connection.abort.abort(); }
     this.opts.permissions.expireSession(id, "aborted");
     this.clearPermissionAttention(id);
-    // Logged, not shown: a dropped permission stream reconnects on the next poll and says nothing new to the user.
-    console.error(`remote control stream (${id}): ${error instanceof Error ? error.message : "failed"}`);
+    // Logged, not shown: a dropped permission stream reconnects on the next poll and says nothing
+    // new to the user — unless the login is the cause, which noteBridge tells phones once.
+    this.noteBridge(connection?.bridgeId ?? id, error, "remote control stream");
   }
 
   private bridgeFrame(id: string, frame: BridgeFrame): void {

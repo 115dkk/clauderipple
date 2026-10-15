@@ -5,7 +5,7 @@
 // Pure logic over a small context, so it runs the same inside the Durable Object (worker.ts, where
 // the context is the hibernation API: tags survive the object sleeping between frames) and in an
 // in-process test with fake sockets.
-import { RELAY_CLOSE, RELAY_FRAME_CAP } from "../src/protocol.ts";
+import { HOST_SILENT_MS, RELAY_CLOSE, RELAY_FRAME_CAP } from "../src/protocol.ts";
 import type { RelayMsg } from "../src/protocol.ts";
 
 export interface Sock {
@@ -15,8 +15,16 @@ export interface Sock {
 
 export interface RoomCtx<S extends Sock> {
   accept(ws: S, tags: string[]): void;
+  /**
+   * Accepted sockets with this tag. On Cloudflare this includes a socket the room closed whose
+   * other end never answered the close (a host that vanished without a FIN): it stays listed, in
+   * acceptance order, until TCP gives up — measured 8+ minutes on the deployed relay (2026-10-15).
+   */
   sockets(tag: string): S[];
   tags(ws: S): string[];
+  /** When the runtime last answered this socket's "ping" (auto-response), in ms; null if never. */
+  lastPing(ws: S): number | null;
+  now(): number;
   get(key: string): Promise<string | undefined>;
   put(key: string, value: string): Promise<void>;
   newId(): string;
@@ -34,6 +42,8 @@ export function frameBytes(data: string | ArrayBuffer | Uint8Array): number {
 
 export class Room<S extends Sock> {
   private ctx: RoomCtx<S>;
+  /** Pings that reached the room itself (the runtime normally answers them unseen); in memory only. */
+  private pinged = new WeakMap<S, number>();
   constructor(ctx: RoomCtx<S>) { this.ctx = ctx; }
 
   /**
@@ -48,10 +58,16 @@ export class Room<S extends Sock> {
     return known === hash;
   }
 
-  /** The host's control socket. A newer one replaces an older (a host that reconnected before the old socket timed out). */
+  /**
+   * The host's control socket. A newer one replaces an older (a host that reconnected before the
+   * old socket timed out). It is tagged with when it was accepted, because a replaced socket can
+   * stay listed long after its close (see RoomCtx.sockets) and must never be routed to again.
+   */
   hostControl(ws: S): void {
     const old = this.ctx.sockets("host");
-    this.ctx.accept(ws, ["host"]);
+    // Strictly increasing even within one millisecond, so "newest" is never a tie.
+    const at = Math.max(this.ctx.now(), ...old.map((o) => this.acceptedAt(o) + 1));
+    this.ctx.accept(ws, ["host", `at:${at}`]);
     for (const o of old) shut(o, RELAY_CLOSE.replaced, "replaced");
     say(ws, { relay: "hello" });
     // Phones that arrived while the host was away and still have no data socket.
@@ -61,11 +77,30 @@ export class Room<S extends Sock> {
     }
   }
 
-  /** A phone. It waits for {"relay":"open"} before its handshake; with no host connected it is told so at once. */
+  /**
+   * The one host socket a phone may be sent to: the newest, and only while it is alive — it pinged
+   * (or was accepted) within HOST_SILENT_MS. A silent newest socket is closed (a live host that
+   * reads the close reconnects at once; a vanished one costs nothing) and the phone hears "host
+   * offline" instead of waiting on a socket nobody reads.
+   */
+  private host(): S | null {
+    let newest: S | null = null;
+    let newestAt = -1;
+    for (const h of this.ctx.sockets("host")) {
+      const at = this.acceptedAt(h);
+      if (at > newestAt) { newest = h; newestAt = at; }
+    }
+    if (!newest) return null;
+    const heard = Math.max(newestAt, this.ctx.lastPing(newest) ?? 0, this.pinged.get(newest) ?? 0);
+    if (this.ctx.now() - heard > HOST_SILENT_MS) { shut(newest, RELAY_CLOSE.stale, "no ping"); return null; }
+    return newest;
+  }
+
+  /** A phone. It waits for {"relay":"open"} before its handshake; with no live host it is told so at once. */
   client(ws: S): void {
     const conn = this.ctx.newId();
     this.ctx.accept(ws, ["client", `c:${conn}`]);
-    const host = this.ctx.sockets("host")[0];
+    const host = this.host();
     if (!host) { shut(ws, RELAY_CLOSE.hostOffline, "host offline"); return; }
     say(host, { relay: "connect", conn });
   }
@@ -89,7 +124,7 @@ export class Room<S extends Sock> {
     const tags = this.ctx.tags(ws);
     if (tags.includes("host")) {
       // Only pings come this way; the Durable Object answers them without waking (auto-response).
-      if (data === "ping") ws.send("pong");
+      if (data === "ping") { this.pinged.set(ws, this.ctx.now()); ws.send("pong"); }
       return;
     }
     const phone = this.connOf(ws, "c:");
@@ -104,6 +139,13 @@ export class Room<S extends Sock> {
     if (phone) for (const d of this.ctx.sockets(`d:${phone}`)) if (d !== ws) shut(d, 1000, "phone left");
     const host = this.connOf(ws, "d:");
     if (host) for (const c of this.ctx.sockets(`c:${host}`)) if (c !== ws) shut(c, RELAY_CLOSE.peerGone, "host left");
+  }
+
+  /** 0 for a host socket accepted before sockets carried the tag (older than any tagged one). */
+  private acceptedAt(ws: S): number {
+    const tag = this.ctx.tags(ws).find((t) => t.startsWith("at:"));
+    const at = tag ? Number(tag.slice(3)) : 0;
+    return Number.isFinite(at) ? at : 0;
   }
 
   private connOf(ws: S, prefix: "c:" | "d:"): string | null {

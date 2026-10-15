@@ -132,7 +132,8 @@ export class HostServer {
 
   constructor(opts: ServerOptions) {
     this.opts = opts;
-    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true };
+    const desktopProblem = opts.sessions.desktopProblem?.();
+    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
     this.http.on("upgrade", (req, socket, head) => {
@@ -507,6 +508,18 @@ export class HostServer {
     const next: HostInfo = { ...this.hostInfo, routerOk: st.ok, ...(st.problem ? { routerProblem: st.problem } : {}) };
     if (!st.problem) delete next.routerProblem;
     if (next.routerOk === this.hostInfo.routerOk && next.routerProblem === this.hostInfo.routerProblem) return;
+    this.setHostInfo(next);
+  }
+
+  /** Sessions says Claude app sessions became unreachable (the Mac's login) or reachable again. */
+  setDesktopProblem(problem: string | null): void {
+    if ((problem ?? undefined) === this.hostInfo.desktopProblem) return;
+    const next: HostInfo = { ...this.hostInfo, ...(problem ? { desktopProblem: problem } : {}) };
+    if (!problem) delete next.desktopProblem;
+    this.setHostInfo(next);
+  }
+
+  private setHostInfo(next: HostInfo): void {
     this.hostInfo = next;
     for (const c of this.clients) if (c.authed) this.send(c, { t: "host", host: next });
   }

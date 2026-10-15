@@ -5,7 +5,13 @@
 // phone's handshake (e2ee.ts) and hands the decrypted channel to HostServer like any other phone.
 // The relay sees ciphertext only; the pairing token is checked inside the channel, as on the
 // direct path.
-import { BACKOFF_CAP_MS, FRAME_CAP, PING_MS, READY_MS, RELAY_FRAME_CAP, STALE_MS } from "./protocol.ts";
+//
+// A pong proves only that the relay's edge answers this socket, not that phones reach it: on
+// 2026-10-15 the relay kept sending every phone to a replaced socket that never answered its close,
+// while this socket stayed "connected" and phones sat at "connecting" (see Room.host). So after
+// each hello and every ROUTE_CHECK_MS the host also walks the phone's path itself — a client socket
+// to its own room must come back "open" — and reconnects when it does not.
+import { BACKOFF_CAP_MS, FRAME_CAP, PING_MS, READY_MS, RELAY_CLOSE, RELAY_FRAME_CAP, STALE_MS } from "./protocol.ts";
 import type { RelayMsg } from "./protocol.ts";
 import path from "node:path";
 import { fromB64u, hostAccept, toB64u } from "./e2ee.ts";
@@ -36,7 +42,7 @@ export interface WsLike {
   terminate(): void;
   on(event: "open", fn: () => void): unknown;
   on(event: "message", fn: (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => void): unknown;
-  on(event: "close", fn: (code: number) => void): unknown;
+  on(event: "close", fn: (code: number, reason?: Buffer | string) => void): unknown;
   on(event: "error", fn: (e: Error) => void): unknown;
   on(event: "unexpected-response", fn: (req: unknown, res: { statusCode?: number }) => void): unknown;
 }
@@ -63,6 +69,16 @@ export function relayBackoff(attempt: number): number {
   return Math.min(BACKOFF_CAP_MS, Math.max(1, attempt) * 1000);
 }
 
+/** First walk of the phone's path after a hello, then every ROUTE_CHECK_MS while connected. */
+export const ROUTE_FIRST_MS = 2_000;
+export const ROUTE_CHECK_MS = 5 * 60_000;
+/** A probe phone that is not let through ("open") within this has no route to this host. */
+export const ROUTE_TIMEOUT_MS = 10_000;
+/** A ping timer this late means the process did not run (sleep, or a blocked event loop). */
+export const STALL_MS = 5_000;
+/** After such a stall, how long a fresh ping has to be answered before the socket is called dead. */
+export const STALL_GRACE_MS = 5_000;
+
 function wsOrigin(relay: string): string {
   const u = new URL(relay);
   return `${u.protocol === "https:" ? "wss:" : "ws:"}//${u.host}`;
@@ -70,6 +86,7 @@ function wsOrigin(relay: string): string {
 
 const toBytes = (data: Buffer | ArrayBuffer | Buffer[]): Uint8Array =>
   Array.isArray(data) ? new Uint8Array(Buffer.concat(data)) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+const toText = (data: Buffer | ArrayBuffer | Buffer[]): string => Buffer.from(toBytes(data)).toString("utf8");
 
 /**
  * One phone through the relay, after the handshake: a Peer whose frames are sealed and opened
@@ -126,15 +143,21 @@ export class SecurePeer implements Peer {
 export class RelayHost {
   state: RelayState = "connecting";
   attempt = 0;
+  /** Consecutive route checks that found no way from a phone to this host. */
+  routeFailures = 0;
   private deps: RelayDeps;
   private now: () => number;
   private setTimer: (fn: () => void, ms: number) => unknown;
   private clearTimer: (id: unknown) => void;
   private sock: WsLike | null = null;
   private lastRx = 0;
-  private timers: { retry: unknown; ping: unknown; ready: unknown } = { retry: null, ping: null, ready: null };
+  private downSince: number | null = null;
+  private timers: { retry: unknown; ping: unknown; ready: unknown; route: unknown } = { retry: null, ping: null, ready: null, route: null };
   private stopped = false;
   private data = new Set<WsLike>();
+  private probe: WsLike | null = null;
+  /** A route check passed on the current control socket (said once per connection). */
+  private routeConfirmed = false;
 
   constructor(deps: RelayDeps) {
     this.deps = deps;
@@ -154,10 +177,15 @@ export class RelayHost {
     this.data.clear();
   }
 
+  private log(line: string): void { this.deps.log?.(`relay: ${line}`); }
+
   private headers(): Record<string, string> { return { "x-ripple-host-secret": this.deps.secret }; }
 
   private clearAll(): void {
-    for (const k of ["retry", "ping", "ready"] as const) if (this.timers[k] !== null) { this.clearTimer(this.timers[k]); this.timers[k] = null; }
+    for (const k of ["retry", "ping", "ready", "route"] as const) if (this.timers[k] !== null) { this.clearTimer(this.timers[k]); this.timers[k] = null; }
+    const probe = this.probe;
+    this.probe = null;
+    if (probe) try { probe.terminate(); } catch { /* gone */ }
   }
 
   private connect(): void {
@@ -165,7 +193,7 @@ export class RelayHost {
     this.state = "connecting";
     let sock: WsLike;
     try { sock = this.deps.makeSocket(`${wsOrigin(this.deps.relay)}/ws/host?server=${encodeURIComponent(this.deps.serverId)}`, this.headers()); } catch (e) {
-      this.deps.log?.(`relay: ${(e as Error).message}`);
+      this.log((e as Error).message);
       this.fail(null);
       return;
     }
@@ -174,7 +202,11 @@ export class RelayHost {
     // From creation: a connect that hangs after a network change fires neither open nor close for minutes.
     this.timers.ready = this.setTimer(() => {
       this.timers.ready = null;
-      if (!ready && this.sock === sock) { try { sock.terminate(); } catch { /* gone */ } this.fail(sock); }
+      if (!ready && this.sock === sock) {
+        this.log(`no hello within ${READY_MS / 1000} s; trying again`);
+        try { sock.terminate(); } catch { /* gone */ }
+        this.fail(sock);
+      }
     }, READY_MS);
     sock.on("open", () => { if (this.sock === sock) this.lastRx = this.now(); });
     sock.on("message", (data) => {
@@ -187,47 +219,133 @@ export class RelayHost {
       if (msg.relay === "hello" && !ready) {
         ready = true;
         if (this.timers.ready !== null) { this.clearTimer(this.timers.ready); this.timers.ready = null; }
-        if (this.attempt > 0) this.deps.log?.(`relay: connected again after ${this.attempt} attempt(s)`);
-        else this.deps.log?.(`relay: connected to ${this.deps.relay}`);
+        if (this.attempt > 0) this.log(`connected again after ${this.attempt} attempt(s), ${Math.round((this.now() - (this.downSince ?? this.now())) / 1000)} s without the relay`);
+        else this.log(`connected to ${this.deps.relay}`);
         this.state = "open";
         this.attempt = 0;
+        this.downSince = null;
         this.armPing(sock);
+        this.routeConfirmed = false;
+        this.armRouteCheck(sock, ROUTE_FIRST_MS);
       } else if (msg.relay === "connect" && typeof msg.conn === "string") this.openData(msg.conn);
     });
     sock.on("unexpected-response", (_req, res) => {
       // 403: another host already holds this server id with a different secret. Retrying is still right (it may be a stale room), but say so.
-      this.deps.log?.(`relay: refused with HTTP ${res.statusCode ?? "?"}`);
+      this.log(`refused with HTTP ${res.statusCode ?? "?"}`);
       // With a listener here, `ws` leaves the handshake to us; end it so the close (and the retry) follow now.
       try { sock.terminate(); } catch { /* gone */ }
     });
-    sock.on("close", () => { if (this.sock === sock) this.fail(sock); });
+    sock.on("close", (code, reason) => {
+      if (this.sock !== sock) return;
+      const why = reason ? String(reason) : "";
+      if (code === RELAY_CLOSE.replaced) {
+        // This process keeps one control socket, so a replacement came from somewhere else: another
+        // ripple-host with the same server id and secret. Back off fully rather than trade the room
+        // back and forth with it every second.
+        this.log(`replaced by another connection with this server id (a second ripple-host sharing this host.json?); retrying in ${BACKOFF_CAP_MS / 1000} s`);
+        this.fail(sock, BACKOFF_CAP_MS);
+        return;
+      }
+      if (ready) this.log(`connection closed (${code}${why ? ` ${why}` : ""})`);
+      this.fail(sock);
+    });
     sock.on("error", () => { /* close follows */ });
   }
 
-  private fail(sock: WsLike | null): void {
+  /** The current control socket ended: retry after the backoff, or after `wait` when given. */
+  private fail(sock: WsLike | null, wait?: number): void {
     if (sock && this.sock !== sock) return;
     this.sock = null;
     this.clearAll();
     if (this.stopped) return;
     this.attempt++;
+    this.downSince ??= this.now();
     this.state = "waiting";
-    this.timers.retry = this.setTimer(() => { this.timers.retry = null; this.connect(); }, relayBackoff(this.attempt));
+    this.timers.retry = this.setTimer(() => { this.timers.retry = null; this.connect(); }, wait ?? relayBackoff(this.attempt));
   }
 
   private armPing(sock: WsLike): void {
+    let due = this.now() + PING_MS;
+    let graceUntil = 0;
     const loop = (): void => {
       this.timers.ping = null;
       if (this.sock !== sock) return;
-      if (this.now() - this.lastRx > STALE_MS) {
+      const now = this.now();
+      const late = now - due;
+      if (late > STALL_MS) {
+        // This process did not run for a while: the Mac slept, or something blocked the event
+        // loop. A pong that arrived meanwhile may still be queued behind this timer, so silence
+        // proves nothing yet; ping, and judge a moment later.
+        this.log(`timers ran ${Math.round(late / 1000)} s late (sleep or a blocked event loop); checking the connection`);
+        graceUntil = now + STALL_GRACE_MS;
+      } else if (now - this.lastRx > STALE_MS && now >= graceUntil) {
         // Half-open: no frame, not even a pong, for 30 s. Drop it ourselves rather than wait for TCP.
+        this.log(`nothing from the relay for ${Math.round((now - this.lastRx) / 1000)} s; dropping the connection`);
         try { sock.terminate(); } catch { /* gone */ }
         this.fail(sock);
         return;
       }
       if (sock.readyState === OPEN) try { sock.send("ping"); } catch { /* close follows */ }
-      this.timers.ping = this.setTimer(loop, PING_MS);
+      const next = now < graceUntil ? STALL_GRACE_MS : PING_MS;
+      due = now + next;
+      this.timers.ping = this.setTimer(loop, next);
     };
     this.timers.ping = this.setTimer(loop, PING_MS);
+  }
+
+  private armRouteCheck(sock: WsLike, ms: number): void {
+    if (this.timers.route !== null) this.clearTimer(this.timers.route);
+    this.timers.route = this.setTimer(() => { this.timers.route = null; this.checkRoute(sock); }, ms);
+  }
+
+  /**
+   * Walk the phone's path: a client socket to this host's own room must be let through ("open"),
+   * which takes the relay sending "connect" to the socket this host holds and this host's data
+   * socket arriving. The probe then leaves; it never says hello, so HostServer never sees it.
+   */
+  private checkRoute(sock: WsLike): void {
+    if (this.sock !== sock || this.stopped) return;
+    let probe: WsLike;
+    try { probe = this.deps.makeSocket(`${wsOrigin(this.deps.relay)}/ws/client?server=${encodeURIComponent(this.deps.serverId)}`, {}); } catch (e) {
+      this.log(`route check could not start: ${(e as Error).message}`);
+      this.armRouteCheck(sock, ROUTE_CHECK_MS);
+      return;
+    }
+    this.probe = probe;
+    let settled = false;
+    const finish = (ok: boolean, why: string): void => {
+      if (settled) return;
+      settled = true;
+      this.clearTimer(timeout);
+      if (this.probe === probe) this.probe = null;
+      try { probe.close(1000, "route check"); } catch { /* gone */ }
+      if (this.sock !== sock || this.stopped) return;
+      if (ok) {
+        if (this.routeFailures > 0) this.log(`phones reach this host again (after ${this.routeFailures} failed route check(s))`);
+        else if (!this.routeConfirmed) this.log("route check: phones reach this host");
+        this.routeConfirmed = true;
+        this.routeFailures = 0;
+        this.armRouteCheck(sock, ROUTE_CHECK_MS);
+        return;
+      }
+      this.routeFailures++;
+      // Said once per streak (then every tenth), not every retry.
+      if (this.routeFailures === 1 || this.routeFailures % 10 === 0) this.log(`route check failed (${why}): a phone cannot reach this host through the relay; reconnecting (failure ${this.routeFailures})`);
+      try { sock.terminate(); } catch { /* gone */ }
+      // Growing waits: a route the relay keeps broken is retried, not hammered.
+      this.fail(sock, relayBackoff(5 * this.routeFailures));
+    };
+    const timeout = this.setTimer(() => finish(false, `not let through within ${ROUTE_TIMEOUT_MS / 1000} s`), ROUTE_TIMEOUT_MS);
+    probe.on("message", (data, isBinary) => {
+      if (isBinary) return;
+      try { if ((JSON.parse(toText(data)) as RelayMsg).relay === "open") finish(true, ""); } catch { /* not ours */ }
+    });
+    probe.on("close", (code) => finish(false, code === RELAY_CLOSE.hostOffline ? "the relay says this host is offline" : `closed ${code}`));
+    probe.on("unexpected-response", (_req, res) => {
+      finish(false, `HTTP ${res.statusCode ?? "?"}`);
+      try { probe.terminate(); } catch { /* gone */ }
+    });
+    probe.on("error", () => { /* close follows */ });
   }
 
   /** A phone is waiting in the room: open its data socket and answer its handshake. */

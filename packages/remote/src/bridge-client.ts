@@ -8,8 +8,18 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { InputBlock } from "./images.ts";
 
 export const DESKTOP_BLOCKED = "Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
+export const LOGIN_EXPIRED = "이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.";
+export const LOGIN_REFUSED = "이 컴퓨터의 Claude 로그인이 거절되었습니다 (401). Claude 앱을 한 번 열어 주십시오.";
 export interface BridgeAuth { accessToken: string; organizationUuid: string; expiresAt: number }
 class BridgeNetworkError extends Error {}
+/**
+ * This Mac's Claude login cannot be used (expired, unreadable, or refused): nothing reaches any
+ * Claude app session until Claude Code refreshes it, which the host never does itself. A state of
+ * the whole host, not of one session, so phones are told once rather than per request.
+ */
+export class BridgeAuthError extends Error {}
+/** While the login is expired, the keychain is read again at most this often (a child process each time). */
+export const AUTH_REREAD_MS = 30_000;
 export function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -20,7 +30,7 @@ export function loadBridgeAuth(): BridgeAuth {
     const account = object(object(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8")))?.oauthAccount);
     if (typeof oauth?.accessToken !== "string" || typeof oauth.expiresAt !== "number" || typeof account?.organizationUuid !== "string") throw new Error();
     return { accessToken: oauth.accessToken, expiresAt: oauth.expiresAt, organizationUuid: account.organizationUuid };
-  } catch { throw new Error("이 컴퓨터의 Claude 로그인 정보를 읽을 수 없습니다."); }
+  } catch { throw new BridgeAuthError("이 컴퓨터의 Claude 로그인 정보를 읽을 수 없습니다."); }
 }
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
 /** `slash_commands` minus `terminal_slash_commands`, which phone UIs should hide (SDK init docs). */
@@ -34,22 +44,36 @@ export class BridgeClient {
   private fetchFn: typeof fetch;
   private loadAuth: () => BridgeAuth;
   private cached: BridgeAuth | null = null;
-  constructor(options: { fetch?: typeof fetch; auth?: () => BridgeAuth } = {}) {
+  private readAt = 0;
+  private now: () => number;
+  constructor(options: { fetch?: typeof fetch; auth?: () => BridgeAuth; now?: () => number } = {}) {
     this.fetchFn = options.fetch ?? fetch;
     this.loadAuth = options.auth ?? loadBridgeAuth;
+    this.now = options.now ?? Date.now;
   }
   /**
    * The keychain read is a synchronous child process; doing it per request blocked the host's
    * event loop under the 3 s state poll until relay pings timed out (2026-10-12). Kept in memory
-   * and reread only near expiry or after a 401 (Claude Code refreshes the token on its own).
+   * and reread only near expiry or after a 401 (Claude Code refreshes the token on its own) — and
+   * near or past expiry at most every AUTH_REREAD_MS: an expired login otherwise meant one keychain
+   * read per request, every poll, for as long as it stayed expired (2026-10-15).
    */
   private auth(): BridgeAuth {
-    if (!this.cached || this.cached.expiresAt - Date.now() < 5 * 60_000) this.cached = this.loadAuth();
-    return this.cached;
+    const now = this.now();
+    const stale = !this.cached || this.refused || this.cached.expiresAt - now < 5 * 60_000;
+    if (stale && (!this.cached || now - this.readAt >= AUTH_REREAD_MS)) {
+      this.readAt = now;
+      this.cached = this.loadAuth();
+      this.refused = false;
+    }
+    return this.cached!;
   }
+  /** The API answered 401 to the token in `cached`; cleared when the keychain is read again. */
+  private refused = false;
   private async request(id: string, suffix: string, options: RequestInit): Promise<Response> {
     const auth = this.auth();
-    if (auth.expiresAt <= Date.now()) throw new Error("이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.");
+    if (this.refused) throw new BridgeAuthError(LOGIN_REFUSED);
+    if (auth.expiresAt <= this.now()) throw new BridgeAuthError(LOGIN_EXPIRED);
     let response: Response;
     try {
       // The bridge treats a prompt as the user's own only from a person's app platform
@@ -60,8 +84,14 @@ export class BridgeClient {
       });
     } catch { throw new BridgeNetworkError("Claude 앱과 연결하지 못했습니다."); }
     if (!response.ok) {
-      if (response.status === 401) this.cached = null;
       await response.body?.cancel();
+      if (response.status === 401) {
+        // Refused: the keychain is read again (Claude Code may have refreshed it) — at once if the
+        // last read is AUTH_REREAD_MS old, else then; until then requests fail here without a call.
+        if (this.now() - this.readAt >= AUTH_REREAD_MS) this.cached = null;
+        else this.refused = true;
+        throw new BridgeAuthError(LOGIN_REFUSED);
+      }
       // Do not expose server bodies (which may echo credentials), or retry rejected writes.
       throw new Error(`Claude 앱이 메시지를 받지 않았습니다 (${response.status}).`);
     }

@@ -28,8 +28,13 @@ export const RELAY_FRAME_CAP = FRAME_CAP + 1024;
  * The host pings its control socket with the text "ping" and the relay answers "pong".
  */
 export type RelayMsg = { relay: "hello" } | { relay: "connect"; conn: string } | { relay: "open" };
-/** Close codes the relay uses. */
-export const RELAY_CLOSE = { badRequest: 4400, badSecret: 4401, hostOffline: 4404, replaced: 4409, peerGone: 4410, tooBig: 1009 } as const;
+/** Close codes the relay uses. `stale`: the host's control socket sent no ping for HOST_SILENT_MS. */
+export const RELAY_CLOSE = { badRequest: 4400, badSecret: 4401, hostOffline: 4404, stale: 4408, replaced: 4409, peerGone: 4410, tooBig: 1009 } as const;
+/**
+ * The relay routes phones only to the host's newest control socket, and only while that socket
+ * pinged within this long (PING_MS cadence; a missed ping or two is not a verdict).
+ */
+export const HOST_SILENT_MS = STALE_MS + PING_MS;
 
 export const PERMISSION_MODES = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const;
 export type PermissionMode = typeof PERMISSION_MODES[number];
@@ -155,7 +160,11 @@ export interface ProviderGroup { provider: string; label: string; usable: boolea
 
 export interface FolderEntry { path: string; name: string; lastUsed?: number; model?: string }
 
-export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string }
+/**
+ * `desktopProblem`: why sends, approvals and live state for Claude app (Mac) sessions cannot work
+ * right now — this Mac's Claude login, in the host's words — absent when they can.
+ */
+export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string }
 
 // ---- client → host --------------------------------------------------------------------
 

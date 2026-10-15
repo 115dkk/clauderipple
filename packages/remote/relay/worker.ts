@@ -18,6 +18,7 @@ interface DoState {
   getWebSockets(tag?: string): CfSocket[];
   getTags(ws: CfSocket): string[];
   setWebSocketAutoResponse(pair: unknown): void;
+  getWebSocketAutoResponseTimestamp(ws: CfSocket): Date | null;
   storage: { get<T>(key: string): Promise<T | undefined>; put<T>(key: string, value: T): Promise<void> };
 }
 interface DoStub { fetch(req: Request): Promise<Response> }
@@ -46,6 +47,8 @@ export class RelayRoom {
       accept: (ws, tags) => state.acceptWebSocket(ws, tags),
       sockets: (tag) => state.getWebSockets(tag),
       tags: (ws) => state.getTags(ws),
+      lastPing: (ws) => state.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? null,
+      now: () => Date.now(),
       get: (k) => state.storage.get<string>(k),
       put: (k, v) => state.storage.put(k, v),
       newId: () => crypto.randomUUID(),
