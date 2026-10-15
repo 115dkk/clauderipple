@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
@@ -55,8 +55,7 @@ const lastRealReplyAt = atom({ plugin: 'ripple', key: 'lastRealReplyAt' } as con
 const context = atom({ plugin: 'ripple', key: 'context' } as const, null)
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
 const limit = atom({ plugin: 'ripple', key: 'limit' } as const, null)
-const claudeLimits = atom({ plugin: 'ripple', key: 'claudeLimits' } as const, null)
-const gptLimits = atom({ plugin: 'ripple', key: 'gptLimits' } as const, null)
+const limits = atom({ plugin: 'ripple', key: 'limits' } as const, null)
 const hotHidden = atom({ plugin: 'ripple', key: 'hotHidden' } as const, null)
 const hotHiddenFor = atom({ plugin: 'ripple', key: 'hotHiddenFor' } as const, null)
 const saveUntil = atom({ plugin: 'ripple', key: 'saveUntil' } as const, null)
@@ -1003,30 +1002,62 @@ async function routerClaude($: EngineInterface): Promise<{ limits: SessionRateLi
   } catch (error) { await report($, 'claude limits row', error) }
   return routerClaudeCache
 }
-/** Every ChatGPT account's windows, at most one round a minute and only while the limits row can
- * show them. Writes the state only when the windows moved: a redraw that shows nothing new is
- * wasted (each answer is drawn afresh). */
-let gptLimitsAt = 0
-async function refreshGptLimits($: EngineInterface): Promise<void> {
+/**
+ * The limits row as a router that predates `GET /api/limits` still answers it: Claude's plan in the
+ * unified shape, from the older `/api/status` and `/api/chatgpt-accounts` routes. Kept so the row
+ * shows exactly as before until the router is restarted onto the new endpoint.
+ */
+async function fallbackLimits($: EngineInterface): Promise<LimitItem[]> {
+  const now = await $.clock.now()
+  const fromRouter = await routerClaude($)
+  const claudeChat = /^claude-/.test(await $.session.model())
+  // The 5-hour and the weekly (one each, the hotter reading winning when both sources name it), then
+  // the per-model weeklies the router reports. Claude's plan shows whatever this chat runs on.
+  const usage = claudeChat ? (await $.session.usage()).rateLimits : []
+  const mains = new Map<'five_hour' | 'seven_day', SessionRateLimit>()
+  for (const w of [...usage, ...fromRouter.limits]) {
+    if (w.kind !== 'five_hour' && w.kind !== 'seven_day') continue
+    const prev = mains.get(w.kind)
+    if (!prev || w.percentUsed > prev.percentUsed) mains.set(w.kind, w)
+  }
+  const items: LimitItem[] = (['five_hour', 'seven_day'] as const)
+    .flatMap(kind => mains.get(kind) ? [mains.get(kind)!] : [])
+    .map(w => ({ provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: w.kind as 'five_hour' | 'seven_day', label: '', percent: w.percentUsed, ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}) }))
+  for (const s of fromRouter.scoped) items.push({ provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'scoped', label: s.name, percent: s.percent, ...(s.resetsAt ? { resetsAt: s.resetsAt } : {}) })
+  const admin = await adminUrl($)
+  const status = await $.http.fetch(`${admin}/api/status`)
+  if (status.ok) for (const provider of chatgptProviders(JSON.parse(status.text))) {
+    const response = await $.http.fetch(`${admin}/api/chatgpt-accounts?provider=${encodeURIComponent(provider)}`)
+    if (!response.ok) continue
+    const body: unknown = JSON.parse(response.text)
+    // The router answers for its first ChatGPT provider when the name is not one: not this provider.
+    if (object(body).provider !== provider) continue
+    items.push(...gptLimitsFrom(body, provider, now))
+  }
+  return items
+}
+/**
+ * The whole limits row from the router's `GET /api/limits` — every provider whose quota it can read,
+ * Claude first — at most one round a minute and only while the row can show it. On a router that
+ * predates the endpoint (404) the older per-provider routes answer instead, so the row shows before
+ * the router is restarted. A failure keeps the last good row rather than blanking it, and the state
+ * is written only when it moved: a redraw that shows nothing new is wasted (each answer is drawn
+ * afresh).
+ */
+let limitsAt = 0
+async function refreshLimits($: EngineInterface): Promise<void> {
   if (!(await currentSettings($)).extras.includes('limits')) return
   const now = await $.clock.now()
-  if (now - gptLimitsAt < 60_000) return
-  gptLimitsAt = now
+  if (now - limitsAt < 60_000) return
+  limitsAt = now
   try {
     const admin = await adminUrl($)
-    const status = await $.http.fetch(`${admin}/api/status`)
-    if (!status.ok) return
-    const items: LimitItem[] = []
-    for (const provider of chatgptProviders(JSON.parse(status.text))) {
-      const response = await $.http.fetch(`${admin}/api/chatgpt-accounts?provider=${encodeURIComponent(provider)}`)
-      if (!response.ok) continue
-      const body: unknown = JSON.parse(response.text)
-      // The router answers for its first ChatGPT provider when the name is not one: not this provider.
-      if (object(body).provider !== provider) continue
-      items.push(...gptLimitsFrom(body, provider, now))
-    }
-    if (!same(items, await read($, gptLimits))) await update($, gptLimits, () => items)
-  } catch (error) { await report($, 'gpt limits', error) }
+    const response = await $.http.fetch(`${admin}/api/limits`)
+    let items: LimitItem[] | null = null
+    if (response.ok) items = routerLimitItems(JSON.parse(response.text), now)
+    else if (response.status === 404) items = await fallbackLimits($)
+    if (items && !same(items, await read($, limits))) await update($, limits, () => items)
+  } catch (error) { await report($, 'limits', error) }
 }
 async function refreshUsage($: EngineInterface): Promise<void> {
   const usage = await $.session.usage()
@@ -1053,23 +1084,8 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   if (JSON.stringify(h) !== JSON.stringify(previous)) await update($, hot, () => h)
   const top = rateLimits.filter(l => ['five_hour', 'seven_day'].includes(l.kind)).sort((a, b) => b.percentUsed - a.percentUsed)[0]
   const l = top ? { kind: top.kind, percent: top.percentUsed, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}) } : null
-  // Every window for the limits row: the 5-hour and the weekly (one each, the hotter reading
-  // winning when both sources name it), then the per-model weeklies the router reports. The row
-  // shows Claude's plan whatever this chat runs on: on a chat routed elsewhere the host's windows
-  // are not Claude's, so the router's stand alone (a muse chat showed GPT only, 2026-10-15).
-  const fromRouter = await routerClaude($)
-  const claudeChat = /^claude-/.test(await $.session.model())
-  const mains = new Map<'five_hour' | 'seven_day', SessionRateLimit>()
-  for (const w of [...(claudeChat ? rateLimits : []), ...fromRouter.limits]) {
-    if (w.kind !== 'five_hour' && w.kind !== 'seven_day') continue
-    const prev = mains.get(w.kind)
-    if (!prev || w.percentUsed > prev.percentUsed) mains.set(w.kind, w)
-  }
-  const claudeItems: LimitItem[] = (['five_hour', 'seven_day'] as const)
-    .flatMap(kind => mains.get(kind) ? [mains.get(kind)!] : [])
-    .map(w => ({ provider: 'claude', account: 0, kind: w.kind as 'five_hour' | 'seven_day', label: '', percent: w.percentUsed, ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}) }))
-  for (const s of fromRouter.scoped) claudeItems.push({ provider: 'claude', account: 0, kind: 'scoped', label: s.name, percent: s.percent, ...(s.resetsAt ? { resetsAt: s.resetsAt } : {}) })
-  if (!same(claudeItems, await read($, claudeLimits))) await update($, claudeLimits, () => claudeItems)
+  // The limits row itself is read from the router's `/api/limits` (refreshLimits); the host's own
+  // windows still bind the first row's limit and the hot alert here, as they always have.
   // Check the previous binding deadline before a rolled-forward snapshot replaces it.
   await endModeIfOver($)
   if (JSON.stringify(l) !== JSON.stringify(await read($, limit))) await update($, limit, () => l)
@@ -1107,7 +1123,7 @@ async function tick($: EngineInterface): Promise<void> {
   ticking = true
   try {
     await refreshUsage($)
-    await refreshGptLimits($)
+    await refreshLimits($)
     const now = await $.clock.now()
     const list = await read($, agents)
     if (list.some(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000)) {
@@ -1172,7 +1188,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     model: await read($, modelIs) ? modelName((await read($, modelIs))!) : null,
     context: await read($, context), cache: await read($, cache), warm: { ...w, on: await keepWarmOn($, s), ...(await read($, warmHere) !== null ? { here: true } : {}) },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
-    limits: [...(await read($, claudeLimits) ?? []), ...(await read($, gptLimits) ?? [])],
+    limits: await read($, limits) ?? [],
     auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
     agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),

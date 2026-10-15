@@ -7,9 +7,9 @@ registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS } = await import('../../packages/mod/hooks/session.ts')
+const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { limitGroupName, limitGroups, limitItemName, limitItemTip } = await import('../../packages/mod/hooks/ui/view.ts')
+const { limitGroupName, limitGroups, limitItemName, limitItemTip, narrowLimitGroups } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -54,9 +54,9 @@ test('gpt windows skip paused and needs-login accounts, and number the rest', ()
   ] })
   const at = NOW - 60_000
   assert.deepEqual(gptLimitsFrom(body(at), 'chatgpt', NOW), [
-    { provider: 'chatgpt', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 23, resetsAt: new Date(1792565062 * 1000).toISOString() },
-    { provider: 'chatgpt', account: 1, kind: 'five_hour', label: '', windowMinutes: 300, percent: 64.4, resetsAt: new Date(1792027211.5 * 1000).toISOString() },
-    { provider: 'chatgpt', account: 1, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: new Date(at + 3600 * 1000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 23, resetsAt: new Date(1792565062 * 1000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'five_hour', label: '', windowMinutes: 300, percent: 64.4, resetsAt: new Date(1792027211.5 * 1000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: new Date(at + 3600 * 1000).toISOString() },
   ])
   // An old snapshot still stands (the router only refreshes it on use); a window whose reset has
   // passed does not. An unknown body leaves nothing.
@@ -66,7 +66,7 @@ test('gpt windows skip paused and needs-login accounts, and number the rest', ()
   assert.deepEqual(gptLimitsFrom({}, 'chatgpt', NOW), [])
   // A window of another length keeps its minutes for a generic name.
   const odd = { provider: 'chatgpt', accounts: [{ id: 'a', state: 'ready', quota: { rate_limits: { primary: { used_percent: 5, window_minutes: 43200 } }, at } }] }
-  assert.deepEqual(gptLimitsFrom(odd, 'chatgpt', NOW), [{ provider: 'chatgpt', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 5 }])
+  assert.deepEqual(gptLimitsFrom(odd, 'chatgpt', NOW), [{ provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 5 }])
 })
 
 test('the row names windows, groups accounts, and tips the reset', () => {
@@ -83,7 +83,7 @@ test('the row names windows, groups accounts, and tips the reset', () => {
   assert.equal(limitItemName(items[3]!, 'en'), 'Weekly')
   assert.equal(limitItemName({ provider: 'x', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 5 }, 'ko'), '30일')
   const groups = limitGroups(items)
-  assert.deepEqual(groups.map(g => g.key), ['claude', 'chatgpt#0', 'chatgpt#1'])
+  assert.deepEqual(groups.map(g => g.key), ['claude#0', 'chatgpt#0', 'chatgpt#1'])
   assert.equal(limitGroupName(groups[0]!, false), 'Claude')
   assert.equal(limitGroupName(groups[1]!, false), 'GPT')
   assert.equal(limitGroupName(groups[1]!, true), 'GPT 1')
@@ -98,4 +98,80 @@ test('the bar rounds to integers, and tones the fill', () => {
   assert.ok(barArt(50, 'ink').includes('#67e8f9'), 'the well reading keeps the teal-to-violet fill')
   assert.ok(barArt(88, 'amber').includes('#fde68a'))
   assert.ok(barArt(97, 'red').includes('#fecdd3'))
+})
+
+test('the whole row comes from /api/limits: every provider, in the router order', () => {
+  const future = new Date(NOW + 3_600_000)
+  const past = new Date(NOW - 3_600_000)
+  const win = (kind: string, used_percent: number, window_minutes: number, reset_at?: number) => ({ kind, used_percent, window_minutes, ...(reset_at !== undefined ? { reset_at } : {}) })
+  const body = {
+    providers: [
+      { provider: 'anthropic', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, at: NOW, windows: [
+        win('five_hour', 1, 300),
+        win('seven_day', 88, 10080, future.getTime() / 1000),
+        { kind: 'scoped', label: 'Fable', used_percent: 2, window_minutes: 10080, reset_at: future.getTime() / 1000 },
+      ] }] },
+      { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', accounts: [{ account: 0, at: NOW, windows: [win('seven_day', 23, 10080, future.getTime() / 1000)] }] },
+      { provider: 'google-gemini', type: 'google', title: 'Gemini', accounts: [{ account: 0, at: NOW, windows: [
+        win('five_hour', 0, 300),
+        win('seven_day', 2, 10080, future.getTime() / 1000),
+        { kind: 'scoped', label: '3P', used_percent: 10, window_minutes: 10080, reset_at: future.getTime() / 1000 },
+      ] }] },
+      { provider: 'opencode-go', type: 'opencode-go', title: 'Go', accounts: [{ account: 0, at: NOW, windows: [
+        win('five_hour', 3, 300, future.getTime() / 1000),
+        win('seven_day', 52, 10080, future.getTime() / 1000),
+        win('window', 92, 43200, future.getTime() / 1000),
+      ] }] },
+    ],
+  }
+  const items = routerLimitItems(body, NOW)
+  assert.deepEqual(items.map(i => `${i.title}/${i.kind}${i.label ? ':' + i.label : ''}`), [
+    'Claude/five_hour', 'Claude/seven_day', 'Claude/scoped:Fable',
+    'GPT/seven_day', 'Gemini/five_hour', 'Gemini/seven_day', 'Gemini/scoped:3P',
+    'Go/five_hour', 'Go/seven_day', 'Go/window',
+  ])
+  assert.equal(items[0]!.type, 'anthropic')
+  assert.equal(items[3]!.type, 'chatgpt')
+  assert.equal(items[9]!.windowMinutes, 43200)
+  assert.equal(items[9]!.percent, 92)
+  // A window whose reset has passed no longer stands; an unreadable body leaves nothing.
+  const stale = { providers: [{ provider: 'x', type: 'chatgpt', title: 'GPT', accounts: [{ account: 0, at: NOW, windows: [win('seven_day', 5, 10080, past.getTime() / 1000)] }] }] }
+  assert.deepEqual(routerLimitItems(stale, NOW), [])
+  assert.deepEqual(routerLimitItems({}, NOW), [])
+  assert.deepEqual(routerLimitItems(null, NOW), [])
+})
+
+test('the groups name and order every provider; Claude first, accounts numbered per provider', () => {
+  const items = [
+    { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'five_hour' as const, label: '', percent: 3 },
+    { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 1 },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'seven_day' as const, label: '', percent: 23 },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day' as const, label: '', percent: 41 },
+    { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'seven_day' as const, label: '', percent: 2 },
+  ]
+  const groups = limitGroups(items)
+  assert.deepEqual(groups.map(g => limitGroupName(g, false)), ['Claude', 'Go', 'GPT', 'GPT', 'Gemini'])
+  assert.deepEqual(groups.map(g => g.key), ['anthropic#0', 'opencode-go#0', 'chatgpt#0', 'chatgpt#1', 'google-gemini#0'])
+  // Numbering is per provider: GPT has two accounts, so both read numbered; the others do not.
+  const accounts = new Map<string, number>()
+  for (const g of groups) accounts.set(g.provider, (accounts.get(g.provider) ?? 0) + 1)
+  assert.deepEqual(groups.map(g => limitGroupName(g, (accounts.get(g.provider) ?? 1) > 1)), ['Claude', 'Go', 'GPT 1', 'GPT 2', 'Gemini'])
+})
+
+test('narrowing drops scoped windows, then secondary accounts, then trailing groups', () => {
+  const group = (provider: string, account: number, kinds: string[]) => ({
+    key: provider + '#' + account, provider, account,
+    items: kinds.map((kind, i) => ({ provider, account, kind, label: kind === 'scoped' ? 'S' : '', percent: i })),
+  })
+  const base = [group('anthropic', 0, ['five_hour', 'seven_day', 'scoped']), group('chatgpt', 0, ['seven_day']), group('google-gemini', 0, ['five_hour', 'seven_day', 'scoped']), group('opencode-go', 0, ['five_hour', 'seven_day', 'window'])]
+  const measure = (gs: readonly { items: unknown[] }[]) => gs.reduce((n, g) => n + g.items.length, 0) + gs.length
+  // Everything fits: unchanged.
+  assert.deepEqual(narrowLimitGroups(base, 100, measure)?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0', 'opencode-go#0'])
+  // The scoped windows go first, then a trailing group.
+  const narrowed = narrowLimitGroups(base, 11, measure)
+  assert.deepEqual(narrowed?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
+  assert.deepEqual(narrowed?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  // Down to Claude alone; and null when not even that fits.
+  assert.deepEqual(narrowLimitGroups(base, 4, measure)?.map(g => g.key), ['anthropic#0'])
+  assert.equal(narrowLimitGroups(base, 1, measure), null)
 })

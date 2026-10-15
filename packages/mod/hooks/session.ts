@@ -1,5 +1,5 @@
 import type { SessionContextUsage, SessionRateLimit } from 'claude-code'
-import type { CacheMemo, Hot } from '../types'
+import type { CacheMemo, Hot, LimitItem } from '../types'
 
 export function hottest(rateLimits: readonly SessionRateLimit[]): Hot | null {
   const eligible = rateLimits.filter(limit => ['five_hour', 'seven_day'].includes(limit.kind) && limit.percentUsed >= 80)
@@ -54,6 +54,65 @@ export function claudeScopedFrom(status: unknown, now: number): ScopedLimit[] {
     const reset = typeof entry.reset_at === 'number' ? entry.reset_at * (entry.reset_at < 1e12 ? 1000 : 1) : NaN
     return [{ name: entry.name, percent: Math.round(entry.used_percent * 10) / 10, ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}) }]
   })
+}
+
+const KINDS = ['five_hour', 'seven_day', 'scoped', 'window'] as const
+type LimitKind = (typeof KINDS)[number]
+
+/** One window of `GET /api/limits` as a limits-row item, or null when it carries nothing to show. */
+function limitItemFromWindow(w: unknown, provider: string, type: string | undefined, title: string | undefined, account: number, now: number): LimitItem | null {
+  const o = w && typeof w === 'object' && !Array.isArray(w) ? w as Record<string, unknown> : {}
+  const kind = o.kind
+  if (typeof kind !== 'string' || !(KINDS as readonly string[]).includes(kind)) return null
+  const used = o.used_percent
+  if (typeof used !== 'number' || !Number.isFinite(used)) return null
+  const minutes = typeof o.window_minutes === 'number' && o.window_minutes > 0 ? o.window_minutes : undefined
+  const reset = typeof o.reset_at === 'number' && Number.isFinite(o.reset_at) ? o.reset_at * (o.reset_at < 1e12 ? 1000 : 1) : NaN
+  // A window whose reset has passed no longer stands (as the ChatGPT reader has always said).
+  if (Number.isFinite(reset) && reset <= now) return null
+  return {
+    provider,
+    ...(type ? { type } : {}),
+    ...(title ? { title } : {}),
+    account,
+    kind: kind as LimitKind,
+    label: typeof o.label === 'string' ? o.label : '',
+    ...(minutes !== undefined ? { windowMinutes: minutes } : {}),
+    percent: Math.round(used * 10) / 10,
+    ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}),
+  }
+}
+
+/**
+ * Every provider's windows from the router's `GET /api/limits`: one shape for Claude, each ChatGPT
+ * account and each Antigravity account (see `buildLimits` in packages/router/src/admin.ts). The
+ * providers keep the router's order (Claude first), and each account's windows keep theirs.
+ */
+export function routerLimitItems(body: unknown, now: number): LimitItem[] {
+  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const providers = object(body).providers
+  if (!Array.isArray(providers)) return []
+  const out: LimitItem[] = []
+  for (const p of providers) {
+    const entry = object(p)
+    const provider = typeof entry.provider === 'string' ? entry.provider : ''
+    if (!provider) continue
+    const type = typeof entry.type === 'string' ? entry.type : undefined
+    const title = typeof entry.title === 'string' ? entry.title : undefined
+    const accounts = entry.accounts
+    if (!Array.isArray(accounts)) continue
+    for (const a of accounts) {
+      const account = object(a)
+      const index = typeof account.account === 'number' ? account.account : 0
+      const windows = account.windows
+      if (!Array.isArray(windows)) continue
+      for (const w of windows) {
+        const item = limitItemFromWindow(w, provider, type, title, index, now)
+        if (item) out.push(item)
+      }
+    }
+  }
+  return out
 }
 
 /**

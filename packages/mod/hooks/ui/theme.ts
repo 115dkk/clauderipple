@@ -84,6 +84,7 @@ export function textTone(appearance: Appearance): typeof TEXT {
 const KNOWN: Record<string, string> = {
   anthropic: '#d97757',
   chatgpt: '#10a37f',
+  google: '#4285f4',
   'google-gemini': '#4285f4',
   deepseek: '#4d6bfe',
   'opencode-go': '#9333ea',

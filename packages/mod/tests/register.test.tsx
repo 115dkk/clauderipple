@@ -624,10 +624,15 @@ for (const [tier, rung, agent, model] of [
 test('the limits row shows Claude\'s plan on a chat that runs on another provider', async ($, on) => {
   const b = boundaries(on, { extras: ['limits'] })
   b.setModel('muse-spark-1.3-contributor')
-  const status = { claude: { accounts: [{ id: 'current', quota: { at: NOW, rate_limits: { primary: { used_percent: 1, window_minutes: 300, reset_at: (NOW + 3_600_000) / 1000 }, secondary: { used_percent: 88, window_minutes: 10080, reset_at: (NOW + 7_200_000) / 1000 } }, scoped: [{ name: 'Fable', used_percent: 2, window_minutes: 10080 }] } }] } }
+  // The unified `/api/limits` body: Claude's plan regardless of the chat's routed provider.
+  const limits = { providers: [{ provider: 'claude', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, at: NOW, windows: [
+    { kind: 'five_hour', used_percent: 1, window_minutes: 300, reset_at: (NOW + 3_600_000) / 1000 },
+    { kind: 'seven_day', used_percent: 88, window_minutes: 10080, reset_at: (NOW + 7_200_000) / 1000 },
+    { kind: 'scoped', label: 'Fable', used_percent: 2, window_minutes: 10080 },
+  ] }] }] }
   on('http.fetch', ($, e, next) => {
     if (e.url.endsWith('/api/mod-settings')) return next(e)
-    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/status') ? status : { requests: [] }) } }
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/limits') ? limits : { requests: [] }) } }
   })
   await start($)
   await b.clock.advance(15000)

@@ -133,6 +133,8 @@ export function gptLimitsFrom(body: unknown, provider: string, now: number): Lim
       const kind = minutes === 300 ? 'five_hour' : minutes === 10080 ? 'seven_day' : 'window'
       out.push({
         provider,
+        type: 'chatgpt',
+        title: 'GPT',
         account: index,
         kind,
         label: '',

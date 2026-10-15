@@ -397,30 +397,62 @@ export function limitItemName(item: Pick<LimitItem, 'kind' | 'label' | 'windowMi
   return item.label || item.kind.replace(/_/g, ' ')
 }
 
-/** One limits group as the row heads it: Claude's own, or one ChatGPT account ("GPT", "GPT 1", …). */
-export type LimitGroup = { key: string; provider: string; account: number; items: LimitItem[] }
+/** One limits group as the row heads it: a provider's own, or one of its accounts ("GPT", "GPT 1", …). */
+export type LimitGroup = { key: string; provider: string; type?: string; title?: string; account: number; items: LimitItem[] }
 
-/** Claude's windows first, then each ChatGPT account's, in answer order. */
+/**
+ * The groups the row draws, one per provider account, Claude's plan first (the row keeps it to the
+ * last when narrow) and otherwise the router's answer order. Each window's item is unchanged.
+ */
 export function limitGroups(items: readonly LimitItem[]): LimitGroup[] {
   const groups: LimitGroup[] = []
-  const claude = items.filter(item => item.provider === 'claude')
-  if (claude.length) groups.push({ key: 'claude', provider: 'claude', account: 0, items: claude })
-  const seen = new Map<string, LimitItem[]>()
+  const index = new Map<string, LimitGroup>()
   for (const item of items) {
-    if (item.provider === 'claude') continue
     const key = item.provider + '#' + item.account
-    const list = seen.get(key)
-    if (list) list.push(item)
-    else seen.set(key, [item])
+    let group = index.get(key)
+    if (!group) {
+      group = { key, provider: item.provider, ...(item.type ? { type: item.type } : {}), ...(item.title ? { title: item.title } : {}), account: item.account, items: [] }
+      index.set(key, group)
+      groups.push(group)
+    }
+    group.items.push(item)
   }
-  for (const [key, list] of seen) groups.push({ key, provider: list[0]!.provider, account: list[0]!.account, items: list })
-  return groups
+  // Claude's own plan comes first however the router ordered it; a stable sort keeps the rest.
+  const rank = (g: LimitGroup) => (g.type === 'anthropic' || g.provider === 'claude' ? 0 : 1)
+  return groups.sort((a, b) => rank(a) - rank(b))
 }
 
-/** A group's head: "Claude", or "GPT" alone, "GPT 1" and "GPT 2" when several accounts show. */
-export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'account'>, numbered: boolean): string {
-  if (group.provider === 'claude') return 'Claude'
-  return numbered ? 'GPT ' + (group.account + 1) : 'GPT'
+/** The head's name when the item carries none: from its kind, else its config name. */
+function groupTitle(group: Pick<LimitGroup, 'provider' | 'type' | 'title'>): string {
+  if (group.title) return group.title
+  if (group.type === 'anthropic' || group.provider === 'claude') return 'Claude'
+  if (group.type === 'chatgpt' || group.provider === 'chatgpt') return 'GPT'
+  if (group.type === 'google') return 'Gemini'
+  return group.provider
+}
+
+/** A group's head: "Claude", "GPT", "Gemini", or its config name; "GPT 1"/"GPT 2" when numbered. */
+export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'type' | 'title' | 'account'>, numbered: boolean): string {
+  const title = groupTitle(group)
+  return numbered ? title + ' ' + (group.account + 1) : title
+}
+
+/**
+ * The groups that fit `budget`, narrowing in this order: the scoped windows (Fable, 3P, …) go
+ * first, then a later provider's secondary accounts (the last one first), then a later provider's
+ * whole group — Claude's own group (the first) stays to the last. Null when even that does not fit
+ * (no row). `width` measures a set of groups the way the row draws it.
+ */
+export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] | null {
+  let out = [...groups]
+  if (width(out) > budget) out = out.map(g => ({ ...g, items: g.items.filter(item => item.kind !== 'scoped') })).filter(g => g.items.length > 0)
+  while (width(out) > budget && out.some(g => g.account > 0)) {
+    const at = out.map(g => g.account > 0).lastIndexOf(true)
+    out = out.filter((_, i) => i !== at)
+  }
+  while (width(out) > budget && out.length > 1) out = out.slice(0, -1)
+  if (!out.length || width(out) > budget) return null
+  return out
 }
 
 /** A window's hover tip: "Claude 주간 88% · 4시간 뒤 초기화". */

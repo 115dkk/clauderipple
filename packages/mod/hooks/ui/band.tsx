@@ -42,7 +42,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, resetsLabel, seconds } from './view'
+import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -518,45 +518,75 @@ function figureCells(): number {
   return Math.ceil(textPx('100%') / CELL_PX)
 }
 
-function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip: string): DrawnFact {
+/**
+ * How much each window takes, widest first; the row takes the first that fits all its groups.
+ * `gauge`: name, bar, figure. `figures`: name and figure. `compact`: a group's figures alone,
+ * "1/88/2%" in its windows' order (the menu-bar and old footer idiom), each in its own tone, the
+ * names and resets in the group's tip. At ~100 columns four providers fit only compact
+ * (2026-10-15: Claude, GPT, Gemini and Go took ~207 cells as gauges against 96).
+ */
+type LimitDensity = 'gauge' | 'figures' | 'compact'
+const DENSITIES: readonly LimitDensity[] = ['gauge', 'figures', 'compact']
+
+/** Cells one window takes at a density (compact: its number's slot and the separator after it). */
+function limitItemCells(item: LimitItem, density: LimitDensity, lang: Lang): number {
+  if (density === 'compact') return Math.ceil(textPx('100/') / CELL_PX)
+  const name = Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1
+  return name + (density === 'gauge' ? Math.ceil(BAR_W / CELL_PX) + 1 : 0) + figureCells()
+}
+
+function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip: string, density: Exclude<LimitDensity, 'compact'>): DrawnFact {
   const { Text } = el
   const tone = limitTone(item.percent)
   const name = limitItemName(item, frame.lang)
-  const cells = Math.ceil(textPx(name) / CELL_PX) + 1 + Math.ceil(BAR_W / CELL_PX) + 1 + figureCells()
   return drawnFact(
     el,
     key,
-    cells,
+    limitItemCells(item, density, frame.lang),
     [
       <Text key="limit-name" color={MUTE}>{name}</Text>,
-      pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H),
+      density === 'gauge' ? pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H) : '',
       <Text key="limit-value" color={figure(tone)}>{Math.round(item.percent) + '%'}</Text>,
     ],
     tip,
   )
 }
 
+/** A group's windows as one run of figures, "1/88/2%", each figure in its own tone. */
+function compactDrawn(el: Els, frame: Frame, group: LimitGroup, key: string, tip: string, lang: Lang): DrawnFact {
+  const { Text } = el
+  const runs: RenderNode[] = []
+  group.items.forEach((item, i) => {
+    runs.push(<Text key={'n' + i} color={figure(limitTone(item.percent))}>{String(Math.round(item.percent))}</Text>)
+    runs.push(<Text key={'s' + i} color={MUTE}>{i < group.items.length - 1 ? '/' : '%'}</Text>)
+  })
+  const cells = group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang), 0)
+  return drawnFact(el, key, cells, [<Text key="limit-figures">{runs}</Text>], tip)
+}
+
 /** Save mode's word after Claude's windows while it is on (it holds Auto down until Claude's reset). */
 function saveWord(group: LimitGroup, save: boolean, lang: Lang): string {
-  return save && group.provider === 'claude' ? t(lang, 'band.save') : ''
+  return save && (group.type === 'anthropic' || group.provider === 'claude') ? t(lang, 'band.save') : ''
 }
 
-/** Cells a group takes: its head (the provider's dot and short name), its windows, save's word. */
-function limitGroupCells(group: LimitGroup, name: string, lang: Lang, save = false): number {
+/** Cells a group takes at a density: its head (the provider's dot and short name), its windows, save's word. */
+function limitGroupCells(group: LimitGroup, name: string, lang: Lang, density: LimitDensity, save = false): number {
   const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
-  const items = group.items.reduce((n, item) => n + Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1 + Math.ceil(BAR_W / CELL_PX) + 1 + figureCells(), 0)
+  const items = group.items.reduce((n, item) => n + limitItemCells(item, density, lang), 0)
+  const gaps = density === 'compact' ? 0 : Math.max(0, group.items.length - 1)
   const word = saveWord(group, save, lang)
-  return head + 1 + items + Math.max(0, group.items.length - 1) + (word ? 1 + Math.ceil(textPx(word) / CELL_PX) : 0)
+  return head + 1 + items + gaps + (word ? 1 + Math.ceil(textPx(word) / CELL_PX) : 0)
 }
 
-function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string, save: boolean): { node: RenderNode; cells: number; tips: { key: string; text: string }[] } {
+function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string, save: boolean, density: LimitDensity): { node: RenderNode; tips: { key: string; text: string }[] } {
   const { Box, Text } = el
-  const dot = providerColor(group.provider === 'claude' ? 'anthropic' : 'chatgpt')
+  const dot = providerColor(group.type ?? group.provider)
   const word = saveWord(group, save, frame.lang)
-  const items = group.items.map((item, ii) => {
-    const key = 'limits-' + group.key + '-' + ii
-    return limitItemDrawn(el, frame, item, key, limitItemTip(item, name, frame.lang, frame.now))
-  })
+  const tipOf = (item: LimitItem) => limitItemTip(item, name, frame.lang, frame.now)
+  // Compact: one figure run for the group, its tip naming every window in turn.
+  const items = density === 'compact'
+    ? [compactDrawn(el, frame, group, 'limits-' + group.key, group.items.map(tipOf).join(' · '), frame.lang)]
+    : group.items.map((item, ii) => limitItemDrawn(el, frame, item, 'limits-' + group.key + '-' + ii, tipOf(item), density))
   return {
     node: (
       <Box key={'limits-' + group.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
@@ -566,35 +596,35 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string,
         {word ? <Text key="limits-save" color={TONE.violet.text}>{word}</Text> : null}
       </Box>
     ),
-    cells: limitGroupCells(group, name, frame.lang, save),
     tips: items.map(f => ({ key: f.key, text: f.tip! })),
   }
 }
 
 /**
- * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own
- * windows fitting. The GPT accounts go first when narrow (the last one first), then the
- * per-model windows. An account reads "GPT 1" while several are known, even when only one of
- * them fits: the number is the account's, not its place in this row.
+ * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own windows
+ * fitting. Narrow, the scoped windows (Fable, 3P, …) go first, then a later provider's secondary
+ * accounts (the last one first), then a later provider's whole group — Claude's own group stays to
+ * the last. A provider with several accounts numbers them ("GPT 1", "GPT 2"); the number is the
+ * account's, not its place in this row, so it holds even when only one of them fits.
  */
 function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: number): { node: RenderNode; tips: { key: string; text: string }[] } | null {
   const { Box } = el
   const items = view.limits ?? []
   if (!items.length || !view.extras.includes('limits')) return null
   const all = limitGroups(items)
-  const numbered = all.filter(g => g.provider !== 'claude').length > 1
+  // Numbering follows the whole set of accounts a provider has, decided before any narrowing.
+  const accounts = new Map<string, number>()
+  for (const g of all) accounts.set(g.provider, (accounts.get(g.provider) ?? 0) + 1)
+  const numbered = (g: LimitGroup) => (accounts.get(g.provider) ?? 1) > 1
   // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
   const save = !!view.limit?.save
-  const width = (gs: LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered), frame.lang, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
-  let groups = all
-  // Narrow, the GPT accounts go first (the last one first: the earlier accounts stay comparable
-  // from one width to the next), then the per-model windows.
-  while (groups.some(g => g.provider !== 'claude') && width(groups) > budget) {
-    groups = groups.filter((_, i) => i !== groups.map(g => g.provider !== 'claude').lastIndexOf(true))
-  }
-  if (width(groups) > budget) groups = groups.map(g => ({ ...g, items: g.items.filter(item => item.kind !== 'scoped') })).filter(g => g.items.length > 0)
-  if (!groups.length || width(groups) > budget) return null
-  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered), save))
+  const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  // Every provider at the roomiest density that holds them all; past compact, windows and then
+  // groups give way (narrowLimitGroups), compact as the row is then.
+  const density = DENSITIES.find(d => width(d)(all) <= budget) ?? 'compact'
+  const groups = narrowLimitGroups(all, budget, width(density))
+  if (!groups) return null
+  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered(g)), save, density))
   const children: RenderNode[] = []
   drawn.forEach((d, i) => {
     if (i > 0) children.push(rule(el, 'limits-' + groups[i]!.key))

@@ -276,15 +276,23 @@ export type WarmState = {
 export type Hot = { kind: string; percent: number; resetsAt?: string }
 
 /**
- * One plan window for the band's second row, the limits row: every Claude window (the 5-hour,
- * the weekly, each per-model weekly) and every signed-in ChatGPT account's windows.
- * `provider` is 'claude' or the ChatGPT provider's name; `account` numbers the provider's
- * eligible accounts from 0 (the row reads "GPT" alone, or "GPT 1", "GPT 2", …); `kind` is
- * 'five_hour', 'seven_day', 'scoped' (a per-model weekly, its name in `label`) or 'window'
- * (a ChatGPT window of another length, its minutes in `windowMinutes`).
+ * One plan window for the band's second row, the limits row: every window of every provider whose
+ * quota the router can read (Claude's plan windows and per-model weeklies, each ChatGPT account's
+ * windows, each Antigravity account's Gemini and third-party windows). The row reads them all from
+ * `GET /api/limits` (falling back to the older status routes on a router that predates it).
+ * `provider` is the provider's config name (the grouping key; 'claude' on the fallback path);
+ * `type` is its kind ('anthropic', 'chatgpt', 'google', …), which picks the group head's colour;
+ * `title` is the head's name ("Claude", "GPT", "Gemini"); `account` numbers the provider's eligible
+ * accounts from 0 (the row reads "GPT" alone, or "GPT 1", "GPT 2", … when a provider has several);
+ * `kind` is 'five_hour', 'seven_day', 'scoped' (a per-model/third-party window, its name in `label`)
+ * or 'window' (a window of another length, its minutes in `windowMinutes`).
  */
 export type LimitItem = {
   provider: string
+  /** The provider's kind, for the head's colour. Absent on an older item, the name stands in. */
+  type?: string
+  /** The head's name; absent, derived from the provider's type or name. */
+  title?: string
   account: number
   kind: 'five_hour' | 'seven_day' | 'scoped' | 'window'
   label: string
@@ -384,10 +392,8 @@ declare module 'claude-code' {
       judgeRuns: JudgeRun[]
       judgeDownNetwork: boolean
       limit: Hot | null
-      /** Every Claude plan window for the limits row (the 5-hour, the weekly, per-model weeklies). Null until read. */
-      claudeLimits: LimitItem[] | null
-      /** Every ChatGPT account's windows for the limits row. Null until read. */
-      gptLimits: LimitItem[] | null
+      /** Every provider's plan windows for the limits row, from `GET /api/limits`. Null until read. */
+      limits: LimitItem[] | null
       demo: 'cold' | 'swamp' | 'hot' | 'down' | 'kept' | null
     }
   }
