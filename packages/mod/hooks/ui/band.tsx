@@ -536,16 +536,23 @@ function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip
   )
 }
 
-/** Cells a group takes: its head (the provider's dot and short name) and its windows. */
-function limitGroupCells(group: LimitGroup, name: string, lang: Lang): number {
-  const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
-  const items = group.items.reduce((n, item) => n + Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1 + Math.ceil(BAR_W / CELL_PX) + 1 + figureCells(), 0)
-  return head + 1 + items + Math.max(0, group.items.length - 1)
+/** Save mode's word after Claude's windows while it is on (it holds Auto down until Claude's reset). */
+function saveWord(group: LimitGroup, save: boolean, lang: Lang): string {
+  return save && group.provider === 'claude' ? t(lang, 'band.save') : ''
 }
 
-function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string): { node: RenderNode; cells: number; tips: { key: string; text: string }[] } {
+/** Cells a group takes: its head (the provider's dot and short name), its windows, save's word. */
+function limitGroupCells(group: LimitGroup, name: string, lang: Lang, save = false): number {
+  const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
+  const items = group.items.reduce((n, item) => n + Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1 + Math.ceil(BAR_W / CELL_PX) + 1 + figureCells(), 0)
+  const word = saveWord(group, save, lang)
+  return head + 1 + items + Math.max(0, group.items.length - 1) + (word ? 1 + Math.ceil(textPx(word) / CELL_PX) : 0)
+}
+
+function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string, save: boolean): { node: RenderNode; cells: number; tips: { key: string; text: string }[] } {
   const { Box, Text } = el
   const dot = providerColor(group.provider === 'claude' ? 'anthropic' : 'chatgpt')
+  const word = saveWord(group, save, frame.lang)
   const items = group.items.map((item, ii) => {
     const key = 'limits-' + group.key + '-' + ii
     return limitItemDrawn(el, frame, item, key, limitItemTip(item, name, frame.lang, frame.now))
@@ -556,9 +563,10 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string)
         <Text key="limits-dot" color={dot}>•</Text>
         <Text key="limits-name" color={SUB}>{name}</Text>
         {items.map(f => f.node)}
+        {word ? <Text key="limits-save" color={TONE.violet.text}>{word}</Text> : null}
       </Box>
     ),
-    cells: limitGroupCells(group, name, frame.lang),
+    cells: limitGroupCells(group, name, frame.lang, save),
     tips: items.map(f => ({ key: f.key, text: f.tip! })),
   }
 }
@@ -575,7 +583,9 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   if (!items.length || !view.extras.includes('limits')) return null
   const all = limitGroups(items)
   const numbered = all.filter(g => g.provider !== 'claude').length > 1
-  const width = (gs: LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered), frame.lang), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
+  const save = !!view.limit?.save
+  const width = (gs: LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered), frame.lang, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
   let groups = all
   // Narrow, the GPT accounts go first (the last one first: the earlier accounts stay comparable
   // from one width to the next), then the per-model windows.
@@ -584,7 +594,7 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   }
   if (width(groups) > budget) groups = groups.map(g => ({ ...g, items: g.items.filter(item => item.kind !== 'scoped') })).filter(g => g.items.length > 0)
   if (!groups.length || width(groups) > budget) return null
-  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered)))
+  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered), save))
   const children: RenderNode[] = []
   drawn.forEach((d, i) => {
     if (i > 0) children.push(rule(el, 'limits-' + groups[i]!.key))

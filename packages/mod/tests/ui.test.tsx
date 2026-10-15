@@ -949,3 +949,22 @@ test('a control\'s tip is drawn in a full band, hidden and revealed by its scope
   expect(await ui.find({ type: 'Button', key: 'compact' })).toBeDefined()
   await ui.unmount()
 })
+
+test('with the limits row drawn, save mode\'s word follows Claude\'s windows', async ($, on) => {
+  const limits: DashboardView['limits'] = [
+    { provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 86 },
+    { provider: 'claude', account: 0, kind: 'seven_day', label: '', percent: 40 },
+  ]
+  const view = (save: boolean): DashboardView => ({ ...DASH, limit: { kind: 'five_hour', percent: 86, save }, limits, extras: ['limits'] })
+  drawPane(on, 'saving', el => renderBand(el, frameOf('desktop', 100), view(true), BAND_ACTIONS))
+  drawPane(on, 'spending', el => renderBand(el, frameOf('desktop', 100), view(false), BAND_ACTIONS))
+  const saving = await mount($, 'saving', 'desktop', 100)
+  expect(await saving.find({ type: 'Text', text: /^save$/ }), 'save word').toBeDefined()
+  // The first row's limit stepped aside: 86% shows once, in the limits row.
+  const at86 = await saving.findAll({ type: 'Text', text: /^86%$/ })
+  expect(at86.length).toBe(1)
+  await saving.unmount()
+  const spending = await mount($, 'spending', 'desktop', 100)
+  expect(await spending.find({ type: 'Text', text: /^save$/ })).toBeUndefined()
+  await spending.unmount()
+})
