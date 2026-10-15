@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { messageContent, sendUserFileImages, type ImageSink } from "./images.ts";
-import type { BackgroundTask, EventBody, SessionSummary, ToolCall } from "./protocol.ts";
+import { PERMISSION_MODES, type BackgroundTask, type EventBody, type PermissionMode, type SessionSummary, type ToolCall } from "./protocol.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
@@ -79,6 +79,9 @@ function object(value: unknown): RecordValue | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : null;
 }
 const str = (value: unknown): string => typeof value === "string" ? value : "";
+/** A transcript's top-level permissionMode, only when it names a mode the host knows. */
+const permissionMode = (value: unknown): PermissionMode | null =>
+  typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value) ? value as PermissionMode : null;
 function record(line: string): RecordValue | null {
   try { return object(JSON.parse(line)); } catch { return null; } // Untrusted JSONL boundary.
 }
@@ -365,6 +368,9 @@ export class DesktopSessions {
 
   transcriptSize(id: string): number { return this.sources.get(id)?.size ?? 0; }
 
+  /** The mode the Claude app last ran this session in, from the transcript's newest user prompt. */
+  permissionMode(id: string): PermissionMode | undefined { return this.sources.get(id)?.summary.permissionMode; }
+
   /** The transcript's current title (a Mac rename lands as a custom-title line), without liveness checks. Read-only. */
   titleOf(id: string): string | null {
     const source = this.sources.get(id);
@@ -477,6 +483,7 @@ export class DesktopSessions {
     try { fd = this.open(file); } catch (error) { if (missing(error)) return null; throw error; }
     try {
       let cwd = "", model = "", ownTitle = "", firstPrompt = "";
+      let mode: PermissionMode | null = null;
       let createdAt = stat.birthtimeMs;
       const tail = windowLines(fd, stat.size, true);
       for (const line of [...windowLines(fd, stat.size, false), ...tail]) {
@@ -484,6 +491,9 @@ export class DesktopSessions {
         if (!r || r.isSidechain === true) continue;
         if (!cwd && typeof r.cwd === "string") cwd = r.cwd;
         if (!firstPrompt) firstPrompt = title(prompt(r));
+        // Only a person's prompt carries the top-level mode; later user lines without one (tool
+        // results) keep the last seen mode, so the newest prompt's mode wins.
+        if (r.type === "user") { const named = permissionMode(r.permissionMode); if (named) mode = named; }
         if (r.type === "custom-title" && typeof r.customTitle === "string") ownTitle = title(r.customTitle);
         if (r.type === "summary" && typeof r.summary === "string" && !ownTitle) ownTitle = title(r.summary);
         const m = object(r.message);
@@ -492,7 +502,7 @@ export class DesktopSessions {
         if (Number.isFinite(at)) createdAt = Math.min(createdAt, at);
       }
       if (!cwd) return null;
-      return { file, size: stat.size, mtime: stat.mtimeMs, unfinished: unfinishedTurn(tail), summary: { id, title: ownTitle || firstPrompt || id, cwd, model, effort: null, state: "stopped", pending: 0, createdAt, updatedAt: stat.mtimeMs, lastSeq: 0, epoch: "", origin: "desktop", readOnly: false } };
+      return { file, size: stat.size, mtime: stat.mtimeMs, unfinished: unfinishedTurn(tail), summary: { id, title: ownTitle || firstPrompt || id, cwd, model, ...(mode ? { permissionMode: mode } : {}), effort: null, state: "stopped", pending: 0, createdAt, updatedAt: stat.mtimeMs, lastSeq: 0, epoch: "", origin: "desktop", readOnly: false } };
     } finally { fs.closeSync(fd); }
   }
 

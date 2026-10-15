@@ -65,6 +65,14 @@ test("Mac bridge mode switching reports not supported without posting controls",
   assert.equal(f.posts.length, 0);
 });
 
+test("a desktop bridge summary carries the Claude app transcript's permission mode", async t => {
+  const f = fixture(t);
+  fs.appendFileSync(f.file, line({ type: "user", uuid: "p1", promptSource: "sdk", permissionMode: "bypassPermissions", message: { content: "run it" } }));
+  f.sessions.log(id); // import as a Remote Control (bridge) record
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(id)!.permissionMode, "bypassPermissions");
+});
+
 test("bridge worker state overrides busy registry for listed and opened sessions, caches and falls back on failure", async t => {
   const f = fixture(t);
   f.registry.get(id)!.status = "busy";

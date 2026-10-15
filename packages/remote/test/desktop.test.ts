@@ -160,6 +160,23 @@ test("listing uses bounded windows, own title, cwd and last model without import
   assert.equal(updated.lastSeq, 3);
 });
 
+test("desktop summary takes the newest user prompt's permissionMode, ignoring unknown values", t => {
+  const f = fixture(t);
+  const third = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const prompt = (uuid: string, mode?: unknown) => line({ ...user, uuid, ...(mode === undefined ? {} : { permissionMode: mode }), message: { content: `prompt ${uuid}` } });
+  const toolResult = (uuid: string) => line({ type: "user", uuid, message: { content: [{ type: "tool_result", tool_use_id: uuid, content: "ok" }] } });
+  // A mid-session change (bypass → plan) followed by a tool result that carries no mode: the newest prompt wins and carries forward.
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), prompt("m1", "bypassPermissions") + line(assistant) + prompt("m2", "plan") + toolResult("t1"));
+  // An unknown value is never surfaced; the last known mode stands.
+  fs.writeFileSync(path.join(f.project, `${other}.jsonl`), prompt("m1", "default") + prompt("m2", "shinyNewMode"));
+  // A transcript whose prompts never name a mode has none.
+  fs.writeFileSync(path.join(f.project, `${third}.jsonl`), prompt("m1") + line(assistant));
+  const byId = new Map(f.desktop.list().map(s => [s.id, s]));
+  assert.equal(byId.get(id)?.permissionMode, "plan");
+  assert.equal(byId.get(other)?.permissionMode, "default");
+  assert.equal(byId.get(third)?.permissionMode, undefined);
+});
+
 test("only recent top-level UUID files, no symlinks, host transcripts or traversal", t => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user));
