@@ -265,6 +265,24 @@ export type WarmState = {
 /** The hottest plan window at or above the alert line. */
 export type Hot = { kind: string; percent: number; resetsAt?: string }
 
+/**
+ * One plan window for the band's second row, the limits row: every Claude window (the 5-hour,
+ * the weekly, each per-model weekly) and every signed-in ChatGPT account's windows.
+ * `provider` is 'claude' or the ChatGPT provider's name; `account` numbers the provider's
+ * eligible accounts from 0 (the row reads "GPT" alone, or "GPT 1", "GPT 2", …); `kind` is
+ * 'five_hour', 'seven_day', 'scoped' (a per-model weekly, its name in `label`) or 'window'
+ * (a ChatGPT window of another length, its minutes in `windowMinutes`).
+ */
+export type LimitItem = {
+  provider: string
+  account: number
+  kind: 'five_hour' | 'seven_day' | 'scoped' | 'window'
+  label: string
+  windowMinutes?: number
+  percent: number
+  resetsAt?: string
+}
+
 export type Stats = {
   prompts: number
   requests: number
@@ -356,6 +374,10 @@ declare module 'claude-code' {
       judgeRuns: JudgeRun[]
       judgeDownNetwork: boolean
       limit: Hot | null
+      /** Every Claude plan window for the limits row (the 5-hour, the weekly, per-model weeklies). Null until read. */
+      claudeLimits: LimitItem[] | null
+      /** Every ChatGPT account's windows for the limits row. Null until read. */
+      gptLimits: LimitItem[] | null
       demo: 'cold' | 'swamp' | 'hot' | 'down' | 'kept' | null
     }
   }

@@ -33,6 +33,29 @@ export function claudeLimitsFrom(status: unknown, now: number): SessionRateLimit
   })
 }
 
+/** One per-model weekly window the router reports beside `rate_limits` (see `scopedFromLimits`). */
+export type ScopedLimit = { name: string; percent: number; resetsAt?: string }
+
+/**
+ * The per-model weekly windows of the Claude login, from the router's GET /api/status
+ * (`claude.accounts[id=current].quota.scoped`: `{name, used_percent, window_minutes, reset_at}`,
+ * reset in epoch seconds or ms). A stale or unknown snapshot gives nothing, like claudeLimitsFrom.
+ */
+export function claudeScopedFrom(status: unknown, now: number): ScopedLimit[] {
+  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const accounts = object(object(status).claude).accounts
+  const current = Array.isArray(accounts) ? accounts.map(object).find(a => a.id === 'current') : undefined
+  const quota = object(current?.quota)
+  if (typeof quota.at !== 'number' || now - quota.at > CLAUDE_USAGE_STALE_MS) return []
+  const scoped = quota.scoped
+  if (!Array.isArray(scoped)) return []
+  return scoped.map(object).flatMap(entry => {
+    if (typeof entry.name !== 'string' || !entry.name || typeof entry.used_percent !== 'number' || !Number.isFinite(entry.used_percent)) return []
+    const reset = typeof entry.reset_at === 'number' ? entry.reset_at * (entry.reset_at < 1e12 ? 1000 : 1) : NaN
+    return [{ name: entry.name, percent: Math.round(entry.used_percent * 10) / 10, ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString() } : {}) }]
+  })
+}
+
 /**
  * The reset is read in the person's own clock: `offsetMinutes` is `Date#getTimezoneOffset` (minutes
  * behind UTC), passed in so tests do not depend on the machine's zone.

@@ -5,6 +5,7 @@ import { test } from 'claude-code/testing'
 import type { RenderElement, RenderPropsOf } from 'claude-code'
 
 import type { Settings } from '../types'
+import type { LimitItem } from '../types'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
@@ -44,6 +45,16 @@ const DASH: DashboardView = {
 }
 
 const SETTINGS: Settings = normalizeSettings({ judge: 'jev', judgeModel: 'deepseek-v4.1-flash', modes: [{ id: 'm1', name: 'GPT 우선' }, { id: 'm2', name: '절약' }], activeMode: 'm1' } as never)
+
+/** Every plan window the limits row gauges: Claude's 5-hour, weekly and Fable, then two GPT accounts. */
+const LIMITS: LimitItem[] = [
+  { provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 1 },
+  { provider: 'claude', account: 0, kind: 'seven_day', label: '', percent: 88, resetsAt: '2026-10-12T18:20:00' },
+  { provider: 'claude', account: 0, kind: 'scoped', label: 'Fable', percent: 2, resetsAt: '2026-10-15T10:59:59+00:00' },
+  { provider: 'chatgpt', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 23, resetsAt: '2026-10-19T13:20:00' },
+  { provider: 'chatgpt', account: 1, kind: 'five_hour', label: '', windowMinutes: 300, percent: 64 },
+  { provider: 'chatgpt', account: 1, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: '2026-10-19T13:20:00' },
+]
 const SETTINGS_VIEW: SettingsView = { settings: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }
 
 /** The AbovePrompt site as register.tsx composes it on the desktop: the band, its × inside. */
@@ -69,6 +80,11 @@ const SCENES: Scene[] = [
   // limit, Handoff advised, a route and every control — must hold at both.
   { name: 'band-94-full', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 42, resetsAt: '2026-10-15T15:40:00', save: false }, handoff: 'advised', extras: ['context', 'limits'] }) },
   { name: 'band-100-full', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 42, resetsAt: '2026-10-15T15:40:00', save: false }, handoff: 'advised', extras: ['context', 'limits'] }) },
+  // The limits row (2026-10-15): every plan window gauges the second row, and the first row's
+  // limit fact steps aside for the route. Narrow, the GPT accounts go first, then Fable.
+  { name: 'band-limits-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, handoff: 'advised', extras: ['context', 'limits'], limits: LIMITS }) },
+  { name: 'band-limits-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, handoff: 'advised', extras: ['context', 'limits'], limits: LIMITS }) },
+  { name: 'band-limits-70', columns: 70, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, handoff: 'advised', extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'settings', draw: (el, f) => renderSettings(el, f, SETTINGS_VIEW, noop) },
   { name: 'settings-off', draw: (el, f) => renderSettings(el, f, { ...SETTINGS_VIEW, settings: { ...SETTINGS, effortAuto: false, judge: 'haiku', keepWarm: true, activeMode: undefined } }, noop) },
   { name: 'settings-key', draw: (el, f) => renderSettings(el, f, { settings: { ...SETTINGS, jevSource: 'typesafe', judge: 'jev' }, jev: { source: null, test: { state: 'fail', message: 'key rejected (401)' } } }, noop) },

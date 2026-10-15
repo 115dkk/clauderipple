@@ -33,15 +33,16 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, clockArt, gaugeArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, textPx } from './art'
+import type { LimitItem } from '../../types'
+import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, INK, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, agentsArt, barArt, clockArt, gaugeArt, iconArt, meterArt, pillArt, plateArt, ringArt, ruleArt, textPx } from './art'
 import type { Sea, Tone } from './art'
 import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
-import type { BandActions, DashboardView, Frame } from './view'
-import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitName, minutesLeft, modelName, resetsLabel, seconds } from './view'
+import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
+import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -352,6 +353,9 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 // model the way into the log); the judge's reason in what is left. Then the controls, each lit
 // under the pointer: Handoff when advised, Auto's switch, keep-warm's flame, the agents, settings,
 // and the way out. Pointing at a fact shows what it means in the reason's place.
+// With the `limits` extra on and any window known, a second row under the first (starting where
+// the effort does) gauges every plan window — Claude's, then each ChatGPT account's — and the
+// first row's limit fact steps aside for the route.
 
 /** 리플이 in the band, px: the mini drawing (ripple.ts), a little taller than a line of text. */
 export const BAND_RIPPLE = 24
@@ -490,6 +494,110 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
   // One slot whatever the name (cut past MODE_CELLS; Latin capitals run ~1.1 ch).
   const amber = TONE.amber.text
   return drawnFact(el, 'mode', 2 + Math.ceil(MODE_CELLS * 1.1), [<Text key="mode-mark" color={amber}>◆</Text>, <Text key="mode-name" color={amber}>{modeLabel(view.mode)}</Text>], t(frame.lang, 'band.modeTip', { name: view.mode }))
+}
+
+// ---- Limits row ----------------------------------------------------------------------------------
+//
+// The capsule's second row, under the first and starting where the effort does (a CREST_CELLS
+// indent): every plan window as a small gauge — Claude's 5-hour, weekly and per-model weeklies,
+// then each ChatGPT account's. A thinner row than the first (a line of text or so); the reset is
+// in the hover tip, which shows in the first row's tip place (see whyDrawn). Widths alone decide,
+// never values: the bar is one width, the figure's slot fits "100%", and only the name takes what
+// it takes (a changing figure never moves a neighbour). Narrow, the GPT accounts go first (the
+// last one first), then the per-model windows; what is left not fitting means no second row, and
+// the first row keeps its limit fact as before.
+
+/** A limit window's bar, px: beside each window's name and figure, in the row's own line. */
+const BAR_W = 36
+const BAR_H = 6
+/** The air between the row's groups, in cells (a rule stands in it, as on the first row). */
+const LIMITS_GAP = 2
+
+/** Cells a window's figure takes: whatever it shows, the slot fits the widest ("100%"). */
+function figureCells(): number {
+  return Math.ceil(textPx('100%') / CELL_PX)
+}
+
+function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip: string): DrawnFact {
+  const { Text } = el
+  const tone = limitTone(item.percent)
+  const name = limitItemName(item, frame.lang)
+  const cells = Math.ceil(textPx(name) / CELL_PX) + 1 + Math.ceil(BAR_W / CELL_PX) + 1 + figureCells()
+  return drawnFact(
+    el,
+    key,
+    cells,
+    [
+      <Text key="limit-name" color={MUTE}>{name}</Text>,
+      pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H),
+      <Text key="limit-value" color={figure(tone)}>{Math.round(item.percent) + '%'}</Text>,
+    ],
+    tip,
+  )
+}
+
+/** Cells a group takes: its head (the provider's dot and short name) and its windows. */
+function limitGroupCells(group: LimitGroup, name: string, lang: Lang): number {
+  const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
+  const items = group.items.reduce((n, item) => n + Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1 + Math.ceil(BAR_W / CELL_PX) + 1 + figureCells(), 0)
+  return head + 1 + items + Math.max(0, group.items.length - 1)
+}
+
+function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string): { node: RenderNode; cells: number; tips: { key: string; text: string }[] } {
+  const { Box, Text } = el
+  const dot = providerColor(group.provider === 'claude' ? 'anthropic' : 'chatgpt')
+  const items = group.items.map((item, ii) => {
+    const key = 'limits-' + group.key + '-' + ii
+    return limitItemDrawn(el, frame, item, key, limitItemTip(item, name, frame.lang, frame.now))
+  })
+  return {
+    node: (
+      <Box key={'limits-' + group.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
+        <Text key="limits-dot" color={dot}>•</Text>
+        <Text key="limits-name" color={SUB}>{name}</Text>
+        {items.map(f => f.node)}
+      </Box>
+    ),
+    cells: limitGroupCells(group, name, frame.lang),
+    tips: items.map(f => ({ key: f.key, text: f.tip! })),
+  }
+}
+
+/**
+ * The second row, or null: no `limits` extra, no windows at all, or not even Claude's own
+ * windows fitting. The GPT accounts go first when narrow (the last one first), then the
+ * per-model windows. An account reads "GPT 1" while several are known, even when only one of
+ * them fits: the number is the account's, not its place in this row.
+ */
+function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: number): { node: RenderNode; tips: { key: string; text: string }[] } | null {
+  const { Box } = el
+  const items = view.limits ?? []
+  if (!items.length || !view.extras.includes('limits')) return null
+  const all = limitGroups(items)
+  const numbered = all.filter(g => g.provider !== 'claude').length > 1
+  const width = (gs: LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered), frame.lang), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  let groups = all
+  // Narrow, the GPT accounts go first (the last one first: the earlier accounts stay comparable
+  // from one width to the next), then the per-model windows.
+  while (groups.some(g => g.provider !== 'claude') && width(groups) > budget) {
+    groups = groups.filter((_, i) => i !== groups.map(g => g.provider !== 'claude').lastIndexOf(true))
+  }
+  if (width(groups) > budget) groups = groups.map(g => ({ ...g, items: g.items.filter(item => item.kind !== 'scoped') })).filter(g => g.items.length > 0)
+  if (!groups.length || width(groups) > budget) return null
+  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered)))
+  const children: RenderNode[] = []
+  drawn.forEach((d, i) => {
+    if (i > 0) children.push(rule(el, 'limits-' + groups[i]!.key))
+    children.push(d.node)
+  })
+  return {
+    node: (
+      <Box key="band-limits" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} paddingLeft={CREST_CELLS} paddingTop={0.5}>
+        {children}
+      </Box>
+    ),
+    tips: drawn.flatMap(d => d.tips),
+  }
 }
 
 /**
@@ -648,7 +756,10 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // then the quietest facts go.
   const close = actions.hide ? CLOSE_CELLS : 0
   const effort = effortDrawn(el, frame, view, actions)
-  const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view), cacheDrawn(el, frame, view), limitDrawn(el, frame, view)].filter((f): f is DrawnFact => f !== null)
+  // The second row is decided before the first row's budget: when it draws, the first row's limit
+  // fact steps aside and the route takes its room.
+  const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS)
+  const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view)])].filter((f): f is DrawnFact => f !== null)
   // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
   // spare words (the icons' beside it) go first when the row narrows.
   let words: readonly string[] = [...WORDLESS]
@@ -682,6 +793,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
+  if (limitsRow) for (const tip of limitsRow.tips) tips.push(tip)
   for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
@@ -720,10 +832,10 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   return capsule(el, frame, {
     key: 'band',
     sea: { ...bandSea(mood), reach: 120, at: { x: PAD_X * CELL_PX + (CREST_CELLS * CELL_PX) / 2, y: PAD_Y * ROW_PX * 0.5 + ROW_H / 2 } },
-    rows: view.effortMenu ? 3.4 : 1.8,
+    rows: view.effortMenu ? (limitsRow ? 4.6 : 3.4) : limitsRow ? 3 : 1.8,
     paddingX: PAD_X,
     paddingY: PAD_Y,
-    children: [row, view.effortMenu ? effortMenuDrawn(el, frame, view, actions) : ''],
+    children: [row, ...(limitsRow ? [limitsRow.node] : []), view.effortMenu ? effortMenuDrawn(el, frame, view, actions) : ''],
   })
 }
 

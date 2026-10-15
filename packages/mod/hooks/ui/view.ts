@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, Pick, Settings, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick, Settings, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -69,6 +69,8 @@ export type DashboardView = {
   warm: { on: boolean; pings: number; cost: number; stopped?: string; here?: boolean }
   /** The hottest plan window, shown when present. */
   limit: { kind: string; percent: number; resetsAt?: string; save: boolean } | null
+  /** Every plan window for the second row, Claude's own first. Absent until read. */
+  limits?: LimitItem[]
   route: RouteView | null
   /** A line from the router side ("router not answering"), shown in place of the route. */
   notice: string | null
@@ -376,4 +378,53 @@ export function limitName(kind: string, lang: Lang): string {
   if (kind === 'five_hour') return t(lang, 'band.fiveHour')
   if (kind === 'seven_day') return t(lang, 'band.weekly')
   return kind.replace(/_/g, ' ')
+}
+
+// ---- Limits row ----------------------------------------------------------------------------------
+
+/** A plan window's short name as the limits row shows it: the window, or the model's own name. */
+export function limitItemName(item: Pick<LimitItem, 'kind' | 'label' | 'windowMinutes'>, lang: Lang): string {
+  if (item.kind === 'five_hour' || item.kind === 'seven_day') return limitName(item.kind, lang)
+  if (item.kind === 'scoped') return item.label || item.kind
+  const minutes = item.windowMinutes
+  if (minutes === 300) return limitName('five_hour', lang)
+  if (minutes === 10080) return limitName('seven_day', lang)
+  if (typeof minutes === 'number' && minutes > 0) {
+    if (minutes % 1440 === 0) return t(lang, 'units.days', { n: minutes / 1440 })
+    if (minutes % 60 === 0) return t(lang, 'units.hours', { n: minutes / 60 })
+    return t(lang, 'units.minutes', { n: minutes })
+  }
+  return item.label || item.kind.replace(/_/g, ' ')
+}
+
+/** One limits group as the row heads it: Claude's own, or one ChatGPT account ("GPT", "GPT 1", …). */
+export type LimitGroup = { key: string; provider: string; account: number; items: LimitItem[] }
+
+/** Claude's windows first, then each ChatGPT account's, in answer order. */
+export function limitGroups(items: readonly LimitItem[]): LimitGroup[] {
+  const groups: LimitGroup[] = []
+  const claude = items.filter(item => item.provider === 'claude')
+  if (claude.length) groups.push({ key: 'claude', provider: 'claude', account: 0, items: claude })
+  const seen = new Map<string, LimitItem[]>()
+  for (const item of items) {
+    if (item.provider === 'claude') continue
+    const key = item.provider + '#' + item.account
+    const list = seen.get(key)
+    if (list) list.push(item)
+    else seen.set(key, [item])
+  }
+  for (const [key, list] of seen) groups.push({ key, provider: list[0]!.provider, account: list[0]!.account, items: list })
+  return groups
+}
+
+/** A group's head: "Claude", or "GPT" alone, "GPT 1" and "GPT 2" when several accounts show. */
+export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'account'>, numbered: boolean): string {
+  if (group.provider === 'claude') return 'Claude'
+  return numbered ? 'GPT ' + (group.account + 1) : 'GPT'
+}
+
+/** A window's hover tip: "Claude 주간 88% · 4시간 뒤 초기화". */
+export function limitItemTip(item: LimitItem, group: string, lang: Lang, now: number): string {
+  const reset = resetsLabel(item.resetsAt, now, lang)
+  return t(lang, 'band.limitsTip', { provider: group, window: limitItemName(item, lang), value: Math.round(item.percent) + '%', reset: reset ? ' · ' + reset : '' })
 }

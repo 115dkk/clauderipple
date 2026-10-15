@@ -555,6 +555,22 @@ export function gaugeArt(kind: string): string {
   return svg(16, 16, arc + '<path d="' + needle + '" fill="none" stroke="' + stroke + '" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.4" r="1.2" fill="' + stroke + '"/>')
 }
 
+/** A limit window's share as a small horizontal bar, 36 × 6 px with round ends: the track white at
+ * low strength, the fill the ring's own teal-to-violet while all is well, amber, then red. Whole
+ * percents only, like the ring: the same figure is the same picture. */
+export function barArt(percent: number, tone: Tone | 'ink'): string {
+  const W = 36
+  const H = 6
+  // Rounded to the integer: neighbouring readings draw byte-identical pictures.
+  const share = Math.max(0, Math.min(1, Math.round(percent) / 100))
+  const fill = tone === 'ink' ? 'url(#g)' : TONE[tone].hi
+  return svg(W, H,
+    '<defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="0"><stop offset="0" stop-color="#67e8f9"/><stop offset="1" stop-color="#a78bfa"/></linearGradient>' +
+    '<clipPath id="c"><rect x="0" y="0" width="' + W + '" height="' + H + '" rx="3"/></clipPath></defs>' +
+    '<rect x="0" y="0" width="' + W + '" height="' + H + '" rx="3" fill="#fff" fill-opacity=".14"/>' +
+    '<g clip-path="url(#c)"><rect x="0" y="0" width="' + r(W * share) + '" height="' + H + '" fill="' + fill + '"/></g>')
+}
+
 export const ICON_PX = 16
 
 /** Line icons of the band's controls, 16 px. */

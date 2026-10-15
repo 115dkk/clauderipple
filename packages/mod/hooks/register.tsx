@@ -2,18 +2,19 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, workerJudgeInput, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
-import { activeModeOf, claudeWindow, eagerNote, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
+import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { bandPriority, claudeLimitsFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
 import { addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, weighted } from './stats'
@@ -53,6 +54,8 @@ const lastRealReplyAt = atom({ plugin: 'ripple', key: 'lastRealReplyAt' } as con
 const context = atom({ plugin: 'ripple', key: 'context' } as const, null)
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
 const limit = atom({ plugin: 'ripple', key: 'limit' } as const, null)
+const claudeLimits = atom({ plugin: 'ripple', key: 'claudeLimits' } as const, null)
+const gptLimits = atom({ plugin: 'ripple', key: 'gptLimits' } as const, null)
 const hotHidden = atom({ plugin: 'ripple', key: 'hotHidden' } as const, null)
 const hotHiddenFor = atom({ plugin: 'ripple', key: 'hotHiddenFor' } as const, null)
 const saveUntil = atom({ plugin: 'ripple', key: 'saveUntil' } as const, null)
@@ -950,6 +953,45 @@ async function routerClaudeLimits($: EngineInterface): Promise<SessionRateLimit[
     return status.ok ? claudeLimitsFrom(JSON.parse(status.text), await $.clock.now()) : []
   } catch (error) { await report($, 'claude limits', error); return [] }
 }
+/** The per-model weekly windows, at most one status lookup a minute and only while the limits
+ * row can show them; a failure keeps the last good numbers rather than blanking them. */
+let scopedAt = 0
+let scopedCache: ScopedLimit[] = []
+async function claudeScoped($: EngineInterface): Promise<ScopedLimit[]> {
+  const now = await $.clock.now()
+  if (!(await currentSettings($)).extras.includes('limits') || now - scopedAt < 60_000) return scopedCache
+  scopedAt = now
+  try {
+    const status = await $.http.fetch(`${await adminUrl($)}/api/status`)
+    if (status.ok) scopedCache = claudeScopedFrom(JSON.parse(status.text), now)
+  } catch (error) { await report($, 'claude scoped limits', error) }
+  return scopedCache
+}
+/** Every ChatGPT account's windows, at most one round a minute and only while the limits row can
+ * show them. Writes the state only when the windows moved: a redraw that shows nothing new is
+ * wasted (each answer is drawn afresh). */
+let gptLimitsAt = 0
+async function refreshGptLimits($: EngineInterface): Promise<void> {
+  if (!(await currentSettings($)).extras.includes('limits')) return
+  const now = await $.clock.now()
+  if (now - gptLimitsAt < 60_000) return
+  gptLimitsAt = now
+  try {
+    const admin = await adminUrl($)
+    const status = await $.http.fetch(`${admin}/api/status`)
+    if (!status.ok) return
+    const items: LimitItem[] = []
+    for (const provider of chatgptProviders(JSON.parse(status.text))) {
+      const response = await $.http.fetch(`${admin}/api/chatgpt-accounts?provider=${encodeURIComponent(provider)}`)
+      if (!response.ok) continue
+      const body: unknown = JSON.parse(response.text)
+      // The router answers for its first ChatGPT provider when the name is not one: not this provider.
+      if (object(body).provider !== provider) continue
+      items.push(...gptLimitsFrom(body, provider, now))
+    }
+    if (!same(items, await read($, gptLimits))) await update($, gptLimits, () => items)
+  } catch (error) { await report($, 'gpt limits', error) }
+}
 async function refreshUsage($: EngineInterface): Promise<void> {
   const usage = await $.session.usage()
   const c = usage.context
@@ -975,6 +1017,19 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   if (JSON.stringify(h) !== JSON.stringify(previous)) await update($, hot, () => h)
   const top = rateLimits.filter(l => ['five_hour', 'seven_day'].includes(l.kind)).sort((a, b) => b.percentUsed - a.percentUsed)[0]
   const l = top ? { kind: top.kind, percent: top.percentUsed, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}) } : null
+  // Every window for the limits row: the 5-hour and the weekly (one each, the hotter reading
+  // winning when both sources name it), then the per-model weeklies the router reports.
+  const mains = new Map<'five_hour' | 'seven_day', SessionRateLimit>()
+  for (const w of rateLimits) {
+    if (w.kind !== 'five_hour' && w.kind !== 'seven_day') continue
+    const prev = mains.get(w.kind)
+    if (!prev || w.percentUsed > prev.percentUsed) mains.set(w.kind, w)
+  }
+  const claudeItems: LimitItem[] = (['five_hour', 'seven_day'] as const)
+    .flatMap(kind => mains.get(kind) ? [mains.get(kind)!] : [])
+    .map(w => ({ provider: 'claude', account: 0, kind: w.kind as 'five_hour' | 'seven_day', label: '', percent: w.percentUsed, ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}) }))
+  for (const s of await claudeScoped($)) claudeItems.push({ provider: 'claude', account: 0, kind: 'scoped', label: s.name, percent: s.percent, ...(s.resetsAt ? { resetsAt: s.resetsAt } : {}) })
+  if (!same(claudeItems, await read($, claudeLimits))) await update($, claudeLimits, () => claudeItems)
   // Check the previous binding deadline before a rolled-forward snapshot replaces it.
   await endModeIfOver($)
   if (JSON.stringify(l) !== JSON.stringify(await read($, limit))) await update($, limit, () => l)
@@ -1012,6 +1067,7 @@ async function tick($: EngineInterface): Promise<void> {
   ticking = true
   try {
     await refreshUsage($)
+    await refreshGptLimits($)
     const now = await $.clock.now()
     const list = await read($, agents)
     if (list.some(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000)) {
@@ -1076,6 +1132,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     model: await read($, modelIs) ? modelName((await read($, modelIs))!) : null,
     context: await read($, context), cache: await read($, cache), warm: { ...w, on: await keepWarmOn($, s), ...(await read($, warmHere) !== null ? { here: true } : {}) },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
+    limits: [...(await read($, claudeLimits) ?? []), ...(await read($, gptLimits) ?? [])],
     auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
     agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
