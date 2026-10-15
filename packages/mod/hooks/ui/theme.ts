@@ -89,6 +89,8 @@ const KNOWN: Record<string, string> = {
   deepseek: '#4d6bfe',
   'opencode-go': '#9333ea',
   'opencode-zen': '#9333ea',
+  // xAI's mark is black on white; silver reads on the band's dark capsule.
+  grok: '#a8a29e',
 }
 const PALETTE = ['#0891b2', '#db2777', '#7c3aed', '#0d9488', '#c026d3', '#4f46e5', '#0284c7', '#be185d']
 
