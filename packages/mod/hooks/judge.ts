@@ -116,10 +116,13 @@ const effortCriteria = {
   xhigh: 'Difficult extended investigation with interacting constraints.',
   max: 'Exceptional open-ended research or the hardest reasoning problems.',
 }
+// Read with the brief, the old wording sent 49 of 64 delegated tasks to deep, against 19 from their
+// one-line descriptions alone: a brief's warnings ("do not restart", "read-only", "no guessing")
+// read as high stakes. Re-judged with this wording the same briefs give 28 (2026-10-15, pick log).
 const levelCriteria = {
-  light: 'Mechanical chores, repeated changes, or simple lookups.',
-  standard: 'Implement a designed change, research, summarize documentation, or review.',
-  deep: 'Careful high-stakes reasoning, subtle debugging, architecture, or security.',
+  light: 'Mechanical chores, repeated edits, simple lookups, or one small fix.',
+  standard: 'Carry out a designed change, even across several files; research, summarize, or review read-only.',
+  deep: 'Subtle debugging, security review, or architecture where a wrong call is costly. Size, file count, or warnings and prohibitions in the brief do not by themselves make work deep.',
 }
 const domainCriteria: Record<Domain, string> = {
   design: 'Visual composition, branding, taste, look and voice of copy.',
