@@ -1928,10 +1928,12 @@ function openAnthropicProviderForm(options) {
   function syncModeHint() { modeHint.textContent = auth.value === "claude-code" && accountPool ? t("providers.anthropicPoolRouting") : t("providers.anthropicIngressOnly"); }
   auth.addEventListener("change", syncModeHint);
   syncModeHint();
+  const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });
+  const limitsField = el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]);
   const form = el("div", { class: "provider-form" }, [
     el("h1", { id: "modal-title", text: existing ? t("providers.edit") : t("providers.addTitle") }),
     inputRow(t("providers.name"), nameInput, t("providers.nameHelp")), authField, keyField, probeButton, sourceLine, result, modelArea,
-    modeHint,
+    modeHint, limitsField,
   ]);
   const saveButton = el("button", { class: "btn", type: "button", "data-default-action": "", text: existing ? t("common.save") : t("providers.add") });
   saveButton.addEventListener("click", async () => {
@@ -1940,7 +1942,7 @@ function openAnthropicProviderForm(options) {
     const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), existing && next.providers[options.name]);
-    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), models: checkedModels };
+    const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), limits: limitsInput.checked, models: checkedModels };
     next.providers[providerName] = provider;
     // accountPool makes these models native Claude routing targets. Without it this remains the
     // historical OpenAI ingress provider, and routing deliberately ignores it.
@@ -2007,9 +2009,11 @@ function openGrokProviderForm(options) {
   probeButton.addEventListener("click", () => void runProbe());
   const advanced = el("details", { class: "details" }, [el("summary", { text: t("common.advanced") })]);
   const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+  const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });
   const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
   advanced.appendChild(el("div", { class: "advanced-content" }, [
     el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+    el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]),
     inputRow(t("providers.append"), append, t("providers.appendHelp")),
   ]));
   const pickerInput = el("input", { type: "checkbox", checked: existing ? modelsOf(existing).some((model) => ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === model.id)) : true });
@@ -2030,12 +2034,13 @@ function openGrokProviderForm(options) {
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const saved = existing && (next.providers[options.name] || existing);
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
-    const formKeys = new Set(["type", "identity", "instructionsAppend", "models"]);
+    const formKeys = new Set(["type", "identity", "limits", "instructionsAppend", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = {
       ...kept,
       type: "grok",
       identity: identity.checked,
+      limits: limitsInput.checked,
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
       models: checkedModels,
     };
@@ -2110,9 +2115,11 @@ function openGoogleProviderForm(options) {
   probeButton.addEventListener("click", () => void runProbe());
   const advanced = el("details", { class: "details" }, [el("summary", { text: t("common.advanced") })]);
   const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+  const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });
   const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
   advanced.appendChild(el("div", { class: "advanced-content" }, [
     el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+    el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]),
     inputRow(t("providers.append"), append, t("providers.appendHelp")),
   ]));
   const pickerInput = el("input", { type: "checkbox", checked: Boolean(existing && modelsOf(existing).some((model) => ((currentConfig.cli && currentConfig.cli.extraModels) || []).some((extra) => extra.model === model.id))) });
@@ -2133,7 +2140,7 @@ function openGoogleProviderForm(options) {
     const saved = existing && (next.providers[options.name] || existing);
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
     // Fields this form has no control for (defaultEffort, a hand-written setting) survive the save.
-    const formKeys = new Set(["type", "auth", "apiKey", "identity", "instructionsAppend", "models"]);
+    const formKeys = new Set(["type", "auth", "apiKey", "identity", "limits", "instructionsAppend", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = {
       ...kept,
@@ -2142,6 +2149,7 @@ function openGoogleProviderForm(options) {
       ...(apiKey ? { apiKey } : {}),
       ...(existing && existing.url ? { url: existing.url } : {}),
       identity: identity.checked,
+      limits: limitsInput.checked,
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
       models: checkedModels,
     };
@@ -2242,12 +2250,14 @@ function openProviderForm(options) {
     // Without a line of its own the model reads Claude Code's system prompt and answers that it is
     // Claude, which is what DeepSeek did before this was offered here too.
     const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+    const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });
     const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
     advancedContent.append(
       el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+      el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]),
       inputRow(t("providers.append"), append, t("providers.appendHelp")),
     );
-    advancedContent._prompt = { identity, append };
+    advancedContent._prompt = { identity, limits: limitsInput, append };
   } else {
     const auth = el("select", {}, [selectOption("auto", t("providers.authAuto")), selectOption("own", t("providers.authOwn")), selectOption("borrow-codex", t("providers.authBorrow"))]);
     auth.value = (existing && existing.auth) || "auto";
@@ -2259,6 +2269,7 @@ function openProviderForm(options) {
     const loginHelp = el("small", { text: t("providers.loginHelp") });
     const effort = effortSelect((existing && existing.defaultEffort) || "high", ["low", "medium", "high", "xhigh", "max"]);
     const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
+    const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });
     const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
     chatgptFields = [
       inputRow(t("providers.credentials"), auth, t("providers.credentialsHelp")),
@@ -2267,9 +2278,10 @@ function openProviderForm(options) {
     ];
     advancedContent.append(
       el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
+      el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]),
       inputRow(t("providers.append"), append, t("providers.appendHelp")),
     );
-    advancedContent._chatgpt = { auth, effort, identity, append };
+    advancedContent._chatgpt = { auth, effort, identity, limits: limitsInput, append };
   }
   advanced.appendChild(advancedContent);
   const customUrlRow = isCustom ? inputRow(t("providers.url"), urlInput, t("providers.urlHelp")) : null;
@@ -2311,13 +2323,13 @@ function openProviderForm(options) {
   function draftProvider() {
     if (isChatgpt) {
       const chat = advancedContent._chatgpt;
-      return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
+      return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, limits: chat.limits.checked, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
     }
     const prompt = advancedContent._prompt;
     return {
       type: openAiNow() ? "openai-compatible" : "anthropic-compatible",
       url: urlInput.value.trim(),
-      ...(prompt ? { identity: prompt.identity.checked } : {}),
+      ...(prompt ? { identity: prompt.identity.checked, limits: prompt.limits.checked } : {}),
       ...(prompt && prompt.append.value.trim() ? { instructionsAppend: prompt.append.value.trim() } : {}),
       ...(preset ? { preset: preset.id } : {}),
       // A vendor that asks for a session header keys its prompt cache on it, so carry it from the
@@ -2419,8 +2431,8 @@ function openProviderForm(options) {
     // (debugDump, a hand-written setting) is carried over from the saved one rather than dropped.
     // A field the form owns is left to the draft, so clearing it in the form still clears it.
     const formKeys = new Set(isChatgpt
-      ? ["type", "auth", "defaultEffort", "identity", "instructionsAppend", "models"]
-      : ["type", "url", "identity", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
+      ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "models"]
+      : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = { ...kept, ...provider };
     // Read after `next.providers` has been updated, so an unticked model is already undeclared here
