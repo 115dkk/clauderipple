@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import type { InputBlock } from "./images.ts";
 
 export const DESKTOP_BLOCKED = "Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
 export interface BridgeAuth { accessToken: string; organizationUuid: string; expiresAt: number }
@@ -70,8 +71,8 @@ export class BridgeClient {
     const response = await this.request(id, "/events", { method: "POST", body: JSON.stringify({ session_id: id, events: [{ payload }] }), signal: AbortSignal.timeout(15_000) });
     await response.body?.cancel();
   }
-  send(id: string, uuid: string, text: string): Promise<void> {
-    return this.post(id, { type: "user", uuid, message: { role: "user", content: text }, parent_tool_use_id: null });
+  send(id: string, uuid: string, content: string | InputBlock[]): Promise<void> {
+    return this.post(id, { type: "user", uuid, message: { role: "user", content }, parent_tool_use_id: null });
   }
   interrupt(id: string): Promise<void> {
     return this.post(id, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });

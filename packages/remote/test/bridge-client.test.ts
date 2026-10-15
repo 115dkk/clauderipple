@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { BridgeClient, decodeSse } from "../src/bridge-client.ts";
+import type { InputBlock } from "../src/images.ts";
 
 const auth = () => ({ accessToken: "secret-not-for-phone", organizationUuid: "org", expiresAt: Date.now() + 60_000 });
 const frame = (sequence: number) => `event: client_event\r\ndata: ${JSON.stringify({ sequence_num: sequence, event_id: `e${sequence}`, source: "worker", payload: { type: "control_cancel_request", request_id: "r" } })}\r\n\r\n`;
@@ -37,6 +38,25 @@ test("client writes exact prompt, permission and interrupt envelopes, never work
   assert.equal(headers.get("x-organization-uuid"), "org");
   assert.equal(headers.get("anthropic-beta"), null);
   assert.equal(JSON.parse(String(calls[2]?.options.body)).events[0].payload.request.subtype, "interrupt");
+});
+
+test("client sends image and text blocks unchanged in the user envelope", async () => {
+  const content: InputBlock[] = [
+    { type: "image", source: { type: "base64", media_type: "image/webp", data: "cGhvdG8=" } },
+    { type: "text", text: "Describe this photo" },
+  ];
+  let calls = 0;
+  const client = new BridgeClient({ auth, fetch: async (url, options) => {
+    calls++;
+    assert.equal(String(url), "https://api.anthropic.com/v1/code/sessions/bridge/events");
+    assert.equal(options?.method, "POST");
+    assert.deepEqual(JSON.parse(String(options?.body)), {
+      session_id: "bridge", events: [{ payload: { type: "user", uuid: "uuid", message: { role: "user", content }, parent_tool_use_id: null } }],
+    });
+    return new Response("{}");
+  } });
+  await client.send("bridge", "uuid", content);
+  assert.equal(calls, 1);
 });
 
 test("expired auth never calls fetch; rejected writes are not retried and errors cannot leak token", async () => {

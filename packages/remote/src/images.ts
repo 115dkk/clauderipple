@@ -12,7 +12,7 @@ export function attachmentContent(cwd: string, text: string, attachments: Attach
   const items = attachments.map(a => {
     if (!a || typeof a.name !== "string" || typeof a.mediaType !== "string") throw new Error("Invalid attachment.");
     const data = read(a.blob);
-    if (!data || data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error("Attachment missing or too large (8 MB limit).");
+    if (!data || data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error("Attachment missing or too large (8 MB limit).");
     const bytes = Buffer.from(data, "base64");
     if (bytes.length > ATTACHMENT_CAP) throw new Error("Attachment exceeds 8 MB.");
     if (a.mediaType.startsWith("image/") && !MIME.has(a.mediaType)) throw new Error("Use PNG, JPEG, GIF or WebP images.");

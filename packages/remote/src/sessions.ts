@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { attachmentContent, messageContent, sendUserFileImages, type InputBlock } from "./images.ts";
-import type { Attachment, ImagePart, SendBehavior } from "./protocol.ts";
+import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeClient, DESKTOP_BLOCKED, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
@@ -639,11 +639,10 @@ export class Sessions {
     if (this.desktop && !this.live.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
       const process = this.desktop.liveProcess(desktopId);
       if (process?.bridgeSessionId) {
-        if (attachments.length) throw new Error("Attachments are not supported on Mac sessions yet.");
         const key = `${id}/${clientMsgId}`;
         const pending = this.bridgeSends.get(key);
         if (pending) return pending;
-        const sending = this.sendBridge(id, clientMsgId, text, process.bridgeSessionId).finally(() => this.bridgeSends.delete(key));
+        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId).finally(() => this.bridgeSends.delete(key));
         this.bridgeSends.set(key, sending);
         return sending;
       }
@@ -672,10 +671,30 @@ export class Sessions {
     return id;
   }
 
-  private async sendBridge(id: string, clientMsgId: string, text: string, bridgeId: string): Promise<string> {
+  private async sendBridge(id: string, clientMsgId: string, text: string, attachments: Attachment[], bridgeId: string): Promise<string> {
+    if (attachments.some(a => !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(a?.mediaType))) {
+      throw new Error("Only photos can be attached to Claude app sessions for now.");
+    }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId, true);
+    // Rebase deletes this log's blobs too: validate and retain the bytes before it can run.
+    const converted = attachmentContent(r.cwd, text, attachments, blob => this.log(id).blob(blob));
+    if (Array.isArray(converted.content)) {
+      const blocks = converted.content;
+      const images = blocks.filter(block => block.type === "image");
+      if (images.reduce((size, block) => size + block.source.data.length, 0) > ATTACHMENT_COUNT * ATTACHMENT_CAP) {
+        throw new Error("Photo payload is too large.");
+      }
+      converted.content = [...images, ...blocks.filter(block => block.type === "text")];
+    }
     if (!r.desktopBridge) this.rebaseDesktop(r);
     if (this.seen(id, clientMsgId)) return id;
+    // Re-store in the current epoch; the local event must never point at deleted upload blobs.
+    if (Array.isArray(converted.content)) {
+      let index = 0;
+      for (const block of converted.content) {
+        if (block.type === "image") converted.images[index++]!.blob = this.log(id).image(block.source.data);
+      }
+    }
     const prior = this.bridges.get(id);
     if (prior?.bridgeId === bridgeId && prior.permissions.size) this.supersedeBridge(id, prior);
     // The stream only carries permission prompts; sending does not depend on it.
@@ -685,10 +704,10 @@ export class Sessions {
     const uuid = UUID_RE.test(clientMsgId) ? clientMsgId : uuidFrom(clientMsgId);
     while (this.bridgeEchoes.size >= Sessions.ECHO_CAP) this.bridgeEchoes.delete(this.bridgeEchoes.values().next().value!);
     this.bridgeEchoes.add(uuid);
-    try { await this.bridge.send(bridgeId, uuid, text); }
+    try { await this.bridge.send(bridgeId, uuid, converted.content); }
     catch (error) { throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED); }
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
-    this.append(id, { kind: "user", text, clientMsgId });
+    this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
     this.rememberClientMsgId(id, clientMsgId);
     // A turn the desktop app finished while no phone was polling left the record "running";
     // without a fresh state event the phone would time this turn from that old one.

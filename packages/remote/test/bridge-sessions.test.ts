@@ -7,12 +7,14 @@ import { Sessions } from "../src/sessions.ts";
 import { BridgeClient } from "../src/bridge-client.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { liveDesktopProcesses, type DesktopProcess } from "../src/desktop.ts";
+import { ATTACHMENT_CAP, ATTACHMENT_COUNT } from "../src/protocol.ts";
+import type { InputBlock } from "../src/images.ts";
 
 const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const line = (value: unknown) => JSON.stringify(value) + "\n";
 
-function fixture(t: import("node:test").TestContext, rejected = false) {
+function fixture(t: import("node:test").TestContext, rejected = false, resumed = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-session-test-"));
   const projects = path.join(root, "projects");
   fs.mkdirSync(path.join(projects, "project"), { recursive: true });
@@ -39,6 +41,13 @@ function fixture(t: import("node:test").TestContext, rejected = false) {
     assert.ok(String(url).includes("/events/stream?from_sequence_num="));
     return new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; options?.signal?.addEventListener("abort", () => c.close(), { once: true }); } }));
   } });
+  if (resumed) {
+    fs.mkdirSync(path.join(root, "host"), { recursive: true });
+    fs.writeFileSync(path.join(root, "host", "sessions.json"), JSON.stringify([{
+      id, sdkSessionId: id, cwd: root, model: "claude-sonnet-4-5", effort: null, title: "resumed",
+      createdAt: now, updatedAt: now, state: "idle", createdBy: "earlier", contextWindow: null, desktopHandoff: "excluded",
+    }]));
+  }
   const permissions = PermissionQueue.open(path.join(root, "permissions.json"));
   const sessions = new Sessions({ now: () => now, log() {}, dir: path.join(root, "host"), desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client, permissions,
     router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
@@ -146,6 +155,79 @@ test("bridge prompts, transcript echo, permission allow/cancel and interrupt nev
   await f.sessions.send(id, "closed-phone", "resume closed");
   await tick();
   assert.equal(f.queries(), 1);
+});
+
+test("bridge photos survive rebase and transcript echoes leave exactly one image-bearing user event", async t => {
+  const f = fixture(t, false, true);
+  const before = f.sessions.log(id);
+  const photos = ["image/png", "image/jpeg", "image/gif", "image/webp"].map((mediaType, index) => {
+    const data = Buffer.from(`synthetic photo ${index}`).toString("base64");
+    return { data, attachment: { blob: before.image(data), name: `photo-${index}`, mediaType } };
+  });
+  const attachments = photos.map(photo => photo.attachment);
+  await Promise.all([
+    f.sessions.send(id, "photo-phone", "Look at these", attachments),
+    f.sessions.send(id, "photo-phone", "Look at these", attachments),
+  ]);
+  const log = f.sessions.log(id);
+  assert.notEqual(log.epoch, before.epoch, "the resumed host record really rebased");
+  assert.equal(f.posts.length, 1);
+  const payload = (f.posts[0] as { events: { payload: { uuid: string; message: { content: InputBlock[] } } }[] }).events[0]!.payload;
+  assert.deepEqual(payload.message.content, [
+    ...photos.map(photo => ({ type: "image", source: { type: "base64", media_type: photo.attachment.mediaType, data: photo.data } })),
+    { type: "text", text: "Look at these" },
+  ]);
+  const users = () => log.tail().events.filter(event => event.kind === "user" && ["photo-phone", payload.uuid].includes(event.clientMsgId));
+  assert.equal(users().length, 1);
+  const event = users()[0]!;
+  assert.ok(event.kind === "user");
+  assert.equal(event.images?.length, photos.length);
+  event.images!.forEach((image, index) => {
+    assert.ok(image.blob);
+    assert.equal(log.blob(image.blob), photos[index]!.data);
+  });
+  fs.appendFileSync(f.file, line({ type: "user", uuid: payload.uuid, promptSource: "sdk", message: payload.message }));
+  await f.sessions.pollDesktop();
+  await f.sessions.pollDesktop();
+  await f.sessions.send(id, "photo-phone", "Look at these", attachments);
+  assert.equal(users().length, 1, "the UUID transcript echo and phone resend add no second message");
+  assert.equal(f.posts.length, 1);
+  assert.deepEqual(users()[0], event);
+  assert.equal(f.queries(), 0);
+});
+
+test("bridge rejects non-photos and excessive attachment counts without posting or logging a user", async t => {
+  const f = fixture(t);
+  const log = f.sessions.log(id);
+  const blob = log.image(Buffer.from("synthetic attachment").toString("base64"));
+  for (const mediaType of ["text/plain", "application/pdf", "image/svg+xml"]) {
+    await assert.rejects(async () => f.sessions.send(id, `file-${mediaType}`, "file", [{ blob, mediaType, name: "file" }]),
+      { message: "Only photos can be attached to Claude app sessions for now." });
+  }
+  await assert.rejects(async () => f.sessions.send(id, "too-many", "photos", Array.from({ length: ATTACHMENT_COUNT + 1 }, () => ({ blob, mediaType: "image/png", name: "photo" }))), /At most/);
+  assert.equal(f.posts.length, 0);
+  assert.equal(log.tail().events.filter(event => event.kind === "user").length, 1, "only the imported old prompt remains");
+  assert.equal(fs.existsSync(path.join(f.root, ".ripple-attachments")), false);
+  assert.equal(f.queries(), 0);
+});
+
+test("bridge caps total base64 at ATTACHMENT_COUNT times ATTACHMENT_CAP, inclusive", async t => {
+  const f = fixture(t);
+  const log = f.sessions.log(id);
+  const exact = Buffer.alloc(ATTACHMENT_CAP / 4 * 3).toString("base64");
+  const over = exact + "AAAA";
+  const attachments = (data: string) => {
+    const blob = log.image(data);
+    return Array.from({ length: ATTACHMENT_COUNT }, () => ({ blob, mediaType: "image/png", name: "photo" }));
+  };
+  await assert.rejects(async () => f.sessions.send(id, "over-size", "", attachments(over)), { message: "Photo payload is too large." });
+  assert.equal(f.posts.length, 0);
+  await f.sessions.send(id, "at-size", "", attachments(exact));
+  assert.equal(f.posts.length, 1);
+  const content = (f.posts[0] as { events: { payload: { message: { content: InputBlock[] } } }[] }).events[0]!.payload.message.content;
+  assert.equal(content.filter(block => block.type === "image").reduce((size, block) => size + block.source.data.length, 0), ATTACHMENT_COUNT * ATTACHMENT_CAP);
+  assert.deepEqual(content.at(-1), { type: "text", text: "Please inspect these images." });
+  assert.equal(f.queries(), 0);
 });
 
 test("a rejected live bridge send fails each attempt without logging the user or starting a writer", async t => {
