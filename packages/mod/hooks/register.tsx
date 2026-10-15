@@ -985,19 +985,23 @@ async function routerClaudeLimits($: EngineInterface): Promise<SessionRateLimit[
     return status.ok ? claudeLimitsFrom(JSON.parse(status.text), await $.clock.now()) : []
   } catch (error) { await report($, 'claude limits', error); return [] }
 }
-/** The per-model weekly windows, at most one status lookup a minute and only while the limits
- * row can show them; a failure keeps the last good numbers rather than blanking them. */
-let scopedAt = 0
-let scopedCache: ScopedLimit[] = []
-async function claudeScoped($: EngineInterface): Promise<ScopedLimit[]> {
+/** The router's figures for the Claude login (5-hour, weekly, per-model weeklies), at most one
+ * status lookup a minute and only while the limits row can show them; a failure keeps the last
+ * good numbers rather than blanking them. */
+let routerClaudeAt = 0
+let routerClaudeCache: { limits: SessionRateLimit[]; scoped: ScopedLimit[] } = { limits: [], scoped: [] }
+async function routerClaude($: EngineInterface): Promise<{ limits: SessionRateLimit[]; scoped: ScopedLimit[] }> {
   const now = await $.clock.now()
-  if (!(await currentSettings($)).extras.includes('limits') || now - scopedAt < 60_000) return scopedCache
-  scopedAt = now
+  if (!(await currentSettings($)).extras.includes('limits') || now - routerClaudeAt < 60_000) return routerClaudeCache
+  routerClaudeAt = now
   try {
     const status = await $.http.fetch(`${await adminUrl($)}/api/status`)
-    if (status.ok) scopedCache = claudeScopedFrom(JSON.parse(status.text), now)
-  } catch (error) { await report($, 'claude scoped limits', error) }
-  return scopedCache
+    if (status.ok) {
+      const body: unknown = JSON.parse(status.text)
+      routerClaudeCache = { limits: claudeLimitsFrom(body, now), scoped: claudeScopedFrom(body, now) }
+    }
+  } catch (error) { await report($, 'claude limits row', error) }
+  return routerClaudeCache
 }
 /** Every ChatGPT account's windows, at most one round a minute and only while the limits row can
  * show them. Writes the state only when the windows moved: a redraw that shows nothing new is
@@ -1050,9 +1054,13 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const top = rateLimits.filter(l => ['five_hour', 'seven_day'].includes(l.kind)).sort((a, b) => b.percentUsed - a.percentUsed)[0]
   const l = top ? { kind: top.kind, percent: top.percentUsed, ...(top.resetsAt ? { resetsAt: top.resetsAt } : {}) } : null
   // Every window for the limits row: the 5-hour and the weekly (one each, the hotter reading
-  // winning when both sources name it), then the per-model weeklies the router reports.
+  // winning when both sources name it), then the per-model weeklies the router reports. The row
+  // shows Claude's plan whatever this chat runs on: on a chat routed elsewhere the host's windows
+  // are not Claude's, so the router's stand alone (a muse chat showed GPT only, 2026-10-15).
+  const fromRouter = await routerClaude($)
+  const claudeChat = /^claude-/.test(await $.session.model())
   const mains = new Map<'five_hour' | 'seven_day', SessionRateLimit>()
-  for (const w of rateLimits) {
+  for (const w of [...(claudeChat ? rateLimits : []), ...fromRouter.limits]) {
     if (w.kind !== 'five_hour' && w.kind !== 'seven_day') continue
     const prev = mains.get(w.kind)
     if (!prev || w.percentUsed > prev.percentUsed) mains.set(w.kind, w)
@@ -1060,7 +1068,7 @@ async function refreshUsage($: EngineInterface): Promise<void> {
   const claudeItems: LimitItem[] = (['five_hour', 'seven_day'] as const)
     .flatMap(kind => mains.get(kind) ? [mains.get(kind)!] : [])
     .map(w => ({ provider: 'claude', account: 0, kind: w.kind as 'five_hour' | 'seven_day', label: '', percent: w.percentUsed, ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}) }))
-  for (const s of await claudeScoped($)) claudeItems.push({ provider: 'claude', account: 0, kind: 'scoped', label: s.name, percent: s.percent, ...(s.resetsAt ? { resetsAt: s.resetsAt } : {}) })
+  for (const s of fromRouter.scoped) claudeItems.push({ provider: 'claude', account: 0, kind: 'scoped', label: s.name, percent: s.percent, ...(s.resetsAt ? { resetsAt: s.resetsAt } : {}) })
   if (!same(claudeItems, await read($, claudeLimits))) await update($, claudeLimits, () => claudeItems)
   // Check the previous binding deadline before a rolled-forward snapshot replaces it.
   await endModeIfOver($)

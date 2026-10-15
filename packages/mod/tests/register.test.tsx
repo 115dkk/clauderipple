@@ -621,6 +621,21 @@ for (const [tier, rung, agent, model] of [
   expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').filter(line => line.includes('"outcome"')).length).toBe(1)
 })
 
+test('the limits row shows Claude\'s plan on a chat that runs on another provider', async ($, on) => {
+  const b = boundaries(on, { extras: ['limits'] })
+  b.setModel('muse-spark-1.3-contributor')
+  const status = { claude: { accounts: [{ id: 'current', quota: { at: NOW, rate_limits: { primary: { used_percent: 1, window_minutes: 300, reset_at: (NOW + 3_600_000) / 1000 }, secondary: { used_percent: 88, window_minutes: 10080, reset_at: (NOW + 7_200_000) / 1000 } }, scoped: [{ name: 'Fable', used_percent: 2, window_minutes: 10080 }] } }] } }
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/status') ? status : { requests: [] }) } }
+  })
+  await start($)
+  await b.clock.advance(15000)
+  const ui = await band($, 'desktop')
+  for (const text of [/^Claude$/, /^88%$/, /^Fable$/]) expect(await ui.find({ type: 'Text', text }), String(text)).toBeDefined()
+  await ui.unmount()
+})
+
 test('a tier marker on a worker other than ripple:auto is dropped, not routed as a model', async ($, on) => {
   boundaries(on)
   http(on)
