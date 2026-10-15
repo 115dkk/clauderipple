@@ -21,12 +21,14 @@ const tmp = (t: { after(fn: () => void): void }): string => {
 // ---- launchd -------------------------------------------------------------------------------------
 
 test("the plist runs this checkout's main.ts with an absolute node, KeepAlive, a 10 s throttle and one log", () => {
-  const spec = specFor({ bind: "lan", script: "/Users/me/Ripple & Co/packages/remote/src/main.ts", claudePath: "/Users/me/.local/bin/claude", node: "/opt/node/bin/node", home: "/Users/me" });
+  const spec = specFor({ script: "/Users/me/Ripple & Co/packages/remote/src/main.ts", claudePath: "/Users/me/.local/bin/claude", node: "/opt/node/bin/node", home: "/Users/me" });
   const xml = plist(spec);
   assert.match(xml, new RegExp(`<key>Label</key>\\s*<string>${LABEL}</string>`));
   const args = [...xml.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
   const start = args.indexOf("/opt/node/bin/node");
-  assert.deepEqual(args.slice(start, start + 5), ["/opt/node/bin/node", "--disable-warning=ExperimentalWarning", "/Users/me/Ripple &amp; Co/packages/remote/src/main.ts", "--bind", "lan"]);
+  assert.deepEqual(args.slice(start, start + 3), ["/opt/node/bin/node", "--disable-warning=ExperimentalWarning", "/Users/me/Ripple &amp; Co/packages/remote/src/main.ts"]);
+  assert.deepEqual(spec.args, [], "the service must read saved settings, not overwrite bind on restart");
+  assert.equal(args.includes("--bind"), false);
   assert.match(xml, /<key>RunAtLoad<\/key>\s*<true\/>/);
   assert.match(xml, /<key>KeepAlive<\/key>\s*<true\/>/);
   assert.match(xml, /<key>ThrottleInterval<\/key>\s*<integer>10<\/integer>/);
@@ -58,7 +60,7 @@ test("install replaces a loaded agent and bootstraps; uninstall boots out and re
     if (args[0] === "bootstrap") loaded = true;
     return { status: 0, out: "" };
   };
-  const spec = { ...specFor({ bind: "127.0.0.1", script: "/x/packages/remote/src/main.ts", claudePath: undefined, node: "/n/node", home: dir }), log: p.log };
+  const spec = { ...specFor({ script: "/x/packages/remote/src/main.ts", claudePath: undefined, node: "/n/node", home: dir }), log: p.log };
   install(spec, run, p);
   assert.deepEqual(calls.map((c) => c[1]), ["print", "bootout", "bootstrap"]);
   assert.equal(calls[2]![3], p.plist);
@@ -68,6 +70,22 @@ test("install replaces a loaded agent and bootstraps; uninstall boots out and re
   uninstall(run, p);
   assert.deepEqual(calls.map((c) => c[1]), ["print", "bootout"]);
   assert.equal(fs.existsSync(p.plist), false);
+});
+
+test("install retries a bootstrap launchd refuses while the old agent is still going away", (t) => {
+  const dir = tmp(t);
+  const p = { home: dir, plist: path.join(dir, "LaunchAgents", `${LABEL}.plist`), log: path.join(dir, "logs", "host.log") };
+  let refusals = 2;
+  const calls: string[] = [];
+  const run = (cmd: string, args: string[]): { status: number; out: string } => {
+    calls.push(args[0] ?? cmd);
+    if (args[0] === "print") return { status: 113, out: "not found" };
+    if (args[0] === "bootstrap" && refusals-- > 0) return { status: 5, out: "Bootstrap failed: 5: Input/output error" };
+    return { status: 0, out: "" };
+  };
+  const spec = { ...specFor({ script: "/x/packages/remote/src/main.ts", claudePath: undefined, node: "/n/node", home: dir }), log: p.log };
+  install(spec, run, p);
+  assert.deepEqual(calls, ["print", "bootstrap", "0.5", "bootstrap", "0.5", "bootstrap"]);
 });
 
 test("launchctl print: state, pid and last exit are read from the first matching lines", () => {

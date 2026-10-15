@@ -80,13 +80,15 @@ export function paths(home = os.homedir()): Paths {
   return { home, plist: path.join(home, "Library", "LaunchAgents", `${LABEL}.plist`), log: path.join(home, ".clauderipple", "logs", "host.log") };
 }
 
-export function specFor(opts: { bind: string; script: string; claudePath: string | undefined; node?: string; home?: string; remoteHome?: string }): PlistSpec {
+export function specFor(opts: { script: string; claudePath: string | undefined; node?: string; home?: string; remoteHome?: string }): PlistSpec {
   const node = opts.node ?? process.execPath;
   const p = paths(opts.home);
   return {
     node,
     script: opts.script,
-    args: ["--bind", opts.bind],
+    // installCmd already persists the selected bind in host.json. Repeating it here would
+    // overwrite a dashboard change every time launchd restarts the host.
+    args: [],
     // The checkout, so relative paths in logs read naturally; modules resolve from the script itself.
     workingDir: path.resolve(path.dirname(opts.script), "..", "..", ".."),
     log: p.log,
@@ -119,7 +121,13 @@ export function install(spec: PlistSpec, run: Run = runSync, p: Paths = paths())
   }
   fs.writeFileSync(p.plist, plist(spec), { mode: 0o644 });
   done.push(`wrote ${p.plist}`);
-  const r = run("/bin/launchctl", ["bootstrap", domain(), p.plist]);
+  // Right after a bootout, launchd may still be tearing the old agent down and answers
+  // "Bootstrap failed: 5: Input/output error"; the host then stayed down. Give it a few seconds.
+  let r = run("/bin/launchctl", ["bootstrap", domain(), p.plist]);
+  for (let tries = 1; r.status === 5 && tries < 10; tries++) {
+    run("/bin/sleep", ["0.5"]);
+    r = run("/bin/launchctl", ["bootstrap", domain(), p.plist]);
+  }
   if (r.status !== 0) throw new Error(`launchctl bootstrap failed (${r.status}): ${r.out.trim()}`);
   done.push(`loaded ${LABEL}; logs in ${spec.log}`);
   return done;

@@ -28,6 +28,7 @@ import { RelayHost, loadHostKey } from "./relay.ts";
 import type { WsLike } from "./relay.ts";
 import { RouterClient } from "./router.ts";
 import { HostServer } from "./server.ts";
+import { LocalControl } from "./local-control.ts";
 import { agentStatus, findClaude, install, paths, plist, specFor, uninstall } from "./service.ts";
 import { Sessions } from "./sessions.ts";
 import { desktopHandoff } from "./handoff.ts";
@@ -131,6 +132,16 @@ async function runHost(): Promise<void> {
     log,
     push: { publicKey: vapid.publicKey, subscribe: (id, sub, lang) => notifier.subscribe(id, sub, lang), unsubscribe: (id) => notifier.unsubscribe(id) },
     expoPush: expoNotifier,
+    pushDevices: () => [...new Set([...notifier.devices(), ...expoNotifier.devices()])],
+    clearPush: () => {
+      for (const id of notifier.devices()) notifier.unsubscribe(id);
+      for (const id of expoNotifier.devices()) expoNotifier.unsubscribe(id);
+    },
+    local: new LocalControl({
+      dir, config: cfg, version: VERSION, hostPublicKey: toB64u(loadHostKey(dir, nacl).publicKey),
+      phones: () => server?.phones() ?? [],
+      rotate: token => { server?.rotateToken(token); },
+    }),
   });
   server = host;
   await host.listen();
@@ -180,8 +191,7 @@ async function status(): Promise<void> {
 function installCmd(): void {
   const dir = remoteHome();
   const cfg = process.argv.includes("--print") ? loadConfig(dir, false) : configFromArgs(dir);
-  const bind = arg("bind") ?? cfg.bind;
-  const spec = specFor({ bind, script: fileURLToPath(import.meta.url), claudePath: findClaude(cfg.claudePath), ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
+  const spec = specFor({ script: fileURLToPath(import.meta.url), claudePath: findClaude(cfg.claudePath), ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
   if (process.argv.includes("--print")) { out(plist(spec)); return; }
   for (const line of install(spec)) out(`${line}\n`);
   out(`Pair the phone: ripple-host pair (npm run remote -- pair)\n`);

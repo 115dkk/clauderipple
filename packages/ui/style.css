@@ -450,6 +450,16 @@ label.check input { margin-top: 2px; }
 .picker-model > .model-window::-webkit-inner-spin-button { display: none; }
 .picker-model > .model-window:hover, .picker-model > .model-window:focus, .picker-model > .model-window:not(:placeholder-shown) { color: var(--label); background: var(--field); border-color: var(--field-edge); }
 
+/* ---- Phone --------------------------------------------------------------------------- */
+
+.phone-choice { cursor: pointer; }
+.phone-choice input { flex: 0 0 auto; }
+.phone-qr:not(:empty) { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 12px; padding: 16px; }
+.phone-qr-image { display: block; flex: 0 0 240px; width: 240px; height: 240px; padding: 8px; background: #fff; border-radius: 8px; }
+#phone-content .cell-value input { width: 280px; max-width: 100%; }
+#phone-content code { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+#phone-content > .section:first-child { margin-top: 0; }
+
 /* ---- Providers ----------------------------------------------------------------------- */
 
 .provider-workspace { display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 28px; align-items: start; }

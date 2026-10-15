@@ -7,6 +7,7 @@ import module from "node:module";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 import { tokenMatches } from "./config.ts";
+import type { Phone } from "./local-control.ts";
 import { browse, makeFolder, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
 import { gitInfo } from "./worktree.ts";
@@ -52,6 +53,9 @@ export interface ServerOptions {
   log?: (line: string) => void;
   push?: Pick<Notifier, "subscribe" | "unsubscribe"> & { publicKey: string };
   expoPush?: { subscribe(clientId: string, token: string, lang: "ko" | "en"): void; unsubscribe(clientId: string): void };
+  local?: { handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> };
+  pushDevices?: () => string[];
+  clearPush?: () => void;
   now?: () => number;
 }
 
@@ -87,6 +91,34 @@ export class HostServer {
   private http: http.Server;
   private wss: WebSocketServer;
   private clients = new Set<Client>();
+  private localHttp: http.Server | null = null;
+  private lastSeen = new Map<string, number>();
+
+  phones(): Phone[] {
+    const push = new Set(this.opts.pushDevices?.() ?? []);
+    const phones = new Map<string, Phone>([...push].map(clientId => [clientId, { clientId, connected: false, lastSeen: this.lastSeen.get(clientId) ?? null, push: true }]));
+    for (const c of this.clients) {
+      if (!c.authed || !c.clientId || c.ws.readyState !== c.ws.OPEN) continue;
+      const prior = phones.get(c.clientId);
+      phones.set(c.clientId, { clientId: c.clientId, connected: true, lastSeen: Math.max(prior?.lastSeen ?? 0, c.lastRx), push: push.has(c.clientId) });
+    }
+    return [...phones.values()];
+  }
+
+  rotateToken(token: string): void {
+    this.opts.token = token;
+    for (const c of this.clients) {
+      if (!c.authed) continue;
+      c.authed = false;
+      c.attached.clear();
+      c.ws.terminate();
+      this.clients.delete(c);
+    }
+    this.uploads.clear();
+    this.seenAt.clear();
+    this.lastSeen.clear();
+    this.opts.clearPush?.();
+  }
   private stripped = new Map<string, { mtime: number; body: string }>();
   private models: { at: number; data: ProviderGroup[] } | null = null;
   private uploads = new Map<string, { data: string; at: number }>();
@@ -152,8 +184,8 @@ export class HostServer {
     });
   }
 
-  listen(): Promise<void> {
-    return new Promise((resolve, reject) => {
+  async listen(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
       this.http.once("error", reject);
       this.http.listen(this.opts.port, this.opts.listen, () => {
         this.http.off("error", reject);
@@ -164,6 +196,24 @@ export class HostServer {
         resolve();
       });
     });
+    // A specific LAN/Tailscale/IPv6 bind does not receive 127.0.0.1 traffic. Keep its public
+    // interface unchanged and add only a loopback control listener on the same port.
+    if (this.opts.local && this.opts.listen !== "127.0.0.1" && this.opts.listen !== "localhost" && this.opts.listen !== "0.0.0.0" && this.opts.listen !== "::") {
+      const local = http.createServer((req, res) => {
+        try {
+          const pathname = new URL(req.url ?? "/", "http://local").pathname;
+          if (!pathname.startsWith("/local/")) { res.writeHead(404).end(); return; }
+        } catch { res.writeHead(400).end(); return; }
+        this.serve(req, res);
+      });
+      this.localHttp = local;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          local.once("error", reject);
+          local.listen(this.address().port, "127.0.0.1", () => { local.off("error", reject); resolve(); });
+        });
+      } catch (error) { await this.close(); throw error; }
+    }
   }
 
   close(): Promise<void> {
@@ -171,7 +221,8 @@ export class HostServer {
     if (this.sessionsTimer) clearTimeout(this.sessionsTimer);
     this.sessionsTimer = null;
     for (const c of this.clients) c.ws.terminate();
-    return new Promise((resolve) => this.http.close(() => resolve()));
+    return Promise.all([this.http, this.localHttp].filter((server): server is http.Server => server !== null)
+      .map(server => new Promise<void>(resolve => server.close(() => resolve())))).then(() => {});
   }
 
   address(): { port: number } { return this.http.address() as { port: number }; }
@@ -256,7 +307,11 @@ export class HostServer {
       try { msg = JSON.parse(String(data)) as ClientMsg; } catch { return; }
       void this.onClient(c, msg).catch((e: Error) => this.send(c, { t: "error", code: "internal", message: e.message }));
     });
-    ws.on("close", () => { clearTimeout(helloTimer); this.clients.delete(c); });
+    ws.on("close", () => {
+      clearTimeout(helloTimer);
+      if (c.authed && c.clientId) this.lastSeen.set(c.clientId, c.lastRx);
+      this.clients.delete(c);
+    });
     ws.on("error", () => { /* close follows */ });
   }
 
@@ -470,6 +525,15 @@ export class HostServer {
 
   private serveInner(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url ?? "/", "http://x");
+    if (url.pathname.startsWith("/local/")) {
+      if (!this.opts.local) { res.writeHead(404).end(); return; }
+      void this.opts.local.handle(req, res).catch(() => {
+        // Never log a local request, body or exception: pairing responses contain credentials.
+        if (!res.headersSent) res.writeHead(500).end();
+        else res.destroy();
+      });
+      return;
+    }
     if (url.pathname === "/healthz") { res.writeHead(200, { "content-type": "application/json" }).end(`{"ok":true}`); return; }
     if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405).end(); return; }
     let rel: string;

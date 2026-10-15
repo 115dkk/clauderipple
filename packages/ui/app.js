@@ -153,6 +153,10 @@ let pickerBusy = false;
 let probeStates = new Map();
 let chatgptLoginBusy = false;
 let chatgptLoginMessage = "";
+let phoneGeneration = 0;
+let phoneSnapshot = null;
+let phoneQrGeneration = 0;
+let phoneBusy = false;
 
 function selectOption(value, text) { return el("option", { value }, [text]); }
 function badge(kind, text) { return el("span", { class: `badge ${kind} dot`, text }, []); }
@@ -195,6 +199,8 @@ function svgIcon(viewBox, paths, cls) {
 function chevronIcon() { return svgIcon("0 0 8 13", ["M1.5 1.5l5 5-5 5"], "chevron"); }
 
 function showView(name) {
+  if (name !== "phone") { phoneGeneration++; hidePhoneQr(); }
+  if (name === "phone") queueMicrotask(() => void loadPhone());
   for (const button of $all(".nav-btn")) button.classList.toggle("active", button.dataset.view === name);
   for (const view of $all(".view")) view.classList.toggle("active", view.id === `view-${name}`);
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
@@ -726,6 +732,129 @@ async function toggleCodex(enabled) {
 }
 void Promise.all([loadCatalogs(), refreshHealth()]);
 setInterval(refreshHealth, 5000);
+
+// ---- Phone --------------------------------------------------------------------------
+
+function hidePhoneQr() {
+  phoneQrGeneration++;
+  const box = $("#phone-qr");
+  if (box) box.replaceChildren();
+}
+function phoneActive() { return $("#view-phone").classList.contains("active"); }
+function phonePost(route, body) {
+  return api(`/api/phone/${route}`, { method: "POST", headers: { "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+}
+async function showPhoneQr(button) {
+  if (phoneBusy) return;
+  const generation = ++phoneQrGeneration;
+  button.disabled = true;
+  try {
+    const pairing = await api("/api/phone/pairing");
+    if (generation !== phoneQrGeneration || !phoneActive()) return;
+    const copy = el("button", { class: "btn secondary", type: "button", text: t("phone.copyLink") });
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(pairing.url); toast(t("phone.copied")); }
+      catch { toast(t("phone.copyFailed"), true); }
+    });
+    // An image, never trusted SVG markup in the dashboard's DOM.
+    $("#phone-qr").replaceChildren(el("img", { class: "phone-qr-image", alt: t("phone.qrAlt"), src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(pairing.svg)}`, width: "240", height: "240" }), copy,
+      el("button", { class: "btn secondary", type: "button", text: t("common.hide"), onclick: hidePhoneQr }));
+  } catch { if (generation === phoneQrGeneration) toast(t("common.loadFailed"), true); }
+  finally { button.disabled = false; }
+}
+function renderPhoneStatus(data) {
+  const rows = [cell(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")))];
+  if (data.hostRunning) rows.push(cell(t("phone.mode"), el("span", { text: t(data.mode === "relay" ? "phone.relayStatus" : data.mode === "direct" ? "phone.directStatus" : "phone.localStatus") }), `${data.bind}:${data.port} · ${data.version}`),
+    cell(t("phone.notifications"), badge(data.pushReady ? "ok" : "warn", t(data.pushReady ? "phone.ready" : "phone.needsRelay"))));
+  else rows.push(el("div", { class: "cell-note" }, [hint(t("phone.install")), el("code", { text: data.hint })]));
+  $("#phone-status").replaceChildren(...rows);
+  if (!data.hostRunning) return;
+  $("#phone-phones").replaceChildren(...(data.phones.length ? data.phones.map(phone => cell(
+    el("span", { class: "cell-label mono", text: phone.clientId.length > 12 ? `${phone.clientId.slice(0, 12)}…` : phone.clientId, title: phone.clientId }),
+    badge(phone.connected ? "ok" : "", t(phone.connected ? "phone.connected" : "phone.offline")),
+    [phone.lastSeen ? t("phone.lastSeen", { time: new Date(phone.lastSeen).toLocaleString(CURRENT_LANG) }) : t("phone.unknownSeen"), t(phone.push ? "phone.pushOn" : "phone.pushOff")],
+  )) : [el("div", { class: "cell-note", text: t("phone.empty") })]));
+  $("#phone-restart").hidden = !data.restartRequired;
+}
+function phoneSettings(data) {
+  const saved = data.settings;
+  const selected = saved.relay ? "relay" : saved.bind === "lan" || saved.bind === "tailscale" ? saved.bind : "local";
+  const relayUrl = el("input", { type: "url", value: saved.relay || "", placeholder: "https://", "aria-label": t("phone.relayUrl"), autocomplete: "off" });
+  const urlRow = cell(el("label", { for: "phone-relay-url", text: t("phone.relayUrl") }), relayUrl, t("phone.relayHelp"), "wide");
+  relayUrl.id = "phone-relay-url";
+  urlRow.hidden = selected !== "relay";
+  const choices = ["relay", "lan", "tailscale", "local"].map(value => {
+    const radio = el("input", { type: "radio", name: "phone-mode", value, checked: value === selected });
+    radio.addEventListener("change", () => { urlRow.hidden = value !== "relay"; });
+    return el("label", { class: "cell phone-choice" }, [radio, el("span", { class: "cell-text" }, [el("span", { class: "cell-label", text: t(`phone.choice.${value}`) }), el("span", { class: "cell-sub", text: t(`phone.help.${value}`) })])]);
+  });
+  const save = el("button", { class: "btn", type: "button", text: t("common.save") });
+  save.addEventListener("click", async () => {
+    if (phoneBusy) return;
+    const mode = $('#phone-content input[name="phone-mode"]:checked').value;
+    if (mode === "relay" && !relayUrl.value.trim()) { relayUrl.focus(); toast(t("phone.urlRequired"), true); return; }
+    phoneBusy = true; save.disabled = true;
+    hidePhoneQr();
+    try {
+      const result = await phonePost("settings", mode === "relay" ? { relay: relayUrl.value.trim(), bind: "local" } : { relay: "off", bind: mode });
+      toast(t(result.restartRequired ? "phone.restartRequired" : "common.saved"));
+      await refreshPhone();
+    } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    finally { phoneBusy = false; save.disabled = false; }
+  });
+  return section(t("phone.settings"), [...choices, urlRow, cell(t("phone.apply"), save)]);
+}
+function phoneRestart() {
+  const button = el("button", { class: "btn secondary", type: "button", text: t("phone.restart") });
+  const message = hint("");
+  button.addEventListener("click", async () => {
+    if (!confirm(t("phone.restartConfirm"))) return;
+    button.disabled = true;
+    hidePhoneQr();
+    try {
+      const result = await phonePost("restart");
+      if (result.manual) message.textContent = t("phone.manualRestart", { command: result.command });
+      else { toast(t("phone.restarting")); setTimeout(() => void loadPhone(), 2000); }
+    } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    finally { button.disabled = false; }
+  });
+  return el("div", { id: "phone-restart", class: "group stacked-group", hidden: "" }, [cell(t("phone.restartRequired"), button, message, "wide")]);
+}
+function phoneControls(data) {
+  const qr = el("button", { class: "btn secondary", type: "button", text: t("phone.showQr") });
+  qr.addEventListener("click", () => void showPhoneQr(qr));
+  const rotate = el("button", { class: "cell-button destructive", type: "button", text: t("phone.rotate") });
+  rotate.addEventListener("click", async () => {
+    if (phoneBusy || !confirm(t("phone.rotateConfirm"))) return;
+    phoneBusy = true; rotate.disabled = true; hidePhoneQr();
+    try { await phonePost("rotate"); toast(t("phone.rotated")); await refreshPhone(); }
+    catch (error) { toast(t("common.actionFailed"), true, error.message); }
+    finally { phoneBusy = false; rotate.disabled = false; }
+  });
+  const phones = section(t("phone.phones"), []);
+  $(".group", phones).id = "phone-phones";
+  return [section(t("phone.pairing"), [cell(t("phone.scan"), qr), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
+    phoneSettings(data), phoneRestart(), phones, section(null, [rotate], t("phone.sharedKey"))];
+}
+async function refreshPhone(rebuild = false) {
+  if (!phoneActive()) return;
+  const generation = phoneGeneration;
+  try {
+    const data = await api("/api/phone/status");
+    if (generation !== phoneGeneration || !phoneActive()) return;
+    if (rebuild || !phoneSnapshot || phoneSnapshot.hostRunning !== data.hostRunning) {
+      hidePhoneQr();
+      const state = section(t("phone.status"), []);
+      $(".group", state).id = "phone-status";
+      $("#phone-content").replaceChildren(state, ...(data.hostRunning ? phoneControls(data) : []));
+    }
+    phoneSnapshot = data;
+    renderPhoneStatus(data);
+  } catch (error) { toast(t("common.loadFailed"), true, error.message); }
+}
+async function loadPhone() { phoneGeneration++; hidePhoneQr(); await refreshPhone(true); }
+$("#phone-refresh").addEventListener("click", () => void loadPhone());
+setInterval(() => { if (!phoneBusy) void refreshPhone(); }, 5000);
 
 // ---- Model links --------------------------------------------------------------------
 

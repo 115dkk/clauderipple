@@ -2387,6 +2387,86 @@ const I18N = {
   },
 };
 
+// Phone control vocabulary stays together across the dashboard's six languages.
+Object.assign(I18N.ko, {
+  "nav.phone": "휴대폰", "phone.subtitle": "Ripple Remote 앱을 연결하고 휴대폰 연결과 알림을 관리합니다.",
+  "phone.refresh": "새로고침", "phone.status": "연결 상태", "phone.host": "원격 호스트", "phone.running": "실행 중", "phone.stopped": "중지됨",
+  "phone.mode": "연결 방식", "phone.relayStatus": "Relay — 어디서나 + 알림", "phone.directStatus": "같은 네트워크", "phone.localStatus": "이 컴퓨터만",
+  "phone.notifications": "알림", "phone.ready": "준비됨", "phone.needsRelay": "Relay 필요", "phone.install": "저장소 폴더의 터미널에서 호스트를 설치·시작하세요.",
+  "phone.pairing": "휴대폰 연결 (QR)", "phone.scan": "휴대폰 카메라로 스캔", "phone.showQr": "QR 코드 보기", "phone.copyLink": "링크 복사", "phone.copied": "링크를 복사했습니다.", "phone.copyFailed": "링크를 복사하지 못했습니다. 브라우저의 클립보드 권한을 확인하세요.", "phone.qrAlt": "Ripple Remote 연결 QR 코드",
+  "phone.qrWarning": "코드와 링크에는 페어링 키가 들어 있습니다. 본인 휴대폰에만 보여 주세요.", "phone.unreachable": "현재 이 컴퓨터에서만 연결됩니다. 휴대폰 연결을 위해 아래에서 Relay 또는 네트워크 연결을 설정하세요.",
+  "phone.settings": "연결 방식 설정", "phone.choice.relay": "Relay (권장)", "phone.help.relay": "기본 권장 방식 · 어디서나 연결하며 알림에 필요합니다.", "phone.choice.lan": "같은 네트워크 (LAN)", "phone.help.lan": "같은 공유기에 연결된 기기만 사용합니다. 알림은 지원하지 않습니다.", "phone.choice.tailscale": "Tailscale", "phone.help.tailscale": "같은 Tailscale 네트워크의 기기에서 연결합니다. 알림은 지원하지 않습니다.", "phone.choice.local": "이 컴퓨터만", "phone.help.local": "루프백 전용입니다. 휴대폰에서는 연결할 수 없습니다.",
+  "phone.relayUrl": "Relay 주소", "phone.relayHelp": "사용할 Relay 서버의 HTTPS 주소를 입력하세요.", "phone.urlRequired": "Relay 주소를 입력하세요.", "phone.apply": "변경 사항 적용",
+  "phone.restartRequired": "호스트를 다시 시작해야 적용됩니다", "phone.restart": "재시작", "phone.restartConfirm": "호스트를 다시 시작하시겠습니까? 휴대폰 연결과 진행 중인 원격 작업이 중단될 수 있습니다.", "phone.restarting": "호스트를 재시작했습니다. 잠시 후 상태를 확인합니다.", "phone.manualRestart": "이 운영체제에서는 터미널에서 실행하세요: {command}",
+  "phone.phones": "연결된 휴대폰", "phone.connected": "연결됨", "phone.offline": "오프라인", "phone.lastSeen": "마지막 접속: {time}", "phone.unknownSeen": "마지막 접속 기록 없음", "phone.pushOn": "알림 켜짐", "phone.pushOff": "알림 꺼짐", "phone.empty": "아직 휴대폰이 없습니다. QR 코드로 연결하세요.",
+  "phone.rotate": "모든 휴대폰 연결 끊기 (새 키)", "phone.rotateConfirm": "모든 휴대폰의 연결과 알림을 해제하고 새 키를 발급하시겠습니까? 기존 QR과 링크는 무효화되며 다시 페어링해야 합니다.", "phone.rotated": "모든 휴대폰 연결을 해제하고 키를 교체했습니다.", "phone.sharedKey": "모든 휴대폰은 하나의 페어링 키를 공유합니다. 개별 연결 해제는 지원하지 않습니다.",
+});
+Object.assign(I18N.en, {
+  "nav.phone": "Phone", "phone.subtitle": "Pair Ripple Remote and manage phone connections and notifications.",
+  "phone.refresh": "Refresh", "phone.status": "Connection status", "phone.host": "Remote host", "phone.running": "Running", "phone.stopped": "Stopped",
+  "phone.mode": "Connection mode", "phone.relayStatus": "Relay — anywhere + notifications", "phone.directStatus": "Same network", "phone.localStatus": "This computer only",
+  "phone.notifications": "Notifications", "phone.ready": "Ready", "phone.needsRelay": "Relay required", "phone.install": "Install and start the host from a terminal in the repository folder.",
+  "phone.pairing": "Pair a phone (QR)", "phone.scan": "Scan with your phone camera", "phone.showQr": "Show QR code", "phone.copyLink": "Copy link", "phone.copied": "Link copied.", "phone.copyFailed": "Could not copy the link. Check the browser's clipboard permission.", "phone.qrAlt": "Ripple Remote pairing QR code",
+  "phone.qrWarning": "The code and link carry the pairing key. Show them only to your own phone.", "phone.unreachable": "Only this computer can connect right now. Choose Relay or a network connection below to reach it from your phone.",
+  "phone.settings": "Connection settings", "phone.choice.relay": "Relay (recommended)", "phone.help.relay": "Recommended default · connect anywhere; required for notifications.", "phone.choice.lan": "Same network (LAN)", "phone.help.lan": "Devices on the same local network only. No notifications.", "phone.choice.tailscale": "Tailscale", "phone.help.tailscale": "Connect from devices on the same Tailscale network. No notifications.", "phone.choice.local": "This computer only", "phone.help.local": "Loopback only. Phones cannot connect.",
+  "phone.relayUrl": "Relay address", "phone.relayHelp": "Enter the HTTPS address of the Relay server you use.", "phone.urlRequired": "Enter a Relay address.", "phone.apply": "Apply changes",
+  "phone.restartRequired": "Restart the host to apply changes", "phone.restart": "Restart", "phone.restartConfirm": "Restart the host? Phone connections and active remote work may be interrupted.", "phone.restarting": "Host restarted. Checking its status shortly.", "phone.manualRestart": "On this operating system, run in a terminal: {command}",
+  "phone.phones": "Connected phones", "phone.connected": "Connected", "phone.offline": "Offline", "phone.lastSeen": "Last seen: {time}", "phone.unknownSeen": "Last seen unknown", "phone.pushOn": "Notifications on", "phone.pushOff": "Notifications off", "phone.empty": "No phones yet. Pair one with the QR code.",
+  "phone.rotate": "Disconnect all phones (new key)", "phone.rotateConfirm": "Disconnect every phone, remove notifications and issue a new key? Existing QR codes and links will stop working. Each phone must pair again.", "phone.rotated": "All phones disconnected and pairing key replaced.", "phone.sharedKey": "All phones share one pairing key. Individual unpairing is not supported.",
+});
+Object.assign(I18N.zh, {
+  "nav.phone": "手机", "phone.subtitle": "配对 Ripple Remote，管理手机连接和通知。",
+  "phone.refresh": "刷新", "phone.status": "连接状态", "phone.host": "远程主机", "phone.running": "运行中", "phone.stopped": "已停止",
+  "phone.mode": "连接方式", "phone.relayStatus": "Relay — 随处连接 + 通知", "phone.directStatus": "同一网络", "phone.localStatus": "仅此电脑",
+  "phone.notifications": "通知", "phone.ready": "已就绪", "phone.needsRelay": "需要 Relay", "phone.install": "在仓库文件夹中打开终端，安装并启动主机。",
+  "phone.pairing": "配对手机 (QR)", "phone.scan": "用手机相机扫描", "phone.showQr": "显示 QR 码", "phone.copyLink": "复制链接", "phone.copied": "已复制链接。", "phone.copyFailed": "无法复制链接，请检查浏览器剪贴板权限。", "phone.qrAlt": "Ripple Remote 配对 QR 码",
+  "phone.qrWarning": "QR 码和链接包含配对密钥，仅向您自己的手机展示。", "phone.unreachable": "当前仅此电脑可连接。请在下方选择 Relay 或网络连接以连接手机。",
+  "phone.settings": "连接设置", "phone.choice.relay": "Relay（推荐）", "phone.help.relay": "默认推荐方式 · 随处连接；通知需要此方式。", "phone.choice.lan": "同一网络 (LAN)", "phone.help.lan": "仅限同一局域网内的设备，不支持通知。", "phone.choice.tailscale": "Tailscale", "phone.help.tailscale": "从同一 Tailscale 网络的设备连接，不支持通知。", "phone.choice.local": "仅此电脑", "phone.help.local": "仅限回环地址，手机无法连接。",
+  "phone.relayUrl": "Relay 地址", "phone.relayHelp": "输入您使用的 Relay 服务器的 HTTPS 地址。", "phone.urlRequired": "请输入 Relay 地址。", "phone.apply": "应用更改",
+  "phone.restartRequired": "重启主机后更改生效", "phone.restart": "重启", "phone.restartConfirm": "重启主机？手机连接和正在进行的远程任务可能会中断。", "phone.restarting": "主机已重启，稍后检查状态。", "phone.manualRestart": "请在此操作系统的终端中运行：{command}",
+  "phone.phones": "已连接的手机", "phone.connected": "已连接", "phone.offline": "离线", "phone.lastSeen": "最后连接：{time}", "phone.unknownSeen": "无最后连接记录", "phone.pushOn": "通知已开启", "phone.pushOff": "通知已关闭", "phone.empty": "尚无手机，请使用 QR 码配对。",
+  "phone.rotate": "断开所有手机（新密钥）", "phone.rotateConfirm": "断开所有手机、移除通知订阅并生成新密钥？现有 QR 码和链接将失效，所有手机都需要重新配对。", "phone.rotated": "已断开所有手机并更换配对密钥。", "phone.sharedKey": "所有手机共用一个配对密钥，不支持单独解除配对。",
+});
+Object.assign(I18N.ja, {
+  "nav.phone": "スマートフォン", "phone.subtitle": "Ripple Remote をペアリングし、接続と通知を管理します。",
+  "phone.refresh": "更新", "phone.status": "接続状況", "phone.host": "リモートホスト", "phone.running": "実行中", "phone.stopped": "停止中",
+  "phone.mode": "接続方式", "phone.relayStatus": "Relay — どこからでも + 通知", "phone.directStatus": "同じネットワーク", "phone.localStatus": "このコンピュータのみ",
+  "phone.notifications": "通知", "phone.ready": "準備完了", "phone.needsRelay": "Relay が必要", "phone.install": "リポジトリのフォルダ内でターミナルを開き、ホストをインストールして起動してください。",
+  "phone.pairing": "スマートフォンの接続 (QR)", "phone.scan": "スマートフォンのカメラでスキャン", "phone.showQr": "QR コードを表示", "phone.copyLink": "リンクをコピー", "phone.copied": "リンクをコピーしました。", "phone.copyFailed": "コピーできませんでした。ブラウザのクリップボード権限を確認してください。", "phone.qrAlt": "Ripple Remote ペアリング QR コード",
+  "phone.qrWarning": "コードとリンクにはペアリングキーが含まれています。ご自身のスマートフォンにのみ見せてください。", "phone.unreachable": "現在はこのコンピュータのみ接続できます。スマートフォンから接続するには、下で Relay またはネットワーク接続を選んでください。",
+  "phone.settings": "接続方式の設定", "phone.choice.relay": "Relay（推奨）", "phone.help.relay": "標準の推奨方式 · どこからでも接続でき、通知にも必要です。", "phone.choice.lan": "同じネットワーク (LAN)", "phone.help.lan": "同じローカルネットワークの端末のみ。通知は利用できません。", "phone.choice.tailscale": "Tailscale", "phone.help.tailscale": "同じ Tailscale ネットワークの端末から接続。通知は利用できません。", "phone.choice.local": "このコンピュータのみ", "phone.help.local": "ループバック専用。スマートフォンは接続できません。",
+  "phone.relayUrl": "Relay のアドレス", "phone.relayHelp": "利用する Relay サーバーの HTTPS アドレスを入力してください。", "phone.urlRequired": "Relay のアドレスを入力してください。", "phone.apply": "変更を適用",
+  "phone.restartRequired": "適用するにはホストの再起動が必要です", "phone.restart": "再起動", "phone.restartConfirm": "ホストを再起動しますか？スマートフォンの接続と実行中のリモート作業が中断する場合があります。", "phone.restarting": "ホストを再起動しました。まもなく状態を確認します。", "phone.manualRestart": "この OS ではターミナルで実行してください：{command}",
+  "phone.phones": "接続済みスマートフォン", "phone.connected": "接続中", "phone.offline": "オフライン", "phone.lastSeen": "最終接続：{time}", "phone.unknownSeen": "最終接続の記録なし", "phone.pushOn": "通知オン", "phone.pushOff": "通知オフ", "phone.empty": "スマートフォンはまだありません。QR コードで接続してください。",
+  "phone.rotate": "すべての接続を解除（新しいキー）", "phone.rotateConfirm": "すべての接続と通知を解除し、新しいキーを発行しますか？既存の QR コードとリンクは無効になり、再ペアリングが必要です。", "phone.rotated": "すべての接続を解除し、キーを更新しました。", "phone.sharedKey": "すべての端末で一つのキーを共有します。個別のペアリング解除はできません。",
+});
+Object.assign(I18N.es, {
+  "nav.phone": "Teléfono", "phone.subtitle": "Vincula Ripple Remote y gestiona las conexiones y notificaciones del teléfono.",
+  "phone.refresh": "Actualizar", "phone.status": "Estado de conexión", "phone.host": "Host remoto", "phone.running": "En ejecución", "phone.stopped": "Detenido",
+  "phone.mode": "Modo de conexión", "phone.relayStatus": "Relay — desde cualquier lugar + avisos", "phone.directStatus": "Misma red", "phone.localStatus": "Solo este equipo",
+  "phone.notifications": "Notificaciones", "phone.ready": "Listas", "phone.needsRelay": "Requiere Relay", "phone.install": "Instala e inicia el host desde una terminal en la carpeta del repositorio.",
+  "phone.pairing": "Vincular teléfono (QR)", "phone.scan": "Escanea con la cámara del teléfono", "phone.showQr": "Mostrar código QR", "phone.copyLink": "Copiar enlace", "phone.copied": "Enlace copiado.", "phone.copyFailed": "No se pudo copiar. Revisa el permiso del portapapeles del navegador.", "phone.qrAlt": "Código QR de vinculación de Ripple Remote",
+  "phone.qrWarning": "El código y el enlace contienen la clave de vinculación. Muéstralos solo a tu propio teléfono.", "phone.unreachable": "Ahora solo puede conectarse este equipo. Elige Relay o una conexión de red para conectar tu teléfono.",
+  "phone.settings": "Ajustes de conexión", "phone.choice.relay": "Relay (recomendado)", "phone.help.relay": "Opción predeterminada recomendada · conexión desde cualquier lugar; necesaria para avisos.", "phone.choice.lan": "Misma red (LAN)", "phone.help.lan": "Solo dispositivos de la misma red local. Sin notificaciones.", "phone.choice.tailscale": "Tailscale", "phone.help.tailscale": "Conecta desde la misma red Tailscale. Sin notificaciones.", "phone.choice.local": "Solo este equipo", "phone.help.local": "Solo loopback. Los teléfonos no pueden conectarse.",
+  "phone.relayUrl": "Dirección de Relay", "phone.relayHelp": "Introduce la dirección HTTPS de tu servidor Relay.", "phone.urlRequired": "Introduce una dirección de Relay.", "phone.apply": "Aplicar cambios",
+  "phone.restartRequired": "Reinicia el host para aplicar los cambios", "phone.restart": "Reiniciar", "phone.restartConfirm": "¿Reiniciar el host? Las conexiones y tareas remotas activas podrían interrumpirse.", "phone.restarting": "Host reiniciado. Comprobaremos su estado en breve.", "phone.manualRestart": "En este sistema operativo, ejecuta en una terminal: {command}",
+  "phone.phones": "Teléfonos conectados", "phone.connected": "Conectado", "phone.offline": "Sin conexión", "phone.lastSeen": "Última conexión: {time}", "phone.unknownSeen": "Última conexión desconocida", "phone.pushOn": "Notificaciones activadas", "phone.pushOff": "Notificaciones desactivadas", "phone.empty": "Aún no hay teléfonos. Vincula uno con el QR.",
+  "phone.rotate": "Desconectar todos (nueva clave)", "phone.rotateConfirm": "¿Desconectar todos los teléfonos, eliminar sus avisos y emitir una nueva clave? Los QR y enlaces actuales dejarán de funcionar. Habrá que vincular cada teléfono de nuevo.", "phone.rotated": "Todos los teléfonos desconectados y clave reemplazada.", "phone.sharedKey": "Todos comparten una clave. No se admite desvincular teléfonos individualmente.",
+});
+Object.assign(I18N.pt, {
+  "nav.phone": "Celular", "phone.subtitle": "Pareie o Ripple Remote e gerencie conexões e notificações do celular.",
+  "phone.refresh": "Atualizar", "phone.status": "Status da conexão", "phone.host": "Host remoto", "phone.running": "Em execução", "phone.stopped": "Parado",
+  "phone.mode": "Modo de conexão", "phone.relayStatus": "Relay — de qualquer lugar + avisos", "phone.directStatus": "Mesma rede", "phone.localStatus": "Somente este computador",
+  "phone.notifications": "Notificações", "phone.ready": "Prontas", "phone.needsRelay": "Requer Relay", "phone.install": "Instale e inicie o host em um terminal na pasta do repositório.",
+  "phone.pairing": "Parear celular (QR)", "phone.scan": "Escaneie com a câmera do celular", "phone.showQr": "Mostrar QR code", "phone.copyLink": "Copiar link", "phone.copied": "Link copiado.", "phone.copyFailed": "Não foi possível copiar. Verifique a permissão da área de transferência do navegador.", "phone.qrAlt": "QR code de pareamento do Ripple Remote",
+  "phone.qrWarning": "O código e o link contêm a chave de pareamento. Mostre-os apenas ao seu próprio celular.", "phone.unreachable": "Por enquanto, só este computador pode se conectar. Escolha Relay ou uma conexão de rede abaixo para usar o celular.",
+  "phone.settings": "Configurações de conexão", "phone.choice.relay": "Relay (recomendado)", "phone.help.relay": "Padrão recomendado · conecte de qualquer lugar; necessário para notificações.", "phone.choice.lan": "Mesma rede (LAN)", "phone.help.lan": "Somente dispositivos na mesma rede local. Sem notificações.", "phone.choice.tailscale": "Tailscale", "phone.help.tailscale": "Conecte de dispositivos na mesma rede Tailscale. Sem notificações.", "phone.choice.local": "Somente este computador", "phone.help.local": "Somente loopback. Celulares não podem se conectar.",
+  "phone.relayUrl": "Endereço do Relay", "phone.relayHelp": "Digite o endereço HTTPS do servidor Relay que você usa.", "phone.urlRequired": "Digite um endereço de Relay.", "phone.apply": "Aplicar alterações",
+  "phone.restartRequired": "Reinicie o host para aplicar as alterações", "phone.restart": "Reiniciar", "phone.restartConfirm": "Reiniciar o host? As conexões e tarefas remotas em andamento podem ser interrompidas.", "phone.restarting": "Host reiniciado. Verificaremos o status em breve.", "phone.manualRestart": "Neste sistema operacional, execute em um terminal: {command}",
+  "phone.phones": "Celulares conectados", "phone.connected": "Conectado", "phone.offline": "Offline", "phone.lastSeen": "Última conexão: {time}", "phone.unknownSeen": "Última conexão desconhecida", "phone.pushOn": "Notificações ativadas", "phone.pushOff": "Notificações desativadas", "phone.empty": "Nenhum celular ainda. Pareie um com o QR code.",
+  "phone.rotate": "Desconectar todos (nova chave)", "phone.rotateConfirm": "Desconectar todos os celulares, remover as notificações e gerar uma nova chave? Os QR codes e links atuais deixarão de funcionar. Será necessário parear cada celular novamente.", "phone.rotated": "Todos os celulares desconectados e chave substituída.", "phone.sharedKey": "Todos compartilham uma chave. Não há suporte para desemparelhar celulares individualmente.",
+});
+
 /** The languages offered, each named in itself, in the order the selector lists them. */
 const LANGUAGES = [
   ["en", "English"], ["ko", "한국어"], ["zh", "简体中文"], ["ja", "日本語"], ["es", "Español"], ["pt", "Português (BR)"],

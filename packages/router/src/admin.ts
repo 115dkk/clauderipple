@@ -17,6 +17,8 @@
 //   GET  /*           static files from packages/ui (the GUI itself)
 
 import crypto from "node:crypto";
+import { phoneRequest } from "./phone.ts";
+import type { PhoneDeps } from "./phone.ts";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -90,6 +92,8 @@ const MIME: Record<string, string> = {
 };
 
 export type AdminDeps = {
+  /** External boundaries for the host-local control bridge; no production side effects in tests. */
+  phone?: PhoneDeps;
   config: () => Config;
   configFile: string;
   log: Logger;
@@ -1769,6 +1773,23 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (method !== "GET" && crossSitePost(req)) {
         deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
         sendJson(res, 403, { error: "cross-site request refused" });
+        return;
+      }
+      if (pathname.startsWith("/api/phone/")) {
+        res.setHeader("cache-control", "no-store");
+        // Pairing is a credential read: guard GETs too, including DNS-rebinding Host values.
+        if (crossSitePost(req) || req.headers["sec-fetch-site"] === "cross-site" ||
+          !new Set([`127.0.0.1:${boundPort}`, `localhost:${boundPort}`]).has(req.headers.host ?? "")) {
+          sendJson(res, 403, { error: "same-origin phone control required" });
+          return;
+        }
+        let body: string | undefined;
+        if (method === "POST" && pathname === "/api/phone/settings") {
+          try { body = (await readBody(req, 4096, new Error("phone settings too large"))).toString("utf8"); }
+          catch { sendJson(res, 413, { error: "phone settings too large" }); return; }
+        }
+        const result = await phoneRequest(pathname.slice("/api/phone/".length), method, body, deps.phone);
+        sendJson(res, result.status, result.body);
         return;
       }
       if (pathname === "/api/shutdown" && method === "POST") {
