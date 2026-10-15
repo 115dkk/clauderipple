@@ -7,7 +7,28 @@ import { kindOf, parseEffortVerdict, verdictObject } from './judge'
 import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 
 /** The one agent the main chat delegates to; the judge picks the worker (docs/specs/2026-10-12-worker-tiers.md). */
-export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple judges how hard it is (low/medium/high/max) and picks the model. If a worker fails or returns nothing usable, delegate again here once and say the earlier attempt failed.'
+export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple picks the model. If a worker fails or returns nothing usable, delegate again here once and say the earlier attempt failed. ' +
+  'If you know how hard the task is, put [[ripple: light]], [[ripple: standard]], [[ripple: hard]] or [[ripple: max]] on the prompt\'s first line: ' +
+  'light = lookups, mechanical edits, one small fix; standard = carry out a designed change (even across several files), research, summarize, read-only review; ' +
+  'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning, design or architecture where the deliverable is the decision itself. ' +
+  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Leave the marker out when unsure, and ClaudeRipple judges it.'
+
+/**
+ * The tier markers the main chat may write on a ripple:auto prompt, as the judge's verdict they
+ * stand for (`rungOf` gives light, standard, hard, plan). The main chat knows the whole
+ * conversation, the judge one brief: re-judging 62 delegations (2026-10-15), the judge sent 32 to
+ * hard, Opus under this description 18. Not model names, so never routed as one.
+ */
+export const TIER_MARKERS: Readonly<Record<string, Pick<WorkerVerdict, 'level' | 'kind'>>> = {
+  light: { level: 'light', kind: 'do' },
+  standard: { level: 'standard', kind: 'do' },
+  hard: { level: 'deep', kind: 'do' },
+  max: { level: 'deep', kind: 'plan' },
+}
+/** The tier a marker names, if it is one. */
+export function tierOf(marker: { name: string } | null): string | null {
+  return marker && Object.hasOwn(TIER_MARKERS, marker.name) ? marker.name : null
+}
 
 export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level, kind of work and the cheapest effort that still does this delegated task well. Evaluate actual scope and risk, not prompt length.
 Domains: design (visual taste, composition, brand), frontend (UI implementation), backend (APIs and server logic), infra (deployment and operations), data (queries and processing), test (verification), docs (writing), research (investigation), general (other or cross-domain).

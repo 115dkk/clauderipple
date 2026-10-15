@@ -227,10 +227,13 @@ export type WorkerPick = WorkerVerdict & {
   position?: number
   skipped?: { rung: Rung; position: number; model: string; reason: string }[]
   target: TierTarget
-  by: JudgeKind | 'marker' | 'default'
+  /** Who named the tier: the judge, the main chat's tier marker (`session`), a model marker, or the default. */
+  by: JudgeKind | 'session' | 'marker' | 'default'
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string
+  /** Joins the pick's lines in the pick log: the pick, the judge's shadow verdict, the outcome. */
+  id?: string
 }
 
 export type AgentState = 'running' | 'waiting' | 'done' | 'failed'

@@ -500,27 +500,29 @@ test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung
   const persisted = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!
   expect(persisted.endsWith('\n')).toBe(true)
   expect(persisted.trim().split('\n').length).toBe(1)
-  expect(JSON.parse(persisted)).toEqual({
+  const row = JSON.parse(persisted)
+  expect(typeof row.id).toBe('string')
+  expect(row).toEqual({
     ...JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length)),
-    at: new Date(NOW).toISOString(), by: 'judge', judge: 'haiku', ms: 0,
+    type: 'pick', id: row.id, at: new Date(NOW).toISOString(), by: 'judge', judge: 'haiku', ms: 0, promptChars: SPAWN.prompt.length,
     verdict: { domain: 'general', level: 'light', kind: 'do', effort: 'low', sure: 0.9, why: 'small rename' },
   })
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
   expect(stats.text).toContain('light 1')
 })
 
-test('worker pick persistence keeps the last 300 lines and concurrent marker picks, never the prompt', async ($, on) => {
+test('worker pick persistence keeps the last 3,000 lines and concurrent marker picks, never the prompt', async ($, on) => {
   const b = boundaries(on, {}, { env: { CLAUDERIPPLE_HOME: '/custom/ripple' } })
   http(on)
   const judges = judgeStub(on)
   spawnStub(on)
   const path = '/custom/ripple/logs/worker-picks.jsonl'
-  b.files.set(path, Array.from({ length: 305 }, (_, n) => JSON.stringify({ old: n })).join('\n') + '\n')
+  b.files.set(path, Array.from({ length: 3005 }, (_, n) => JSON.stringify({ old: n })).join('\n') + '\n')
   await start($)
   await Promise.all(['first', 'second'].map(label => $.agent.spawn({ ...SPAWN, description: label + 'x'.repeat(220), prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nPRIVATE_TASK_PROMPT' })))
   const text = b.files.get(path)!
   const rows = text.trim().split('\n').map(line => JSON.parse(line))
-  expect(rows.length).toBe(300)
+  expect(rows.length).toBe(3000)
   expect(rows[0]).toEqual({ old: 7 })
   expect(rows.slice(-2).map(row => row.task).sort()).toEqual(['first' + 'x'.repeat(195), 'second' + 'x'.repeat(194)])
   for (const row of rows.slice(-2)) expect(row).toMatchObject({ by: 'marker', verdict: null, judge: null, ms: 0, model: 'gpt-6.1-sol@xhigh', effort: 'xhigh' })
@@ -588,6 +590,49 @@ for (const prefix of ['ripple:', '']) for (const [level, kind, rung, agent, mode
   }
 })
 
+// The main chat may name the tier itself; the judge then only rates it in the shadow (2026-10-15).
+for (const [tier, rung, agent, model] of [
+  ['light', 'light', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max'],
+  ['standard', 'standard', 'gpt-6-1-sol', 'gpt-6.1-sol@medium'],
+  ['hard', 'hard', 'gpt-6-astra', 'gpt-6-astra@high'],
+  ['max', 'plan', 'general-purpose', 'opus'],
+] as const) test(`a [[ripple: ${tier}]] marker runs the ${rung} rung, the judge rating it only in the log`, async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const judges = judgeStub(on, JSON.stringify({ domain: 'backend', level: 'deep', kind: 'do', effort: 'high', sure: 0.8, why: 'judged' }))
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: ${tier}]]\nRename one local variable and verify it.` })
+  await b.clock.settle()
+  // The tier marker is the main chat's to the mod, never a model name the router would see.
+  expect(sent[0]).toMatchObject({ subagentType: agent, model, prompt: 'Rename one local variable and verify it.' })
+  const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
+  const pick = rows.find(row => row.type === 'pick')
+  expect(pick).toMatchObject({ by: 'session', tier, rung, judge: null, verdict: null })
+  // The judge still rated the same brief, beside the pick, without holding the spawn.
+  expect(judges.length).toBe(1)
+  expect(rows.find(row => row.type === 'shadow')).toMatchObject({ pick: pick.id, rung: 'hard', judge: 'haiku', verdict: { level: 'deep', kind: 'do' } })
+  // The worker's end joins the same pick.
+  await complete($, 'worker-1', 'Renamed and tested.')
+  const after = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
+  expect(after.find(row => row.type === 'outcome')).toMatchObject({ pick: pick.id, agent: 'worker-1', reason: 'answer', aborted: false, ms: 1000, answerChars: 19 })
+  // Once: a second completion of the same agent writes no second outcome.
+  await complete($, 'worker-1')
+  expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').filter(line => line.includes('"outcome"')).length).toBe(1)
+})
+
+test('a tier marker on a worker other than ripple:auto is dropped, not routed as a model', async ($, on) => {
+  boundaries(on)
+  http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', prompt: '[[ripple: hard]]\nFind the router entry point.' })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: 'Explore', prompt: 'Find the router entry point.' })
+  expect(sent[0]?.model).toBeUndefined()
+})
+
 test('a judged spawn uses the default general ladder when general is inherit', async ($, on) => {
   boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'inherit' } } }).rules })
   http(on)
@@ -648,7 +693,7 @@ for (const agentAuto of ['off', 'auto', 'all'] as const) test('only ripple:auto 
   await start($)
   expect([...new Set(registered.map(e => e.name))]).toEqual(agentAuto === 'off' ? [] : ['auto'])
   for (const entry of registered) {
-    expect(entry.description).toContain('low/medium/high/max')
+    expect(entry.description).toContain('[[ripple: standard]]')
     expect(entry.disallowedTools).toEqual(['Agent'])
   }
   await $.agent.spawn(SPAWN)

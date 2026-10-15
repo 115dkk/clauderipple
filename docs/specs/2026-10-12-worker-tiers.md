@@ -56,6 +56,35 @@ rung, low → medium → high; it never reaches max, which only a deep planning 
 - Always visible: the task list label shows the model ("Astra·high · …"); every pick is logged as
   now (`worker pick:`, with its rung).
 
+**Revised 2026-10-15: the main chat may name the tier.** The judge overcalled: of 64 delegations
+(2026-10-12..15) it sent 48 to hard, because a brief's warnings ("read-only", "do not restart")
+read as high stakes. Re-judged with tighter level wording (`judge.ts` `levelCriteria`) it gave
+32; Opus, shown each delegation's recent conversation and brief under the description below,
+gave 18 (light 1, standard 43, max 0).
+
+- `ripple:auto`'s description (`workers.ts` `AUTO_DESCRIPTION`, still no CLAUDE.md needed) asks
+  for `[[ripple: light|standard|hard|max]]` on the prompt's first line when the main chat knows,
+  and to leave it out when unsure. `TIER_MARKERS` maps them to the verdicts `rungOf` reads; the
+  marker is stripped before the worker or the router sees it (on any other worker it is just
+  dropped, never routed as a model).
+- With a marker the spawn does not wait for the judge. The judge still rates the same brief
+  (`shadowJudge`), only into the log.
+- No marker: the judge decides, as before.
+
+**The pick log decides whether the judge stays.** `~/.clauderipple/logs/worker-picks.jsonl`,
+3,000 lines, three line types joined by the pick's `id`:
+
+| `type` | written | fields |
+|---|---|---|
+| `pick` | at spawn | `by` (`session`/`haiku`/`jev`/`model`/`marker`/`default`), `tier`, `verdict` (with Jev's per-question `odds`), `rung`, `model`, `effort`, `promptChars` |
+| `shadow` | after a session-tiered spawn | the judge's `verdict`, its `rung`, `judge`, `ms` |
+| `outcome` | when the worker's turn completes | `reason` (`answer`/`aborted`/`refusal`/`error`), `aborted`, `ms`, `answerChars`, `cost` (weighted tokens) |
+
+Lines before 2026-10-15 have no `type` (picks only). The brief itself is never logged; to re-judge
+a pick, take its brief from the session transcript under the same description. A re-delegation
+("the earlier attempt failed") is a later pick whose brief says so: the clearest sign the tier
+was too low.
+
 ## Filling the tiers
 
 The shared ticked-model list supplies every worker set. Each rung is an ordered `Step[]`, each
