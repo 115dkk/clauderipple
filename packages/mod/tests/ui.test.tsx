@@ -179,7 +179,8 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
       expect(await ui.find({ type: 'Text', text: /^Keep cache warm Off · / })).toBeDefined()
       // What captions said is in the hover tips.
       expect(await ui.find({ type: 'Text', text: /^Opus 5\.5 · Auto · Effort High — multi-file refactor/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /^Last route: gpt-6.1-sol via chatgpt, high, cache 96%/ })).toBeDefined()
+      // The route has no tip of its own: the log it opens is its card (028aee5).
+      expect(await ui.find({ type: 'Text', text: /^Last route: / })).toBeUndefined()
       // The route opens the log too; the effort its menu.
       await ui.press({ key: 'route' })
       await ui.press({ key: 'effort' })
@@ -928,12 +929,13 @@ test('a control\'s tip is drawn in a full band, hidden and revealed by its scope
   const ui = await mount($, 'n100', 'desktop', 100)
   const tree = await ui.drawn()
   const tips = tipsOf(tree)
-  // One tip per fact and control (the effort, the context, the cache, the limit, the route, and
-  // every control but Handoff, which names itself in its pill) plus the way out — the row is full
-  // and all are drawn.
-  expect(tips.length, 'tips: ' + tips.map(t => t.text.slice(0, 14)).join(' / ')).toBe(12)
+  // One tip per fact and control (the effort, the context, the cache, the limit, and every control
+  // but Handoff, which names itself in its pill) plus the way out — the row is full and all are
+  // drawn. The route has none: it lights as a button, and the log it opens is its card (028aee5).
+  expect(tips.length, 'tips: ' + tips.map(t => t.text.slice(0, 14)).join(' / ')).toBe(11)
   const words = (start: string) => tips.find(tip => tip.text.startsWith(start))
-  for (const start of ['Opus 5.5 · Auto', 'Context 38%', 'Prompt cache', 'Weekly limit 42%', 'Last route', 'Effort Auto', 'Keep cache warm', 'Agents:', 'Compact — ', 'New start (/clear) — ', 'Ripple settings', 'Hide the band']) {
+  expect(words('Last route')).toBeUndefined()
+  for (const start of ['Opus 5.5 · Auto', 'Context 38%', 'Prompt cache', 'Weekly limit 42%', 'Effort Auto', 'Keep cache warm', 'Agents:', 'Compact — ', 'New start (/clear) — ', 'Ripple settings', 'Hide the band']) {
     expect(words(start), start).toBeDefined()
   }
   for (const tip of tips) {
