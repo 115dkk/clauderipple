@@ -210,7 +210,14 @@ export type Verdict = { effort: Effort; sure?: number; why: string }
 export type Pick = Verdict & { by: JudgeKind | 'manual' | 'followup'; at: number }
 
 /** A judge's answer for a delegated task; a judge that names no kind means do. */
-export type WorkerVerdict = { domain: Domain; level: Level; kind?: Kind; effort: Effort; sure?: number; why: string }
+export type WorkerVerdict = {
+  domain: Domain; level: Level; kind?: Kind; effort: Effort
+  /** Confidence in the level, the one that moves a task up the ladder. */
+  sure?: number
+  /** Jev's confidence in each answer, kept in the pick log so a rubric change can be compared. */
+  odds?: { domain?: number; level?: number; kind?: number; effort?: number }
+  why: string
+}
 
 /** What a spawn of ripple:auto (or a taken-over spawn) was turned into. */
 export type WorkerPick = WorkerVerdict & {

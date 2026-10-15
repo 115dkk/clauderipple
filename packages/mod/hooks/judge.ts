@@ -188,10 +188,14 @@ export function parseJevWorker(json: unknown): WorkerVerdict | undefined {
   const effortAnswer = record(reply?.effort)
   const selectedEffort = effort(effortAnswer?.choice)
   if (!domainAnswer || !DOMAINS.includes(domainAnswer.choice as Domain) || !levelAnswer || !LEVELS.includes(levelAnswer.choice as Level) || !effortAnswer || !selectedEffort) return undefined
-  // Confidence moves a task up the ladder, so it is the level's question that counts, not the kind's.
-  const scores = [answerSure(domainAnswer), answerSure(levelAnswer), answerSure(effortAnswer)].filter((score): score is number => score !== undefined)
-  const kind = kindOf(record(reply?.kind)?.choice) ?? 'do'
-  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, kind, effort: selectedEffort, ...(scores.length ? { sure: Math.min(...scores) } : {}), why: '' }
+  // Confidence moves a task up the ladder, so it is the level's question that counts. The lowest of
+  // all three counted before: torn only between frontend and backend, or high and xhigh, a task
+  // judged standard was sent a rung up (4 of 16 standard verdicts, pick log 2026-10-12..15).
+  const kindAnswer = record(reply?.kind)
+  const kind = kindOf(kindAnswer?.choice) ?? 'do'
+  const odds = { domain: answerSure(domainAnswer), level: answerSure(levelAnswer), kind: kindAnswer ? answerSure(kindAnswer) : undefined, effort: answerSure(effortAnswer) }
+  const known = Object.fromEntries(Object.entries(odds).filter(([, score]) => score !== undefined)) as WorkerVerdict['odds']
+  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, kind, effort: selectedEffort, ...(odds.level !== undefined ? { sure: odds.level } : {}), ...(Object.keys(known!).length ? { odds: known } : {}), why: '' }
 }
 
 export function jevUsage(json: unknown): number {

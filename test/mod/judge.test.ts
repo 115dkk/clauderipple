@@ -115,11 +115,11 @@ test('Jev parses direct/nested answers and confidence fallback, keeps a plausibl
   assert.deepEqual(parseJevEffort({ answers: { effort: { choice: 'high', confidence: 2 } } }), { effort: 'high', why: '' })
 })
 
-test('Jev worker needs both choices and conservatively uses their minimum confidence', () => {
-  assert.deepEqual(parseJevWorker({ result: { answers: { domain: { choice: 'design', confidence: 0.8 }, level: { choice: 'deep', confidence: 0.9 }, effort: { choice: 'high', probabilities: { high: 0.6 } } } } }), { domain: 'design', level: 'deep', kind: 'do', effort: 'high', sure: 0.6, why: '' })
+test('Jev worker needs every choice; only the level confidence is its sureness, all are kept as odds', () => {
+  assert.deepEqual(parseJevWorker({ result: { answers: { domain: { choice: 'design', confidence: 0.8 }, level: { choice: 'deep', confidence: 0.9 }, effort: { choice: 'high', probabilities: { high: 0.6 } } } } }), { domain: 'design', level: 'deep', kind: 'do', effort: 'high', sure: 0.9, odds: { domain: 0.8, level: 0.9, effort: 0.6 }, why: '' })
   assert.deepEqual(parseJevWorker({ answers: { domain: { choice: 'general' }, level: { choice: 'light' }, effort: { choice: 'low' } } }), { domain: 'general', level: 'light', kind: 'do', effort: 'low', why: '' })
-  // Kind is read but its confidence does not move the task up: that is the level's to say.
-  assert.deepEqual(parseJevWorker({ answers: { domain: { choice: 'backend', confidence: 0.9 }, level: { choice: 'deep', confidence: 0.8 }, kind: { choice: 'plan', confidence: 0.2 }, effort: { choice: 'high', confidence: 0.7 } } }), { domain: 'backend', level: 'deep', kind: 'plan', effort: 'high', sure: 0.7, why: '' })
+  // Neither a torn domain, kind nor effort moves the task up: that is the level's to say.
+  assert.deepEqual(parseJevWorker({ answers: { domain: { choice: 'backend', confidence: 0.3 }, level: { choice: 'standard', confidence: 0.8 }, kind: { choice: 'plan', confidence: 0.2 }, effort: { choice: 'high', confidence: 0.4 } } }), { domain: 'backend', level: 'standard', kind: 'plan', effort: 'high', sure: 0.8, odds: { domain: 0.3, level: 0.8, kind: 0.2, effort: 0.4 }, why: '' })
   assert.equal(parseJevWorker({ answers: { domain: { choice: 'general' }, level: { choice: 'light' }, kind: { choice: 'think' }, effort: { choice: 'low' } } })?.kind, 'do')
   for (const json of [null, {}, { answers: { tier: { choice: 'bad' }, effort: { choice: 'high' } } }, { answers: { tier: { choice: 'deep' } } }]) assert.equal(parseJevWorker(json), undefined)
 })
