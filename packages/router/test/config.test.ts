@@ -43,6 +43,10 @@ test("validate accepts native Anthropic providers and confines account pools to 
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "bad" as "api-key" } } }).some((error) => error.includes("auth must be")));
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "api-key", accountPool: true } } }).some((error) => error.includes('requires auth "claude-code"')));
   assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "claude-code", accountPool: "yes" as unknown as boolean } } }).some((error) => error.includes("must be true or false")));
+  // `limits` is carried by every provider kind, so a wrong type is refused once for all of them.
+  assert.deepEqual(validate({ ...DEFAULTS, providers: { ok: { type: "anthropic", auth: "claude-code", limits: false } } }), []);
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "anthropic", auth: "claude-code", limits: "no" as unknown as boolean } } }).some((error) => error.includes("limits must be true or false")));
+  assert.ok(validate({ ...DEFAULTS, providers: { bad: { type: "chatgpt", limits: 1 as unknown as boolean } } }).some((error) => error.includes("limits must be true or false")));
 });
 
 test("validate accepts compatible caps and rejects invalid values", () => {

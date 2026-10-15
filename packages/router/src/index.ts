@@ -169,6 +169,7 @@ proxy
       google: () => ({
         accounts: () => proxy.googleAccounts(),
         models: (name: string) => proxy.googleFetchModels(name),
+        usage: (name: string) => proxy.googleUsage(name),
         clearCooldown: (id: string) => proxy.googleClearCooldown(id),
         recheckVerification: (id: string) => proxy.googleRecheckVerification(id),
       }),
@@ -177,6 +178,7 @@ proxy
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
+      opencodeUsage: (name: string) => proxy.opencodeLimits(name),
       image: (req, signal) => proxy.generateImage(req, signal),
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),

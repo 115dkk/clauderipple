@@ -29,6 +29,7 @@ import { ThoughtSignatureStore } from "./thoughtSignatures.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap, type AnthropicRequest } from "../chatgpt/translate.ts";
 import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, type FetchLike } from "./accounts.ts";
 import { fetchAvailableModels, staticAntigravityModels } from "./antigravity.ts";
+import { GoogleUsage, type QuotaGroup } from "./usage.ts";
 
 const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
@@ -137,6 +138,8 @@ export class GoogleAdapter {
   private readonly cfg: GoogleProvider;
   private readonly log: Logger;
   private readonly accounts: GoogleAccountPool;
+  /** Per-account quota, for the status bar's limits row (`GET /api/limits`). */
+  private readonly usage: GoogleUsage;
   /** Cooldowns and conversation stickiness, shared with the proxy's other credential pools. */
   private readonly pool: CredentialPool;
   private readonly lastInputByKey = new Map<string, number>();
@@ -155,6 +158,7 @@ export class GoogleAdapter {
     this.log = log;
     this.pool = pool;
     this.accounts = new GoogleAccountPool({ home, log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+    this.usage = new GoogleUsage(this.accounts, { warn: (message) => log.warn(message), ...(fetchImpl ? { fetch: fetchImpl } : {}) });
   }
 
   describeAuth(): string {
@@ -189,6 +193,14 @@ export class GoogleAdapter {
         active: summary.id === this.activeOwner,
       };
     });
+  }
+
+  /**
+   * Each account's quota groups by owner id, for the status bar's limits row. Never a token; a
+   * failed lookup keeps that account's last good groups.
+   */
+  usageSnapshot(): Promise<Record<string, QuotaGroup[]>> {
+    return this.usage.snapshot();
   }
 
   /**

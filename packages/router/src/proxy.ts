@@ -34,6 +34,8 @@ import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
 import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/index.ts";
+import type { QuotaGroup } from "./providers/google/usage.ts";
+import { OpenCodeUsage, isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import { GrokAdapter } from "./providers/grok/index.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, searchProviderFor, terminateHosts } from "./config.ts";
@@ -234,6 +236,8 @@ export class Proxy {
   readonly claudeUsage: ClaudeUsage;
   /** The Claude models the signed-in account can use, from Anthropic's own list. */
   readonly claudeModels: ClaudeModelCatalog;
+  /** Each OpenCode Go provider's usage windows, for the status bar's limits row (never a key). */
+  private readonly opencodeUsage: OpenCodeUsage;
   private readonly deps: ProxyDeps;
   /**
    * Cooldowns, quarantines and conversation stickiness for provider credentials. In memory: a
@@ -383,6 +387,20 @@ export class Proxy {
     return this.google(name, cfg).fetchModels();
   }
 
+  /** Each google provider account's quota groups by owner id, for the status bar's limits row. */
+  googleUsage(name: string): Promise<Record<string, QuotaGroup[]>> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "google" || cfg.auth !== "antigravity") return Promise.resolve({});
+    return this.google(name, cfg).usageSnapshot();
+  }
+
+  /** An OpenCode Go provider's usage windows, for the status bar's limits row. Empty otherwise. */
+  opencodeLimits(name: string): Promise<OpenCodeWindow[]> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "openai-compatible" || !isOpenCodeGo(cfg)) return Promise.resolve([]);
+    return this.opencodeUsage.windows(name, cfg.url, cfg.headers ?? {});
+  }
+
   /** Dashboard action: put one resting Google account back into rotation now. */
   googleClearCooldown(ownerId: string): void {
     for (const [name, p] of Object.entries(this.deps.config().providers)) {
@@ -415,6 +433,7 @@ export class Proxy {
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
     });
+    this.opencodeUsage = new OpenCodeUsage({ warn: (message) => deps.log.warn(message) });
     this.httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
       void this.handle(req, res);
     });

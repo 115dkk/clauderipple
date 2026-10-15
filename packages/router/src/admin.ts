@@ -60,6 +60,8 @@ import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount, setPrefer
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
+import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
+import { isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
 import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/login.ts";
@@ -118,6 +120,8 @@ export type AdminDeps = {
     accounts: () => Record<string, GoogleAccountStatus[]>;
     /** The models one antigravity provider can reach, from Cloud Code Assist's own catalogue. */
     models?: (name: string) => Promise<ProviderModel[] | null>;
+    /** Each antigravity account's quota groups by owner id, for the status bar's limits row (`/api/limits`). Absent in tests. */
+    usage?: (name: string) => Promise<Record<string, QuotaGroup[]>>;
     /** Put one resting account back into rotation now. */
     clearCooldown?: (accountId: string) => void;
     /** Ask Google again whether an account still needs its verification page. */
@@ -167,6 +171,8 @@ export type AdminDeps = {
   claudeUsage?: () => Promise<Record<string, Record<string, unknown>>>;
   /** The Claude models the signed-in account can use (`GET /v1/models`); null until one answer. Absent in tests. */
   claudeModels?: () => Promise<ClaudeModel[] | null>;
+  /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
+  opencodeUsage?: (name: string) => Promise<OpenCodeWindow[]>;
 };
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -192,6 +198,133 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
     if (quota) rows.push({ id: account.id, label: account.label, quota });
   }
   return rows;
+}
+
+// ---- Limits (`GET /api/limits`) ----------------------------------------------------------------
+//
+// One shape for every provider whose quota can be read, so the status bar's second row instrument
+// them all the same way: Claude's plan windows and per-model weeklies, each ChatGPT account's
+// windows, and each Antigravity account's Gemini and third-party windows. Providers with no way to
+// read a quota (OpenCode Go/Zen, Grok, the compatible APIs) are simply not listed, and a provider
+// saved with `limits: false` opts out. Read in the provider's config order; the mod keeps Claude
+// first and otherwise follows this order.
+
+/** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
+export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number };
+export type LimitsAccount = { account: number; windows: LimitsWindow[]; at: number };
+export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
+
+/** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
+function limitWindowFrom(w: unknown): { used_percent: number; window_minutes?: number; reset_at?: number } | null {
+  if (!w || typeof w !== "object" || Array.isArray(w)) return null;
+  const o = w as Record<string, unknown>;
+  const used = o.used_percent;
+  if (typeof used !== "number" || !Number.isFinite(used)) return null;
+  const minutes = typeof o.window_minutes === "number" && o.window_minutes > 0 ? o.window_minutes : undefined;
+  // A reset already in milliseconds would otherwise park a window for decades; the other readers
+  // normalise the same way (chatgpt windowResetMs).
+  const reset = typeof o.reset_at === "number" && Number.isFinite(o.reset_at) ? Math.round(o.reset_at > 1e12 ? o.reset_at / 1000 : o.reset_at) : undefined;
+  return { used_percent: used, ...(minutes !== undefined ? { window_minutes: minutes } : {}), ...(reset !== undefined ? { reset_at: reset } : {}) };
+}
+
+/** The kind a five-hour/weekly/other window takes, by its length in minutes. */
+function windowKind(minutes: number | undefined): "five_hour" | "seven_day" | "window" {
+  return minutes === 300 ? "five_hour" : minutes === 10080 ? "seven_day" : "window";
+}
+
+/** One Claude subscription account's plan windows: the two main windows and the scoped weeklies. */
+function claudeLimitWindows(quota: Record<string, unknown>): LimitsWindow[] {
+  const out: LimitsWindow[] = [];
+  const limits = quota.rate_limits as { primary?: unknown; secondary?: unknown } | undefined;
+  for (const w of [limits?.primary, limits?.secondary]) {
+    const win = limitWindowFrom(w);
+    if (win) out.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
+  }
+  const scoped = quota.scoped;
+  if (Array.isArray(scoped)) for (const s of scoped) {
+    if (!s || typeof s !== "object" || Array.isArray(s)) continue;
+    const entry = s as { name?: unknown; used_percent?: unknown; window_minutes?: unknown; reset_at?: unknown };
+    const win = limitWindowFrom(entry);
+    if (!win || typeof entry.name !== "string" || !entry.name) continue;
+    out.push({ kind: "scoped", label: entry.name, used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
+  }
+  return out;
+}
+
+/** The Claude Code login's plan windows as one account (the row shows Claude as a single group). */
+async function anthropicLimitAccounts(deps: AdminDeps): Promise<LimitsAccount[]> {
+  let usage: Record<string, Record<string, unknown>>;
+  try {
+    usage = (await deps.claudeUsage?.()) ?? {};
+  } catch {
+    return [];
+  }
+  const quota = usage.current ?? Object.values(usage)[0];
+  if (!quota) return [];
+  const windows = claudeLimitWindows(quota);
+  if (!windows.length) return [];
+  const at = typeof quota.at === "number" ? quota.at : Date.now();
+  return [{ account: 0, windows, at }];
+}
+
+/** Every ChatGPT account's windows, paused and needs-login accounts left out and unnumbered. */
+function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[] {
+  const kept = accounts.filter((a) => a.state !== "paused" && a.state !== "needs-login");
+  const out: LimitsAccount[] = [];
+  kept.forEach((account, index) => {
+    const quota = account.quota;
+    if (!quota || typeof quota.at !== "number") return;
+    const limits = quota.rate_limits as { primary?: unknown; secondary?: unknown } | undefined;
+    const windows: LimitsWindow[] = [];
+    for (const w of [limits?.primary, limits?.secondary]) {
+      const win = limitWindowFrom(w);
+      if (win) windows.push({ kind: windowKind(win.window_minutes), used_percent: win.used_percent, ...(win.window_minutes !== undefined ? { window_minutes: win.window_minutes } : {}), ...(win.reset_at !== undefined ? { reset_at: win.reset_at } : {}) });
+    }
+    if (windows.length) out.push({ account: index, windows, at: quota.at });
+  });
+  return out;
+}
+
+/** Every Antigravity account's windows (Gemini's own plus the third-party ones), paused left out. */
+async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
+  const google = deps.google?.();
+  if (!google) return [];
+  const statuses = google.accounts()[name] ?? [];
+  const groups = (await google.usage?.(name)) ?? {};
+  const kept = statuses.filter((a) => a.state !== "paused" && a.state !== "needs-login");
+  const at = Date.now();
+  const out: LimitsAccount[] = [];
+  kept.forEach((account, index) => {
+    const quotient = groups[account.id];
+    if (!quotient || !quotient.length) return;
+    const windows: LimitsWindow[] = googleWindowsFromGroups(quotient);
+    if (windows.length) out.push({ account: index, windows, at });
+  });
+  return out;
+}
+
+/** Every provider whose quota can be read, in one shape, for `GET /api/limits`. */
+async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider[] }> {
+  const providers: LimitsProvider[] = [];
+  const chatgpt = deps.chatgpt?.();
+  const accounts = chatgpt?.accounts?.() ?? {};
+  for (const [name, p] of Object.entries(deps.config().providers)) {
+    if (p.limits === false) continue;
+    if (p.type === "anthropic" && p.auth === "claude-code") {
+      const rows = await anthropicLimitAccounts(deps);
+      if (rows.length) providers.push({ provider: name, type: "anthropic", title: "Claude", accounts: rows });
+    } else if (p.type === "chatgpt") {
+      const rows = chatgptLimitAccounts(accounts[name] ?? []);
+      if (rows.length) providers.push({ provider: name, type: "chatgpt", title: "GPT", accounts: rows });
+    } else if (p.type === "google" && p.auth === "antigravity") {
+      const rows = await googleLimitAccounts(deps, name);
+      if (rows.length) providers.push({ provider: name, type: "google", title: "Gemini", accounts: rows });
+    } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
+      const windows = (await deps.opencodeUsage?.(name)) ?? [];
+      if (windows.length) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
+    }
+  }
+  return { providers };
 }
 
 /** One discovered/offered model. Exactly the config shape, so a preset's per-model override
@@ -1652,6 +1785,11 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (pathname === "/api/status" && method === "GET") {
         const refresh = new URL(url, "http://127.0.0.1").searchParams.get("refresh") === "1";
         sendJson(res, 200, await buildStatus(deps, { refresh }));
+        return;
+      }
+      // One shape for every provider whose quota can be read, for the status bar's limits row.
+      if (pathname === "/api/limits" && method === "GET") {
+        sendJson(res, 200, await buildLimits(deps));
         return;
       }
       if (pathname === "/api/mod-settings" && method === "GET") {

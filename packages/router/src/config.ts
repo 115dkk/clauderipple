@@ -81,6 +81,8 @@ export type AnthropicCompatibleProvider = {
   identity?: boolean;
   /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
   instructionsAppend?: string;
+  /** Show this provider's quota in the status bar's limits row. Default true (ignored when unreadable). */
+  limits?: boolean;
   /** Compatibility overrides. Unspecified fields fall back to the preset, then strict defaults. */
   caps?: CompatibleCaps;
 };
@@ -96,6 +98,8 @@ export type ChatGptProvider = {
   identity?: boolean;
   /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
   instructionsAppend?: string;
+  /** Show this provider's quota in the status bar's limits row. Default true (ignored when unreadable). */
+  limits?: boolean;
   /** Troubleshooting: true = dump failed upstream exchanges to <home>/debug/; "all" = dump every exchange (last 60). */
   debugDump?: boolean | "all";
   /** Reasoning effort when the request carries none. Default "high". */
@@ -127,6 +131,8 @@ export type OpenAiCompatibleProvider = {
   identity?: boolean;
   /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
   instructionsAppend?: string;
+  /** Show this provider's quota in the status bar's limits row. Default true (ignored when unreadable). */
+  limits?: boolean;
   /** Reasoning-effort capability exposed by this API/model family. */
   caps?: { effortLevels?: string[]; reasoning?: "effort" | "none" };
 };
@@ -152,6 +158,8 @@ export type GoogleProvider = {
   identity?: boolean;
   /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
   instructionsAppend?: string;
+  /** Show this provider's quota in the status bar's limits row. Default true (ignored when unreadable). */
+  limits?: boolean;
   /** Reasoning effort when the request carries none. */
   defaultEffort?: string;
 };
@@ -169,6 +177,8 @@ export type AnthropicProvider = {
    */
   accountPool?: boolean;
   models?: ProviderModel[];
+  /** Show this provider's quota in the status bar's limits row. Default true (ignored when unreadable). */
+  limits?: boolean;
 };
 
 export type GrokProvider = {
@@ -193,6 +203,8 @@ export type GrokProvider = {
   identity?: boolean;
   /** Fixed text appended to the system prompt. Must stay constant across turns or the prompt cache breaks. */
   instructionsAppend?: string;
+  /** Show this provider's quota in the status bar's limits row. Default true (ignored when unreadable). */
+  limits?: boolean;
 };
 
 export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | GoogleProvider | AnthropicProvider | GrokProvider;
@@ -600,9 +612,10 @@ export function validate(c: Config): string[] {
   }
   for (const [name, p] of Object.entries(c.providers)) {
     // Carried by every provider that puts together a system prompt, so checked once for all of them.
-    const shared = p as { identity?: unknown; instructionsAppend?: unknown };
+    const shared = p as { identity?: unknown; instructionsAppend?: unknown; limits?: unknown };
     if (shared.identity !== undefined && typeof shared.identity !== "boolean") errors.push(`provider ${name}: identity must be true or false`);
     if (shared.instructionsAppend !== undefined && typeof shared.instructionsAppend !== "string") errors.push(`provider ${name}: instructionsAppend must be a string`);
+    if (shared.limits !== undefined && typeof shared.limits !== "boolean") errors.push(`provider ${name}: limits must be true or false`);
     // Ids key the router's cooldown and quarantine state, so a duplicate would make two credentials
     // share one health record and take each other down.
     const pool = (p as { credentials?: unknown }).credentials;

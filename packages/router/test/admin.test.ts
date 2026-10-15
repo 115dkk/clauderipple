@@ -42,7 +42,9 @@ async function withAdmin(
     modelCatalog?: () => Promise<unknown>;
     modelScoresFetch?: typeof fetch;
     chatgpt?: NonNullable<AdminDeps["chatgpt"]>;
-    google?: () => { accounts: () => Record<string, GoogleAccountStatus[]>; models?: (name: string) => Promise<ProviderModel[] | null>; clearCooldown?: (id: string) => void };
+    google?: NonNullable<AdminDeps["google"]>;
+    opencodeUsage?: NonNullable<AdminDeps["opencodeUsage"]>;
+    claudeUsage?: NonNullable<AdminDeps["claudeUsage"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
   } = {},
@@ -2326,4 +2328,57 @@ test("POST /api/providers/probe[grok] without a session says to sign in and call
     { probeFetch: async () => { called = true; return new Response("{}", { status: 200 }); } },
   );
   assert.equal(called, false);
+});
+
+test("GET /api/limits assembles every readable provider and honours limits:false", async () => {
+  const now = Date.now();
+  const future = Math.floor((now + 3_600_000) / 1000);
+  const cfg = makeCfg({ providers: {
+    anthropic: { type: "anthropic", auth: "claude-code" },
+    chatgpt: { type: "chatgpt" },
+    gem: { type: "google", auth: "antigravity" },
+    go: { type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", preset: "opencode-go" },
+    zen: { type: "openai-compatible", url: "https://opencode.ai/zen/v1" },
+    deepseek: { type: "anthropic-compatible", url: "https://api.deepseek.com/anthropic" },
+    quiet: { type: "chatgpt", limits: false },
+  } });
+  await withAdmin(cfg, async ({ port }) => {
+    const res = await fetch(`${base()}:${port}/api/limits`);
+    const body = (await res.json()) as { providers: { provider: string; type: string; title: string; accounts: { account: number; windows: { kind: string; label?: string; used_percent: number }[] }[] }[] };
+    assert.deepEqual(body.providers.map((p) => p.provider), ["anthropic", "chatgpt", "gem", "go"]);
+    assert.deepEqual(body.providers.map((p) => p.title), ["Claude", "GPT", "Gemini", "Go"]);
+    assert.equal(body.providers[0]!.type, "anthropic");
+    assert.deepEqual(body.providers[0]!.accounts[0]!.windows.map((w) => `${w.kind}${w.label ? ":" + w.label : ""}`), ["five_hour", "seven_day", "scoped:Fable"]);
+    // The paused ChatGPT account takes no number; the ready one is account 0.
+    assert.deepEqual(body.providers[1]!.accounts.map((a) => a.account), [0]);
+    assert.equal(body.providers[2]!.type, "google");
+    assert.equal(body.providers[3]!.type, "opencode-go");
+  }, {
+    claudeUsage: async () => ({ current: { type: "claude.usage", at: now, rate_limits: {
+      primary: { used_percent: 1, window_minutes: 300 },
+      secondary: { used_percent: 88, window_minutes: 10080, reset_at: future },
+    }, scoped: [{ name: "Fable", used_percent: 2, window_minutes: 10080, reset_at: future }] } }),
+    chatgpt: () => ({
+      quota: {}, auth: {},
+      accounts: () => ({
+        chatgpt: [
+          { id: "a", label: "A", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 23, window_minutes: 10080, reset_at: future }, secondary: null } }, active: true },
+          { id: "b", label: "B", paused: true, state: "paused", quota: null, active: false },
+        ] as never,
+        quiet: [{ id: "c", label: "C", paused: false, state: "ready", quota: { at: now, rate_limits: { primary: { used_percent: 5, window_minutes: 10080 } } }, active: false }] as never,
+      }),
+    }),
+    google: () => ({
+      accounts: () => ({ gem: [{ id: "g1", label: "G", paused: false, state: "ready", projectId: "p", expiresAt: now + 3_600_000, needsReauth: false, active: true }] as never }),
+      usage: async () => ({ g1: [{ displayName: "Gemini Models", buckets: [
+        { bucketId: "gemini-weekly", displayName: "Weekly", window: "weekly", resetTime: new Date(future * 1000).toISOString(), remainingFraction: 0.98 },
+        { bucketId: "gemini-5h", displayName: "5h", window: "5h", remainingFraction: 1 },
+      ] }] }),
+    }),
+    opencodeUsage: async (name: string) => name === "go" ? [
+      { kind: "five_hour", used_percent: 3, window_minutes: 300, reset_at: future },
+      { kind: "seven_day", used_percent: 52, window_minutes: 10080, reset_at: future },
+      { kind: "window", used_percent: 92, window_minutes: 43200, reset_at: future },
+    ] : [],
+  });
 });
