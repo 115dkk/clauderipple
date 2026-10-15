@@ -179,6 +179,7 @@ proxy
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
       opencodeUsage: (name: string) => proxy.opencodeLimits(name),
+      grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal) => proxy.generateImage(req, signal),
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),

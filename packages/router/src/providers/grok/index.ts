@@ -15,6 +15,7 @@ import type { AnthropicRequest } from "../chatgpt/translate.ts";
 import { OpenAiCompatibleAdapter, type OpenAiOutcome } from "../openai/index.ts";
 import { GROK_AUTH_HINT, GrokAuth, GrokAuthError, grokHome, sharedGrokAuth } from "./auth.ts";
 import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS } from "./catalog.ts";
+import { GrokUsage, type GrokWindow } from "./usage.ts";
 
 /**
  * Facts only, returned by the probe in a `warning` field like the Antigravity one. Nothing published
@@ -44,9 +45,15 @@ export class GrokAdapter {
   readonly name: string;
   readonly auth: GrokAuth;
   private readonly inner: OpenAiCompatibleAdapter;
+  private readonly url: string;
+  private readonly clientVersion: string | undefined;
+  private readonly usageReader: GrokUsage;
 
   constructor(name: string, cfg: GrokProvider, log: Logger, auth?: GrokAuth) {
     this.name = name;
+    this.url = cfg.url ?? GROK_DEFAULT_URL;
+    this.clientVersion = cfg.clientVersion;
+    this.usageReader = new GrokUsage(name, { warn: (message) => log.warn(message) });
     // Shared with the dashboard's probe and with any other provider on the same session, and kept
     // across a config change that rebuilds this adapter.
     this.auth = auth ?? sharedGrokAuth({ home: cfg.home ?? grokHome(), ...(cfg.cli ? { cli: cfg.cli } : {}), log });
@@ -73,6 +80,18 @@ export class GrokAdapter {
       },
       unauthorized: async (_model, sent) => this.auth.rejected(bearer(sent)),
     });
+  }
+
+  /**
+   * The subscription's usage pool, for the status bar's limits row: what the CLI's `/usage` reads,
+   * with this adapter's own session and headers. Empty while no session is usable.
+   */
+  usage(): Promise<GrokWindow[]> {
+    return this.usageReader.windows(this.url, async () => {
+      const token = await this.auth.token();
+      const { "x-grok-model-override": _model, ...headers } = grokHeaders(token.key, "", await this.auth.clientVersion(this.clientVersion));
+      return headers;
+    }).catch(() => []);
   }
 
   async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<OpenAiOutcome> {

@@ -37,6 +37,7 @@ import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/inde
 import type { QuotaGroup } from "./providers/google/usage.ts";
 import { OpenCodeUsage, isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import { GrokAdapter } from "./providers/grok/index.ts";
+import type { GrokWindow } from "./providers/grok/usage.ts";
 import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/translate.ts";
 import { providerFor, searchProviderFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
@@ -392,6 +393,13 @@ export class Proxy {
     const cfg = this.deps.config().providers[name];
     if (!cfg || cfg.type !== "google" || cfg.auth !== "antigravity") return Promise.resolve({});
     return this.google(name, cfg).usageSnapshot();
+  }
+
+  /** A Grok provider's usage pool, for the status bar's limits row. Empty otherwise. */
+  grokLimits(name: string): Promise<GrokWindow[]> {
+    const cfg = this.deps.config().providers[name];
+    if (!cfg || cfg.type !== "grok") return Promise.resolve([]);
+    return this.grok(name, cfg).usage();
   }
 
   /** An OpenCode Go provider's usage windows, for the status bar's limits row. Empty otherwise. */

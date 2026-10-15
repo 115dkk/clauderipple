@@ -62,6 +62,7 @@ import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type C
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
 import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
 import { isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
+import type { GrokWindow } from "./providers/grok/usage.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
 import { readGoogleAccounts, removeGoogleAccount, summarize as summarizeGoogleAccount, updateGoogleAccount } from "./providers/google/accounts.ts";
 import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/login.ts";
@@ -173,6 +174,8 @@ export type AdminDeps = {
   claudeModels?: () => Promise<ClaudeModel[] | null>;
   /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
   opencodeUsage?: (name: string) => Promise<OpenCodeWindow[]>;
+  /** A Grok provider's usage pool, for the status bar's limits row (`/api/limits`). Absent in tests. */
+  grokUsage?: (name: string) => Promise<GrokWindow[]>;
 };
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -204,8 +207,9 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 //
 // One shape for every provider whose quota can be read, so the status bar's second row instrument
 // them all the same way: Claude's plan windows and per-model weeklies, each ChatGPT account's
-// windows, and each Antigravity account's Gemini and third-party windows. Providers with no way to
-// read a quota (OpenCode Go/Zen, Grok, the compatible APIs) are simply not listed, and a provider
+// windows, each Antigravity account's Gemini and third-party windows, OpenCode Go's three windows
+// and a Grok subscription's usage pool. Providers with no way to read a quota (OpenCode Zen, the
+// compatible APIs) are simply not listed, and a provider
 // saved with `limits: false` opts out. Read in the provider's config order; the mod keeps Claude
 // first and otherwise follows this order.
 
@@ -322,6 +326,9 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
       const windows = (await deps.opencodeUsage?.(name)) ?? [];
       if (windows.length) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
+    } else if (p.type === "grok") {
+      const windows = (await deps.grokUsage?.(name)) ?? [];
+      if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
     }
   }
   return { providers };
