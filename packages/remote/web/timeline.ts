@@ -145,6 +145,9 @@ export interface ToolGroup {
 }
 export type TimelineItem = Item | ToolGroup;
 
+/** A tool call that draws a "visualize" widget rather than doing work: `show_widget` or `…__show_widget`. */
+export const isWidgetTool = (name: string): boolean => name === "show_widget" || name.endsWith("__show_widget");
+
 /** Presentation only: text, permissions and turn boundaries separate consecutive activity. */
 export function timelineItems(view: Pick<SessionView, "items" | "state">): TimelineItem[] {
   const result: TimelineItem[] = [];
@@ -176,6 +179,12 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
         result.push({ ...item, tools: [] });
       }
       for (const tool of item.tools) {
+        // A widget is something to look at, not activity: it stands on its own instead of folding away.
+        if (isWidgetTool(tool.name)) {
+          group = null;
+          result.push({ ...item, key: `${item.key}:${tool.id}`, text: "", images: [], streaming: false, tools: [tool] });
+          continue;
+        }
         const worker = workers.get(tool.id);
         if (worker) add({ ...worker, call: tool }, worker.key, `${worker.ver}:${item.ver}`);
         else add({ type: "tool", tool }, tool.id, item.ver);

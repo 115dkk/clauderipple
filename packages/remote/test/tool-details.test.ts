@@ -110,6 +110,18 @@ test("open tool data tracks results through later assistant snapshots and worker
   assert.equal(activitySummary(group.rows, group.running, "en").text, "1 agent");
 });
 
+test("a widget call stands on its own between folded activity instead of joining the group", () => {
+  const read = { id: "r", name: "Read", summary: "a.ts" };
+  const widget = { id: "w", name: "mcp__visualize__show_widget", summary: "", input: JSON.stringify({ widget_code: "<svg></svg>" }) };
+  const bash = { id: "b", name: "Bash", summary: "ls" };
+  const items = timelineItems(reduce(events({ kind: "assistant", msg: "m", model: "test", text: "", tools: [read, widget, bash] })));
+  assert.deepEqual(items.map(i => i.type), ["toolGroup", "assistant", "toolGroup"]);
+  const shown = items[1];
+  assert.ok(shown?.type === "assistant");
+  assert.deepEqual(shown.tools.map(t => t.id), ["w"]);
+  assert.equal(shown.text, "");
+});
+
 test("500 turns retain stable timeline keys when older pages are prepended", () => {
   const all = events(...Array.from({ length: 500 }, (_, i): EventBody[] => [
     { kind: "user", clientMsgId: `u${i}`, text: `question ${i}` },
