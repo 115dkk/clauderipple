@@ -171,6 +171,9 @@ test('narrowing drops scoped windows, then secondary accounts, then trailing gro
   const narrowed = narrowLimitGroups(base, 11, measure)
   assert.deepEqual(narrowed?.map(g => g.key), ['anthropic#0', 'chatgpt#0', 'google-gemini#0'])
   assert.deepEqual(narrowed?.[0]?.items.map(i => i.kind), ['five_hour', 'seven_day'])
+  // Scoped windows go one group at a time from the back: Gemini's before Claude's Fable.
+  const one = narrowLimitGroups(base, 13, measure)
+  assert.deepEqual(one?.map(g => g.items.some(i => i.kind === 'scoped')), [true, false, false, false])
   // Down to Claude alone; and null when not even that fits.
   assert.deepEqual(narrowLimitGroups(base, 4, measure)?.map(g => g.key), ['anthropic#0'])
   assert.equal(narrowLimitGroups(base, 1, measure), null)

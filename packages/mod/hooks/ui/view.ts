@@ -439,13 +439,18 @@ export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'type' | 'ti
 
 /**
  * The groups that fit `budget`, narrowing in this order: the scoped windows (Fable, 3P, …) go
- * first, then a later provider's secondary accounts (the last one first), then a later provider's
- * whole group — Claude's own group (the first) stays to the last. Null when even that does not fit
- * (no row). `width` measures a set of groups the way the row draws it.
+ * first, one group's at a time from the last group back, so Claude's own Fable is the last of them
+ * to go (all of them going at once hid Fable for Gemini's two 3P windows, 2026-10-15); then a later
+ * provider's secondary accounts (the last one first), then a later provider's whole group —
+ * Claude's own group (the first) stays to the last. Null when even that does not fit (no row).
+ * `width` measures a set of groups the way the row draws it.
  */
 export function narrowLimitGroups(groups: readonly LimitGroup[], budget: number, width: (gs: readonly LimitGroup[]) => number): LimitGroup[] | null {
   let out = [...groups]
-  if (width(out) > budget) out = out.map(g => ({ ...g, items: g.items.filter(item => item.kind !== 'scoped') })).filter(g => g.items.length > 0)
+  for (let i = out.length - 1; i >= 0 && width(out) > budget; i--) {
+    if (!out[i]!.items.some(item => item.kind === 'scoped')) continue
+    out = out.map((g, j) => j === i ? { ...g, items: g.items.filter(item => item.kind !== 'scoped') } : g).filter(g => g.items.length > 0)
+  }
   while (width(out) > budget && out.some(g => g.account > 0)) {
     const at = out.map(g => g.account > 0).lastIndexOf(true)
     out = out.filter((_, i) => i !== at)

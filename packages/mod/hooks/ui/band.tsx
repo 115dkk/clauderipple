@@ -521,7 +521,7 @@ function figureCells(): number {
 /**
  * How much each window takes, widest first; the row takes the first that fits all its groups.
  * `gauge`: name, bar, figure. `figures`: name and figure. `compact`: a group's figures alone,
- * "1/88/2%" in its windows' order (the menu-bar and old footer idiom), each in its own tone, the
+ * "1 / 88 / 2%" in its windows' order (the menu-bar and old footer idiom), each in its own tone, the
  * names and resets in the group's tip. At ~100 columns four providers fit only compact
  * (2026-10-15: Claude, GPT, Gemini and Go took ~207 cells as gauges against 96).
  */
@@ -530,7 +530,9 @@ const DENSITIES: readonly LimitDensity[] = ['gauge', 'figures', 'compact']
 
 /** Cells one window takes at a density (compact: its number's slot and the separator after it). */
 function limitItemCells(item: LimitItem, density: LimitDensity, lang: Lang): number {
-  if (density === 'compact') return Math.ceil(textPx('100/') / CELL_PX)
+  // A figure's slot and the " / " after it, in fractions of a cell: summed per group, then rounded up.
+  // Two digits: a window at 100% is spent and runs into the air after its group, which is wider.
+  if (density === 'compact') return textPx('00 / ') / CELL_PX
   const name = Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1
   return name + (density === 'gauge' ? Math.ceil(BAR_W / CELL_PX) + 1 : 0) + figureCells()
 }
@@ -552,15 +554,15 @@ function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip
   )
 }
 
-/** A group's windows as one run of figures, "1/88/2%", each figure in its own tone. */
+/** A group's windows as one run of figures, "1 / 88 / 2%", each figure in its own tone. */
 function compactDrawn(el: Els, frame: Frame, group: LimitGroup, key: string, tip: string, lang: Lang): DrawnFact {
   const { Text } = el
   const runs: RenderNode[] = []
   group.items.forEach((item, i) => {
     runs.push(<Text key={'n' + i} color={figure(limitTone(item.percent))}>{String(Math.round(item.percent))}</Text>)
-    runs.push(<Text key={'s' + i} color={MUTE}>{i < group.items.length - 1 ? '/' : '%'}</Text>)
+    runs.push(<Text key={'s' + i} color={MUTE}>{i < group.items.length - 1 ? ' / ' : '%'}</Text>)
   })
-  const cells = group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang), 0)
+  const cells = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang), 0))
   return drawnFact(el, key, cells, [<Text key="limit-figures">{runs}</Text>], tip)
 }
 
@@ -572,7 +574,7 @@ function saveWord(group: LimitGroup, save: boolean, lang: Lang): string {
 /** Cells a group takes at a density: its head (the provider's dot and short name), its windows, save's word. */
 function limitGroupCells(group: LimitGroup, name: string, lang: Lang, density: LimitDensity, save = false): number {
   const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
-  const items = group.items.reduce((n, item) => n + limitItemCells(item, density, lang), 0)
+  const items = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, density, lang), 0))
   const gaps = density === 'compact' ? 0 : Math.max(0, group.items.length - 1)
   const word = saveWord(group, save, lang)
   return head + 1 + items + gaps + (word ? 1 + Math.ceil(textPx(word) / CELL_PX) : 0)

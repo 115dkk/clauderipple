@@ -65,6 +65,7 @@ const LIMITS_ALL: LimitItem[] = [
   { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 0 },
   { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 2, resetsAt: '2026-10-19T13:20:00' },
   { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'scoped', label: '3P', windowMinutes: 10080, percent: 10, resetsAt: '2026-10-19T13:20:00' },
+  { provider: 'google-gemini', type: 'google', title: 'Gemini', account: 0, kind: 'scoped', label: '3P', windowMinutes: 300, percent: 0 },
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 3, resetsAt: '2026-10-15T05:39:48Z' },
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 52, resetsAt: '2026-10-19T00:00:00Z' },
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 92, resetsAt: '2026-10-18T05:43:30Z' },
