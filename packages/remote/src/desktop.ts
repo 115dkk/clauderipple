@@ -234,13 +234,13 @@ export class BackgroundTasks {
     else if (r.type === "user" && typeof content === "string" && /^\[Request interrupted/.test(content)) this.turnStartedAt = null;
     else if (r.type === "assistant" && Array.isArray(content) && !content.some(b => object(b)?.type === "tool_use") &&
       ["end_turn", "stop_sequence"].includes(str(object(r.message)?.stop_reason))) this.turnStartedAt = null;
-    const notification = text(content);
-    if (r.type === "user" && notification.startsWith("<task-notification>")) {
+    // A notification that arrives mid-turn is queued, not written as a user line: the transcript has it
+    // only as a queued_command attachment (and the queue's own enqueue record), seen 2026-10-16.
+    const queued = r.type === "attachment" && object(r.attachment)?.type === "queued_command" ? str(object(r.attachment)?.prompt) : "";
+    const notification = queued || (r.type === "user" ? text(content) : "");
+    if (notification.startsWith("<task-notification>")) {
       const id = /<task-id>([^<]+)<\/task-id>/.exec(notification)?.[1];
-      if (id && /<status>(completed|killed|failed)<\/status>/.test(notification)) {
-        this.active.delete(id);
-        this.terminal.add(id);
-      }
+      if (id && /<status>(completed|killed|failed|stopped)<\/status>/.test(notification)) this.end(id);
       return;
     }
     for (const value of Array.isArray(content) ? content : []) {
@@ -249,10 +249,17 @@ export class BackgroundTasks {
         const name = str(b.name);
         const input = object(b.input);
         if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: input?.run_in_background === true, label: str(input?.description) || str(input?.command) || name });
+        // A task stopped with TaskStop gets no notification at all (seen 2026-10-16: a shell "running" four hours).
+        if (name === "TaskStop") this.tools.set(b.id, { name, background: false, label: str(input?.task_id) || str(input?.shell_id) });
       }
       if (r.type !== "user" || b?.type !== "tool_result" || b.is_error === true) continue;
       const tool = this.tools.get(str(b.tool_use_id));
       if (!tool) continue;
+      if (tool.name === "TaskStop") {
+        if (tool.label) this.end(tool.label);
+        this.tools.delete(str(b.tool_use_id));
+        continue;
+      }
       const result = object(r.toolUseResult);
       const body = text(b.content);
       let id = "";
@@ -264,6 +271,11 @@ export class BackgroundTasks {
       if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null });
       this.tools.delete(str(b.tool_use_id));
     }
+  }
+
+  private end(id: string): void {
+    this.active.delete(id);
+    this.terminal.add(id);
   }
 }
 

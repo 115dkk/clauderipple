@@ -88,6 +88,29 @@ test("background task lifecycle counts async Agent/Task and Bash, not synchronou
   assert.equal(tasks.count, 0);
 });
 
+test("a background task ends on a queued notification and on TaskStop", () => {
+  const tasks = new BackgroundTasks();
+  const shell = (toolId: string, taskId: string) => {
+    tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: toolId, input: { run_in_background: true, command: "sleep" } }] } }));
+    tasks.accept(line({ type: "user", toolUseResult: { backgroundTaskId: taskId }, message: { content: [{ type: "tool_result", tool_use_id: toolId, content: "running" }] } }));
+  };
+  shell("t0", "said-stopped");
+  tasks.accept(line({ type: "user", message: { content: "<task-notification>\n<task-id>said-stopped</task-id>\n<status>stopped</status>\n</task-notification>" } }));
+  assert.equal(tasks.count, 0, "a stopped status ends the task");
+  shell("t1", "queued-shell");
+  shell("t2", "stopped-shell");
+  assert.equal(tasks.count, 2);
+  // Mid-turn, the notification is written only as a queued_command attachment.
+  tasks.accept(line({ type: "attachment", isSidechain: false, attachment: { type: "queued_command", prompt: "<task-notification>\n<task-id>queued-shell</task-id>\n<status>completed</status>\n</task-notification>" } }));
+  assert.deepEqual(tasks.list.map(task => task.id), ["stopped-shell"]);
+  tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "TaskStop", id: "s1", input: { task_id: "nobody" } }] } }));
+  tasks.accept(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "s1", is_error: true, content: "No task" }] } }));
+  assert.equal(tasks.count, 1, "a failed TaskStop ends nothing");
+  tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "TaskStop", id: "s2", input: { task_id: "stopped-shell" } }] } }));
+  tasks.accept(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "s2", content: "Successfully stopped task: stopped-shell" }] } }));
+  assert.equal(tasks.count, 0);
+});
+
 test("background tasks survive bounded summary tails and incremental partial records", t => {
   const f = fixture(t);
   const file = path.join(f.project, `${id}.jsonl`);
