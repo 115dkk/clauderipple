@@ -1341,9 +1341,10 @@ export const register: Register = on => {
     const result = await next(e)
     jevBlips = 0
     try {
-      await loadSettings($)
+      // A failure here must not cost the commands: without them there is no /ripple to look with.
+      try { await loadSettings($); await $.ui.status(undefined) }
+      catch (error) { await report($, 'session.start settings', error) }
       const language = await read($, lang)
-      await $.ui.status(undefined)
       await $.command.register({ name: 'ripple', description: t(language, 'commands.description'), argumentHint: t(language, 'commands.argumentHint'), immediate: true })
       await $.command.register({ name: 'ripple-log', description: t(language, 'commands.logDescription'), immediate: true })
       await $.command.register({ name: 'ripple-bar', description: t(language, 'commands.barDescription'), immediate: true })
