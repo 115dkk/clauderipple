@@ -99,23 +99,29 @@ const active = {
   ko: { command: "명령어 실행 중…", read: "파일 읽는 중…", edit: "파일 편집 중…", search: "검색 중…", web: "웹 검색 중…", agent: "에이전트 실행 중…", other: "도구 실행 중…" },
   en: { command: "Running command…", read: "Reading file…", edit: "Editing file…", search: "Searching…", web: "Searching the web…", agent: "Running agent…", other: "Running tool…" },
 };
+const more = { ko: (n: number) => `그 외 작업 ${n}개`, en: (n: number) => `and ${n} more action${n === 1 ? "" : "s"}` };
+/** Like the Claude app: kinds in the order they first appear, files counted once per path, five or more kinds cut to three. */
 export function activitySummary(rows: readonly SummaryRow[], running: boolean, language: "ko" | "en"): ChangeCount & { text: string; failed: boolean } {
   const counts = new Map<Category, number>();
-  const editPaths = new Set<string>();
+  const paths = new Set<string>();
   let added = 0, removed = 0, failed = false, pending: Category | null = null;
   for (const row of rows) {
     const kind = row.type === "subagent" ? "agent" : category(row.tool.name);
     const input = row.type === "tool" ? toolInput(row.tool.input) : null;
     const path = stringField(input, "file_path") || stringField(input, "path") || (row.type === "tool" ? row.tool.summary : "");
-    if (kind !== "edit" || !path || !editPaths.has(path)) counts.set(kind, (counts.get(kind) ?? 0) + 1);
-    if (kind === "edit" && path) editPaths.add(path);
+    const file = (kind === "edit" || kind === "read") && path ? `${kind}:${path}` : "";
+    if (!file || !paths.has(file)) counts.set(kind, (counts.get(kind) ?? 0) + 1);
+    if (file) paths.add(file);
     if (row.type === "subagent") { failed ||= row.status === "failed"; if (row.status === "running") pending = kind; continue; }
     failed ||= row.tool.result?.ok === false;
     if (!row.tool.result) pending = kind;
     const changes = row.tool.changes ?? changeCount(row.tool.name, input);
     added += changes.added; removed += changes.removed;
   }
-  const text = running && pending ? active[language][pending] : [...counts].map(([kind, n]) => completed[language][kind](n)).join(", ");
+  const parts = [...counts];
+  const shown = parts.length >= 5 ? parts.slice(0, 3) : parts;
+  const rest = parts.slice(shown.length).reduce((sum, [, n]) => sum + n, 0);
+  const text = running && pending ? active[language][pending] : [...shown.map(([kind, n]) => completed[language][kind](n)), ...(rest ? [more[language](rest)] : [])].join(", ");
   return { text, added, removed, failed };
 }
 

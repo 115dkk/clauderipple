@@ -28,6 +28,14 @@ test("activity summary localizes categories, running state and failure", () => {
   assert.deepEqual(activitySummary([], false, "en"), { text: "", added: 0, removed: 0, failed: false });
 });
 
+test("activity summary counts a file read twice once and cuts five or more kinds to three", () => {
+  assert.equal(activitySummary([tool("Read", { file_path: "a.ts" }), tool("Read", { file_path: "a.ts" }), tool("Read", { file_path: "b.ts" })], false, "ko").text, "파일 2개 읽음");
+  const kinds = [tool("Read", { file_path: "a.ts" }), tool("Bash"), tool("Grep"), tool("WebFetch"), tool("Bash"), tool("Agent")];
+  assert.equal(activitySummary(kinds, false, "ko").text, "파일 1개 읽음, 명령어 2개 실행함, 검색 1회, 그 외 작업 2개");
+  assert.equal(activitySummary([...kinds.slice(0, 4), tool("Agent")], false, "en").text, "Read 1 file, Ran 1 command, 1 search, and 2 more actions");
+  assert.equal(activitySummary(kinds.slice(0, 5), false, "en").text, "Read 1 file, Ran 2 commands, 1 search, 1 web request");
+});
+
 test("edit summaries count unique files and all supplied edits, including blob metadata", () => {
   const rows = [tool("Edit", { file_path: "a", old_string: "old\n", new_string: "new\n" }), tool("MultiEdit", { file_path: "a", edits: [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }] }), tool("Write", { file_path: "b", content: "" })];
   assert.deepEqual(activitySummary(rows, false, "ko"), { text: "파일 2개를 편집함", added: 3, removed: 3, failed: false });
