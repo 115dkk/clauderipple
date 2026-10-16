@@ -102,31 +102,69 @@ function prompt(r: RecordValue): string {
 }
 function title(value: string): string { return value.trim().replace(/\s+/g, " ").slice(0, 160); }
 
+/** A subagent's running state while its parent transcript is converted; `input` lets a terminal
+ * event re-resolve its model once its own transcript has written one. */
+export interface SubagentState { description: string; model: string | null; steps: number; input: RecordValue }
+/** How to convert one transcript. Omitting it is the top-level session: sidechain records are skipped
+ * and no subagent events are produced. The sub pass reads a subagent's own transcript instead. */
+export interface SubagentContext {
+  /** Read sidechain records (a subagent's own transcript) rather than skipping them. */
+  allowSidechain?: boolean;
+  /** toolUseId → what is known about it; kept across a scan, and across polls for a live tail. */
+  state?: Map<string, SubagentState>;
+  /** What a subagent's own transcript reports: the model that answered, its steps, its description
+   * (meta.json), and whether it stopped on its own answer (`ended`). */
+  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; ended: boolean };
+}
+
 /** Unknown records and malformed block shapes never become events. */
-export function transcriptEvents(line: string, cwd: string, summarize: Summarize, sink?: ImageSink): { at: number | null; bodies: EventBody[] } {
+export function transcriptEvents(line: string, cwd: string, summarize: Summarize, sink?: ImageSink, subs?: SubagentContext): { at: number | null; bodies: EventBody[] } {
   const r = record(line);
   const bodies: EventBody[] = [];
-  if (!r || r.isSidechain === true) return { at: null, bodies };
+  if (!r) return { at: null, bodies };
+  const sidechain = r.isSidechain === true;
+  if (sidechain && !subs?.allowSidechain) return { at: null, bodies };
+  const state = subs?.state;
+  const resolve = subs?.resolve;
   const time = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
   const at = Number.isFinite(time) ? time : null;
   const message = object(r.message);
-  if (r.type === "user") {
-    const p = prompt(r);
+  // A notification that arrives mid-turn is queued, not written as a user line (BackgroundTasks.accept).
+  const queued = r.type === "attachment" && object(r.attachment)?.type === "queued_command" ? str(object(r.attachment)?.prompt) : "";
+  if (r.type === "user" || queued) {
+    const p = queued || (sidechain ? text(message?.content).trim() : prompt(r));
     const notification = /^<task-notification>[\s\S]*<\/task-notification>$/.test(p);
     if (notification) {
       const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(p)?.[1];
       const result = /<result>([\s\S]*)<\/result>/.exec(p)?.[1];
       const status = /<status>([^<]+)<\/status>/.exec(p)?.[1];
       // A notification without its tool call has nothing to attach to; it is not the user's words.
-      if (toolUseId) bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? p });
-    } else if (p) {
+      if (toolUseId) {
+        bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? p });
+        const running = state?.get(toolUseId);
+        if (running && resolve) {
+          const info = resolve(toolUseId, running.input);
+          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: status === "completed" ? "done" : "failed", steps: info.steps });
+        }
+        state?.delete(toolUseId);
+      }
+    } else if (p && r.type === "user") {
       const converted = messageContent(message?.content, sink);
       bodies.push({ kind: "user", ...converted, clientMsgId: str(r.uuid) });
     }
     for (const value of Array.isArray(message?.content) ? message.content : []) {
       const b = object(value);
       if (b?.type === "tool_result" && typeof b.tool_use_id === "string") {
-        bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...messageContent(b.content, sink) });
+        const converted = messageContent(b.content, sink);
+        bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...converted });
+        // A synchronous worker finishes at its tool result; an async one only launches here and ends at its notification.
+        const running = state?.get(b.tool_use_id);
+        const launched = object(r.toolUseResult)?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(typeof converted.text === "string" ? converted.text : "");
+        if (running && resolve && !launched) {
+          const info = resolve(b.tool_use_id, running.input);
+          bodies.push({ kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: running.description, model: info.model ?? running.model, status: b.is_error === true ? "failed" : "done", steps: info.steps });
+          state?.delete(b.tool_use_id);
+        }
       }
     }
   } else if (r.type === "assistant" && message && Array.isArray(message.content)) {
@@ -145,6 +183,13 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       tools.push({ id: b.id, name: b.name,
         summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
         input: JSON.stringify(input, null, 2) });
+      // Only a top-level worker opens its own log; sidechain records never carry their own subagent event.
+      if (worker && !sidechain && state && resolve) {
+        const info = resolve(b.id, input);
+        const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, input };
+        state.set(b.id, running);
+        bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, status: "running", steps: running.steps });
+      }
     }
     const body = messageContent(message.content, sink);
     body.images.push(...sendUserFileImages(message.content, cwd, sink));
@@ -212,6 +257,19 @@ export function agentEnded(file: string): boolean {
 }
 function missing(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "");
+}
+/** A meta.json or subagent transcript that is not there yet is simply unknown, never fatal. */
+function safeRead(file: string): string {
+  try { return fs.readFileSync(file, "utf8"); } catch { return ""; }
+}
+const SUB_META = /^agent-([\w-]+)\.meta\.json$/;
+/** A hook prefixes a subagent's stored description with "Model·effort · ", shown separately as `model`. */
+function stripModelPrefix(description: string): string {
+  return description.replace(/^\S*·\S* · /, "");
+}
+/** The model without its `@effort` suffix (`gpt-6.1-sol@medium` → `gpt-6.1-sol`). */
+function withoutEffort(model: string): string {
+  return model.replace(/@[^@]*$/, "");
 }
 
 /** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks.
@@ -284,7 +342,13 @@ export class DesktopSessions {
   private projects: string;
   private sources = new Map<string, Source>();
   private imported = new Map<string, Imported>();
+  private subImports = new Map<string, Imported>();
   private tasks = new Map<string, { file: string; offset: number; tracker: BackgroundTasks }>();
+  /** Per-session subagent state for an incremental tail (a bridged session), so a tool_result in a
+   * later poll still closes the worker its tool_use opened in an earlier one. */
+  private tailSubs = new Map<string, Map<string, SubagentState>>();
+  /** session → toolUseId → agentId, rebuilt when the subagents directory changes. */
+  private agentMaps = new Map<string, { at: number; map: Map<string, string> }>();
   private temp: string | null = null;
   private scannedAt = -Infinity;
   private checkedAt = -Infinity;
@@ -343,8 +407,11 @@ export class DesktopSessions {
     try {
       const size = fs.fstatSync(fd).size;
       if (size < offset) throw new Error("Desktop transcript was truncated.");
+      let state = this.tailSubs.get(id);
+      if (!state) { state = new Map(); this.tailSubs.set(id, state); }
+      const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
       return scanLines(fd, size, line => {
-        for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize, sink).bodies) visit(body);
+        for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize, sink, { state, resolve }).bodies) visit(body);
       }, offset);
     } finally { fs.closeSync(fd); }
   }
@@ -357,10 +424,125 @@ export class DesktopSessions {
     const list = this.scan(id)?.list ?? [];
     const source = this.sources.get(id);
     if (!source) return list;
-    const dir = path.join(path.dirname(source.file), path.basename(source.file, ".jsonl"), "subagents");
+    const dir = this.subagentsDir(source);
     return list.filter(task => task.kind !== "agent" || !agentEnded(path.join(dir, `agent-${task.id}.jsonl`)));
   }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
+
+  /** A subagent transcript lives beside its session file: `<projects>/<proj>/<id>/subagents/agent-<agentId>.jsonl`. */
+  private subagentsDir(source: Source): string {
+    return path.join(path.dirname(source.file), path.basename(source.file, ".jsonl"), "subagents");
+  }
+
+  /** toolUseId → agentId, from the `agent-*.meta.json` files a worker writes when it starts. */
+  private agentMap(id: string): Map<string, string> {
+    const empty = new Map<string, string>();
+    const source = this.sources.get(id);
+    if (!source) return empty;
+    const dir = this.subagentsDir(source);
+    let at: number;
+    try { at = fs.statSync(dir).mtimeMs; } catch { return empty; }
+    const cached = this.agentMaps.get(id);
+    if (cached && cached.at === at) return cached.map;
+    const map = new Map<string, string>();
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        const match = SUB_META.exec(name);
+        if (!match) continue;
+        const meta = record(safeRead(path.join(dir, name)));
+        const toolUseId = str(meta?.toolUseId);
+        if (toolUseId) map.set(toolUseId, match[1]!);
+      }
+    } catch (error) { if (!missing(error)) throw error; }
+    this.agentMaps.set(id, { at, map });
+    return map;
+  }
+
+  /** What a worker's own transcript reports, for its parent's subagent events. */
+  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; steps: number; description: string; ended: boolean } {
+    const source = this.sources.get(id);
+    const agentId = source ? this.agentMap(id).get(toolUseId) : undefined;
+    let model = "", steps = 0, ended = false, description = "";
+    if (source && agentId) {
+      const dir = this.subagentsDir(source);
+      const meta = record(safeRead(path.join(dir, `agent-${agentId}.meta.json`)));
+      if (meta) {
+        model = withoutEffort(str(meta.model));
+        description = stripModelPrefix(str(meta.description));
+      }
+      const read = this.readSubTranscript(path.join(dir, `agent-${agentId}.jsonl`));
+      model = read.model || model;
+      steps = read.steps;
+      ended = read.ended;
+    }
+    return { model: model || str(input.model) || null, steps, description, ended };
+  }
+
+  /** The model that answered (its last assistant record) and how far it got. Tail-bounded read. */
+  private readSubTranscript(file: string): { model: string; steps: number; ended: boolean } {
+    let fd: number;
+    try { fd = this.openUnder(file); } catch { return { model: "", steps: 0, ended: false }; }
+    try {
+      let model = "", steps = 0;
+      let last: RecordValue | null = null;
+      scanLines(fd, fs.fstatSync(fd).size, line => {
+        const r = record(line);
+        if (!r) return;
+        last = r;
+        if (r.type === "assistant") {
+          steps++;
+          const m = object(r.message);
+          if (typeof m?.model === "string") model = m.model;
+        }
+      });
+      const ending = last as RecordValue | null;
+      const message = object(ending?.message);
+      const content = message?.content;
+      const ended = ending?.type === "assistant" && ["end_turn", "stop_sequence"].includes(str(message?.stop_reason)) &&
+        !(Array.isArray(content) && content.some(b => object(b)?.type === "tool_use"));
+      return { model, steps, ended };
+    } finally { fs.closeSync(fd); }
+  }
+
+  /** A Mac session's worker log: the subagent transcript converted to events, cached like the main one.
+   * Unknown session or unknown worker → null, which the `sub` op turns into "no such subagent". */
+  subLog(id: string, sub: string): EventLog | null {
+    const match = /^sub-([\w-]{1,80})$/.exec(sub);
+    if (!match) return null;
+    const source = this.sources.get(id);
+    if (!source) return null;
+    const agentId = this.agentMap(id).get(match[1]!);
+    if (!agentId) return null;
+    const file = path.join(this.subagentsDir(source), `agent-${agentId}.jsonl`);
+    let stat: fs.Stats;
+    try { stat = fs.lstatSync(file); } catch (error) { if (!missing(error)) throw error; return null; }
+    if (!stat.isFile()) return null;
+    const key = `${id}::${sub}`;
+    const cached = this.subImports.get(key);
+    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) return cached.log;
+    if (cached) { this.dispose(cached); this.subImports.delete(key); }
+    this.temp ??= fs.mkdtempSync(path.join(os.tmpdir(), "ripple-desktop-"));
+    const dir = fs.mkdtempSync(path.join(this.temp, "sub-"));
+    const log = this.importSub(id, file, dir);
+    this.subImports.set(key, { size: stat.size, mtime: stat.mtimeMs, log, dir });
+    return log;
+  }
+
+  private importSub(id: string, file: string, dir: string): EventLog {
+    const source = this.sources.get(id)!;
+    const fd = this.openUnder(file);
+    let at = source.summary.createdAt;
+    const log = EventLog.open({ dir, now: () => at });
+    try {
+      scanLines(fd, fs.fstatSync(fd).size, line => {
+        const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true });
+        at = parsed.at ?? at;
+        for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
+      });
+      return log;
+    } catch (error) { log.close(); throw error; }
+    finally { fs.closeSync(fd); }
+  }
 
   private scan(id: string): BackgroundTasks | null {
     const source = this.sources.get(id);
@@ -412,13 +594,21 @@ export class DesktopSessions {
     const fd = this.open(source.file);
     let at = source.summary.createdAt;
     let importing = true;
+    const state = new Map<string, SubagentState>();
+    const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
     const log = EventLog.open({ dir, now: () => importing ? at : now() });
     try {
       source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize, data => log.image(data));
+        const parsed = transcriptEvents(line, source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve });
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });
+      // A worker whose own transcript ended on its answer, but whose notification never landed in
+      // the parent, is done: without this it would read "running" for good.
+      for (const [toolUseId, running] of state) {
+        const info = resolve(toolUseId, running.input);
+        if (info.ended) log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+      }
       importing = false;
       return log;
     } catch (error) { log.close(); throw error; }
@@ -479,7 +669,10 @@ export class DesktopSessions {
     }
     this.sources = next;
     for (const id of this.tasks.keys()) if (!next.has(id)) this.tasks.delete(id);
+    for (const id of this.tailSubs.keys()) if (!next.has(id)) this.tailSubs.delete(id);
+    for (const id of this.agentMaps.keys()) if (!next.has(id)) this.agentMaps.delete(id);
     for (const [id, cached] of this.imported) if (!next.has(id)) { this.dispose(cached); this.imported.delete(id); }
+    for (const [key, cached] of this.subImports) if (!next.has(key.slice(0, key.indexOf("::")))) { this.dispose(cached); this.subImports.delete(key); }
   }
 
   /** Resolve both directories and the file; a replaced symlink may not escape projects/. */
@@ -487,6 +680,14 @@ export class DesktopSessions {
     const root = fs.realpathSync(this.projects);
     const real = fs.realpathSync(file);
     if (!real.startsWith(root + path.sep) || path.relative(root, real).split(path.sep).length !== 2) throw new Error("transcript outside projects");
+    return fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  }
+
+  /** A subagent transcript sits deeper than the two-segment session file; only projects/ matters. */
+  private openUnder(file: string): number {
+    const root = fs.realpathSync(this.projects);
+    const real = fs.realpathSync(file);
+    if (!real.startsWith(root + path.sep)) throw new Error("transcript outside projects");
     return fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   }
 
@@ -539,6 +740,10 @@ export class DesktopSessions {
   close(): void {
     for (const cached of this.imported.values()) this.dispose(cached);
     this.imported.clear();
+    for (const cached of this.subImports.values()) this.dispose(cached);
+    this.subImports.clear();
+    this.tailSubs.clear();
+    this.agentMaps.clear();
     if (this.temp) fs.rmSync(this.temp, { recursive: true, force: true });
     this.temp = null;
   }

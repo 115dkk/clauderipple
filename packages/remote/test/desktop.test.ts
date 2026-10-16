@@ -400,3 +400,88 @@ test("a background agent whose transcript ends on its answer is done without a n
   fs.appendFileSync(file, line({ type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "done" }] } }));
   assert.equal(agentEnded(file), true);
 });
+
+/** A worker's own transcript and its meta.json, beside the session file. */
+function subagent(project: string, agentId: string, meta: Record<string, unknown>, records: string[]): void {
+  const dir = path.join(project, id, "subagents");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `agent-${agentId}.meta.json`), JSON.stringify(meta));
+  fs.writeFileSync(path.join(dir, `agent-${agentId}.jsonl`), records.join(""));
+}
+const assistantTurn = (model: string, stop: string, content: unknown[]): string => line({ isSidechain: true, type: "assistant", message: { model, stop_reason: stop, content } });
+const subagentEvents = (log: { tail: (n?: number) => { events: { kind: string }[] } }) => log.tail(1 << 20).events.filter(e => e.kind === "subagent") as unknown as { toolUseId: string; description: string; model: string | null; status: string; steps: number }[];
+
+test("a Mac session opens a worker with the model its own transcript answered on", t => {
+  const f = fixture(t);
+  subagent(f.project, "one", { toolUseId: "toolu_one", model: "gpt-6.1-sol@medium", description: "Sol·medium · Summarize the rules" }, [
+    line({ isSidechain: true, type: "user", message: { content: "do it" } }),
+    assistantTurn("deepseek-v4.1-flash", "end_turn", [{ type: "text", text: "ok" }]),
+  ]);
+  // No model in its transcript yet, and no tool description: meta's model (minus @effort) and stripped description stand.
+  subagent(f.project, "two", { toolUseId: "toolu_two", model: "gpt-6.1-sol@medium", description: "Sol·medium · Long task" }, [
+    assistantTurn("", "tool_use", [{ type: "tool_use", id: "t", name: "Read", input: {} }]),
+  ]);
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user) + line({ type: "assistant", message: { content: [
+    { type: "tool_use", id: "toolu_one", name: "Agent", input: { description: "Summarize the rules" } },
+    { type: "tool_use", id: "toolu_two", name: "Task", input: {} },
+  ] } }));
+  assert.deepEqual(subagentEvents(f.desktop.log(id)).map(e => [e.toolUseId, e.model, e.description, e.status]), [
+    ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "running"],
+    ["toolu_two", "gpt-6.1-sol", "Long task", "running"],
+    // Its transcript ends on its own answer with no notification line: the worker is done.
+    ["toolu_one", "deepseek-v4.1-flash", "Summarize the rules", "done"],
+  ]);
+});
+
+test("a Mac session's worker status follows its result, its notification, a queued notification, and agentEnded", t => {
+  const f = fixture(t);
+  const file = path.join(f.project, `${id}.jsonl`);
+  let stamp = 2_000_000_000_000;
+  const run = (records: string[]) => {
+    fs.writeFileSync(file, [line(user), ...records].join(""));
+    const at = new Date(stamp += 1000);
+    fs.utimesSync(file, at, at);
+    return subagentEvents(f.desktop.log(id)).map(e => [e.toolUseId, e.status]);
+  };
+  const toolUse = (tid: string) => line({ type: "assistant", message: { id: `m-${tid}`, model: "m", content: [{ type: "tool_use", id: tid, name: "Agent", input: { description: tid } }] } });
+  const launch = (tid: string) => line({ type: "user", toolUseResult: { isAsync: true, agentId: "w" }, message: { content: [{ type: "tool_result", tool_use_id: tid, content: "Async agent launched successfully" }] } });
+  const notice = (tid: string, status: string, queued = false) => {
+    const prompt = `<task-notification>\n<tool-use-id>${tid}</tool-use-id>\n<status>${status}</status>\n</task-notification>`;
+    return queued ? line({ type: "attachment", attachment: { type: "queued_command", prompt } }) : line({ type: "user", message: { content: prompt } });
+  };
+  assert.deepEqual(run([toolUse("a"), launch("a")]), [["a", "running"]], "an async launch is not an end");
+  assert.deepEqual(run([toolUse("a"), launch("a"), notice("a", "completed")]), [["a", "running"], ["a", "done"]]);
+  assert.deepEqual(run([toolUse("b"), launch("b"), notice("b", "completed", true)]), [["b", "running"], ["b", "done"]], "a queued notification ends it");
+  assert.deepEqual(run([toolUse("c"), launch("c"), notice("c", "killed")]), [["c", "running"], ["c", "failed"]]);
+  const sync = (tid: string, error = false) => line({ type: "user", toolUseResult: { agentId: "w" }, message: { content: [{ type: "tool_result", tool_use_id: tid, is_error: error, content: "answer" }] } });
+  assert.deepEqual(run([toolUse("d"), sync("d")]), [["d", "running"], ["d", "done"]], "a synchronous worker ends at its result");
+  assert.deepEqual(run([toolUse("e"), sync("e", true)]), [["e", "running"], ["e", "failed"]]);
+});
+
+test("a Mac session's worker log is readable and grows with its transcript", t => {
+  const f = fixture(t);
+  subagent(f.project, "grow", { toolUseId: "toolu_grow", model: "sol@high", description: "sol·high · Task" }, [
+    assistantTurn("sol", "tool_use", [{ type: "tool_use", id: "t", name: "Read", input: {} }]),
+  ]);
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user));
+  f.desktop.list();
+  const first = f.desktop.subLog(id, "sub-toolu_grow");
+  assert.ok(first);
+  assert.ok(first.lastSeq >= 1);
+  assert.deepEqual(first!.readAfter(0, 1 << 20).events.map(e => e.kind), ["assistant"]);
+  const before = first!.lastSeq;
+  fs.appendFileSync(path.join(f.project, id, "subagents", "agent-grow.jsonl"), assistantTurn("sol", "end_turn", [{ type: "text", text: "done" }]));
+  const second = f.desktop.subLog(id, "sub-toolu_grow");
+  assert.ok(second!.lastSeq > before, "the worker log grows as its transcript does");
+  assert.equal(f.desktop.subLog(id, "sub-toolu_missing"), null, "an unknown worker has no log");
+});
+
+test("sidechain and nested records never open their own worker", () => {
+  const nested = line({ isSidechain: true, type: "assistant", message: { model: "sol", content: [{ type: "tool_use", id: "nested", name: "Agent", input: { description: "nested" } }] } });
+  const resolve = () => ({ model: "sol", steps: 1, description: "", ended: false });
+  // The parent pass skips sidechain records entirely.
+  assert.deepEqual(transcriptEvents(nested, "/x", summarize).bodies, []);
+  // A subagent's own transcript reads sidechain records, but none of its Agent calls becomes a worker.
+  const own = transcriptEvents(nested, "/x", summarize, undefined, { allowSidechain: true, state: new Map(), resolve });
+  assert.deepEqual(own.bodies.map(b => b.kind), ["assistant"]);
+});

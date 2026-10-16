@@ -531,7 +531,13 @@ export class Sessions {
   }
 
   subLog(id: string, sub: string): EventLog | null {
-    if (!/^sub-[\w-]{1,80}$/.test(sub) || !this.records.has(id)) return null;
+    if (!/^sub-[\w-]{1,80}$/.test(sub)) return null;
+    const record = this.records.get(id);
+    // A Mac (Claude app) session's worker log lives beside its transcript, not under the host's dir.
+    // Only a session the host itself drives (a resumed record) keeps the host's own sub log, so a
+    // live SDK worker is written and read in the same place.
+    if ((!record || record.desktopBridge) && this.desktop?.has(id)) return this.desktop.subLog(id, sub);
+    if (!this.records.has(id)) return null;
     const key = `${id}/${sub}`;
     let log = this.logs.get(key);
     if (!log) { log = EventLog.open({ dir: path.join(this.opts.dir, "sessions", id, sub), now: this.now }); this.logs.set(key, log); }
