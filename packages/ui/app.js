@@ -2627,7 +2627,7 @@ const MOD_DEFAULTS = {
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
-  swampAt: 50, layout: "dashboard", appearance: "auto", language: "auto", hide: ["reason"], extras: [], setupDone: false,
+  swampAt: 50, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
 
 let modState = { settings: null, revision: 0, options: null, retiredNote: false };
@@ -3193,6 +3193,7 @@ function modLookCard() {
     modSection(null, [
       cell(t("mod.layout"), modSegmented("layout", [{ value: "dashboard", label: t("mod.dashboard") }, { value: "minimal", label: t("mod.minimal") }], s.layout, t("mod.layout"), (layout) => modPatch({ layout })), s.layout === "minimal" ? modCap(t("mod.footerHint")) : null, "wide"),
       cell(t("mod.appearance"), modSegmented("appearance", [{ value: "auto", label: t("mod.auto") }, { value: "dark", label: t("mod.dark") }, { value: "light", label: t("mod.lightAppearance") }], s.appearance, t("mod.appearance"), (appearance) => modPatch({ appearance })), null, "wide"),
+      cell(t("mod.skin"), modSegmented("skin", [{ value: "deep", label: t("mod.skinDeep") }, { value: "flat", label: t("mod.skinFlat") }, { value: "matrix", label: t("mod.skinMatrix") }], s.skin || "deep", t("mod.skin"), (skin) => modPatch({ skin })), null, "wide"),
       cell(t("mod.language"), modSelect("language", languages, s.language, t("mod.language"), (language) => modPatch({ language }), "narrow")),
     ]),
     modSection(t("mod.show"), [

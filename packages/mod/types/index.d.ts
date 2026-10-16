@@ -25,6 +25,9 @@ export type StatusRequest = {
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
+/** The desktop's skins: the deep (dark water, the first look), flat (the app's own surfaces), the matrix (an instrument panel). */
+export type Skin = 'deep' | 'flat' | 'matrix'
+
 /** API usage may omit counts; the engine's ModelUsage does not expose cache TTL evidence. */
 export type Usage = {
   input_tokens?: number
@@ -183,6 +186,8 @@ export type Settings = {
   swampAlert: boolean
   layout: 'dashboard' | 'minimal'
   appearance: 'auto' | 'dark' | 'light'
+  /** How the desktop draws the band and the cards: the deep, flat, or the matrix (ui/look.ts). */
+  skin: Skin
   language: 'auto' | Lang
   /** Band parts switched off: 'timer' | 'reason' | 'route'. */
   hide: string[]

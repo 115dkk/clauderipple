@@ -12,7 +12,9 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
-import { CELL_PX, MUTE, ROW_PX, SUB, TONE, pillArt } from './art'
+import { CELL_PX, ROW_PX } from './art'
+import { boardAlert } from './board'
+import { lookOf } from './look'
 import type { Sea, Tone } from './art'
 import { capsule, closeButton, pill, ripple, segmented as drawnSegmented, well } from './kit'
 import type { SegmentOption } from './kit'
@@ -26,7 +28,7 @@ import { compactNumber, isRich, limitName, resetsLabel } from './view'
 
 type Choice = { key: string; label: string; hotkey: string; onPress: () => void }
 
-type Card = {
+export type Card = {
   key: string
   /** 리플이's face; on the terminal its tone colours the title's mark. */
   face: Face
@@ -44,7 +46,7 @@ type Card = {
 
 const JUDGE_NAME = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'alerts.routerModel' } as const
 
-function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
+export function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
   const L = frame.lang
   const notNow: Choice = { key: 'dismiss', label: t(L, 'alerts.notNow'), hotkey: 'n', onPress: a.dismiss }
   const cancel: Choice = { key: 'dismiss', label: t(L, 'alerts.cancel'), hotkey: 'x', onPress: a.dismiss }
@@ -249,6 +251,7 @@ const CARD_FACE = 34
 
 function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions, tone: Tone): RenderNode[] {
   const { Box, Text } = el
+  const k = lookOf(frame)
   if (alert.kind === 'compactNote' && 'Input' in el) {
     const Field = el.Input
     const name = t(frame.lang, 'alerts.keep').trim()
@@ -257,8 +260,8 @@ function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions, t
     const cells = Math.max(20, frame.columns - Math.ceil(CARD_FACE / CELL_PX) - Math.ceil(chOf(name)) - 10)
     return [
       <Box key="note-row" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
-        <Text color={SUB}>{name}</Text>
-        {well(el, 'note', cells, (
+        <Text {...k.sub}>{name}</Text>
+        {well(el, frame, 'note', cells, (
           <Field
             key="note"
             placeholder={placeholder}
@@ -287,29 +290,30 @@ function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions, t
   const line = (key: string, name: string, control: RenderNode) => (
     <Box key={key} flexDirection="row" alignItems="center" columnGap={2}>
       <Box width={nameCells} flexShrink={0}>
-        <Text color={MUTE}>{name}</Text>
+        <Text {...k.mute}>{name}</Text>
       </Box>
       {control}
     </Box>
   )
   return [
     <Box key="choices" flexDirection="column" rowGap={1}>
-      {line('kind', names[0]!, drawnSegmented(el, 'kind', kinds, alert.handoffKind, k => a.setHandoffKind(k), tone))}
-      {line('after', names[1]!, drawnSegmented(el, 'after', afters, alert.after, k => a.setHandoffAfter(k), tone))}
+      {line('kind', names[0]!, drawnSegmented(el, frame, 'kind', kinds, alert.handoffKind, kind => a.setHandoffKind(kind), tone))}
+      {line('after', names[1]!, drawnSegmented(el, frame, 'after', afters, alert.after, after => a.setHandoffAfter(after), tone))}
       <Box paddingLeft={nameCells + 2}>
-        <Text color={MUTE} wrap="wrap">{afterHint(frame, alert.after)}</Text>
+        <Text {...k.mute} wrap="wrap">{afterHint(frame, alert.after)}</Text>
       </Box>
     </Box>,
   ]
 }
 
 /** What the chosen "then" does, in a line: the names alone were read the wrong way (2026-10-13). */
-function afterHint(frame: Frame, after: Settings['handoffAfter']): string {
+export function afterHint(frame: Frame, after: Settings['handoffAfter']): string {
   return t(frame.lang, after === 'continue' ? 'alerts.continueHint' : after === 'confirm' ? 'alerts.confirmHint' : 'alerts.copyHint')
 }
 
 function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): RenderNode {
   const { Box, Text } = el
+  const k = lookOf(frame)
   const card = cardOf(frame, alert, a)
   const sea = seaOf(card, alert)
   const tone = sea.tone
@@ -319,7 +323,7 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
   const main = card.main && !fieldSubmits ? card.main : undefined
   const more = drawnExtras(el, frame, alert, a, tone)
   // The actions' cells, as drawn (each pill its own whole cells, a cell between, the way out last).
-  const actionCells = quiet.reduce((n, c) => n + pillArt(c.label, 'ghost', tone).cells + 1, 0) + (main ? pillArt(main.label, 'primary', tone).cells + 1 : 0) + (card.close ? 4 : 0)
+  const actionCells = quiet.reduce((n, c) => n + k.art.pill(c.label, 'ghost', tone).cells + 1, 0) + (main ? k.art.pill(main.label, 'primary', tone).cells + 1 : 0) + (card.close ? 4 : 0)
   const faceCells = Math.ceil(CARD_FACE / CELL_PX) + 2
   const room = frame.columns - 4
   const oneRow = !more.length && faceCells + chOf(card.title) * 1.12 + 2 + chOf(card.body) + 2 + actionCells <= room
@@ -330,14 +334,14 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
   // where a way out is looked for.
   const buttons = (
     <Box key="actions" flexDirection="row" alignItems="center" alignSelf={more.length ? 'flex-start' : 'center'} columnGap={1} flexShrink={0} flexWrap="wrap" rowGap={1}>
-      {quiet.map(c => pill(el, c.key, c.label, 'ghost', c.onPress, tone))}
-      {main ? pill(el, main.key, main.label, 'primary', main.onPress, tone) : null}
-      {card.close ? closeButton(el, card.close.key, card.close.label, card.close.onPress) : null}
+      {quiet.map(c => pill(el, frame, c.key, c.label, 'ghost', c.onPress, tone))}
+      {main ? pill(el, frame, main.key, main.label, 'primary', main.onPress, tone) : null}
+      {card.close ? closeButton(el, frame, card.close.key, card.close.label, card.close.onPress) : null}
     </Box>
   )
-  const face = ripple(el, card.key, card.face, card.title, CARD_FACE, card.percent)
-  const title = <Text key="title" bold color={TONE[tone].text} wrap="wrap">{card.title}</Text>
-  const body = <Text key="body" color={SUB} wrap="wrap">{card.body}</Text>
+  const face = ripple(el, frame, card.key, card.face, card.title, CARD_FACE, card.percent)
+  const title = <Text key="title" bold color={k.tone(tone)} wrap="wrap">{card.title}</Text>
+  const body = <Text key="body" {...k.sub} wrap="wrap">{card.body}</Text>
   const top = oneRow ? (
     <Box key="top" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
       {face}
@@ -372,7 +376,8 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
 
 /** One alert band, chosen by register.tsx from the priority list in the spec (§5 Bands). */
 export function renderAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): RenderNode {
-  if (canDraw(el, frame)) return drawnAlert(el, frame, alert, a)
+  // The matrix posts the card as one row of a board (board.tsx).
+  if (canDraw(el, frame)) return frame.skin === 'matrix' ? boardAlert(el, frame, alert, a) : drawnAlert(el, frame, alert, a)
   const card = cardOf(frame, alert, a)
   const rich = isRich(frame)
   const tone = FACE_TONE[card.face]

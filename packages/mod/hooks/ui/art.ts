@@ -13,7 +13,8 @@
 // - The desktop sets text at 13 px with 19 px lines; a cell is 1ch, 7.917 px. Controls are sized in
 //   whole cells so a picture and the presses laid over it share one grid.
 
-import { chOf } from './theme'
+import type { Skin } from '../../types/index.d.ts'
+import { chOf } from './theme.ts'
 
 /** One desktop cell (1ch of the host's 13 px sans), px. */
 export const CELL_PX = 7.917
@@ -58,7 +59,7 @@ export const DEPTH = ['#67e8f9', '#7dd3fc', '#a5b4fc', '#a78bfa', '#c084fc'] as 
 
 const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Apple SD Gothic Neo','Segoe UI',system-ui,sans-serif"
 
-const r = (x: number): string => String(Math.round(x * 100) / 100)
+export const r = (x: number): string => String(Math.round(x * 100) / 100)
 
 /** One SVG document, `width` × `height` px; nothing in it moves when less motion is asked for. */
 export function svg(width: number, height: number, body: string, css = '', extra = ''): string {
@@ -66,7 +67,7 @@ export function svg(width: number, height: number, body: string, css = '', extra
   return '<svg xmlns="http://www.w3.org/2000/svg" width="' + r(width) + '" height="' + r(height) + '" viewBox="0 0 ' + r(width) + ' ' + r(height) + '"' + extra + '><style>' + base + css + '</style>' + body + '</svg>'
 }
 
-function esc(text: string): string {
+export function esc(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
@@ -320,7 +321,7 @@ export type PillLook = 'primary' | 'ghost'
 /** Glyphs a button may lead with, drawn on a 12 px square. */
 export type Glyph = 'open' | 'close' | 'gear' | 'back' | 'next' | 'copy' | 'save' | 'compact' | 'handoff'
 
-const GLYPH: Record<Glyph, string> = {
+export const GLYPH: Record<Glyph, string> = {
   open: '<path d="M7 2.2h2.8V5M9.8 2.2L5.6 6.4M8.8 7.4v2.4H2.2V3.2h2.4"/>',
   close: '<path d="M3 3l6 6M9 3L3 9"/>',
   gear: '<circle cx="6" cy="6" r="1.7"/><path d="M6 1.3v1.3M6 9.4v1.3M1.3 6h1.3M9.4 6h1.3M2.7 2.7l.9.9M8.4 8.4l.9.9M2.7 9.3l.9-.9M8.4 3.6l.9-.9"/><circle cx="6" cy="6" r="3.5"/>',
@@ -576,9 +577,9 @@ export const ICON_PX = 16
 /** Line icons of the band's controls, 16 px. */
 export type Icon = 'flame' | 'gear' | 'agents' | 'log' | 'compact' | 'clear'
 
-const FLAME = 'M8.1 14.3c2.8 0 4.5-1.9 4.5-4.4 0-2.8-2.4-4.2-2.8-7.2-1.7 1.1-2.6 2.8-2.5 4.3-1-.4-1.5-1.4-1.6-2.3-1.4 1.3-2 2.9-2 5.2 0 2.5 1.6 4.4 4.4 4.4z'
+export const FLAME = 'M8.1 14.3c2.8 0 4.5-1.9 4.5-4.4 0-2.8-2.4-4.2-2.8-7.2-1.7 1.1-2.6 2.8-2.5 4.3-1-.4-1.5-1.4-1.6-2.3-1.4 1.3-2 2.9-2 5.2 0 2.5 1.6 4.4 4.4 4.4z'
 
-const ICON: Record<Icon, string> = {
+export const ICON: Record<Icon, string> = {
   flame: '<path d="' + FLAME + '"/>',
   gear: '<circle cx="8" cy="8" r="2.3"/><path d="M8 1.7v1.8M8 12.5v1.8M1.7 8h1.8M12.5 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M3.5 12.5l1.3-1.3M11.2 4.8l1.3-1.3"/><circle cx="8" cy="8" r="4.8"/>',
   agents: '<circle cx="4.8" cy="5" r="2.1"/><circle cx="11.4" cy="5" r="2.1"/><path d="M1.6 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6M8.2 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6"/>',
@@ -633,11 +634,12 @@ export type TileArt =
   | { kind: 'judge'; judge: 'haiku' | 'jev' | 'model' }
   | { kind: 'mode'; on: boolean }
   | { kind: 'warm'; on: boolean }
+  | { kind: 'skin'; skin: Skin }
 
 /**
  * A tile's picture, 44 px: a rounded square of its own colour with the setting drawn as it stands
  * (rising bars sounding by themselves for automatic effort, the judge's letter, a stack of worker
- * cards, a flame or a snowflake for keep-warm), alive while it is on.
+ * cards, a flame or a snowflake for keep-warm, a small panel for the skin), alive while it is on.
  */
 export function tileArt(art: TileArt): string {
   const s = TILE_PX
@@ -677,6 +679,14 @@ export function tileArt(art: TileArt): string {
     const card = (y: number, op: number, cls = '') => '<rect class="' + cls + '" x="11" y="' + y + '" width="22" height="9" rx="2.6" fill="' + ink + '" fill-opacity="' + op + '" stroke="' + ink + '" stroke-opacity="' + Math.min(1, op + 0.3) + '"/>'
     return svg(s, s, square('#4a3410', '#24180a', '#fbbf24') + card(28, 0.18) + card(21.5, 0.32) + '<g class="fl">' + card(15, 0.95) + '<circle cx="15.5" cy="19.5" r="1.4" fill="#3a2604"/><rect x="19" y="18.6" width="10" height="1.8" rx=".9" fill="#3a2604" fill-opacity=".7"/></g>',
       '.fl{animation:fl 4.4s ease-in-out infinite}@keyframes fl{0%,100%{transform:none}50%{transform:translateY(-1.2px)}}')
+  }
+  if (art.kind === 'skin') {
+    // A small panel in lavender: its head's dot, a title line, two lines of words.
+    const ink = '#c4b5fd'
+    return svg(s, s, square('#33227a', '#191146', '#a78bfa') +
+      '<rect x="10.5" y="12.5" width="23" height="19" rx="3.5" fill="' + ink + '" fill-opacity=".12" stroke="' + ink + '" stroke-width="1.6"/>' +
+      '<circle cx="16" cy="18.5" r="2" fill="' + ink + '"/>' +
+      '<path d="M20.5 18.5h8M15 24h12M15 27.5h8" fill="none" stroke="' + ink + '" stroke-width="1.6" stroke-linecap="round"/>')
   }
   if (art.on) {
     const flame = 'M22 35.5c6.4 0 10-4.2 10-9.6 0-6-5.2-9-6.1-15.4-3.6 2.4-5.6 6-5.4 9.3-2.2-.9-3.3-3-3.5-4.9-3 2.9-4.4 6.4-4.4 11.3 0 5.4 3.6 9.3 9.4 9.3z'

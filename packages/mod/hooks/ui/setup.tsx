@@ -10,7 +10,9 @@ import { t } from '../i18n'
 import type { RenderNode } from 'claude-code'
 import { RUNGS } from '../settings'
 
-import { CELL_PX, INK, MUTE, SUB, TONE, beadsArt } from './art'
+import { CELL_PX } from './art'
+import { boardSetup } from './board'
+import { lookOf } from './look'
 import { capsule, pic, pill, ripple } from './kit'
 import { GREET_SIZE, action, actions, canDraw, speak } from './parts'
 import type { Els } from './parts'
@@ -19,14 +21,14 @@ import { chOf } from './theme'
 import type { Frame, SettingsActions, SettingsView, SetupActions, SetupView } from './view'
 import { targetLabel } from './view'
 
-const STEPS = [
+export const STEPS = [
   { title: 'setup.judgeTitle', blurb: 'setup.judgeBlurb' },
   { title: 'setup.workersTitle', blurb: 'setup.workersNote' },
   { title: 'setup.cacheTitle', blurb: 'setup.cacheBlurb' },
 ] as const
 
 /** `Sol · Astra · …`: the four workers' models, lowest first. */
-function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
+export function workersSummary(lang: Frame['lang'], d: SetupView['draft']): string {
   const general = d.rules.general
   return RUNGS.map(rung => general.rungs[rung]?.map(step => targetLabel(step.target, lang)).join(' → ') || '—').join(' · ')
 }
@@ -69,11 +71,14 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
   // It greets first; the first step's question is its one row (who judges).
   const title = done ? t(frame.lang, 'setup.ready') : view.step === 1 ? t(frame.lang, 'setup.welcome') : t(frame.lang, step!.title)
   const line = done ? t(frame.lang, 'setup.changeDashboard') : t(frame.lang, step!.blurb)
+  // The matrix posts the setup on a board of its own (board.tsx).
+  if (canDraw(el, frame) && frame.skin === 'matrix') return boardSetup(el, frame, view, a)
   if (canDraw(el, frame)) {
     // The desktop: a capsule of the deep, the step's control the quick settings' own tile (who
     // judges, keep warm), what was chosen when done, Next lit and the rest ghost buttons.
     const L = frame.lang
-    const beads = beadsArt(view.step, 3)
+    const k = lookOf(frame)
+    const beads = k.art.beads(view.step, 3)
     const summary = done
       ? [
           [t(L, 'band.effort'), t(L, 'setup.effortSummary', { state: t(L, d.effortAuto ? 'band.on' : 'band.off').toLowerCase(), judge: d.judge === 'haiku' ? t(L, 'settings.haiku') : d.judge === 'jev' ? t(L, 'settings.jev') : d.judgeModel })],
@@ -87,8 +92,8 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
           <Box key="summary" flexDirection="column" rowGap={1} paddingLeft={Math.ceil(GREET_SIZE / CELL_PX) + 2}>
             {summary.map(([name, value], i) => (
               <Box key={'sum-' + i} flexDirection="row" columnGap={2} alignItems="flex-start">
-                <Box width={nameCells} flexShrink={0}><Text color={MUTE}>{name}</Text></Box>
-                <Text color={INK} wrap="wrap">{value}</Text>
+                <Box width={nameCells} flexShrink={0}><Text {...k.mute}>{name}</Text></Box>
+                <Text {...k.ink} wrap="wrap">{value}</Text>
               </Box>
             ))}
           </Box>,
@@ -100,7 +105,7 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
             </Box>,
           ]
         : []
-    const next = done ? pill(el, 'finish', t(L, 'setup.start'), 'primary', a.finish, 'green', 'next') : pill(el, 'next', view.step === 3 ? t(L, 'setup.finish') : t(L, 'setup.next'), 'primary', a.next, 'violet', 'next')
+    const next = done ? pill(el, frame, 'finish', t(L, 'setup.start'), 'primary', a.finish, 'green', 'next') : pill(el, frame, 'next', view.step === 3 ? t(L, 'setup.finish') : t(L, 'setup.next'), 'primary', a.next, 'violet', 'next')
     return capsule(el, frame, {
       key: 'setup',
       sea: { tone: done ? 'green' : 'violet', ripples: 'calm', reach: 170, motes: true, wave: 19 * 0.5 + GREET_SIZE + 9, ...(done ? { tick: true, weather: 'sparkles' as const } : {}), at: { x: 1.5 * CELL_PX + GREET_SIZE / 2, y: 19 * 0.5 + GREET_SIZE / 2 } },
@@ -109,21 +114,21 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
       gap: 1,
       children: [
         <Box key="setup-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
-          {ripple(el, 'setup', face, title, GREET_SIZE)}
+          {ripple(el, frame, 'setup', face, title, GREET_SIZE)}
           <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
             <Box flexDirection="row" alignItems="center" columnGap={2} flexWrap="wrap">
-              <Text bold color={done ? TONE.green.text : INK} wrap="wrap">{title}</Text>
+              <Text bold {...(done ? { color: k.tone('green') } : k.ink)} wrap="wrap">{title}</Text>
               {done ? null : pic(el, 'setup-beads', beads.source, view.step + ' / 3', beads.width, 16)}
             </Box>
-            <Text color={SUB} wrap="wrap">{line}</Text>
+            <Text {...k.sub} wrap="wrap">{line}</Text>
           </Box>
         </Box>,
         ...content,
         <Box key="actions" flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap" rowGap={1}>
           {next}
-          {!done && view.step === 2 ? pill(el, 'all-settings', t(L, 'settings.openAll'), 'ghost', a.openAllSettings, 'violet', 'open') : null}
-          {done || view.step > 1 ? pill(el, 'back', t(L, 'setup.back'), 'ghost', a.back, 'violet', 'back') : null}
-          {done ? null : pill(el, 'skip', t(L, 'setup.skip'), 'ghost', a.skip)}
+          {!done && view.step === 2 ? pill(el, frame, 'all-settings', t(L, 'settings.openAll'), 'ghost', a.openAllSettings, 'violet', 'open') : null}
+          {done || view.step > 1 ? pill(el, frame, 'back', t(L, 'setup.back'), 'ghost', a.back, 'violet', 'back') : null}
+          {done ? null : pill(el, frame, 'skip', t(L, 'setup.skip'), 'ghost', a.skip)}
         </Box>,
       ],
     })

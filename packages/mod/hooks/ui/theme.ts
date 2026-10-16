@@ -28,6 +28,9 @@ export type Palette = {
   bad: string
 }
 
+/** A palette for each face of the theme. */
+export type PaletteSet = { dark: Palette; light: Palette }
+
 export const ACCENT = '#6a56d6'
 
 export const DARK: Palette = {
@@ -142,13 +145,18 @@ export function v(key: keyof Palette): string {
 const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',system-ui,sans-serif"
 
 /**
- * One SVG document. The palette is set as CSS variables on the root: fixed for dark or light, and
- * for auto switched by the frame's `prefers-color-scheme`. `viewBox` draws a grid of its own at
+ * One SVG document. The palette is set as CSS variables on the root: fixed for dark or light, for
+ * auto switched by the frame's `prefers-color-scheme`, or `palette`: one of a skin's own whatever
+ * the theme, or a pair of them switched by it. `viewBox` draws a grid of its own at
  * this size (the mascot's 56 units); absent, one unit is one pixel.
  */
-export function svgDoc(width: number, height: number, appearance: Appearance, body: string, css = '', viewBox = '0 0 ' + width + ' ' + height): string {
-  const vars =
-    appearance === 'dark'
+export function svgDoc(width: number, height: number, appearance: Appearance, body: string, css = '', viewBox = '0 0 ' + width + ' ' + height, palette?: Palette | PaletteSet): string {
+  // A palette of a skin's own: a pair switched by the theme (the board's), or one fixed whatever it is.
+  const vars = palette && 'dark' in palette
+    ? 'svg{' + varsOf(palette.light) + '}@media (prefers-color-scheme:dark){svg{' + varsOf(palette.dark) + '}}'
+    : palette
+      ? 'svg{' + varsOf(palette) + '}'
+      : appearance === 'dark'
       ? 'svg{' + varsOf(DARK) + '}'
       : appearance === 'light'
         ? 'svg{' + varsOf(LIGHT) + '}'
