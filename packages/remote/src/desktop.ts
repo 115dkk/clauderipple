@@ -562,6 +562,27 @@ export class DesktopSessions {
 
   transcriptSize(id: string): number { return this.sources.get(id)?.size ?? 0; }
 
+  /** Whether the transcript's newest turn ended ok, from the tail window; null when it holds no
+   * result record at all. A Mac session the host is not tailing offers no other word on how its
+   * turn ended, so this is what turns an alert's "finished" into "failed"; anything unreadable
+   * stays null and the caller says ok. */
+  turnOutcome(id: string): boolean | null {
+    const source = this.sources.get(id);
+    if (!source) return null;
+    let fd: number;
+    try { fd = this.open(source.file); } catch (error) { if (missing(error)) return null; throw error; }
+    try {
+      let outcome: boolean | null = null;
+      for (const line of windowLines(fd, fs.fstatSync(fd).size, true)) {
+        const r = record(line);
+        if (!r || r.isSidechain === true || r.isMeta === true) continue;
+        if (r.type === "result") outcome = r.subtype === "success" && r.is_error !== true;
+        else if (r.type === "system" && r.subtype === "turn_duration") outcome = true;
+      }
+      return outcome;
+    } finally { fs.closeSync(fd); }
+  }
+
   /** The mode the Claude app last ran this session in, from the transcript's newest user prompt. */
   permissionMode(id: string): PermissionMode | undefined { return this.sources.get(id)?.summary.permissionMode; }
 

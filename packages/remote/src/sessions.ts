@@ -18,7 +18,7 @@ import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { createWorktree } from "./worktree.ts";
 import { MessageReceipts, OutcomeUnknownError } from "./receipts.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
-import { PERMISSION_MODES, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
+import { PERMISSION_MODES, type AlertBody, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
 
 // ---- the slice of the Agent SDK this file relies on (typed loosely so tests can fake it) ----
@@ -85,6 +85,11 @@ export interface SessionsOptions {
   log?: (line: string) => void;
   onEvent: (session: string, event: SessionEvent) => void;
   onSessions: () => void;
+  /** A turn finished/failed, or an approval is waiting, on a Mac session the host is not tailing.
+   * Fired only while `away`, and never appended to a log (main sends it to the pushes). */
+  onAlert?: (session: string, body: AlertBody) => void;
+  /** Whether the Mac is away (screen locked, or no input for a while). Missing: never alert. */
+  away?: () => Promise<boolean>;
   /** Claude app sessions became unreachable for the whole host (the Mac's Claude login), or reachable again (null). */
   onDesktopProblem?: (problem: string | null) => void;
   now?: () => number;
@@ -235,6 +240,9 @@ export class Sessions {
   private desktopModels = new Map<string, { model: string; effort: Effort | null }>();
   private bridge: BridgeClient;
   private bridgeStates = new Map<string, { at: number; state?: SessionState; pending?: Promise<void> }>();
+  /** The last state seen per non-bridged Mac session, for the away-alert transitions. The first
+   * sight of a session only seeds it: a host start must not push for turns that ended before it. */
+  private macStates = new Map<string, { state: SessionState; permission: boolean }>();
 
   /** The registry says busy (it counts background work) while the main turn itself is not running. */
   private background(process: DesktopProcess): boolean {
@@ -374,11 +382,13 @@ export class Sessions {
 
   async pollDesktop(): Promise<void> {
     if (this.desktop?.poll()) this.opts.onSessions();
+    const sessions = this.list();
+    this.pollMacAlerts(sessions);
     if (this.sidebar) {
-      const fingerprint = JSON.stringify([this.groups(), this.list()]);
+      const fingerprint = JSON.stringify([this.groups(), sessions]);
       if (fingerprint !== this.sidebarFingerprint) { this.sidebarFingerprint = fingerprint; this.opts.onSessions(); }
     }
-    const ids = new Set(this.list().flatMap(s => {
+    const ids = new Set(sessions.flatMap(s => {
       const process = this.desktop?.liveProcess(this.records.get(s.id)?.sdkSessionId ?? s.id);
       return process?.bridgeSessionId ? [process.bridgeSessionId] : [];
     }));
@@ -414,6 +424,36 @@ export class Sessions {
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
       this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
     }
+  }
+
+  /**
+   * Alerts for Mac sessions the host is not tailing: a bridged record already pushes through its
+   * own appended events, so this path is for the ones only the list knows. A turn that was running
+   * and is now idle finished (ok, or failed when the transcript's result says so), and a session
+   * that newly waits for approval asks. The first sight of a session only seeds its state.
+   */
+  private pollMacAlerts(sessions: SessionSummary[]): void {
+    if (!this.desktop) return;
+    const seen = new Set<string>();
+    for (const s of sessions) {
+      if (s.origin !== "desktop" || this.records.has(s.id) || this.archived.has(s.id)) continue;
+      seen.add(s.id);
+      const permission = s.state === "waiting" || s.attention?.reason === "permission";
+      const previous = this.macStates.get(s.id);
+      this.macStates.set(s.id, { state: s.state, permission });
+      if (!previous) continue;
+      if (permission && !previous.permission) this.alert(s.id, { kind: "permission" });
+      else if (previous.state === "running" && s.state === "idle") this.alert(s.id, { kind: "result", ok: this.desktop.turnOutcome(s.id) ?? true });
+    }
+    for (const id of this.macStates.keys()) if (!seen.has(id)) this.macStates.delete(id);
+  }
+
+  /** Hand an alert to the pushes, but only when the Mac is away: the person at the desk sees it already. */
+  private alert(id: string, body: AlertBody): void {
+    const { onAlert, away } = this.opts;
+    if (!onAlert || !away) return;
+    void away().then(awayNow => { if (awayNow) onAlert(id, body); })
+      .catch(error => (this.opts.log ?? console.error)(`[alert] ${id}: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
@@ -497,7 +537,9 @@ export class Sessions {
 
   summaryOf(id: string): SessionSummary | undefined {
     const r = this.records.get(id);
-    return r ? this.summary(r) : undefined;
+    if (r) return this.summary(r);
+    // A Mac session the host is not tailing has no record: its push (onAlert) still needs a title.
+    return this.desktop?.has(id) ? this.list().find(s => s.id === id) : undefined;
   }
 
   private summary(r: SessionRecord): SessionSummary {

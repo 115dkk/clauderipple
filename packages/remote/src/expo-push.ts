@@ -1,7 +1,7 @@
 // Native push is a metadata-only boundary: neither Expo nor Apple receives session text.
 import path from "node:path";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
-import type { EventBody } from "./protocol.ts";
+import type { PushEvent } from "./protocol.ts";
 
 export interface ExpoPayload {
   to: string;
@@ -16,7 +16,7 @@ interface Stored { token: string; lang: "ko" | "en" }
 
 export const validExpoToken = (token: string): boolean => /^(ExponentPushToken|ExpoPushToken)\[[A-Za-z0-9_-]+\]$/.test(token);
 
-export function expoBody(event: EventBody, lang: "ko" | "en"): string | null {
+export function expoBody(event: PushEvent, lang: "ko" | "en"): string | null {
   if (event.kind === "permission") return lang === "ko" ? "승인을 기다립니다" : "Waiting for approval";
   if (event.kind !== "result") return null;
   if (event.ok) return lang === "ko" ? "작업을 마쳤습니다" : "Work finished";
@@ -75,7 +75,7 @@ export class ExpoNotifier {
     delete this.tokens[clientId];
     this.save();
   }
-  async onEvent(session: string, event: EventBody): Promise<void> {
+  async onEvent(session: string, event: PushEvent): Promise<void> {
     if (this.opts.seenRecently(session)) return;
     await Promise.all(Object.entries(this.tokens).map(async ([id, stored]) => {
       const body = expoBody(event, stored.lang);

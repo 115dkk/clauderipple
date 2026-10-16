@@ -1,8 +1,10 @@
 // Web push to the phone (RFC 8030 delivery, RFC 8291 payload encryption, RFC 8292 VAPID, via the
 // `web-push` package). Three moments, and only when no connected phone looked at that session in
 // the last SEEN_MS (180 s): a permission request is waiting, a turn finished, a turn failed.
-// Tapping the push opens exactly that session (its id is in the payload's session field).
-// The payload is metadata only — session title plus fixed state words, never conversation text.
+// They arrive as an appended event, or as a Mac-session alert (Sessions.onAlert) for a session the
+// host is not tailing. Tapping the push opens exactly that session (its id is in the payload's
+// session field). The payload is metadata only — session title plus fixed state words, never
+// conversation text.
 //
 // The VAPID key pair is made once and kept under the host's config dir (0600); a new pair would
 // orphan every subscription. Subscriptions are per device (the phone's clientId) and a push
@@ -10,7 +12,7 @@
 import path from "node:path";
 import webpush from "web-push";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
-import type { EventBody, PushSubscriptionJSON, SessionSummary } from "./protocol.ts";
+import type { PushEvent, PushSubscriptionJSON, SessionSummary } from "./protocol.ts";
 
 export const VISIBLE_MS = 30_000;
 /** A session a connected phone looked at within this needs no push (Paseo agent-attention-policy PRESENCE_THRESHOLD_MS). */
@@ -70,10 +72,10 @@ const COPY = {
 const clip = (s: string, n: number): string => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 const folderOf = (cwd: string): string => path.basename(cwd) || cwd;
 
-/** The push for an event, or null if this event is not one of the three moments.
+/** The push for an event or Mac-session alert, or null if it is not one of the three moments.
  * Metadata only: the session title plus fixed state words. Neither Expo/Apple nor the web push
  * service ever receives assistant text, tool input, or error detail. */
-export function pushFor(event: EventBody, s: Pick<SessionSummary, "id" | "title" | "cwd">, lang: "ko" | "en"): PushPayload | null {
+export function pushFor(event: PushEvent, s: Pick<SessionSummary, "id" | "title" | "cwd">, lang: "ko" | "en"): PushPayload | null {
   const c = COPY[lang];
   const title = clip(s.title || folderOf(s.cwd), 140);
   if (event.kind === "permission") {
@@ -125,8 +127,8 @@ export class Notifier {
     this.save();
   }
 
-  /** Called for every appended session event. Resolves when every send finished (tests wait on it). */
-  async onEvent(session: string, event: EventBody): Promise<void> {
+  /** Called for every appended session event, and for each Mac-session alert (Sessions.onAlert). Resolves when every send finished (tests wait on it). */
+  async onEvent(session: string, event: PushEvent): Promise<void> {
     if (event.kind !== "permission" && event.kind !== "result") return;
     if (!Object.keys(this.subs).length || this.opts.seenRecently(session)) return;
     const s = this.opts.summary(session);

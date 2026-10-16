@@ -19,6 +19,7 @@ import nacl from "tweetnacl";
 import { WebSocket } from "ws";
 import { loadConfig, newToken, normalizeRelay, pairingUrl, relayPairingUrl, remoteHome, resolveBind, saveConfig } from "./config.ts";
 import type { HostConfig } from "./config.ts";
+import { MacAway } from "./away.ts";
 import { toB64u } from "./e2ee.ts";
 import { PermissionQueue } from "./permissions.ts";
 import { PowerHold } from "./power.ts";
@@ -135,6 +136,8 @@ async function runHost(): Promise<void> {
     summary: (id) => sessions?.summaryOf(id),
   });
   const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log, seenRecently: (id) => server?.sessionSeenRecently(id) ?? false });
+  // Mac sessions the host is not tailing push only while the Mac is away (screen locked or idle).
+  const away = new MacAway({ log });
   sessions = new Sessions({
     dir, router, permissions,
     desktopProjects: path.join(os.homedir(), ".claude", "projects"),
@@ -143,6 +146,8 @@ async function runHost(): Promise<void> {
     ...(claudePath ? { claudePath, ...(process.platform === "darwin" ? { handoff: desktopHandoff(claudePath) } : {}) } : {}),
     log,
     onEvent: (id, event) => { server?.onEvent(id); void notifier.onEvent(id, event); void expoNotifier.onEvent(id, event); },
+    away: () => away.away(),
+    onAlert: (id, body) => { void notifier.onEvent(id, body); void expoNotifier.onEvent(id, body); },
     onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },
     onDesktopProblem: (problem) => server?.setDesktopProblem(problem),
   });

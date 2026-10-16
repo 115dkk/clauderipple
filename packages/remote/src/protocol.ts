@@ -99,6 +99,15 @@ export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "route
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 
+/**
+ * A push-worthy moment on a Mac session the host is not tailing: a turn finished (ok/failed) or an
+ * approval is waiting. It goes to the pushes only, never into a session log, so it carries just
+ * what they read — a bridged session's own result/permission events carry the rest.
+ */
+export type AlertBody = { kind: "permission" } | { kind: "result"; ok: boolean };
+/** What a push reads: a real log event, or an alert for a Mac session the host does not tail. */
+export type PushEvent = EventBody | AlertBody;
+
 /** The mod's figures, as the phone shows them under the header. Null means "not known", never zero. */
 export interface Figures {
   effort: Effort | null;
