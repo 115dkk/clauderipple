@@ -686,7 +686,9 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
           <Text {...(tone === 'ok' ? { color: k.tone('green') } : figure(frame, tone === 'warn' ? 'warn' : 'bad'))}>{r.cachePct + '%'}</Text>
         ) : null}
       </Box>
-      {press(el, 'route', Math.max(40, frame.columns) * CELL_PX * 0.4, actions.toggleLog)}
+      {/* No wider than the Box's least width: a blank wider than the Box is cut with an ellipsis,
+          dark on a light page (flat, 2026-10-16). */}
+      {press(el, 'route', (Math.min(ROUTE_ROOM, room) - 1) * CELL_PX, actions.toggleLog)}
     </Box>
   )
 }
