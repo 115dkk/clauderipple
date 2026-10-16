@@ -36,9 +36,17 @@ function toneVar(tone: Tone): string {
 /** The 44 px flame of the keep-warm tile (the deep's path). */
 const TILE_FLAME = 'M22 35.5c6.4 0 10-4.2 10-9.6 0-6-5.2-9-6.1-15.4-3.6 2.4-5.6 6-5.4 9.3-2.2-.9-3.3-3-3.5-4.9-3 2.9-4.4 6.4-4.4 11.3 0 5.4 3.6 9.3 9.4 9.3z'
 
+/**
+ * A text's colour as a style: svgDoc's `text{fill:var(--ink)}` rule beats a `fill` attribute, so an
+ * attribute left every label and the agents' count in ink (black on the accent, 2026-10-16).
+ */
+function fillOf(fill: string): string {
+  return ' style="fill:' + fill + '"'
+}
+
 /** A label drawn at 12 px, centred on `cx`, on a control `h` high. */
 function label(text: string, cx: number, h: number, fill: string, weight: number): string {
-  return '<text x="' + r(cx) + '" y="' + r(h / 2 + 12 * 0.36) + '" text-anchor="middle" font-size="12" font-weight="' + weight + '" fill="' + fill + '">' + esc(text) + '</text>'
+  return '<text x="' + r(cx) + '" y="' + r(h / 2 + 12 * 0.36) + '" text-anchor="middle" font-size="12" font-weight="' + weight + '"' + fillOf(fill) + '>' + esc(text) + '</text>'
 }
 
 /** The pictures of the flat skin for one appearance: the theme's palette, fixed or following the app. */
@@ -198,7 +206,7 @@ export function flatPictures(appearance: Appearance): Paint {
     agents: (count, on) => {
       const text = count > 9 ? '9+' : String(count)
       const badge = count > 0
-        ? '<circle cx="20" cy="5.5" r="5.5" fill="' + ACCENT + '"/><text x="20" y="8.6" text-anchor="middle" font-size="' + (text.length > 1 ? 7 : 8.5) + '" font-weight="750" fill="#fff">' + text + '</text>'
+        ? '<circle cx="20" cy="5.5" r="5.5" fill="' + ACCENT + '"/><text x="20" y="8.6" text-anchor="middle" font-size="' + (text.length > 1 ? 7 : 8.5) + '" font-weight="750"' + fillOf('#fff') + '>' + text + '</text>'
         : ''
       return doc(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON.agents + '</g>' + badge)
     },
@@ -221,7 +229,7 @@ export function flatPictures(appearance: Appearance): Paint {
       if (art.kind === 'judge') {
         const mark = art.judge === 'model'
           ? '<g fill="none" stroke="' + ACCENT + '" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="29" r="3.2"/><circle cx="31" cy="15" r="3.2"/><path d="M16 27.5c6-1.5 4-9 12-11"/></g>'
-          : '<text x="22" y="29.5" text-anchor="middle" font-size="21" font-weight="760" fill="' + ACCENT + '">' + (art.judge === 'haiku' ? 'H' : 'J') + '</text>'
+          : '<text x="22" y="29.5" text-anchor="middle" font-size="21" font-weight="760"' + fillOf(ACCENT) + '>' + (art.judge === 'haiku' ? 'H' : 'J') + '</text>'
         return doc(s, s, square + mark)
       }
       if (art.kind === 'mode') {
