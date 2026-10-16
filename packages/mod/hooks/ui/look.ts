@@ -4,8 +4,7 @@
 // host's own ink, the accent only where something is on. Those two share one layout and change
 // paint alone: every size is art.ts's and every cell count the same under both, so band.tsx's
 // arithmetic and the blank presses laid over the pictures (kit.tsx) hold whatever the skin. The
-// matrix is a board of its own (board.tsx, cells.ts): a different composition, dispatched before
-// any of this is asked. The terminal draws text and knows nothing of skins.
+// terminal draws text and knows nothing of skins.
 
 import type { Skin } from '../../types'
 import * as deep from './art'
@@ -118,8 +117,7 @@ function flat(appearance: Appearance): Look {
 }
 
 /**
- * The look a frame draws in. The matrix never asks: its renderers are dispatched to board.tsx
- * before any drawn control is built; were one to ask, it would get the deep.
+ * The look a frame draws in: flat's own surfaces for flat, the deep for everything else.
  */
 export function lookOf(frame: Frame): Look {
   return frame.skin === 'flat' ? flat(frame.appearance) : DEEP

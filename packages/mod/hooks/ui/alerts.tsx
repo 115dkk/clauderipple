@@ -13,7 +13,6 @@ import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
 import { CELL_PX, ROW_PX } from './art'
-import { boardAlert } from './board'
 import { lookOf } from './look'
 import type { Sea, Tone } from './art'
 import { capsule, closeButton, pill, ripple, segmented as drawnSegmented, well } from './kit'
@@ -376,8 +375,7 @@ function drawnAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): R
 
 /** One alert band, chosen by register.tsx from the priority list in the spec (§5 Bands). */
 export function renderAlert(el: Els, frame: Frame, alert: AlertView, a: AlertActions): RenderNode {
-  // The matrix posts the card as one row of a board (board.tsx).
-  if (canDraw(el, frame)) return frame.skin === 'matrix' ? boardAlert(el, frame, alert, a) : drawnAlert(el, frame, alert, a)
+  if (canDraw(el, frame)) return drawnAlert(el, frame, alert, a)
   const card = cardOf(frame, alert, a)
   const rich = isRich(frame)
   const tone = FACE_TONE[card.face]

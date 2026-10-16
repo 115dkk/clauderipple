@@ -123,7 +123,7 @@ const SCENES: Scene[] = [
   { name: 'setup-2', draw: (el, f) => renderSetup(el, f, { step: 2, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, noop) },
   { name: 'setup-3', draw: (el, f) => renderSetup(el, f, { step: 3, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, noop) },
   { name: 'setup-done', draw: (el, f) => renderSetup(el, f, { step: 4, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, noop) },
-  // The other two skins (look.ts), each on the band, the quick settings, a card and a setup step.
+  // The flat skin (look.ts), on the band, the quick settings, a card and a setup step.
   { name: 'flat-band', skin: 'flat', draw: (el, f) => site(el, f, { ...DASH, warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, resetsAt: '2026-10-12T15:40:00', save: false } }) },
   { name: 'flat-band-menu', skin: 'flat', draw: (el, f) => site(el, f, { ...DASH, effortMenu: true, effort: { level: 'xhigh', mode: 'manual' } }) },
   { name: 'flat-settings', skin: 'flat', draw: (el, f) => renderSettings(el, f, SETTINGS_VIEW, noop) },
@@ -131,13 +131,6 @@ const SCENES: Scene[] = [
   { name: 'flat-alert-swamp', skin: 'flat', draw: (el, f) => renderAlert(el, f, { kind: 'swamp', percent: 63, tokens: 126_000 }, noop) },
   { name: 'flat-alert-handoff', skin: 'flat', draw: (el, f) => renderAlert(el, f, { kind: 'handoffChoice', handoffKind: 'quick', after: 'continue' }, noop) },
   { name: 'flat-setup', skin: 'flat', draw: (el, f) => renderSetup(el, f, { step: 1, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, noop) },
-  { name: 'matrix-band', skin: 'matrix', draw: (el, f) => site(el, f, { ...DASH, warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, resetsAt: '2026-10-12T15:40:00', save: false } }) },
-  { name: 'matrix-band-deciding', skin: 'matrix', draw: (el, f) => site(el, f, { ...DASH, effort: { level: null, mode: 'deciding', since: NOW - 500 }, effortMenu: true }) },
-  { name: 'matrix-settings', skin: 'matrix', draw: (el, f) => renderSettings(el, f, SETTINGS_VIEW, noop) },
-  { name: 'matrix-settings-key', skin: 'matrix', draw: (el, f) => renderSettings(el, f, { settings: { ...SETTINGS, jevSource: 'typesafe', judge: 'jev', effortAuto: false, keepWarm: true }, jev: { source: null, test: { state: 'fail', message: 'key rejected (401)' } } }, noop) },
-  { name: 'matrix-alert-hot', skin: 'matrix', draw: (el, f) => renderAlert(el, f, { kind: 'hot', limitKind: 'five_hour', percent: 86, resetsAt: '2026-10-12T15:40:00', save: false }, noop) },
-  { name: 'matrix-alert-handoff', skin: 'matrix', draw: (el, f) => renderAlert(el, f, { kind: 'handoffChoice', handoffKind: 'quick', after: 'continue' }, noop) },
-  { name: 'matrix-setup', skin: 'matrix', draw: (el, f) => renderSetup(el, f, { step: 4, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, noop) },
   { name: 'agents', columns: 90, draw: (el, f) => renderAgents(el, f, { agents: [], now: NOW, showDone: false }, noop) },
   { name: 'log', columns: 90, draw: (el, f) => renderLog(el, f, { rows: [], mineOnly: true }, noop) },
 ]

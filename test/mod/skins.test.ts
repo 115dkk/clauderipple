@@ -2,11 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { flatPictures } from '../../packages/mod/hooks/ui/flat.ts'
 import * as deep from '../../packages/mod/hooks/ui/art.ts'
-import * as cells from '../../packages/mod/hooks/ui/cells.ts'
 import type { Paint } from '../../packages/mod/hooks/ui/look.ts'
 import type { Sea, TileArt } from '../../packages/mod/hooks/ui/art.ts'
-import { svgDoc } from '../../packages/mod/hooks/ui/theme.ts'
-import { rippleBody, rippleCss } from '../../packages/mod/hooks/ui/ripple.ts'
 
 const DEEP: Paint = {
   sea: deep.seaArt, plate: deep.plateArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
@@ -68,7 +65,7 @@ test('the deep and flat draw every picture, each one sound', () => {
 })
 
 test('flat changes paint, never geometry: pills, words and beads take the deep\'s cells', () => {
-  for (const label of ['Auto', '전체 설정 열기', 'Open all settings', 'Matrix']) {
+  for (const label of ['Auto', '전체 설정 열기', 'Open all settings']) {
     const sizes = PAINTS.map(([, art]) => [art.pill(label, 'ghost', 'violet', 'open').cells, art.pill(label, 'primary').cells, art.word(label, true).cells, art.beads(2, 3).width])
     for (const other of sizes.slice(1)) assert.deepEqual(other, sizes[0], label)
   }
@@ -82,64 +79,4 @@ test('flat follows the theme: its pictures paint with palette variables, fixed o
   assert.equal(auto.sea(600, 300, SEAS[0]!), '')
   // One accent: the efforts' depths and the judge's teal are not taken.
   assert.ok(!auto.segmented(['L', 'M'], [5, 5], 0, 'teal', ['#67e8f9', '#7dd3fc']).includes('#67e8f9'))
-})
-
-/** Every cell of the board, drawn in its states. */
-function boardPictures(): [string, string][] {
-  const out: [string, string][] = []
-  const lamps = ['on', 'bypass', 'off', 'busy', 'danger', 'remark'] as const
-  for (const lamp of lamps) {
-    out.push(['ground ' + lamp, cells.groundArt(700, 300, { lamp, lampY: 10 })])
-    out.push(['ground header ' + lamp, cells.groundArt(700, 300, { lamp, lampY: 10, headerPx: 68 })])
-    out.push(['row ' + lamp, cells.rowArt(700, 228, { lamp, coordinate: 'E1', headerPx: 38 })])
-    out.push(['lamp ' + lamp, cells.lampArt(lamp)])
-  }
-  out.push(['row cancelled', cells.rowArt(700, 228, { lamp: 'on', coordinate: 'J2', headerPx: 38, cancelled: true, engaged: true })])
-  for (const code of ['AUTO', 'JUDGE', '판정']) out.push(['code ' + code, cells.codeArt(code).source], ['code cancelled', cells.codeArt(code, { cancelled: true }).source])
-  for (const ink of ['text', 'muted', 'accent', 'accent2', 'success', 'warning', 'danger'] as const) out.push(['readout ' + ink, cells.readoutArt('41분', { ink, marker: true }).source])
-  for (const edge of ['border', 'accent', 'dashed'] as const) out.push(['readout ' + edge, cells.readoutArt('gpt-6.1-sol', { edge, widthPx: 120 }).source])
-  out.push(['caption', cells.captionArt('Effort').source], ['caption ko', cells.captionArt('추론 강도', { ink: 'accent' }).source])
-  out.push(['scan', cells.scanArt(400, 22)], ['scan accent', cells.scanArt(400, 32, { edge: 'accent' })])
-  for (const on of [true, false]) for (const busy of [true, false]) out.push(['power', cells.powerArt(on, busy)])
-  const labels = ['Haiku', 'Jev', '라우터 모델']
-  const widths = cells.portCells(labels)
-  for (const chosen of [-1, 0, 2]) out.push(['ports ' + chosen, cells.portsArt(labels, widths, chosen)])
-  out.push(['ports cancelled', cells.portsArt(labels, widths, 1, { cancelled: true })])
-  for (const chosen of [0, 2, 4]) out.push(['led ' + chosen, cells.ledStripArt(5, 3, chosen)])
-  for (const look of ['auto', 'manual', 'quiet', 'deciding'] as const) out.push(['meter ' + look, cells.meterArt(3, look)])
-  for (const kind of ['execute', 'quiet', 'cancelled'] as const) out.push(['plate ' + kind, cells.plateArt('Open all settings', kind).source], ['plate ko ' + kind, cells.plateArt('전체 설정 열기', kind).source])
-  for (const lit of [true, false]) out.push(['close', cells.closeArt(lit)])
-  for (const icon of ['flame', 'gear', 'agents', 'compact', 'clear'] as const) out.push(['cell ' + icon, cells.cellArt(icon, 5, { on: true, lamp: 'on', count: '9+' })], ['cell off ' + icon, cells.cellArt(icon, 4)])
-  for (const step of [1, 2, 3, 4]) out.push(['steps ' + step, cells.stepsArt(step, 3).source])
-  out.push(['rule', cells.ruleArt(700)])
-  return out
-}
-
-test('the board draws every cell sound, follows the theme, and neither glows nor rounds a corner', () => {
-  for (const [name, source] of boardPictures()) {
-    sound('board ' + name, source)
-    assert.ok(source.includes('@media (prefers-color-scheme:dark)'), name + ' has both faces')
-    assert.ok(!/feGaussianBlur|filter=|<radialGradient|<linearGradient/.test(source), name + ' glows or shades')
-    assert.ok(!/ rx="/.test(source), name + ' rounds a corner')
-  }
-})
-
-test('board type is measured as mono: wide characters a full em, the rest six tenths', () => {
-  assert.equal(cells.monoPx('ab', 10), 12)
-  assert.equal(cells.monoPx('가', 10), 10)
-  assert.equal(cells.monoPx('a가', 10, 1), 18)
-  assert.equal(cells.elide('abcdefgh', 30, 10), 'abcd…')
-  assert.equal(cells.elide('abc', 30, 10), 'abc')
-  assert.equal(cells.caps('Haiku 판정'), 'HAIKU 판정')
-  // A port strip's cells come from its labels in mono caps, never fewer than five.
-  assert.deepEqual(cells.portCells(['A', 'Router model']), [5, cells.cellsOf(cells.monoPx('ROUTER MODEL', 10.5, 0.5) + 20)])
-})
-
-test('리플이 draws in the board\'s own ink on both faces', () => {
-  const face = svgDoc(56, 56, 'auto', rippleBody('calm'), rippleCss('calm'), '0 0 56 56', cells.BOARD_PALETTE)
-  assert.ok(face.includes('--accent:' + cells.BOARD_PALETTE.light.accent))
-  assert.ok(face.includes('@media (prefers-color-scheme:dark){svg{') && face.includes('--accent:' + cells.BOARD_PALETTE.dark.accent))
-  // Furniture, not signal: its tone is the board's muted ink, and only its worries take the rationed colours.
-  assert.equal(cells.BOARD_PALETTE.dark.accent, cells.FACE.dark.muted)
-  assert.equal(cells.BOARD_PALETTE.dark.bad, cells.FACE.dark.danger)
 })

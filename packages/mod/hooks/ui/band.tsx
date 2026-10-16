@@ -34,7 +34,6 @@ import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort, LimitItem } from '../../types'
 import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
-import { boardBand } from './board'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -994,8 +993,7 @@ export function besideBand(frame: Frame): number {
 /** The dashboard band, `frame.columns` being its own width (see besideBand). */
 export function renderBand(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   if (!isRich(frame) || !('Svg' in el)) return bandText(el, frame, view, actions)
-  // The matrix is a board of its own (board.tsx), not the deep's row in other colours.
-  return frame.skin === 'matrix' ? boardBand(el, frame, view, actions) : bandDrawn(el, frame, view, actions)
+  return bandDrawn(el, frame, view, actions)
 }
 
 // ---- Minimal: the footer -----------------------------------------------------------------------

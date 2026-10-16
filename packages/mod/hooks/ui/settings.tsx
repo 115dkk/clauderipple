@@ -14,7 +14,6 @@ import type { Settings, Skin } from '../../types'
 import { SKINS } from '../settings'
 import { CELL_PX, TILE_PX } from './art'
 import type { TileArt } from './art'
-import { boardSettings } from './board'
 import { capsule, pill, pic, ripple, segmented, slider, toggle, well } from './kit'
 import { lookOf } from './look'
 import type { Word } from './look'
@@ -300,9 +299,9 @@ export function warmTile(el: Els, frame: Frame, view: SettingsView, a: SettingsA
   })
 }
 
-/** The three skins by name, in the order they are offered. */
+/** The two skins by name, in the order they are offered. */
 function skinOptions(frame: Frame): { value: Skin; label: string }[] {
-  return SKINS.map(skin => ({ value: skin, label: t(frame.lang, skin === 'deep' ? 'settings.skinDeep' : skin === 'flat' ? 'settings.skinFlat' : 'settings.skinMatrix') }))
+  return SKINS.map(skin => ({ value: skin, label: t(frame.lang, skin === 'deep' ? 'settings.skinDeep' : 'settings.skinFlat') }))
 }
 
 /**
@@ -379,8 +378,7 @@ function settingsDrawn(el: Els, frame: Frame, view: SettingsView, a: SettingsAct
 
 /** Session-time controls only; the full settings live on the router dashboard. */
 export function renderSettings(el: Els, frame: Frame, view: SettingsView, a: SettingsActions): RenderNode {
-  // The matrix posts the settings as rows of a board (board.tsx).
-  if (canDraw(el, frame)) return frame.skin === 'matrix' ? boardSettings(el, frame, view, a) : settingsDrawn(el, frame, view, a)
+  if (canDraw(el, frame)) return settingsDrawn(el, frame, view, a)
   const { Box } = el
   const rich = isRich(frame)
   const close = dismiss(el, frame, 'close', t(frame.lang, 'settings.close'), a.close, 'x')

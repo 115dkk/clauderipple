@@ -35,7 +35,7 @@ export const DEFAULTS: Settings = {
 }
 
 /** The desktop's skins, in the order the panel offers them. */
-export const SKINS: readonly Skin[] = ['deep', 'flat', 'matrix']
+export const SKINS: readonly Skin[] = ['deep', 'flat']
 
 /** Band chips that show only when switched on in Look. */
 export const EXTRAS: readonly string[] = ['context', 'limits']

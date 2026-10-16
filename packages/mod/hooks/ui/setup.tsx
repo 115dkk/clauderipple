@@ -11,7 +11,6 @@ import type { RenderNode } from 'claude-code'
 import { RUNGS } from '../settings'
 
 import { CELL_PX } from './art'
-import { boardSetup } from './board'
 import { lookOf } from './look'
 import { capsule, pic, pill, ripple } from './kit'
 import { GREET_SIZE, action, actions, canDraw, speak } from './parts'
@@ -71,8 +70,6 @@ export function renderSetup(el: Els, frame: Frame, view: SetupView, a: SetupActi
   // It greets first; the first step's question is its one row (who judges).
   const title = done ? t(frame.lang, 'setup.ready') : view.step === 1 ? t(frame.lang, 'setup.welcome') : t(frame.lang, step!.title)
   const line = done ? t(frame.lang, 'setup.changeDashboard') : t(frame.lang, step!.blurb)
-  // The matrix posts the setup on a board of its own (board.tsx).
-  if (canDraw(el, frame) && frame.skin === 'matrix') return boardSetup(el, frame, view, a)
   if (canDraw(el, frame)) {
     // The desktop: a capsule of the deep, the step's control the quick settings' own tile (who
     // judges, keep warm), what was chosen when done, Next lit and the rest ghost buttons.

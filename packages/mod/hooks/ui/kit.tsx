@@ -1,5 +1,5 @@
 // The desktop's capsules and drawn controls, put together: a picture from the skin's pictures
-// (look.ts: art.ts for the deep, flat.ts, matrix.ts), the host's text in the skin's colours beside
+// (look.ts: art.ts for the deep, flat.ts for flat), the host's text in the skin's colours beside
 // it, and a blank native button laid over both to take the press. Desktop and the editor only (an
 // Svg in the table); the terminal keeps the text controls of parts.tsx.
 //
@@ -95,7 +95,7 @@ export function pic(el: Els, key: string, source: string, alt: string, width: nu
 
 /**
  * 리플이 on a capsule: its face drawn in the skin's palette (the deep's dark one, the theme's for
- * flat, phosphor on the matrix), a plain image in a Box of its own that never shrinks. `percent`
+ * flat), a plain image in a Box of its own that never shrinks. `percent`
  * fills a gauge face's ring.
  */
 export function ripple(el: Els, frame: Frame, key: string, face: Face, alt: string, size: number, percent?: number, dim = false): RenderNode {
@@ -135,7 +135,7 @@ function extraHover(el: Els, frame: Frame, cells: number): RenderNode[] {
  * A capsule: a Box in the skin's edge and colour, the skin's backdrop (the deep's sea; flat has
  * none) painted behind it from its top left, and everything it holds in one positioned layer above
  * that. `rows` is about how tall it draws; the backdrop is taken taller and wider than that, and
- * the capsule clips it. The matrix draws its own board (board.tsx) and never comes here.
+ * the capsule clips it.
  */
 export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 'at'> & { at?: Sea['at'] }; rows: number; paddingX?: number; paddingY?: number; gap?: number; children: RenderNode[] }): RenderNode {
   const { Box } = el

@@ -40,10 +40,10 @@ test('a rung changed here is rebased onto the other side, and an unchanged draft
   assert.equal(rebased.language, 'ko')
   assert.deepEqual(settingsChanges(before, normalizeSettings(before)), [])
 })
-test('the skin is deep unless a stored one is deep, flat or matrix', () => {
+test('the skin is deep unless a stored one is deep or flat', () => {
   assert.equal(normalizeSettings(null).skin, 'deep')
   assert.equal(normalizeSettings({ skin: 'flat' }).skin, 'flat')
-  assert.equal(normalizeSettings({ skin: 'matrix' }).skin, 'matrix')
+  assert.equal(normalizeSettings({ skin: 'matrix' }).skin, 'deep')
   assert.equal(normalizeSettings({ skin: 'glass' }).skin, 'deep')
   assert.equal(normalizeSettings({ skin: 2 }).skin, 'deep')
 })
