@@ -669,15 +669,25 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
   }
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   const k = lookOf(frame)
+  const name = routeName(r.model)
+  const tail = !r.ok ? (r.resent ? t(frame.lang, 'band.resent', { status: r.status }) : r.status) : r.cachePct !== undefined ? r.cachePct + '%' : ''
+  // The light is as wide as what it holds (its air, the dot, the name, the figure), giving way only
+  // when the row has less, and the blank press laid over it is that wide too: a press wider is cut
+  // with an ellipsis (three dark dots on flat's light page), and a narrower one lights a smaller box
+  // inside the route's own light (2026-10-16).
+  const width = Math.max(Math.min(ROUTE_ROOM, room), Math.ceil(1 + cells(frame, '•') + 0.5 + cells(frame, name) + (tail ? 0.5 + cells(frame, tail) : 0)))
   // The route is a button (it opens the log), so it lights under the pointer like the controls do.
   // It has no tip: the light says it is a button, and its card is what the log shows (asked 2026-10-14).
   return (
-    <Box key="fact-route" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden" {...hoverLight(frame)}>
+    // The slot keeps no width of the value's (what the band holds never depends on one); the light
+    // inside it is as wide as the value.
+    <Box key="fact-route" flexDirection="row" flexShrink={1} minWidth={Math.min(ROUTE_ROOM, room)} overflow="hidden">
+    <Box key="route-light" position="relative" flexDirection="row" alignItems="center" columnGap={0.5} paddingX={0.5} width={width} flexShrink={1} minWidth={0} overflow="hidden" {...hoverLight(frame)}>
       <Box flexShrink={0}>
         {r.ok ? <Text {...(r.resent ? k.mute : { color: providerColor(r.provider) })}>{r.resent ? '↻' : '•'}</Text> : <Text color={k.tone('red')}>✕</Text>}
       </Box>
       <Box flexShrink={1} minWidth={0}>
-        <Text {...k.sub} wrap="truncate">{routeName(r.model)}</Text>
+        <Text {...k.sub} wrap="truncate">{name}</Text>
       </Box>
       <Box flexShrink={0}>
         {!r.ok ? (
@@ -686,9 +696,8 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
           <Text {...(tone === 'ok' ? { color: k.tone('green') } : figure(frame, tone === 'warn' ? 'warn' : 'bad'))}>{r.cachePct + '%'}</Text>
         ) : null}
       </Box>
-      {/* No wider than the Box's least width: a blank wider than the Box is cut with an ellipsis,
-          dark on a light page (flat, 2026-10-16). */}
-      {press(el, 'route', (Math.min(ROUTE_ROOM, room) - 1) * CELL_PX, actions.toggleLog)}
+      {press(el, 'route', width * CELL_PX, actions.toggleLog)}
+    </Box>
     </Box>
   )
 }
