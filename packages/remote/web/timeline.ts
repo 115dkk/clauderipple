@@ -191,11 +191,14 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
       }
       continue;
     }
-    // Claude Code records most thinking with its text withheld: a row that opens onto nothing, and it would split the run.
-    if (item.type === "thinking" && !item.streaming && typeof item.text === "string" && !item.text.trim()) continue;
+    // As in the Claude app's default view, thinking is not drawn and does not split a run (most of it
+    // has its text withheld anyway). Only thinking still streaming at the very end shows, as a live line.
+    if (item.type === "thinking") continue;
     group = null;
     result.push(item);
   }
+  const tail = view.items.at(-1);
+  if (tail?.type === "thinking" && tail.streaming) result.push(tail);
   // Only the final activity run of the active turn spins, even between tool results.
   const last = result.at(-1);
   if (last?.type === "toolGroup" && (view.state === "running" || view.state === "starting" || view.state === "waiting")) {
