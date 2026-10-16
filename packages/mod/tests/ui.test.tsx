@@ -481,7 +481,7 @@ test('the skin tile offers deep and flat on the desktop alone, and a pick patche
 /** The deep's three inks for host Text (art.ts): a skin that is not the deep uses none of them. */
 const DEEP_INKS = ['#f2f0eb', '#cbc8bf', '#9c988e']
 
-test('every skin draws the band, the quick settings and a card on the desktop; flat leaves the words to the host and paints no backdrop', async ($, on) => {
+test('every skin draws the band, the quick settings and a card on the desktop; flat paints the app\'s surface and its quiet words', async ($, on) => {
   const noop = () => undefined
   const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
   const alertActions = { compact: noop, clear: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
@@ -498,16 +498,15 @@ test('every skin draws the band, the quick settings and a card on the desktop; f
       const svgs = await ui.findAll({ type: 'Svg' })
       expect(svgs.length, skin + ' ' + what + ' pictures').toBeGreaterThan(3)
       for (const svg of svgs) expect(String(svg.props.source), skin + ' ' + what + ' ' + svg.props.alt).not.toMatch(/NaN|undefined/)
-      // The capsule's backdrop: a picture as wide as the frame; flat is the Box's own colour instead.
+      // The capsule's backdrop: a picture as wide as the frame (flat's is the app's own surface).
       const backdrop = svgs.some(svg => svg.props.alt === 'ClaudeRipple' && Number(svg.props.width) > 300)
-      expect(backdrop, skin + ' ' + what + ' backdrop').toBe(skin !== 'flat')
+      expect(backdrop, skin + ' ' + what + ' backdrop').toBe(true)
       const colours = new Set((await ui.findAll({ type: 'Text' })).map(text => String(text.props.color ?? '')))
       if (skin === 'deep') expect(DEEP_INKS.some(ink => colours.has(ink)), skin + ' ' + what + ' ink').toBe(true)
       else for (const ink of DEEP_INKS) expect(colours.has(ink), skin + ' ' + what + ' ' + ink).toBe(false)
       if (skin === 'flat') {
-        // The host's own ink for the words: quiet ones dimmed, none in a colour but the semantic ones.
-        const texts = await ui.findAll({ type: 'Text' })
-        expect(texts.some(text => text.props.dimColor === true), skin + ' ' + what + ' dim words').toBe(true)
+        // The host's ink for values, the app's quiet text colour for the names and asides.
+        expect(['#73726c', '#9c9a92', '#86847d'].some(c => colours.has(c)), skin + ' ' + what + ' quiet words').toBe(true)
       }
       await ui.unmount()
     }

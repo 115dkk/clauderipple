@@ -49,10 +49,13 @@ export function flatPictures(appearance: Appearance): Paint {
     appearance === 'dark' ? sel + '{' + dark + '}' : appearance === 'light' ? sel + '{' + light + '}' : sel + '{' + light + '}@media (prefers-color-scheme:dark){' + sel + '{' + dark + '}}'
 
   return {
-    sea: () => '',
+    // The capsule is the app's own surface, as its prompt box is: white on a light app, its dark
+    // surface on a dark one (the app's bg-000, read from its stylesheet 2026-10-16). A grey tint
+    // over the host's slot read as a dark block beside the prompt box.
+    sea: (width, height) => doc(width, height, '<rect class="s" width="' + r(width) + '" height="' + r(height) + '" rx="9"/>', themed('.s', 'fill:#ffffff', 'fill:#30302e')),
 
-    // The page's own grey under the capsule's tint, about: it hides the words beneath a tip.
-    plate: (width, height) => doc(width, height, '<rect class="p" width="' + r(width) + '" height="' + r(height) + '"/>', themed('.p', 'fill:#edece8', 'fill:#2c2b29')),
+    // The capsule's own surface: it hides the words beneath a tip.
+    plate: (width, height) => doc(width, height, '<rect class="p" width="' + r(width) + '" height="' + r(height) + '"/>', themed('.p', 'fill:#ffffff', 'fill:#30302e')),
 
     // On: the accent's track and a white knob at the right; off: an outline and a quiet knob at the left.
     switch: (on, busy = false) =>

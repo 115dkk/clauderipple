@@ -88,12 +88,17 @@ const DEEP: Look = {
 }
 
 /**
- * Flat: a Box of the host's, edged and tinted in a grey that sits on the light page and the dark
- * one (the host paints both with the theme), the host's own ink for every word (`dimColor` for the
- * quiet ones), and the pictures in the theme's palette. One per appearance, since the palette and
- * the semantic colours of host Text follow it.
+ * Flat: the capsule painted in the app's own surface (flat.ts `sea`, white on a light app as its
+ * prompt box is), edged in a grey that sits on either theme, the host's own ink for values and the
+ * app's quiet text colour for names and asides, and the pictures in the theme's palette. The
+ * host's `dimColor` was too faint to read on a light page (2026-10-16). The engine takes a theme
+ * key, a name or hex here (not the app's CSS variables) and does not say which theme is on, so
+ * with appearance auto the quiet words are a mid tone between the app's two. One per appearance.
  */
 const FLATS = new Map<Appearance, Look>()
+
+/** The app's quiet text (text-400, read from its stylesheet 2026-10-16) per theme, and between them. */
+const QUIET: Record<Appearance, string> = { light: '#73726c', dark: '#9c9a92', auto: '#86847d' }
 
 function flat(appearance: Appearance): Look {
   let look = FLATS.get(appearance)
@@ -102,14 +107,14 @@ function flat(appearance: Appearance): Look {
   look = {
     skin: 'flat',
     ink: {},
-    sub: { dimColor: true },
-    mute: { dimColor: true },
+    sub: { color: QUIET[appearance] },
+    mute: { color: QUIET[appearance] },
     // One accent: the deep's decorative tones (the judge's teal, the mode's amber) are the accent
     // here, and amber, red and green stay what they mean.
     tone: tone => (tone === 'amber' || tone === 'ember' ? text.warn : tone === 'red' ? text.bad : tone === 'green' ? text.ok : text.accent),
-    capsule: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.38)', backgroundColor: 'rgba(128,124,116,0.07)' },
-    tile: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.3)', backgroundColor: 'rgba(128,124,116,0.05)', hover: { borderColor: 'rgba(128,124,116,0.5)', backgroundColor: 'rgba(128,124,116,0.09)' } },
-    lit: { borderStyle: 'round', borderColor: 'rgba(0,0,0,0)', hover: { backgroundColor: 'rgba(128,124,116,0.14)', borderColor: 'rgba(0,0,0,0)' } },
+    capsule: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.3)' },
+    tile: { borderStyle: 'round', borderColor: 'rgba(128,124,116,0.22)', backgroundColor: 'rgba(128,124,116,0.04)', hover: { borderColor: 'rgba(128,124,116,0.4)', backgroundColor: 'rgba(128,124,116,0.08)' } },
+    lit: { borderStyle: 'round', borderColor: 'rgba(0,0,0,0)', hover: { backgroundColor: 'rgba(128,124,116,0.12)', borderColor: 'rgba(0,0,0,0)' } },
     art: { ...flatPictures(appearance), mascot: (face, size, percent, dim) => rippleSource(face, size, appearance, percent, dim) },
   }
   FLATS.set(appearance, look)

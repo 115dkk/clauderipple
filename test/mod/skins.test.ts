@@ -76,7 +76,9 @@ test('flat follows the theme: its pictures paint with palette variables, fixed o
   assert.ok(auto.switch(true).includes('var(--accent)'))
   assert.ok(auto.plate(100, 19).includes('@media (prefers-color-scheme:dark)'))
   assert.ok(!flatPictures('dark').plate(100, 19).includes('@media (prefers-color-scheme'))
-  assert.equal(auto.sea(600, 300, SEAS[0]!), '')
+  // The capsule is the app's surface: white, its dark surface on a dark app, fixed when the appearance is.
+  assert.ok(auto.sea(600, 300, SEAS[0]!).includes('fill:#ffffff') && auto.sea(600, 300, SEAS[0]!).includes('@media (prefers-color-scheme:dark)'))
+  assert.ok(!flatPictures('light').sea(600, 300, SEAS[0]!).includes('#30302e'))
   // One accent: the efforts' depths and the judge's teal are not taken.
   assert.ok(!auto.segmented(['L', 'M'], [5, 5], 0, 'teal', ['#67e8f9', '#7dd3fc']).includes('#67e8f9'))
 })

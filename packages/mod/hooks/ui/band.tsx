@@ -550,7 +550,7 @@ function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip
     key,
     limitItemCells(item, density, frame.lang),
     [
-      <Text key="limit-name" color={MUTE}>{name}</Text>,
+      <Text key="limit-name" {...lookOf(frame).mute}>{name}</Text>,
       density === 'gauge' ? pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H) : '',
       <Text key="limit-value" {...figure(frame, tone)}>{Math.round(item.percent) + '%'}</Text>,
     ],
@@ -564,7 +564,7 @@ function compactDrawn(el: Els, frame: Frame, group: LimitGroup, key: string, tip
   const runs: RenderNode[] = []
   group.items.forEach((item, i) => {
     runs.push(<Text key={'n' + i} {...figure(frame, limitTone(item.percent))}>{String(Math.round(item.percent))}</Text>)
-    runs.push(<Text key={'s' + i} color={MUTE}>{i < group.items.length - 1 ? ' / ' : '%'}</Text>)
+    runs.push(<Text key={'s' + i} {...lookOf(frame).mute}>{i < group.items.length - 1 ? ' / ' : '%'}</Text>)
   })
   const cells = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang), 0))
   return drawnFact(el, key, cells, [<Text key="limit-figures">{runs}</Text>], tip)
@@ -597,7 +597,7 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string,
     node: (
       <Box key={'limits-' + group.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
         <Text key="limits-dot" color={dot}>•</Text>
-        <Text key="limits-name" color={SUB}>{name}</Text>
+        <Text key="limits-name" {...lookOf(frame).sub}>{name}</Text>
         {items.map(f => f.node)}
         {word ? <Text key="limits-save" color={TONE.violet.text}>{word}</Text> : null}
       </Box>
