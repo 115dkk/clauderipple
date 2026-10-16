@@ -195,6 +195,7 @@ test('spawn titles name the model that runs, replacing a guessed prefix', async 
   assert.equal(titleName('gpt-6-astra@high'), 'Astra')
   assert.equal(titleName('claude-opus-5-5'), 'Opus5.5')
   assert.equal(titleName('opus'), 'Opus')
+  assert.equal(titleName('claude-mythos-5-1'), 'Mythos5.1')
   assert.equal(titleName('deepseek-v4.1-flash@max'), 'deepseek-v4.1-flash')
   assert.equal(spawnTitle('Opus5.5·high · Fix routing', 'gpt-6.1-sol@medium', 'medium', models), 'Sol·medium · Fix routing')
   assert.equal(spawnTitle('Fix routing', 'claude-opus-5-5', undefined), 'Opus5.5 · Fix routing')

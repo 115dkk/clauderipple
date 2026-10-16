@@ -9,7 +9,7 @@ import type { ProviderModel } from "../config.ts";
 import type { Credential } from "../pool.ts";
 
 export type ClaudeModel = ProviderModel & {
-  /** The family (`opus`, `sonnet`, `haiku`, `fable`), as the API names it. */
+  /** The family (`opus`, `sonnet`, `haiku`, `fable`, `mythos`), as the API names it. */
   line?: string;
   /** Release time, epoch ms. Newest first is how the API sorts them. */
   createdAt?: number;

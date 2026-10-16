@@ -24,6 +24,8 @@ test("marker wins, agent file next, claude alias otherwise", () => {
   assert.equal(retitle({ ...base, tool_input: { description: "Sol·low · Do X", prompt: "hi", subagent_type: "gpt" } }, [dir], NAMES)!.description, "Terra·high · Do X", "stale prefix replaced");
   assert.equal(retitle({ tool_name: "Bash", tool_input: { description: "x" } }, [dir], NAMES), null);
   assert.equal(claudePretty("claude-haiku-4-5-20251001"), "Haiku4.5");
+  assert.equal(claudePretty("claude-mythos-5-1"), "Mythos5.1");
+  assert.equal(claudePretty("mythos"), "Mythos");
   assert.deepEqual(fromMarker("<system-reminder>r</system-reminder>\n[[ripple: Luna@max]]\nx"), { name: "luna", effort: "max" });
   assert.equal(fromMarker("x\n[[ripple: luna@max]]"), null);
 });
