@@ -21,7 +21,9 @@ import { textTone } from './theme'
 import type { AgentsActions, AgentsView, Frame } from './view'
 import { compactNumber, effortLabel, elapsed, isRich, modelName, targetLabel } from './view'
 
-const BY = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', marker: 'agents.marker', default: 'agents.default', tier: 'toasts.yourPick' } as const
+// Every `by` a pick can carry: a missing one handed t() no key, which threw and left the whole pane
+// undrawn ("Nothing to show yet") once a worker ran on the session's model (2026-10-16).
+const BY: Record<NonNullable<AgentRec['pick']>['by'] | 'tier', string> = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', marker: 'agents.marker', default: 'agents.default', session: 'agents.session', tier: 'toasts.yourPick' }
 
 function who(agent: AgentRec, lang: Frame['lang']): string {
   const pick = agent.pick

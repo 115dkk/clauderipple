@@ -579,6 +579,16 @@ const AGENTS: AgentRec[] = [
   { id: 'a2', description: 'Summarize the docs', type: 'deepseek-v4-1-flash', state: 'done', startedAt: NOW - 900_000, endedAt: NOW - 800_000, cost: 9000 },
 ]
 
+test('the Agents pane draws a worker the session\'s own model runs', async ($, on) => {
+  const onSession: AgentRec = { ...AGENTS[0]!, id: 's1', description: 'Review on the session model', pick: { ...AGENTS[0]!.pick!, target: { agent: 'general-purpose' }, by: 'session' } }
+  drawPane(on, 'agents-session', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [onSession], now: NOW, showDone: false }, { toggleDone: () => undefined }))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'agents-session', surface, 64)
+    expect(await ui.find({ type: 'Text', text: 'Review on the session model' }), surface).toBeDefined()
+    await ui.unmount()
+  }
+})
+
 test('the Agents pane draws live, finished and empty', async ($, on) => {
   const { calls, fn } = recorder()
   drawPane(on, 'agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false }, { toggleDone: fn('done') }))
