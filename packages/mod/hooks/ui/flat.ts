@@ -57,7 +57,7 @@ export function flatPictures(appearance: Appearance): Paint {
     // On: the accent's track and a white knob at the right; off: an outline and a quiet knob at the left.
     switch: (on, busy = false) =>
       doc(SWITCH_W, SWITCH_H, on
-        ? '<rect x="2" y="2" width="32" height="18" rx="9" fill="' + PRIMARY + '"/><circle class="' + (busy ? 'pu' : '') + '" cx="25" cy="11" r="6" fill="#fff"/>'
+        ? '<rect x="2" y="2" width="32" height="18" rx="9" fill="' + ACCENT + '"/><circle class="' + (busy ? 'pu' : '') + '" cx="25" cy="11" r="6" fill="#fff"/>'
         : '<rect x="2.5" y="2.5" width="31" height="17" rx="8.5" fill="none" stroke="' + MUTED + '"/><circle cx="11" cy="11" r="5" fill="' + MUTED + '"/>',
       '.pu{animation:pu 1.3s ease-in-out infinite}@keyframes pu{50%{opacity:.5}}'),
 

@@ -73,7 +73,7 @@ test('flat changes paint, never geometry: pills, words and beads take the deep\'
 
 test('flat follows the theme: its pictures paint with palette variables, fixed only when the appearance is', () => {
   const auto = flatPictures('auto')
-  assert.ok(auto.switch(true).includes('var(--primary)'))
+  assert.ok(auto.switch(true).includes('var(--accent)'))
   assert.ok(auto.plate(100, 19).includes('@media (prefers-color-scheme:dark)'))
   assert.ok(!flatPictures('dark').plate(100, 19).includes('@media (prefers-color-scheme'))
   assert.equal(auto.sea(600, 300, SEAS[0]!), '')
