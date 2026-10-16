@@ -191,6 +191,8 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
       }
       continue;
     }
+    // Claude Code records most thinking with its text withheld: a row that opens onto nothing, and it would split the run.
+    if (item.type === "thinking" && !item.streaming && typeof item.text === "string" && !item.text.trim()) continue;
     group = null;
     result.push(item);
   }

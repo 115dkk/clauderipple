@@ -18,6 +18,15 @@ test("consecutive tools and workers collapse without counting Agent twice; text 
   assert.equal(first.running, false);
 });
 
+test("thinking with its text withheld neither shows nor splits a run; real or live thinking still does", () => {
+  const thinking = (key: string, text: string, streaming = false): Item => ({ type: "thinking", key, ver: key, text, streaming, msg: key, at: 1 });
+  const rows = timelineItems({ state: "idle", items: [assistant("a"), thinking("h1", ""), assistant("b"), thinking("h2", "  "), assistant("c")] });
+  assert.deepEqual(rows.map(r => r.type), ["toolGroup"]);
+  assert.ok(rows[0]?.type === "toolGroup" && rows[0].tools === 3);
+  const kept = timelineItems({ state: "running", items: [assistant("a"), thinking("h1", "Checking the log"), assistant("b"), thinking("h2", "", true)] });
+  assert.deepEqual(kept.map(r => r.type), ["toolGroup", "thinking", "toolGroup", "thinking"]);
+});
+
 test("worker event emitted before assistant text appears at its Agent call position", () => {
   const rows = timelineItems({ state: "idle", items: [worker, assistant("agent", "Delegating review", ["Agent"])] });
   assert.deepEqual(rows.map(r => r.type), ["assistant", "toolGroup"]);
