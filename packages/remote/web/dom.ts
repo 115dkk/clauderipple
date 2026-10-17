@@ -50,6 +50,11 @@ export function relTime(at: number, now: number): string {
 export function duration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return t("dur.s", { n: s });
+  // An hour and up reads as hours and minutes ("1시간 47분"), not "107분".
+  if (s >= 3600) {
+    const m = Math.round(s / 60);
+    return m % 60 === 0 ? t("dur.h", { n: m / 60 }) : t("dur.hm", { h: Math.floor(m / 60), m: m % 60 });
+  }
   if (s % 60 === 0 || s >= 600) return t("dur.m", { n: Math.round(s / 60) });
   return t("dur.ms", { m: Math.floor(s / 60), s: s % 60 });
 }
