@@ -52,7 +52,7 @@ export interface ServerOptions {
   recentCli: () => Promise<RecentSource[]>;
   log?: (line: string) => void;
   push?: Pick<Notifier, "subscribe" | "unsubscribe"> & { publicKey: string };
-  expoPush?: { subscribe(clientId: string, token: string, lang: "ko" | "en"): void; unsubscribe(clientId: string): void };
+  expoPush?: { subscribe(clientId: string, token: string, lang: "ko" | "en", platform?: "ios" | "android", key?: string): void; unsubscribe(clientId: string): void };
   local?: { handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> };
   pushDevices?: () => string[];
   clearPush?: () => void;
@@ -484,7 +484,7 @@ export class HostServer {
       case "expo_push_subscribe":
         if (!this.opts.expoPush) throw new Error("native push is off on this host");
         if (!c.clientId) throw new Error("no device id");
-        this.opts.expoPush.subscribe(c.clientId, op.token, op.lang);
+        this.opts.expoPush.subscribe(c.clientId, op.token, op.lang, op.platform, op.key);
         return { ok: true };
       case "expo_push_unsubscribe":
         if (c.clientId) this.opts.expoPush?.unsubscribe(c.clientId);

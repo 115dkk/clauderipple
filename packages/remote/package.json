@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Ripple Remote: a host on this machine that runs Claude Code sessions in any folder on any routed model, and a phone-first web app that drives them.",
   "license": "GPL-3.0-only",
+  "scripts": { "test": "node --test test/*.test.ts" },
   "bin": {
     "ripple-host": "./src/main.ts"
   },

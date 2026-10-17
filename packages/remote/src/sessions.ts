@@ -7,6 +7,8 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import type { PushContext } from "./push-content.ts";
+import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, messageContent, sendUserFileImages, type InputBlock } from "./images.ts";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
@@ -540,6 +542,29 @@ export class Sessions {
     if (r) return this.summary(r);
     // A Mac session the host is not tailing has no record: its push (onAlert) still needs a title.
     return this.desktop?.has(id) ? this.list().find(s => s.id === id) : undefined;
+  }
+
+  /** Only the encrypted native push path asks for private turn context. */
+  async pushContext(id: string, event: PushEvent): Promise<PushContext> {
+    const summary = this.summaryOf(id);
+    const record = this.records.get(id);
+    const context: PushContext = summary ? { title: summary.title === id ? "" : summary.title, cwd: summary.cwd } : {};
+    if (event.kind === "result") {
+      if (record) {
+        // onEvent fires immediately after append, before a later turn can change this cursor.
+        const log = this.log(id);
+        const seq = "seq" in event && typeof event.seq === "number" ? event.seq : log.lastSeq;
+        context.text = log.lastAssistantText(seq);
+      } else Object.assign(context, this.desktop?.pushContext(id));
+    }
+    if (event.kind === "permission" && !("tool" in event)) {
+      const bridgeId = this.desktop?.liveProcess(record?.sdkSessionId ?? id)?.bridgeSessionId;
+      if (bridgeId) {
+        const request = (await this.bridge.openRequests(bridgeId))[0];
+        if (request) { context.tool = request.tool; context.summary = summarize(request.tool, request.input, summary?.cwd ?? ""); }
+      }
+    }
+    return context;
   }
 
   private summary(r: SessionRecord): SessionSummary {

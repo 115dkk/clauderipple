@@ -218,8 +218,8 @@ export type ReqOp =
   | { op: "push_key" }
   | { op: "push_subscribe"; subscription: PushSubscriptionJSON; lang: "ko" | "en" }
   | { op: "push_unsubscribe" }
-  /** Native push carries only fixed status copy and a session id, never conversation text. */
-  | { op: "expo_push_subscribe"; token: string; lang: "ko" | "en" }
+  /** Optional native push key travels inside the authenticated E2EE channel, never via Expo. */
+  | { op: "expo_push_subscribe"; token: string; lang: "ko" | "en"; platform?: "ios" | "android"; key?: string }
   | { op: "expo_push_unsubscribe" };
 
 /** PushSubscription.toJSON() as the browser gives it. */

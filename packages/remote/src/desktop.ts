@@ -583,6 +583,31 @@ export class DesktopSessions {
     } finally { fs.closeSync(fd); }
   }
 
+  /** Private notification context from a bounded, read-only tail; never imports a session log. */
+  pushContext(id: string): { text: string; error: string } {
+    const source = this.sources.get(id);
+    if (!source) return { text: "", error: "" };
+    const fd = this.open(source.file);
+    try {
+      let answer = "", error = "";
+      for (const line of windowLines(fd, fs.fstatSync(fd).size, true)) {
+        const r = record(line);
+        if (!r || r.isSidechain === true || r.isMeta === true) continue;
+        if (prompt(r)) { answer = ""; error = ""; }
+        if (r.type === "assistant") {
+          const content = object(r.message)?.content;
+          const value = Array.isArray(content) ? content.flatMap(b => {
+            const block = object(b);
+            return block?.type === "text" ? [str(block.text)] : [];
+          }).join("\n") : "";
+          if (value.trim()) answer = value;
+        }
+        if (r.type === "result" && (r.subtype !== "success" || r.is_error === true)) error = str(r.result) || str(r.subtype);
+      }
+      return { text: answer, error };
+    } finally { fs.closeSync(fd); }
+  }
+
   /** The mode the Claude app last ran this session in, from the transcript's newest user prompt. */
   permissionMode(id: string): PermissionMode | undefined { return this.sources.get(id)?.summary.permissionMode; }
 

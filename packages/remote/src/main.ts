@@ -135,7 +135,10 @@ async function runHost(): Promise<void> {
     seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
     summary: (id) => sessions?.summaryOf(id),
   });
-  const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log, seenRecently: (id) => server?.sessionSeenRecently(id) ?? false });
+  const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log,
+    seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
+    context: (id, event) => sessions?.pushContext(id, event) ?? {},
+  });
   // Mac sessions the host is not tailing push only while the Mac is away (screen locked or idle).
   const away = new MacAway({ log });
   sessions = new Sessions({

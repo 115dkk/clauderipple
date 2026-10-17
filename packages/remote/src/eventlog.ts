@@ -234,6 +234,22 @@ export class EventLog {
     return { events, hasOlder: remaining };
   }
 
+  /** The last nonempty assistant text of this turn, not a previous turn or a tool result.
+   * Walk the in-memory index so even a long chain of tool events needs only relevant disk reads. */
+  lastAssistantText(beforeSeq = this.lastSeq + 1): string {
+    this.assertOpen();
+    for (let i = Math.min(this.entries.length, beforeSeq - 1) - 1; i >= 0; i--) {
+      const entry = this.entries[i]!;
+      if (entry.kind === "turn" || entry.kind === "user" || entry.kind === "result") return "";
+      if (entry.kind !== "assistant") continue;
+      const event = this.read(entry);
+      if (event.kind !== "assistant") continue;
+      const text = typeof event.text === "string" ? event.text : event.text.preview;
+      if (text.trim()) return text;
+    }
+    return "";
+  }
+
   /** Content-addressed, so repeated SDK snapshots do not duplicate large image bytes. */
   image(base64: string): string {
     this.assertOpen();
