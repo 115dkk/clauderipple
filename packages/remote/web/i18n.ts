@@ -276,11 +276,11 @@ const en: Record<Key, string> = {
   "tool.failed": "failed",
   "tool.more": "Show result",
   "tool.less": "Hide",
-  "tool.group": "Used {n} tools",
-  "tool.groupWorkers": "{n} tools · {w} workers",
+  "tool.group": "Used {n} {n|tool|tools}",
+  "tool.groupWorkers": "{n} {n|tool|tools} · {w} {w|worker|workers}",
   "tool.loading": "Loading…",
   "sub.worker": "Worker",
-  "sub.steps": "{n} steps",
+  "sub.steps": "{n} {n|step|steps}",
   "sub.running": "working",
   "sub.done": "done",
   "sub.failed": "failed",
@@ -316,7 +316,7 @@ const en: Record<Key, string> = {
   "model.noEffort": "This model takes no effort level",
   "history.loading": "Loading earlier messages…",
   "history.start": "Start of conversation",
-  "tasks.running": "{n} tasks running",
+  "tasks.running": "{n} {n|task|tasks} running",
   "running.for": "Working for {t}",
   "running.lastSeen": "Was working when last seen at {time}",
   "effort.none": "none",
@@ -365,5 +365,6 @@ export function t(key: Key, vars?: Record<string, string | number>): string {
   // the rest get the neutral fallback so no copy ever hardcodes a platform.
   if (s.includes("{host}")) s = s.replaceAll("{host}", String(vars?.host ?? dictionaries[current]["host.fallback"]));
   if (vars) for (const [k, v] of Object.entries(vars)) s = s.replaceAll(`{${k}}`, String(v));
-  return s;
+  // `{n|tool|tools}` picks the singular when that count is 1 (English needs it; Korean never uses it).
+  return s.replace(/\{(\w+)\|([^|}]*)\|([^}]*)\}/g, (_, k: string, one: string, other: string) => (Number(vars?.[k]) === 1 ? one : other));
 }

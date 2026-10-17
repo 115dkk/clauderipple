@@ -57,6 +57,9 @@ test("group keeps individual input/output and localizes counts", () => {
   assert.equal(group.rows[0].tool.result?.text, "output");
   setLang("en");
   assert.equal(t("tool.group", { n: group.tools }), "Used 2 tools");
+  assert.equal(t("tool.group", { n: 1 }), "Used 1 tool");
+  assert.equal(t("tasks.running", { n: 1 }), "1 task running");
+  assert.equal(t("tool.groupWorkers", { n: 1, w: 2 }), "1 tool · 2 workers");
   setLang("ko");
   assert.equal(t("tool.group", { n: group.tools }), "도구 2개 사용");
 });
