@@ -124,8 +124,9 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
   const logDir = path.join(opts.home, "logs");
   const env = { CLAUDERIPPLE_HOME: opts.home, ...(opts.env ?? {}) };
   const quoteArg = (arg: string): string => ps(`"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`);
+  // No `$ErrorActionPreference = 'Stop'`: one failed Start-Process (a locked log file, say) would end
+  // the loop and leave the router or host unsupervised; the loop retries instead.
   return [
-    "$ErrorActionPreference = 'Stop'",
     ...Object.entries(env).map(([k, v]) => `$env:${k} = ${ps(v)}`),
     `$routerArgs = @(${opts.args.map(quoteArg).join(", ")})`,
     `$out = ${ps(path.join(logDir, "launcher.log"))}`,
