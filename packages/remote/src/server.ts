@@ -240,8 +240,12 @@ export class HostServer {
     if (this.sessionsTimer) return;
     this.sessionsTimer = setTimeout(() => {
       this.sessionsTimer = null;
-      const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
-      for (const c of this.clients) if (c.authed) this.send(c, msg);
+      try {
+        const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
+        for (const c of this.clients) if (c.authed) this.send(c, msg);
+      } catch (error) {
+        this.opts.log?.(`session list failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }, 150);
   }
 

@@ -4,16 +4,28 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { claudeBinary } from "../../cli/src/claude-auth.ts";
 
 export const LABEL = "com.clauderipple.host";
 
 // ---- where things are --------------------------------------------------------------------------
 
 /** The user's own CLI when there is one: it is the version the router's measurements and the ripple mod are kept current with. */
-export function findClaude(configured: string | undefined, exists: (p: string) => boolean = fs.existsSync): string | undefined {
+export function findClaude(configured: string | undefined, exists: (p: string) => boolean = fs.existsSync,
+  opts: { platform?: NodeJS.Platform; home?: string; pathValue?: string } = {}): string | undefined {
   if (configured) return configured;
-  for (const p of [path.join(os.homedir(), ".local", "bin", "claude"), "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]) if (exists(p)) return p;
-  try { return execFileSync("/usr/bin/which", ["claude"], { encoding: "utf8" }).trim() || undefined; } catch { return undefined; }
+  const platform = opts.platform ?? process.platform;
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const home = opts.home ?? os.homedir();
+  const names = platform === "win32" ? ["claude.exe", "claude.cmd", "claude.bat"] : ["claude"];
+  const dirs = [p.join(home, ".local", "bin"), ...(platform === "win32" ? [p.join(process.env.APPDATA ?? p.join(home, "AppData", "Roaming"), "npm")] : ["/opt/homebrew/bin", "/usr/local/bin"]),
+    ...(opts.pathValue ?? process.env.PATH ?? process.env.Path ?? "").split(platform === "win32" ? ";" : ":")];
+  for (const dir of dirs.filter(Boolean)) for (const name of names) {
+    const candidate = p.join(dir, name);
+    if (exists(candidate)) return candidate;
+  }
+  // Shared discovery also covers both AppData roots and Desktop's version/hash cache layout.
+  return platform === process.platform && exists === fs.existsSync ? claudeBinary() ?? undefined : undefined;
 }
 
 // ---- launchd ------------------------------------------------------------------------------------
@@ -67,6 +79,7 @@ ${env}
 
 /** PATH for the agent: launchd starts it with almost nothing, and the SDK spawns `claude`, which spawns git, rg, node… */
 export function agentPath(claudePath: string | undefined, nodePath: string): string {
+  if (process.platform !== "darwin") return [...new Set([...(claudePath ? [path.dirname(claudePath)] : []), path.dirname(nodePath), ...((process.env.PATH ?? process.env.Path ?? "").split(path.delimiter))])].join(path.delimiter);
   const dirs = [
     ...(claudePath ? [path.dirname(claudePath)] : []),
     path.dirname(nodePath),
@@ -95,6 +108,8 @@ export function specFor(opts: { script: string; claudePath: string | undefined; 
     env: {
       PATH: agentPath(opts.claudePath, node),
       HOME: p.home,
+      ...(process.platform === "win32" ? { USERPROFILE: p.home } : {}),
+      CLAUDERIPPLE_HOME: process.env.CLAUDERIPPLE_HOME ?? path.join(p.home, ".clauderipple"),
       ...(opts.remoteHome ? { RIPPLE_REMOTE_HOME: opts.remoteHome } : {}),
     },
   };

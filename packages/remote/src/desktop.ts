@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { processCommands } from "./processes.ts";
 import { messageContent, sendUserFileImages, type ImageSink } from "./images.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type PermissionMode, type SessionSummary, type ToolCall } from "./protocol.ts";
 
@@ -26,7 +27,8 @@ const verifiedStarts = new Map<number, string>();
 let snapshot: { dir: string; at: number; result: Map<string, DesktopProcess> } | null = null;
 
 /** Registry identity is authoritative; ps flags remain a legacy fallback only. Cached for 1 s. */
-export function liveDesktopProcesses(dir: string, maxAgeMs = 1000): Map<string, DesktopProcess> {
+export function liveDesktopProcesses(dir: string, maxAgeMs = 1000, platform = process.platform): Map<string, DesktopProcess> {
+  if (platform !== "darwin") return new Map();
   const now = Date.now();
   if (snapshot && snapshot.dir === dir && now - snapshot.at < maxAgeMs) return snapshot.result;
   const result = new Map<string, DesktopProcess>();
@@ -69,7 +71,7 @@ export interface DesktopOptions {
 export function processHasSession(output: string, id: string): boolean {
   if (!UUID.test(id)) return false;
   return output.split("\n").some(line => {
-    const args = line.trim().split(/\s+/);
+    const args = line.trim().split(/\s+/).map(arg => arg.replace(/^"|"$/g, ""));
     return args.some((arg, i) => arg === `--resume=${id}` || arg === `--session-id=${id}` ||
       ((arg === "--session-id" || arg === "--resume") && args[i + 1] === id));
   });
@@ -396,7 +398,7 @@ export class DesktopSessions {
   }
 
   isOpen(id: string): boolean {
-    return !!this.liveProcess(id) || processHasSession(this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }), id);
+    return !!this.liveProcess(id) || processHasSession(this.opts.processes?.() ?? processCommands(), id);
   }
 
   /** Tail complete transcript lines into an existing host log; never write the transcript. */
@@ -666,7 +668,7 @@ export class DesktopSessions {
     const now = (this.opts.now ?? Date.now)();
     if (now - this.checkedAt < 3000) return;
     const registry = this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"));
-    const processes = this.sources.size ? this.opts.processes?.() ?? execFileSync("ps", ["-axo", "pid,command"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }) : "";
+    const processes = this.sources.size ? this.opts.processes?.() ?? processCommands() : "";
     for (const [id, previous] of this.sources) {
       let stat: fs.Stats;
       try { stat = fs.lstatSync(previous.file); }

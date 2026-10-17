@@ -14,6 +14,7 @@ export interface LocalControlOptions {
   hostPublicKey: string;
   phones(): Phone[];
   rotate(token: string): void;
+  shutdown?(): void;
 }
 
 export function isLoopback(address: string | undefined): boolean {
@@ -78,6 +79,11 @@ export class LocalControl {
           phones: this.opts.phones(), settings: { bind: saved.bind, ...(saved.relay ? { relay: saved.relay } : {}) }, defaultRelay: DEFAULT_RELAY,
           restartRequired: saved.bind !== cfg.bind || saved.relay !== cfg.relay,
         });
+        return;
+      }
+      if (route === "/local/shutdown" && req.method === "POST" && this.opts.shutdown) {
+        res.once("finish", () => this.opts.shutdown?.());
+        json(res, 200, { ok: true });
         return;
       }
       if (route === "/local/pairing" && req.method === "GET") {

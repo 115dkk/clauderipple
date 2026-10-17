@@ -8,7 +8,12 @@ import type { BrowseResult, FolderEntry } from "./protocol.ts";
 
 const BROWSE_CAP = 300;
 /** Scratch and worktree folders are noise in a "recent" list a person picks from. */
-const NOISE = [/\/\.claude\/worktrees\//, /^\/private\/tmp\//, /^\/tmp\//, /^\/var\/folders\//, /\/node_modules\//];
+const NOISE = [/\/\.claude\/worktrees\//i, /^\/private\/tmp\//, /^\/tmp\//, /^\/var\/folders\//, /\/node_modules\//i];
+export function noisyFolder(folder: string, temp = os.tmpdir()): boolean {
+  const normalized = folder.replace(/\\/g, "/").replace(/\/$/, "") + "/";
+  const tempRoot = temp.replace(/\\/g, "/").replace(/\/$/, "") + "/";
+  return normalized.toLowerCase().startsWith(tempRoot.toLowerCase()) || NOISE.some(r => r.test(normalized));
+}
 
 export interface RecentSource { path: string; lastUsed: number; model?: string }
 
@@ -34,7 +39,7 @@ export async function makeFolder(parent: string, name: string): Promise<string> 
 export async function recentFolders(sources: RecentSource[], limit = 12): Promise<FolderEntry[]> {
   const best = new Map<string, RecentSource>();
   for (const s of sources) {
-    if (!path.isAbsolute(s.path) || NOISE.some((r) => r.test(s.path + "/"))) continue;
+    if (!path.isAbsolute(s.path) || noisyFolder(s.path)) continue;
     const prev = best.get(s.path);
     if (!prev || s.lastUsed > prev.lastUsed) {
       // Keep the model the host knows about even when the CLI's own record is newer.

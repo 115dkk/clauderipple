@@ -13,7 +13,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { listSessions, query } from "@anthropic-ai/claude-agent-sdk";
+import { listSessions } from "@anthropic-ai/claude-agent-sdk";
+import { sdkQuery as query } from "./sdk-launcher.ts";
 import qrcode from "qrcode-generator";
 import nacl from "tweetnacl";
 import { WebSocket } from "ws";
@@ -30,7 +31,8 @@ import type { WsLike } from "./relay.ts";
 import { RouterClient } from "./router.ts";
 import { HostServer } from "./server.ts";
 import { LocalControl } from "./local-control.ts";
-import { agentStatus, findClaude, install, paths, plist, specFor, uninstall } from "./service.ts";
+import { findClaude, specFor } from "./service.ts";
+import { installService, uninstallService, serviceStatus, servicePaths, renderService, supervisorName, controlShutdown } from "./host-service.ts";
 import { Sessions } from "./sessions.ts";
 import { desktopHandoff } from "./handoff.ts";
 import type { QueryFn } from "./sessions.ts";
@@ -172,6 +174,7 @@ async function runHost(): Promise<void> {
       dir, config: cfg, version: VERSION, hostPublicKey: toB64u(loadHostKey(dir, nacl).publicKey),
       phones: () => server?.phones() ?? [],
       rotate: token => { server?.rotateToken(token); },
+      shutdown: () => stop(),
     }),
   });
   server = host;
@@ -205,9 +208,9 @@ async function runHost(): Promise<void> {
 
 async function status(): Promise<void> {
   const cfg = loadConfig(remoteHome());
-  const st = agentStatus();
-  const p = paths();
-  out(`launchd agent: ${st.installed ? p.plist : "not installed"}${st.loaded ? `, loaded (state ${st.state ?? "?"}${st.pid ? `, pid ${st.pid}` : ""}${st.lastExit ? `, last exit ${st.lastExit}` : ""})` : ", not loaded"}\n`);
+  const st = serviceStatus();
+  const p = servicePaths();
+  out(`${supervisorName()}: ${st.installed ? p.definition : "not installed"}${st.loaded ? `, loaded (state ${st.state ?? "?"}${st.pid ? `, pid ${st.pid}` : ""}${st.lastExit ? `, last exit ${st.lastExit}` : ""})` : ", not loaded"}\n`);
   const listen = resolveBind(cfg.bind).listen;
   const probe = listen === "0.0.0.0" || listen === "::" ? "127.0.0.1" : listen;
   let health = "no answer";
@@ -219,13 +222,15 @@ async function status(): Promise<void> {
   out(`relay: ${cfg.relay ?? "off"}\nlogs: ${p.log}\n`);
 }
 
-function installCmd(): void {
+async function installCmd(): Promise<void> {
   const dir = remoteHome();
+  // Read the running host's old port before command-line options persist a replacement.
+  if (process.platform === "win32" && !process.argv.includes("--print")) await controlShutdown(dir);
   const cfg = process.argv.includes("--print") ? loadConfig(dir, false) : configFromArgs(dir);
   const spec = specFor({ script: fileURLToPath(import.meta.url), claudePath: findClaude(cfg.claudePath), ...(process.env.RIPPLE_REMOTE_HOME ? { remoteHome: process.env.RIPPLE_REMOTE_HOME } : {}) });
-  if (process.argv.includes("--print")) { out(plist(spec)); return; }
-  for (const line of install(spec)) out(`${line}\n`);
-  out(`Pair the phone: ripple-host pair (npm run remote -- pair)\n`);
+  if (process.argv.includes("--print")) { out(renderService(spec)); return; }
+  for (const line of await installService(spec)) out(`${line}\n`);
+  out(`Pair the phone: clauderipple remote pair\n`);
 }
 
 async function main(): Promise<void> {
@@ -233,7 +238,7 @@ async function main(): Promise<void> {
   switch (sub) {
     case null: return runHost();
     case "install": return installCmd();
-    case "uninstall": for (const line of uninstall()) out(`${line}\n`); return;
+    case "uninstall": for (const line of await uninstallService()) out(`${line}\n`); return;
     case "status": return status();
     case "pair": { const dir = remoteHome(); printPairing(configFromArgs(dir), dir); return; }
     default: throw new Error(`unknown command "${sub}" (install, uninstall, status, pair)`);

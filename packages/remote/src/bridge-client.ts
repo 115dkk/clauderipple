@@ -24,6 +24,7 @@ export function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 export function loadBridgeAuth(): BridgeAuth {
+  if (process.platform !== "darwin") throw new Error(DESKTOP_BLOCKED);
   try {
     const credentials = object(JSON.parse(execFileSync("security", ["find-generic-password", "-a", process.env.USER ?? os.userInfo().username, "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })));
     const oauth = object(credentials?.claudeAiOauth);
