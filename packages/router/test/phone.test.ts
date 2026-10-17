@@ -60,11 +60,11 @@ test("admin proxies only allowed phone routes to the configured loopback port wi
 
 test("host-down status gives the install hint; mutations fail without exposing errors or secrets", async t => {
   const f = await admin(t, { fetch: async () => { throw new Error("secret-sensitive transport details"); } });
-  assert.deepEqual(await (await fetch(`${f.base}/api/phone/status`)).json(), { hostRunning: false, hint: "npm run remote -- install" });
+  assert.deepEqual(await (await fetch(`${f.base}/api/phone/status`)).json(), { hostRunning: false, hint: "clauderipple remote install" });
   assert.equal((await fetch(`${f.base}/api/phone/pairing`)).status, 503);
   assert.equal((await fetch(`${f.base}/api/phone/rotate`, { method: "POST" })).status, 503);
   fs.unlinkSync(path.join(f.home, "local.secret"));
-  assert.deepEqual(await (await fetch(`${f.base}/api/phone/status`)).json(), { hostRunning: false, hint: "npm run remote -- install" });
+  assert.deepEqual(await (await fetch(`${f.base}/api/phone/status`)).json(), { hostRunning: false, hint: "clauderipple remote install" });
 });
 
 test("proxy preserves settings refusals, reports live incompatible hosts, and defaults to port 8797", async t => {
@@ -140,13 +140,19 @@ test("QR is fetched only on reveal and late responses cannot undo hiding or leav
   assert.deepEqual(children, []);
 });
 
-test("restart runs only the macOS host job, through the process boundary; other OS gives a manual command", async t => {
+test("restart targets only the Mac host job or installs the Windows/Linux host service", async t => {
   const commands: [string, string[]][] = [];
   const f = await admin(t, { platform: "darwin", uid: 501, exec: async (file, args) => { commands.push([file, args]); } });
   assert.deepEqual(await (await fetch(`${f.base}/api/phone/restart`, { method: "POST" })).json(), { ok: true });
   assert.deepEqual(commands, [["launchctl", ["kickstart", "-k", "gui/501/com.clauderipple.host"]]]);
-  const manual = await phoneRequest("restart", "POST", undefined, { platform: "linux", exec: async () => { assert.fail("must not execute on Linux"); } });
-  assert.deepEqual(manual.body, { manual: true, command: "npm run remote" });
+  for (const platform of ["linux", "win32"] as const) {
+    commands.length = 0;
+    const result = await phoneRequest("restart", "POST", undefined, { platform, exec: async (file, args) => { commands.push([file, args]); } });
+    assert.deepEqual(result.body, { ok: true });
+    assert.equal(commands[0]?.[0], process.execPath);
+    assert.match(commands[0]?.[1][0] ?? "", /remote[/\\]src[/\\]main\.ts$/);
+    assert.equal(commands[0]?.[1][1], "install");
+  }
   const failed = await phoneRequest("restart", "POST", undefined, { platform: "darwin", uid: 501, exec: async () => { throw new Error("job not installed"); } });
   assert.equal(failed.status, 502);
 });

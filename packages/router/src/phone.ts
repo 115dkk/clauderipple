@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { DEFAULT_PORT, remoteHome } from "../../remote/src/config.ts";
+import { fileURLToPath } from "node:url";
 
 export interface PhoneDeps {
   home?: string;
@@ -12,7 +13,7 @@ export interface PhoneDeps {
   exec?: (file: string, args: string[]) => Promise<void>;
 }
 export interface PhoneResponse { status: number; body: unknown }
-const INSTALL_HINT = "npm run remote -- install";
+const INSTALL_HINT = "clauderipple remote install";
 
 function target(dir: string): { port: number; secret: string } {
   let port = DEFAULT_PORT;
@@ -29,14 +30,20 @@ function target(dir: string): { port: number; secret: string } {
 }
 
 function execute(file: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => execFile(file, args, { timeout: 15_000 }, error => error ? reject(error) : resolve()));
+  return new Promise((resolve, reject) => execFile(file, args, { timeout: 150_000, windowsHide: true }, error => error ? reject(error) : resolve()));
 }
 
 export async function phoneRequest(route: string, method: string, body: string | undefined, deps: PhoneDeps = {}): Promise<PhoneResponse> {
   if (route === "restart" && method === "POST") {
     const uid = deps.uid ?? process.getuid?.();
     const command = uid === undefined ? "npm run remote -- install" : `launchctl kickstart -k gui/${uid}/com.clauderipple.host`;
-    if ((deps.platform ?? process.platform) !== "darwin") return { status: 200, body: { manual: true, command: "npm run remote" } };
+    if ((deps.platform ?? process.platform) !== "darwin") {
+      const script = fileURLToPath(new URL(`../../remote/src/main${path.extname(import.meta.url)}`, import.meta.url));
+      try {
+        await (deps.exec ?? execute)(process.execPath, [script, "install"]);
+        return { status: 200, body: { ok: true } };
+      } catch { return { status: 502, body: { error: "host service install/restart failed", command: INSTALL_HINT } }; }
+    }
     if (uid === undefined) return { status: 500, body: { error: "host restart unavailable" } };
     try {
       await (deps.exec ?? execute)("launchctl", ["kickstart", "-k", `gui/${uid}/com.clauderipple.host`]);

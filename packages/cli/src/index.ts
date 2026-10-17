@@ -458,6 +458,7 @@ function help(): void {
   status
   start | stop | restart
   logs [-n N] [-f]
+  remote [install|uninstall|status|pair]  run or manage the phone host (macOS, Windows, Linux systemd)
   config            print the config file path
   ui                open the dashboard in your browser
   tray [--install]  start the menu-bar / tray app (--install fetches Electron, ~270MB, once)
@@ -481,6 +482,17 @@ Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 
 try {
   switch (cmd) {
+    case "remote": {
+      const script = path.resolve(here, "../../remote/src/main" + path.extname(fileURLToPath(import.meta.url)));
+      const { spawn } = await import("node:child_process");
+      const child = spawn(installedRuntime.node, [script, ...args.slice(1)], { stdio: "inherit", env: { ...process.env, ...installedRuntime.env } });
+      for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, () => child.kill(signal));
+      process.exitCode = await new Promise<number>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", code => resolve(code ?? 1));
+      });
+      break;
+    }
     case "install":
       await install();
       break;

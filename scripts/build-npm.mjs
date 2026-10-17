@@ -24,6 +24,14 @@ execFileSync(npm, ["exec", "--", "tsc", "-p", "tsconfig.build.json"], { cwd: roo
 execFileSync(npm, ["--workspace", "@clauderipple/app", "run", "build"], { cwd: root, stdio: "inherit" });
 
 fs.cpSync(path.join(root, "packages", "ui"), path.join(dist, "ui"), { recursive: true });
+// Host runtime metadata and browser modules are not TypeScript server compilation outputs.
+fs.copyFileSync(path.join(root, "packages", "remote", "package.json"), path.join(dist, "remote", "package.json"));
+const remoteWeb = path.join(root, "packages", "remote", "web");
+if (fs.existsSync(remoteWeb)) fs.cpSync(remoteWeb, path.join(dist, "remote", "web"), { recursive: true });
+// SHARED keeps .ts browser URLs in both checkout and installed host layouts.
+for (const name of ["protocol.ts", "tool-details.ts", "e2ee.ts"]) {
+  fs.copyFileSync(path.join(root, "packages", "remote", "src", name), path.join(dist, "remote", "src", name));
+}
 // The status mod is loaded by Claude Code itself, as TypeScript; the API types it writes beside the
 // manifest when it loads one are its own and are left out, as is the design preview (a dev tool).
 fs.cpSync(path.join(root, "packages", "mod"), path.join(dist, "mod"), {
