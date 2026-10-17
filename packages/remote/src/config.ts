@@ -5,6 +5,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { ConfigStore, adminPort, configPath as routerConfigPath } from "../../router/src/config.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 
 export const DEFAULT_PORT = 8797;
@@ -34,6 +35,16 @@ export function newToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/**
+ * Where the router's admin API is listening, read from the router's own config. The admin API sits
+ * beside the proxy listener: the router derives its port as `admin.port ?? listen.port + 1`, so a
+ * default install is 8791 while this Mac (listen 8791) is 8792. Hardcoding 8792 only worked on this
+ * machine; on a default Windows install the host hit a dead port (`/api/status: HTTP 404`).
+ */
+export function routerAdminUrl(configFile = routerConfigPath()): string {
+  return `http://127.0.0.1:${adminPort(new ConfigStore(configFile).get())}`;
+}
+
 /** `persist: false` reads without writing the generated secrets (for commands that only print). */
 export function loadConfig(dir = remoteHome(), persist = true): HostConfig {
   const file = path.join(dir, "host.json");
@@ -42,7 +53,7 @@ export function loadConfig(dir = remoteHome(), persist = true): HostConfig {
     token: typeof stored.token === "string" && stored.token.length >= 32 ? stored.token : newToken(),
     bind: typeof stored.bind === "string" ? stored.bind : "127.0.0.1",
     port: typeof stored.port === "number" ? stored.port : DEFAULT_PORT,
-    adminUrl: typeof stored.adminUrl === "string" ? stored.adminUrl : "http://127.0.0.1:8792",
+    adminUrl: typeof stored.adminUrl === "string" ? stored.adminUrl : routerAdminUrl(),
     ...(typeof stored.claudePath === "string" ? { claudePath: stored.claudePath } : {}),
     ...(typeof stored.relay === "string" ? { relay: stored.relay } : {}),
     serverId: typeof stored.serverId === "string" && /^[\w-]{16,64}$/.test(stored.serverId) ? stored.serverId : randomBytes(16).toString("base64url"),
