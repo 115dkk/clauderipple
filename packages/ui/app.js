@@ -71,9 +71,13 @@ function modelsOf(provider) {
 }
 function labelOf(model) { return model.name || model.id; }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
-function safeName(value) { return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "provider"; }
-function uniqueName(name, providers) {
-  const base = safeName(name);
+function safeName(value) { return value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, ""); }
+// A name with no Latin letters ("하이브") slugs to nothing: fall back to the URL's domain ("thehive").
+function domainWord(url) {
+  try { const parts = new URL(url).hostname.split("."); return safeName(parts.length > 1 ? parts[parts.length - 2] : parts[0]); } catch { return ""; }
+}
+function uniqueName(name, providers, url) {
+  const base = safeName(name) || (url ? domainWord(url) : "") || "provider";
   let value = base;
   let number = 2;
   while (providers[value]) value = `${base}-${number++}`;
@@ -2547,7 +2551,7 @@ function openProviderForm(options) {
     const provider = draftProvider();
     if (!isChatgpt && (!provider.url || !/^https?:\/\//.test(provider.url))) { toast(t("providers.urlRequired"), true); return; }
     const next = clone(await latestConfig());
-    const providerName = existing ? options.name : uniqueName(typedName, next.providers);
+    const providerName = existing ? options.name : uniqueName(typedName, next.providers, provider.url);
     const saved = existing && (next.providers[options.name] || existing);
     if (existing && providerName !== options.name) delete next.providers[options.name];
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
