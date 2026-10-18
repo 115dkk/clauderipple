@@ -102,6 +102,24 @@ test("tool result images survive on chat and responses wires", () => {
   assert.equal(JSON.stringify({ chat, responses }).includes("[image omitted]"), false);
 });
 
+test("parallel tool results with images keep their tool messages together on chat (#64)", () => {
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+  const ids = ["a", "b", "c"];
+  const request: AnthropicRequest = {
+    model: "m",
+    messages: [
+      { role: "user", content: "look" },
+      { role: "assistant", content: ids.map((id) => ({ type: "tool_use", id, name: "Read", input: {} })) },
+      { role: "user", content: [...ids.map((id) => ({ type: "tool_result", tool_use_id: id, content: [image] })), { type: "text", text: "and?" }] },
+    ],
+  };
+  const chat = toOpenAiRequest(request, { model: "m", wire: "chat" }) as ChatRequest;
+
+  const turns = chat.messages.filter((m) => m.role !== "system");
+  assert.deepEqual(turns.map((m) => m.role), ["user", "assistant", "tool", "tool", "tool", "user"]);
+  assert.deepEqual((turns[5]?.content as { type: string }[]).map((part) => part.type), ["image_url", "image_url", "image_url", "text"]);
+});
+
 test("chat SSE mapper emits text, indexed tool calls and cached-token usage", () => {
   const mapper = new OpenAiStreamMapper("test", 88);
   const records = [

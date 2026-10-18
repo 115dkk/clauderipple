@@ -248,11 +248,21 @@ export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOpti
       messages.push({ role: "user", content: onlyText ? parts.map((part) => (part as ChatTextPart).text).join("\n") : parts });
       parts = [];
     };
+    // A tool result's images (and the fallback text of an unknown call) wait until the run of tool
+    // results ends: every `tool` message must follow the assistant's tool_calls directly, and a user
+    // message between parallel results is refused (DeepSeek: "insufficient tool messages", #64).
+    let deferred: (ChatTextPart | ChatImagePart)[] = [];
+    const release = (): void => {
+      parts.push(...deferred);
+      deferred = [];
+    };
     for (const block of message.content) {
       if (block.type === "text") {
+        release();
         const text = String((block as { text?: unknown }).text ?? "");
         if (text) parts.push({ type: "text", text });
       } else if (block.type === "image") {
+        release();
         const url = imageUrl(block);
         if (url) parts.push({ type: "image_url", image_url: { url } });
       } else if (block.type === "tool_result") {
@@ -263,10 +273,11 @@ export function toChatMessages(req: AnthropicRequest, opts?: OpenAiTranslateOpti
         if (result.is_error && !output) output = "Tool execution failed";
         if (!output && images.length > 0) output = "Tool returned image content.";
         if (knownCalls.has(result.tool_use_id)) messages.push({ role: "tool", tool_call_id: result.tool_use_id, content: output });
-        else parts.push({ type: "text", text: `[Tool result]\n${output}` });
-        for (const url of images) parts.push({ type: "image_url", image_url: { url } });
+        else deferred.push({ type: "text", text: `[Tool result]\n${output}` });
+        for (const url of images) deferred.push({ type: "image_url", image_url: { url } });
       }
     }
+    release();
     flush();
   }
   return messages;
