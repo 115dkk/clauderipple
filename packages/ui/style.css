@@ -277,6 +277,11 @@ select {
   text-overflow: ellipsis;
   cursor: pointer;
 }
+/* Native popups need an opaque surface independent of the translucent field. */
+select option, select optgroup {
+  background-color: var(--group);
+  color: var(--label);
+}
 select:disabled { opacity: 0.5; cursor: default; }
 input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; padding: 0; accent-color: var(--accent-fill); }
 input[type="checkbox"] { width: 16px; height: 16px; margin: 0; flex: 0 0 auto; }
