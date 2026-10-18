@@ -671,11 +671,14 @@ export class Proxy {
     if (typeof session === "string" && /^[\w-]{1,128}$/.test(session)) record.session = session;
     let observedUsage: RequestUsage | undefined;
     let observedStopReason: string | undefined;
+    let promptFallbackNote: string | undefined;
+    let promptRefusalSeen = false;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
     const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
+      if (promptFallbackNote) note = [promptFallbackNote, note].filter(Boolean).join("; ");
       this.stats.inFlight--;
       if (isMessages) this.stats.messagesInFlight--;
       if (failed) this.stats.failed++;
@@ -701,7 +704,7 @@ export class Proxy {
         if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
         if (extra?.requestedTier !== undefined) completed.requestedTier = extra.requestedTier;
         if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
-        if (extra?.upstreamCalled === false) completed.upstreamCalled = false;
+        if (extra?.upstreamCalled === false && !promptRefusalSeen) completed.upstreamCalled = false;
         if (extra?.refusal !== undefined) completed.refusal = extra.refusal;
         this.deps.requests.add(completed);
       }
@@ -782,10 +785,10 @@ export class Proxy {
       }
     }
     // A slot with fallbacks picks its provider before anything is sent, so a primary that is rate
-    // limited for the next hour is skipped rather than rediscovered once per request. Failing over
-    // mid-turn is not possible — once a byte of the answer has gone out, replacing it would splice
-    // two answers together — so the choice has to be made here or not at all.
-    const route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
+    // limited for the next hour is skipped rather than rediscovered once per request. A distinct
+    // prompt refusal can also select one fallback below, but only before any response is written.
+    let route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
+    const originalJson = json;
     const source = typeof model === "string" ? model : "-";
     record = {
       ...record,
@@ -838,8 +841,13 @@ export class Proxy {
     let chosen: Credential | null = null;
     let penalised: { provider: string; id: string } | null = null;
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
-    if (route && json) {
+    // Re-enter only for the one unwritten Google prompt refusal. Each target sees the original
+    // request, not the primary's rewritten effort, stripped thread, or translated body.
+    for (;;) {
+    if (route && originalJson) {
+      json = structuredClone(originalJson);
       record = { ...record, target: route.model, provider: route.provider };
+      delete record.effort;
       const configured = cfg.providers[route.provider];
       if (!configured) {
         finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
@@ -917,6 +925,27 @@ export class Proxy {
         tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
         try {
           const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+          if (o.kind === "prompt-incompatible") {
+            const alreadyRetried = promptRefusalSeen;
+            promptRefusalSeen = true;
+            if (res.destroyed || res.writableEnded || res.headersSent) {
+              finish("0", 0, "client closed before prompt-refusal fallback", true);
+              if (!res.destroyed && !res.writableEnded) res.destroy();
+              return;
+            }
+            const fallback = !alreadyRetried && resolved
+              ? this.promptFallback(resolved, route, cfg) : null;
+            if (fallback) {
+              promptFallbackNote = `${o.note}; fallback ${route.provider}/${route.model} → ${fallback.provider}/${fallback.model}`;
+              log.info(`FAILOVER ${promptFallbackNote}`);
+              route = fallback;
+              continue;
+            }
+            // Refusal is request-specific: neither cool nor mark success for this provider.
+            res.writeHead(400, { "content-type": "application/json" }).end(o.errorBody);
+            finish("400", Buffer.byteLength(o.errorBody), o.note, true, { refusal: "prompt-incompatible" });
+            return;
+          }
           this.recordOutcome(route.provider, o.status);
           if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
           finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
@@ -1002,7 +1031,8 @@ export class Proxy {
         return;
       }
       const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
-      const modelEffortLevels = provider.models?.find((entry) => entry.id === route.model)?.effortLevels;
+      const routeModel = route.model;
+      const modelEffortLevels = provider.models?.find((entry) => entry.id === routeModel)?.effortLevels;
       compatCaps = resolveCompatibleCaps(
         preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined,
         modelEffortLevels === undefined ? provider.caps : { ...provider.caps, effortLevels: modelEffortLevels },
@@ -1064,6 +1094,8 @@ export class Proxy {
     } else {
       target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
       tag = `WEB ${reqHost}`;
+    }
+    break;
     }
 
     if (json && typeof json.service_tier === "string") record.requestedTier = json.service_tier;
@@ -1542,21 +1574,10 @@ export class Proxy {
    */
   private chooseTarget(resolved: Resolved, cfg: Config, log: Logger): Resolved {
     if (!resolved.fallbacks?.length) return resolved;
-    const usable = (name: string): boolean => {
-      const provider = cfg.providers[name];
-      if (!provider) return false;
-      if (provider.type === "anthropic") {
-        if (!provider.accountPool || provider.auth !== "claude-code") return false;
-        const accounts = this.claudeAccounts.peekCredentials();
-        return accounts.length > 0 && this.pool.hasUsable(name, accounts);
-      }
-      if (provider.type === "chatgpt") return this.chatgpt(name, provider).hasUsable();
-      return this.pool.hasUsable(name, this.credentialsOf(name, provider));
-    };
-    if (usable(resolved.provider)) return resolved;
+    if (this.targetUsable(resolved, cfg)) return resolved;
     for (const f of resolved.fallbacks) {
       if (f.provider === resolved.provider && f.model === resolved.model) continue;
-      if (!usable(f.provider)) continue;
+      if (!this.targetUsable(f, cfg)) continue;
       log.info(`FAILOVER ${resolved.provider}/${resolved.model} exhausted → ${f.provider}/${f.model}`);
       // The tag names the model that answers, not the one that could not: a log line saying `->m1`
       // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
@@ -1569,6 +1590,33 @@ export class Proxy {
       };
     }
     return resolved;
+  }
+
+  /** Only configured route fallbacks, not another account or an invented provider. */
+  private promptFallback(resolved: Resolved, attempted: Resolved, cfg: Config): Resolved | null {
+    for (const f of resolved.fallbacks ?? []) {
+      if (f.provider === attempted.provider && f.model === attempted.model) continue;
+      if (!this.targetUsable(f, cfg)) continue;
+      return {
+        provider: f.provider, model: f.model, effort: f.effort ?? resolved.effort,
+        tag: `${resolved.tag.split("->")[0] ?? resolved.model}->${f.model} (prompt fallback from ${attempted.provider})`,
+      };
+    }
+    return null;
+  }
+
+  private targetUsable(target: Pick<Resolved, "provider" | "model">, cfg: Config): boolean {
+    const configured = cfg.providers[target.provider];
+    if (!configured) return false;
+    const provider = providerFor(configured, target.model);
+    if (provider.type === "anthropic") {
+      if (!provider.accountPool || provider.auth !== "claude-code") return false;
+      const accounts = this.claudeAccounts.peekCredentials();
+      return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts);
+    }
+    if (provider.type === "chatgpt") return this.chatgpt(target.provider, provider).hasUsable();
+    if (provider.type === "google" && provider.auth === "antigravity") return this.google(target.provider, provider).hasUsable();
+    return this.pool.hasUsable(target.provider, this.credentialsOf(target.provider, provider));
   }
 
   /**

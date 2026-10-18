@@ -85,6 +85,18 @@ async function rig(promptRefusal = false): Promise<Rig> {
     agentDir: path.join(home, "agents"),
   });
   await proxy.listen();
+  if (promptRefusal) {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async input => {
+      assert.match(String(input), /:retrieveUserQuotaSummary$/);
+      return Response.json({ groups: [{ displayName: "Gemini Models", buckets: ["5h", "weekly"].map(window => ({
+        bucketId: `gemini-${window}`, displayName: window, window, remainingFraction: 0.9,
+        resetTime: new Date(Date.now() + 3_600_000).toISOString(),
+      })) }] });
+    };
+    try { await proxy.googleUsage("google"); }
+    finally { globalThis.fetch = originalFetch; }
+  }
 
   const send = async (body: unknown, pathName = "/v1/messages"): Promise<{ status: number; body: string }> => {
     const sock = net.connect(proxyPort, "127.0.0.1");

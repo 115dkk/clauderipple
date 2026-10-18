@@ -118,6 +118,57 @@ export function googleWindowsFromGroups(groups: readonly QuotaGroup[]): GoogleWi
   return ordered(out);
 }
 
+/** What the last successful lookup of one account said, kept only to answer hasRemainingQuota. */
+type QuotaEvidence = { projectId: string; observedAt: number; groups: QuotaGroup[] };
+
+/**
+ * The whole body as groups, or null when ANY group or bucket is malformed. The display parser drops
+ * what it cannot read; evidence must not, because a dropped bucket could be the exhausted one.
+ */
+function strictQuotaGroups(body: unknown): QuotaGroup[] | null {
+  const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isObject(body) || !Array.isArray(body.groups)) return null;
+  const out: QuotaGroup[] = [];
+  for (const g of body.groups) {
+    if (!isObject(g) || typeof g.displayName !== "string" || !g.displayName || !Array.isArray(g.buckets)) return null;
+    const buckets: QuotaBucket[] = [];
+    for (const b of g.buckets) {
+      if (!isObject(b) || typeof b.bucketId !== "string" || typeof b.window !== "string" || !b.window) return null;
+      if (typeof b.remainingFraction !== "number" || !Number.isFinite(b.remainingFraction)) return null;
+      if (b.resetTime !== undefined && typeof b.resetTime !== "string") return null;
+      buckets.push({ bucketId: b.bucketId, displayName: typeof b.displayName === "string" ? b.displayName : "", window: b.window, ...(typeof b.resetTime === "string" ? { resetTime: b.resetTime } : {}), remainingFraction: b.remainingFraction });
+    }
+    out.push({ displayName: g.displayName, buckets });
+  }
+  return out;
+}
+
+/** The measured group names and their bucket ids; the endpoint reports no per-model quota. */
+const GEMINI_GROUP = { name: "gemini models", ids: { "5h": "gemini-5h", weekly: "gemini-weekly" } };
+const THIRD_PARTY_GROUP = { name: "claude and gpt models", ids: { "5h": "3p-5h", weekly: "3p-weekly" } };
+
+/** gemini-* draws on "Gemini Models"; claude-* and gpt-oss* on "Claude and GPT models"; else unknown. */
+function groupFor(groups: readonly QuotaGroup[], model: string): { group: QuotaGroup; ids: Record<"5h" | "weekly", string> } | undefined {
+  const id = model.toLowerCase();
+  const known = /^gemini-/.test(id) ? GEMINI_GROUP : /^claude-/.test(id) || /^gpt-oss(-|$)/.test(id) ? THIRD_PARTY_GROUP : undefined;
+  if (!known) return undefined;
+  const found = groups.filter((g) => g.displayName.trim().toLowerCase() === known.name);
+  return found.length === 1 ? { group: found[0]!, ids: known.ids } : undefined;
+}
+
+/** True when the group is exactly its 5h and weekly buckets, each with 0 < fraction <= 1 and a reset after `now`. */
+function groupHasQuota(group: QuotaGroup, ids: Record<"5h" | "weekly", string>, now: number): boolean {
+  if (group.buckets.length !== 2) return false;
+  return (["5h", "weekly"] as const).every((window) => {
+    const matches = group.buckets.filter((b) => b.window === window && b.bucketId === ids[window]);
+    const bucket = matches[0];
+    if (matches.length !== 1 || !bucket) return false;
+    if (bucket.remainingFraction <= 0 || bucket.remainingFraction > 1) return false;
+    const reset = bucket.resetTime ? Date.parse(bucket.resetTime) : Number.NaN;
+    return Number.isFinite(reset) && reset > now;
+  });
+}
+
 type UsageSource = { credentials(): Promise<GoogleCredential[]> };
 type UsageOptions = {
   fetch?: FetchLike;
@@ -133,6 +184,8 @@ type UsageOptions = {
  */
 export class GoogleUsage {
   private readonly last = new Map<string, QuotaGroup[]>();
+  /** Per account, only the last SUCCESSFUL lookup; dropped as soon as a refresh fails. */
+  private readonly evidence = new Map<string, QuotaEvidence>();
   private inFlight: Promise<Record<string, QuotaGroup[]>> | null = null;
   private fetchedAt = Number.NEGATIVE_INFINITY;
   private readonly source: UsageSource;
@@ -154,25 +207,52 @@ export class GoogleUsage {
     return this.inFlight;
   }
 
+  /**
+   * Whether the cached quota still shows room for `model` on this account and project. Reads the
+   * cache only (never fetches), and is true only when the last refresh of this account succeeded
+   * within the TTL, the model's group is recognized, and both its 5h and weekly buckets have a
+   * remaining fraction in (0, 1] and a reset time in the future. Everything else is false: this
+   * is positive evidence, not a guess, so "false" means "unknown or spent", not "refused".
+   */
+  hasRemainingQuota(credential: Pick<GoogleCredential, "ownerId" | "projectId">, model: string): boolean {
+    const evidence = this.evidence.get(credential.ownerId);
+    if (!evidence || evidence.projectId !== credential.projectId) return false;
+    const now = (this.opts.now ?? Date.now)();
+    const age = now - evidence.observedAt;
+    if (!(age >= 0 && age < (this.opts.ttlMs ?? 5 * 60_000))) return false;
+    const match = groupFor(evidence.groups, model);
+    return !!match && groupHasQuota(match.group, match.ids, now);
+  }
+
   private async fetchAll(): Promise<Record<string, QuotaGroup[]>> {
     let credentials: GoogleCredential[];
     try {
       credentials = await this.source.credentials();
     } catch (e) {
       this.opts.warn?.(`google usage: no credentials: ${(e as Error).message}`);
+      this.evidence.clear();
       return Object.fromEntries(this.last);
     }
     await Promise.all(credentials.map(async (credential) => {
-      const groups = await this.fetchOne(credential);
-      if (groups) this.last.set(credential.ownerId, groups);
+      const fetched = await this.fetchOne(credential);
+      if (fetched) {
+        this.last.set(credential.ownerId, fetched.groups);
+        // A body with any malformed group or bucket is shown as far as it parses, but proves nothing.
+        if (fetched.strict) this.evidence.set(credential.ownerId, { projectId: credential.projectId, observedAt: (this.opts.now ?? Date.now)(), groups: fetched.strict });
+        else this.evidence.delete(credential.ownerId);
+      } else {
+        // The displayed numbers stay, but they are no longer proof of anything.
+        this.evidence.delete(credential.ownerId);
+      }
     }));
     // An account that was removed must not keep its old numbers on the screen.
     const owners = new Set(credentials.map((c) => c.ownerId));
     for (const owner of [...this.last.keys()]) if (!owners.has(owner)) this.last.delete(owner);
+    for (const owner of [...this.evidence.keys()]) if (!owners.has(owner)) this.evidence.delete(owner);
     return Object.fromEntries(this.last);
   }
 
-  private async fetchOne(credential: GoogleCredential): Promise<QuotaGroup[] | null> {
+  private async fetchOne(credential: GoogleCredential): Promise<{ groups: QuotaGroup[]; strict: QuotaGroup[] | null } | null> {
     const owner = credential.ownerId.slice(0, 8);
     try {
       const res = await (this.opts.fetch ?? fetch)(`${GOOGLE_OAUTH.prodApi}/${GOOGLE_OAUTH.apiVersion}:retrieveUserQuotaSummary`, {
@@ -186,7 +266,9 @@ export class GoogleUsage {
         this.opts.warn?.(`google usage ${owner}: HTTP ${res.status}`);
         return null;
       }
-      return parseQuotaSummary(await res.json());
+      const body: unknown = await res.json();
+      const groups = parseQuotaSummary(body);
+      return groups ? { groups, strict: strictQuotaGroups(body) } : null;
     } catch (e) {
       this.opts.warn?.(`google usage ${owner}: ${(e as Error).message}`);
       return null;

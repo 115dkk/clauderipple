@@ -23,6 +23,8 @@ test("the refusal detector requires the exact observed response and an outbound 
   const system = { parts: [{ text: `prefix\r\n\r\n${sdk}\r\n\r\nsuffix` }] };
   const body = JSON.stringify(refusal);
   assert.equal(isAntigravityPromptRefusal(system, 429, body, null), true);
+  assert.equal(isAntigravityPromptRefusal(system, 429, JSON.stringify({ error: { ...refusal.error, details: [] } }), null), true);
+  assert.equal(isAntigravityPromptRefusal(system, 429, body, ""), false);
   for (const status of [200, 400, 401, 403, 500, 503]) assert.equal(isAntigravityPromptRefusal(system, status, body, null), false);
   for (const text of ["not JSON", "null", "[]", "{}", '{"error":null}', '{"error":[]}', JSON.stringify({ error: { ...refusal.error, details: {} } }), JSON.stringify({ error: { ...refusal.error, code: 503 } })]) {
     assert.equal(isAntigravityPromptRefusal(system, 429, text, null), false, text);
@@ -32,7 +34,14 @@ test("the refusal detector requires the exact observed response and an outbound 
   assert.equal(isAntigravityPromptRefusal({ parts: [{ text: `${sdk} Extra words.` }] }, 429, body, null), false);
 });
 
-async function rig(t: TestContext, apiKey = false) {
+function quotaSummary(fraction = 0.9) {
+  return { groups: [{ displayName: "Gemini Models", buckets: ["5h", "weekly"].map(window => ({
+    bucketId: `gemini-${window}`, displayName: window, window,
+    remainingFraction: fraction, resetTime: new Date(Date.now() + 3_600_000).toISOString(),
+  })) }] };
+}
+
+async function rig(t: TestContext, apiKey = false, quota: unknown = quotaSummary()) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-prompt-refusal-"));
   const seen: { token: string | undefined; body: { request?: { systemInstruction?: unknown } } }[] = [];
   let reply = { status: 429, body: refusal as unknown, retryAfter: undefined as string | undefined };
@@ -50,12 +59,20 @@ async function rig(t: TestContext, apiKey = false) {
   });
   const adapter = new GoogleAdapter("google", apiKey
     ? { type: "google", auth: "api-key", apiKey: "test-key", url }
-    : { type: "google", auth: "antigravity", url }, home, new Logger(null, 1e6, 1, false));
+    : { type: "google", auth: "antigravity", url }, home, new Logger(null, 1e6, 1, false), undefined,
+    async (_url, init) => Response.json(typeof quota === "function" ? quota(new Headers(init?.headers).get("authorization")) : quota));
+  if (quota !== null) await adapter.usageSnapshot();
   let outcome: GoogleOutcome | undefined;
   const front = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
     outcome = await adapter.handle(req, res, "/v1/messages", JSON.parse(body) as AnthropicRequest, "gemini-3.8-flash", "low");
+    if (outcome.kind === "prompt-incompatible") {
+      assert.equal(res.headersSent, false, "only the proxy may commit a prompt refusal");
+      assert.equal(res.writableEnded, false);
+      assert.equal(outcome.bytes, 0);
+      res.writeHead(400, { "content-type": "application/json" }).end(outcome.errorBody);
+    }
   });
   await new Promise<void>(resolve => front.listen(0, "127.0.0.1", resolve));
   t.after(async () => {
@@ -99,6 +116,41 @@ for (const stream of [true, false]) test(`SDK prompt refusal is non-retryable an
   assert.equal(next.status, 200);
   assert.match(next.text, /"text":"OK"/);
   assert.equal(r.seen[1]!.token, r.seen[0]!.token, "a subsequent compatible request can use the same account immediately");
+});
+
+for (const evidence of [
+  { label: "missing snapshot", quota: null },
+  { label: "exhausted quota", quota: quotaSummary(0) },
+  { label: "invalid quota", quota: quotaSummary(1.1) },
+  { label: "unrelated model family", quota: { groups: [{ ...quotaSummary().groups[0], displayName: "Claude and GPT models" }] } },
+  { label: "expired windows", quota: { groups: [{ displayName: "Gemini Models", buckets: quotaSummary().groups[0]!.buckets.map(b => ({ ...b, resetTime: "2020-01-01T00:00:00Z" })) }] } },
+]) test(`SDK paragraph retains ordinary 429 handling with ${evidence.label}`, async t => {
+  const r = await rig(t, false, evidence.quota);
+  const res = await r.call(request);
+  assert.equal(res.status, 429);
+  assert.equal(res.outcome?.refusal, undefined);
+  assert.equal(r.seen.length, 2, "unknown or exhausted quota must still try peer accounts");
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "cooling"]);
+});
+
+test("stale quota evidence keeps the SDK request on the ordinary account-rotation path", async t => {
+  const r = await rig(t);
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now + 300_001);
+  const res = await r.call(request);
+  assert.equal(res.status, 429);
+  assert.equal(res.outcome?.refusal, undefined);
+  assert.equal(r.seen.length, 2);
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "cooling"]);
+});
+
+test("another account's positive quota does not excuse the attempted account's exhaustion", async t => {
+  const r = await rig(t, false, (token: string) => quotaSummary(token === "Bearer token-1" ? 0 : 0.9));
+  const res = await r.call(request);
+  assert.equal(res.status, 400, "the second account has evidence for a distinct refusal");
+  assert.equal(res.outcome?.kind, "prompt-incompatible");
+  assert.deepEqual(r.seen.map(s => s.token), ["Bearer token-1", "Bearer token-2"]);
+  assert.deepEqual(r.adapter.accountStatus().map(a => a.state), ["cooling", "ready"]);
 });
 
 test("the generic 429 without an SDK system paragraph still cools accounts", async t => {
