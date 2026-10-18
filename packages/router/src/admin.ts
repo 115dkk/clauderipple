@@ -1290,10 +1290,12 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
   const checkModel = presetProbeModel(body.preset) ?? models[0]?.id ?? body.probeModel ?? "test";
   // 16 tokens, as on Responses: some vendors refuse a smaller cap outright (B.ai: "max_tokens must be
   // greater than 2", #57), which read as a failed connection though the key and URL were right.
+  // Streamed, as every translated turn is: the status arrives with the headers, while a reasoning
+  // model answering whole can take past the timeout (Hive: 0.3s streamed, 3–23s whole, 2026-10-18).
   const checkBody = responses
-    ? { model: checkModel, max_output_tokens: 16, stream: false, store: false, input: "hi" }
+    ? { model: checkModel, max_output_tokens: 16, stream: true, store: false, input: "hi" }
     : openai
-      ? { model: checkModel, max_tokens: 16, stream: false, messages: [{ role: "user", content: "hi" }] }
+      ? { model: checkModel, max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] }
       : { model: checkModel, max_tokens: 16, messages: [{ role: "user", content: "hi" }] };
   const label = responses ? "responses endpoint" : openai ? "chat completions endpoint" : "messages endpoint";
   try {
@@ -1311,7 +1313,10 @@ async function probeProvider(body: ProbeRequest, probeFetch: (url: string, init:
       const auth: ProbeAuth = response.status === 403 && refusedByPlan(refusal) ? "not-entitled" : "bad-key";
       return { ok: false, auth, models, error: `${label} returned ${response.status}: ${refusal}` };
     }
-    if (response.ok) return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
+    if (response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return { ok: true, auth: "ok", models, ...(modelsError ? { error: modelsError } : {}) };
+    }
     const detail = snippet(await response.text());
     // A model-validation refusal still demonstrates that the endpoint reached the provider and the key was accepted.
     if (refusedForModel(response.status, detail)) {
