@@ -5,11 +5,16 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { retitle, claudePretty, fromMarker } from "../src/hooks/agent-title.ts";
+import { retitle, claudePretty, fromMarker, shortName } from "../src/hooks/agent-title.ts";
 import { setAgentTitleHook, agentTitleHookEnabled } from "../src/settings.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const NAMES = { names: { "gpt-5.6-terra": "Terra", "gpt-5.6-sol": "Sol" } };
+
+test("short name: the display name's last word, without a hosted id's vendor path", () => {
+  assert.equal(shortName("GPT-6.1 Sol"), "Sol");
+  assert.equal(shortName("deepseek-ai/deepseek-v4.1-flash-1017"), "deepseek-v4.1-flash-1017");
+});
 
 test("marker wins, agent file next, claude alias otherwise", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agents-"));

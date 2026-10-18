@@ -38,10 +38,13 @@ const CLAUDE_ID = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+(?:-\d+)*?)(?:-\
 /** The router's default `effortClamp` (config.ts), for when config.json cannot be read. */
 const DEFAULT_CLAMP: Record<string, string> = { ultra: "max" };
 
-/** A model's name in a title: the last word of its display name ("GPT-6.1 Sol" → "Sol"). */
+/**
+ * A model's name in a title: the last word of its display name ("GPT-6.1 Sol" → "Sol"), without
+ * the vendor path a hosted id carries ("deepseek-ai/deepseek-v4.1-flash-1017" → "deepseek-v4.1-flash-1017").
+ */
 export function shortName(name: string): string {
   const words = name.trim().split(/\s+/);
-  return words[words.length - 1]!;
+  return words[words.length - 1]!.replace(/^.*\//, "");
 }
 
 /** What the title needs from config.json: display names, marker aliases and the effort clamp. */

@@ -215,10 +215,11 @@ export function titleName(model: string, models: readonly RouterModel[] = []): s
   const id = baseModel(model).replace(/\[.*?\]/g, '')
   const claude = /^(?:claude-)?(opus|sonnet|haiku|fable|mythos)(?:-(\d+)(?:-(\d{1,2}))?)?/i.exec(id)
   if (claude) return claude[1]!.charAt(0).toUpperCase() + claude[1]!.slice(1).toLowerCase() + (claude[2] ? claude[2] + (claude[3] ? '.' + claude[3] : '') : '')
+  // A hosted id's vendor path ("deepseek-ai/") is dropped: the title has room for the model only.
   const named = models.find(m => m.value.toLowerCase() === id.toLowerCase())?.name
-  if (named) return named.trim().split(/\s+/).pop()!
+  if (named) return named.trim().split(/\s+/).pop()!.replace(/^.*\//, '')
   const gpt = /^gpt-[\d.]+-([a-z]+)$/i.exec(id)
-  return gpt ? gpt[1]!.charAt(0).toUpperCase() + gpt[1]!.slice(1) : id
+  return gpt ? gpt[1]!.charAt(0).toUpperCase() + gpt[1]!.slice(1) : id.replace(/^.*\//, '')
 }
 
 /**
