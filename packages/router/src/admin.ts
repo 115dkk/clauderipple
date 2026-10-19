@@ -1685,6 +1685,25 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
   return { models: await claudeModelList(deps), source: "fallback" };
 }
 
+/**
+ * Each model's context window, for a client that reads a session's context use without the CLI's own
+ * figure (the phone, for a Claude app session). Claude's from Anthropic's catalog, the CLI's injected
+ * models from their config (else `cli.autoCompactWindow`), providers' from theirs. Unknown is absent.
+ */
+async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number> }> {
+  const cfg = deps.config();
+  const windows: Record<string, number> = {};
+  const put = (id: string, value: number | undefined): void => {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0 && windows[id] === undefined) windows[id] = Math.floor(value);
+  };
+  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow);
+  for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
+  for (const provider of Object.values(cfg.providers)) {
+    for (const model of ("models" in provider && provider.models) || []) put(model.id, model.contextWindow);
+  }
+  return { windows };
+}
+
 function tailLines(file: string, n: number): string {
   if (!fs.existsSync(file)) return "";
   const text = fs.readFileSync(file, "utf8");
@@ -1857,6 +1876,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       if (pathname === "/api/claude-models" && method === "GET") {
         sendJson(res, 200, await pickerModels(deps));
+        return;
+      }
+      if (pathname === "/api/context-windows" && method === "GET") {
+        sendJson(res, 200, await contextWindows(deps));
         return;
       }
       if (pathname === "/api/effort-levels" && method === "GET") {
