@@ -64,3 +64,177 @@ test("usage is cached per account and a failed lookup keeps the last good groups
   assert.equal(third["acct-1"]?.length, 2);
   assert.equal(seen.length, 2);
 });
+
+// hasRemainingQuota: cached, positive-only evidence from the last successful lookup.
+const NOW = Date.parse("2026-10-15T00:00:00Z");
+const FUTURE = "2026-10-15T03:00:00Z";
+const bucket = (window: string, remainingFraction: unknown, resetTime: unknown = FUTURE) => ({ displayName: window, window, resetTime, remainingFraction });
+// A bucket without its own bucketId gets the measured one for its group ("gemini-5h", "3p-weekly").
+const group = (displayName: string, prefix: string, buckets: unknown[]) => ({
+  displayName,
+  buckets: buckets.map((b) => ({ bucketId: `${prefix}-${(b as { window: string }).window}`, ...(b as object) })),
+});
+const summary = (gemini: unknown[], thirdParty: unknown[]) => ({ groups: [group("Gemini Models", "gemini", gemini), group("Claude and GPT models", "3p", thirdParty)] });
+const healthy = () => summary([bucket("weekly", 0.5), bucket("5h", 1)], [bucket("weekly", 0.2), bucket("5h", 0.01)]);
+
+type Account = { ownerId: string; accessToken: string; projectId: string };
+function harness(initial: unknown = healthy()) {
+  const state = { body: initial as unknown, status: 200, now: NOW, accounts: [{ ownerId: "acct-1", accessToken: "tok", projectId: "proj-1" }] as Account[], calls: 0 };
+  const fetchImpl = (async () => {
+    state.calls++;
+    return state.status === 200 ? new Response(JSON.stringify(state.body), { status: 200 }) : new Response("nope", { status: state.status });
+  }) as unknown as typeof fetch;
+  const usage = new GoogleUsage({ credentials: async () => state.accounts } as never, { fetch: fetchImpl, now: () => state.now, ttlMs: 300_000, warn: () => {} });
+  return { state, usage, acct: (): Account => state.accounts[0]! };
+}
+const GEMINI = "gemini-3.8-flash";
+
+test("hasRemainingQuota is false until a lookup has succeeded, never fetches, then is true on the ordinary positive path", async () => {
+  const h = harness();
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);
+  assert.equal(h.state.calls, 0);
+  await h.usage.snapshot();
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), true);
+  // Both windows only need to be positive: 1 (untouched) and 0.01 (almost spent) both count.
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), "claude-opus-4-6-thinking"), true);
+  assert.equal(h.state.calls, 1);
+});
+
+test("hasRemainingQuota reads the model's own group and treats unrecognized models as false", async () => {
+  const h = harness(summary([bucket("weekly", 0.5), bucket("5h", 0.5)], [bucket("weekly", 0.5), bucket("5h", 0)]));
+  await h.usage.snapshot();
+  const a = h.acct();
+  for (const model of ["gemini-3.1-pro", "gemini-pro-agent", "gemini-3.7-flash-tiered"]) assert.equal(h.usage.hasRemainingQuota(a, model), true, model);
+  // The third-party group has a spent 5h window.
+  for (const model of ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"]) assert.equal(h.usage.hasRemainingQuota(a, model), false, model);
+  // With room in that group, claude-/gpt-oss are true, but names outside the known families never are.
+  h.state.body = healthy();
+  h.state.now += 300_001;
+  await h.usage.snapshot();
+  for (const model of ["claude-sonnet-4-6", "gpt-oss-120b-medium"]) assert.equal(h.usage.hasRemainingQuota(a, model), true, model);
+  for (const model of ["gpt-6-sol", "gemini", "geminix-1", "gpt-oss2", "llama-4", ""]) assert.equal(h.usage.hasRemainingQuota(a, model), false, model);
+});
+
+test("hasRemainingQuota expires with the cache TTL, and a clock that moved backwards is not evidence", async () => {
+  const h = harness();
+  await h.usage.snapshot();
+  h.state.now = NOW + 299_999;
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), true);
+  h.state.now = NOW + 300_000;
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);
+  h.state.now = NOW - 1;
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);
+});
+
+test("hasRemainingQuota is false once a reset time has passed, even inside the snapshot TTL", async () => {
+  const reset = NOW + 60_000;
+  const h = harness(summary([bucket("weekly", 0.5), bucket("5h", 0.5, new Date(reset).toISOString())], []));
+  await h.usage.snapshot();
+  h.state.now = reset - 1;
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), true);
+  h.state.now = reset;
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);
+});
+
+test("a failed refresh drops the evidence even though the dashboard keeps the last good groups", async () => {
+  const h = harness();
+  await h.usage.snapshot();
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), true);
+  h.state.now += 300_001;
+  h.state.status = 500;
+  const shown = await h.usage.snapshot();
+  assert.equal(shown["acct-1"]?.length, 2);
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);
+  // A response of the wrong shape is a failed lookup too, and a later success restores the evidence.
+  h.state.now += 300_001;
+  h.state.status = 200;
+  h.state.body = { nope: true };
+  await h.usage.snapshot();
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);
+  h.state.now += 300_001;
+  h.state.body = healthy();
+  await h.usage.snapshot();
+  assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), true);
+});
+
+test("hasRemainingQuota belongs to one account and project, and a removed account loses its evidence", async () => {
+  const h = harness();
+  h.state.accounts.push({ ownerId: "acct-2", accessToken: "tok2", projectId: "proj-2" });
+  await h.usage.snapshot();
+  const [one, two] = h.state.accounts as [Account, Account];
+  assert.equal(h.usage.hasRemainingQuota(one, GEMINI), true);
+  assert.equal(h.usage.hasRemainingQuota(two, GEMINI), true);
+  assert.equal(h.usage.hasRemainingQuota({ ownerId: "acct-3", projectId: "proj-1" }, GEMINI), false);
+  // The same owner under another project is a different quota.
+  assert.equal(h.usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj-other" }, GEMINI), false);
+  // acct-1 is removed and later signs in again with a new project: the old answer cannot be reused.
+  h.state.accounts.shift();
+  h.state.now += 300_001;
+  await h.usage.snapshot();
+  assert.equal(h.usage.hasRemainingQuota(one, GEMINI), false);
+  assert.equal(h.usage.hasRemainingQuota(two, GEMINI), true);
+  h.state.accounts.push({ ownerId: "acct-1", accessToken: "tok", projectId: "proj-new" });
+  assert.equal(h.usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj-new" }, GEMINI), false);
+  assert.equal(h.usage.hasRemainingQuota(one, GEMINI), false);
+});
+
+test("hasRemainingQuota rejects invalid fractions, bad resets and missing or ambiguous windows", async () => {
+  const cases: Record<string, unknown[]> = {
+    "zero 5h": [bucket("weekly", 0.5), bucket("5h", 0)],
+    "zero weekly": [bucket("weekly", 0), bucket("5h", 0.5)],
+    "negative": [bucket("weekly", -0.1), bucket("5h", 0.5)],
+    "above one": [bucket("weekly", 0.5), bucket("5h", 1.0001)],
+    "null fraction": [bucket("weekly", 0.5), bucket("5h", null)],
+    "nonfinite fraction": [bucket("weekly", Number.POSITIVE_INFINITY), bucket("5h", 0.5)],
+    "unreadable fraction (dropped by the parse)": [bucket("weekly", 0.5), bucket("5h", "0.5")],
+    "missing 5h": [bucket("weekly", 0.5)],
+    "missing weekly": [bucket("5h", 0.5)],
+    "unknown window only": [bucket("monthly", 0.5), bucket("5h", 0.5)],
+    "duplicate 5h": [bucket("weekly", 0.5), bucket("5h", 0.5), bucket("5h", 0.5)],
+    "missing reset": [bucket("weekly", 0.5), { window: "5h", remainingFraction: 0.5 }],
+    "invalid reset": [bucket("weekly", 0.5), bucket("5h", 0.5, "not a date")],
+    "reset in the past": [bucket("weekly", 0.5), bucket("5h", 0.5, "2026-10-14T23:59:59Z")],
+    "reset exactly now": [bucket("weekly", 0.5), bucket("5h", 0.5, "2026-10-15T00:00:00Z")],
+    "no buckets": [],
+    "extra exhausted window": [bucket("weekly", 0.5), bucket("5h", 0.5), bucket("monthly", 0)],
+    "extra bucket of a known window": [bucket("weekly", 0.5), bucket("5h", 0.5), { ...bucket("5h", 0), bucketId: "other-5h" }],
+    "wrong bucket id": [bucket("weekly", 0.5), { ...bucket("5h", 0.5), bucketId: "something-else" }],
+    "malformed extra bucket (dropped by the display parse)": [bucket("weekly", 0.5), bucket("5h", 0.5), { window: "5h", bucketId: "gemini-5h" }],
+    "malformed duplicate bucket": [bucket("weekly", 0.5), bucket("5h", 0.5), { ...bucket("5h", 0.5), remainingFraction: "0" }],
+  };
+  for (const [name, buckets] of Object.entries(cases)) {
+    const h = harness(summary(buckets, buckets));
+    await h.usage.snapshot();
+    assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false, name);
+    assert.equal(h.usage.hasRemainingQuota(h.acct(), "claude-sonnet-4-6"), false, name);
+  }
+  // An absent or duplicated group is unknown too.
+  const noThirdParty = harness({ groups: [group("Gemini Models", "gemini", [bucket("weekly", 0.5), bucket("5h", 0.5)])] });
+  await noThirdParty.usage.snapshot();
+  assert.equal(noThirdParty.usage.hasRemainingQuota(noThirdParty.acct(), GEMINI), true);
+  assert.equal(noThirdParty.usage.hasRemainingQuota(noThirdParty.acct(), "claude-sonnet-4-6"), false);
+  const twoGemini = harness({ groups: [...healthy().groups, group("gemini models", "gemini", [bucket("weekly", 0.5), bucket("5h", 0.5)])] });
+  await twoGemini.usage.snapshot();
+  assert.equal(twoGemini.usage.hasRemainingQuota(twoGemini.acct(), GEMINI), false);
+});
+
+test("hasRemainingQuota accepts only the exact known group names and a structurally valid body", async () => {
+  // Case and surrounding space in the name are tolerated; a renamed or lookalike group is not a known group.
+  const ok = harness({ groups: [group(" gemini MODELS ", "gemini", [bucket("weekly", 0.5), bucket("5h", 0.5)]), group("claude and gpt MODELS", "3p", [bucket("weekly", 0.5), bucket("5h", 0.5)])] });
+  await ok.usage.snapshot();
+  assert.equal(ok.usage.hasRemainingQuota(ok.acct(), GEMINI), true);
+  assert.equal(ok.usage.hasRemainingQuota(ok.acct(), "claude-sonnet-4-6"), true);
+  const renamed = harness({ groups: [group("Gemini Models", "gemini", [bucket("weekly", 0.5), bucket("5h", 0.5)]), group("GPT premium", "3p", [bucket("weekly", 0.5), bucket("5h", 0.5)])] });
+  await renamed.usage.snapshot();
+  assert.equal(renamed.usage.hasRemainingQuota(renamed.acct(), GEMINI), true);
+  assert.equal(renamed.usage.hasRemainingQuota(renamed.acct(), "claude-sonnet-4-6"), false);
+  assert.equal(renamed.usage.hasRemainingQuota(renamed.acct(), "gpt-oss-120b-medium"), false);
+  // A malformed group anywhere (even an unrelated one the display parse silently drops) voids the whole snapshot,
+  // while the display still shows what parsed.
+  for (const bad of [{ displayName: "Other", buckets: "nope" }, { buckets: [] }, 42, { displayName: "Other", buckets: [{ window: "5h", bucketId: "x", remainingFraction: 0 }, null] }]) {
+    const h = harness({ groups: [...summary([bucket("weekly", 0.5), bucket("5h", 0.5)], [bucket("weekly", 0.5), bucket("5h", 0.5)]).groups, bad] });
+    const shown = await h.usage.snapshot();
+    assert.equal((shown["acct-1"]?.length ?? 0) >= 2, true);
+    assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false, JSON.stringify(bad));
+  }
+});

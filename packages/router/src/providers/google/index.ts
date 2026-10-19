@@ -30,12 +30,17 @@ import { conversationKey, serverToolNames, toolNameRestoreMap, type AnthropicReq
 import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, type FetchLike } from "./accounts.ts";
 import { fetchAvailableModels, staticAntigravityModels } from "./antigravity.ts";
 import { GoogleUsage, type QuotaGroup } from "./usage.ts";
+import { ANTIGRAVITY_PROMPT_REFUSAL_MESSAGE, isAntigravityPromptRefusal } from "./prompt-refusal.ts";
 
 const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
 const MODELS_CACHE_MS = 60 * 60 * 1000;
 
-export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
+export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined } & (
+  | { kind?: "response" }
+  // No status or bytes have reached the client; the proxy may try one route fallback.
+  | { kind: "prompt-incompatible"; status: 400; bytes: 0; errorBody: string }
+);
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -127,6 +132,7 @@ export type GoogleAccountStatus = GoogleAccountSummary & {
 /** How a send across the accounts ended. */
 type SendResult =
   | { kind: "ok"; upstream: Response; credential: GoogleCredential }
+  | { kind: "prompt-refused" }
   | { kind: "refused"; status: number; text: string; retryAfterSeconds?: number; verify?: { url: string; account: string } }
   | { kind: "all-resting"; backMs?: number }
   | { kind: "no-account" }
@@ -387,6 +393,8 @@ export class GoogleAdapter {
     const sent = await this.sendToAnAccount({
       conversation: key,
       signal: controller.signal,
+      system: upstreamRequest.systemInstruction,
+      model,
       build: (credential) => {
         const built = transport.build(upstreamRequest, {
           model,
@@ -401,6 +409,11 @@ export class GoogleAdapter {
     if (sent.kind !== "ok") {
       res.off("close", onClose);
       if (sent.kind === "aborted") return { status: 0, bytes: 0, note: "client closed" };
+      if (sent.kind === "prompt-refused") {
+        const err = anthropicError(400, "invalid_request_error", ANTIGRAVITY_PROMPT_REFUSAL_MESSAGE);
+        return { kind: "prompt-incompatible", status: 400, bytes: 0, errorBody: err.body,
+          note: "upstream 429: suspected Antigravity SDK prompt refusal with remaining quota", refusal: "prompt-incompatible" };
+      }
       if (sent.kind === "unreachable") {
         const err = anthropicError(502, "api_error", `Google provider unreachable: ${sent.error.message}`);
         if (!res.headersSent) res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
@@ -542,6 +555,8 @@ export class GoogleAdapter {
   private async sendToAnAccount(spec: {
     conversation: string | undefined;
     signal: AbortSignal;
+    system: GeminiRequest["systemInstruction"];
+    model: string;
     build: (credential: GoogleCredential) => { built: { url: string; headers: Record<string, string>; body: string }; secrets: string[] };
   }): Promise<SendResult> {
     const tried = new Set<string>();
@@ -590,6 +605,13 @@ export class GoogleAdapter {
       const safeText = redactErrorText(text, secrets);
       const status = upstream.status;
       this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
+      // The generic 429 is also real exhaustion. Only fresh quota evidence for this
+      // account/model permits a request-specific refusal; otherwise keep ordinary
+      // cooldown and account rotation. The proxy can still try a route fallback.
+      if (isAntigravityPromptRefusal(spec.system, status, text, upstream.headers.get("retry-after")) &&
+          this.usage.hasRemainingQuota(credential, spec.model)) {
+        return { kind: "prompt-refused" };
+      }
       // Not a rest and not a refresh: the account works again the moment its person finishes
       // Google's page, so it stays in rotation and the next turn finds out.
       const verifyUrl = status === 403 ? googleValidationUrl(text) : undefined;

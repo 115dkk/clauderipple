@@ -772,7 +772,7 @@ text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
 - `upstreamRequestId`: the final forwarded native Anthropic response's `request-id` header (passthrough or account pool).
 - `messageId`: the Anthropic message id delivered by a translated adapter or forwarded compatible response; not a generated id from a non-streaming error.
 - `upstreamCalled`: `false` only for a known pre-model-API exit; omitted when a search backend was attempted or the call state is unknown.
-- `refusal`: `thread-continue`, `drain`, `unroutable`, `no-account`, `unknown-provider` or `web-search-unsupported`, from the actual exit branch.
+- `refusal`: `thread-continue`, `drain`, `unroutable`, `no-account`, `unknown-provider`, `web-search-unsupported` or `prompt-incompatible`, from the actual exit branch. `prompt-incompatible` follows an upstream request; it does not set `upstreamCalled: false`.
 - `purpose`: `auto-mode-classifier` from the security-monitor request shape regardless of routing settings, or `web-search` for router-served searches.
 - `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent.
 - `servedTier`: the response-reported tier (Responses/Chat `service_tier` or Anthropic `usage.service_tier`); never inferred from the request.
@@ -816,6 +816,9 @@ text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
   is parked, the turn goes to the first fallback that has one, chosen **before anything is sent**,
   since failing over mid-turn would splice two answers together. With nothing usable anywhere the
   primary is kept, so the provider refuses rather than the router inventing a refusal.
+  The narrowly classified Antigravity prompt refusal (§4d-ii) additionally permits one same-turn
+  route fallback after the upstream rejects the request but **before any response reaches the
+  client**; it does not mark a usable account as exhausted.
   - Four things an independent review found, each of which had made it past the unit tests because
     each lived in the wiring rather than the state machine: the pool never heard about the ChatGPT
     or openai-compatible adapters, so those providers looked healthy forever and a slot pointing at
@@ -1157,9 +1160,10 @@ adapter lives in `packages/router/src/providers/google/` and separates translati
 (`thoughtSignatures.ts`) so Stage 2 (Antigravity Code Assist) is a new transport only.
 
 Both modes are implemented: `api-key` (AI Studio) below, and `auth: "antigravity"` (Cloud
-Code Assist) in its own subsection. No live key or Antigravity subscription exists in this
-environment, so everything below is doc- and source-derived and **not measured** unless it
-says otherwise:
+Code Assist) in its own subsection. At the original implementation on 2026-10-01, no live
+key or Antigravity subscription was available in the implementation environment, so those
+initial facts were doc- and source-derived, **not measured**. Later dated observations,
+including the 2026-10-16 Antigravity measurement in §4d-ii, are identified separately:
 
 - Stream endpoint `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`,
   the key on header `x-goog-api-key`, base default `https://generativelanguage.googleapis.com`
@@ -1225,10 +1229,10 @@ Cloud Code Assist (CCA) backend, with several accounts rotating. Same translatio
 Studio; only `transport.ts` differs. Accounts live in `<home>/google-accounts.json` (0600,
 cross-process lock, atomic write, one account per email+project, a re-login replaces its own
 entry), the sign-in in `login.ts`, the account pool and refresh in `accounts.ts`, and the wire
-facts and model-id resolution in `antigravity.ts`. **Every wire fact below is taken from the
-reference implementation opencodex (GitHub `lidge-jun/opencodex`, read 2026-10-01 as a
-behavioral spec — no code copied; project rule) and is not measured live** — no Antigravity
-subscription exists in this environment. Files are under `src/`:
+facts and model-id resolution in `antigravity.ts`. **Except for the dated live observation
+below, these wire facts come from the reference implementation opencodex** (GitHub
+`lidge-jun/opencodex`, read 2026-10-01 as a behavioral spec — no code copied; project rule).
+They were not live-tested during the original implementation. Files are under `src/`:
 
 - OAuth is Google's standard installed-app flow with PKCE S256. Client id
   `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`, secret
@@ -1291,6 +1295,47 @@ subscription exists in this environment. Files are under `src/`:
   and is not retried. Refresh is per account, single-flight per token generation, five minutes
   ahead; only a structured `invalid_grant` marks an account for sign-in. Only the access token
   and the account email/project id are ever in memory; no token reaches a log or an API response.
+- **SDK prompt refusal (measured 2026-10-16, Windows, Claude Code 2.1.289).** The Opus request
+  used the CCA wire id `claude-opus-5-5-high` unchanged, with
+  `generationConfig.thinkingConfig.thinkingLevel: "low"` (not an id from the static fallback
+  table). The Gemini comparison used picker id `gemini-3.8-flash`, effort `low`, resolved by
+  `resolveAntigravityWireModel` to wire id `gemini-3.8-flash-low`, without a separate
+  `thinkingConfig`. The saved comparison records the Opus id and both generation configs;
+  Gemini's wire id is reconstructed from the reproduction script's inputs and the resolver,
+  not a captured outbound envelope. Both requests used `maxOutputTokens: 128000`.
+  Otherwise identical requests returned HTTP 429 with the standalone system paragraph
+  `You are a Claude agent, built on Anthropic's Claude Agent SDK.` and HTTP 200 without it.
+  The paragraph alone reproduced the refusal; reducing output tokens did not. OAuth, project
+  discovery and short compatible requests succeeded on the same account. This establishes a
+  request-specific refusal in that measurement, not Google's internal policy or every account's
+  quota. Related independent reports: [OpenCodex #2899](https://github.com/lidge-jun/opencodex/issues/2899),
+  [Magpie #666](https://github.com/yetone/magpie/issues/666).
+  The SDK paragraph alone does not distinguish refusal from exhaustion: SDK clients send it on
+  every request, and Google can use the same generic 429 for real limits. `prompt-refusal.ts`
+  checks the outbound paragraph, exact generic `RESOURCE_EXHAUSTED` JSON, and absence of a
+  retry header or nonempty error details. The adapter additionally requires a **fresh successful
+  usage snapshot for the attempted account and project**, with quota remaining in both the 5h
+  and weekly windows of the requested model's known quota group (Gemini or Claude/GPT).
+  Evidence expires after five minutes or a bucket's reset time, and a failed refresh invalidates
+  it even when the dashboard retains old values. Missing, malformed, ambiguous, stale or exhausted
+  evidence follows ordinary 429 cooldown/account rotation. This is a cache-only check; it does
+  not probe quota per request. Group-level quota is supporting evidence, not proof about every
+  model or concurrent request; unknown groups/models are not classified.
+  With that evidence the adapter leaves the prompt intact and returns a distinct **unwritten**
+  `prompt-incompatible` outcome, without cooling the account or trying the prompt on its peers.
+  Before any response bytes, the proxy tries the same request once on the first usable configured
+  route fallback other than the attempted provider/model pair. Each attempt starts from the
+  original request and applies the target's own model, effort and translation. Another model on
+  the same provider is eligible; no fallback chain or unconfigured provider is tried. An absent
+  usable fallback, or a second prompt refusal, produces the explanatory `400 invalid_request_error`.
+  Other fallback errors keep their normal handling. A successful fallback's request record names
+  the actual responder and retains the initial upstream 429/refusal in its note, without marking
+  the successful turn as refused. A terminal refusal records `refusal: prompt-incompatible`.
+  Another compatible request can still use the primary account immediately. The message makes
+  no claim that changing accounts cannot help: only one account was measured.
+  This is error handling, not a workaround that makes Google accept the SDK prompt. HTTP-200
+  error frames were not part of this live reproduction and retain the existing stream handling;
+  no fallback can replace an answer once response bytes have been sent.
 - Session id and prompt cache. The real client puts a stable per-conversation id at
   `request.sessionId` so provider-side replay can associate a signature with the call that made
   it; instability loses it (`google-antigravity-wire.ts:62-88`). We derive it from the router's
