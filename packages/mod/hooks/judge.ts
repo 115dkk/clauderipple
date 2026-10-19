@@ -5,15 +5,26 @@ import type { Lang } from './i18n.ts'
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
-export const EFFORT_JUDGE_SYSTEM = `Choose the cheapest reasoning effort that can do this work well. This is a coding agent able to inspect files, run commands, and edit code, not merely answer a chat question.
-Assess work volume, uncertainty, and the cost of mistakes, not message length. A short choice approving a build inherits the size of that build. Corrections and steering retain at least the running effort; closing remarks need little effort. "Think hard" or thorough reasoning requires at least high; an explicit quick answer calls for low.
-Low and medium are only for turns that need no judgment: low for chit-chat, thanks, or a direct answer needing no inspection; medium for one fully specified, low-risk step the user spelled out (run this command, rename this). Anything that asks the agent to decide, explain why, review, verify, debug, plan, delegate, or change more than one thing needs at least high; most coding-agent turns are high. xhigh is for unusually difficult investigation, and max only for the hardest open-ended problems. Consider the current model's strength.
+// "xhigh for unusually difficult investigation, max only for the hardest open-ended problems" left
+// a medium..max range at medium and high: 10-13..10-17 ran ~9,000 Opus requests with no max and 91
+// xhigh, and Jev gave an architecture redesign 2% max (2026-10-19). Above high is now named by
+// what hinges on judgment, so important plans and failed attempts can reach it.
+export const EFFORT_JUDGE_SYSTEM = `Choose the reasoning effort this work deserves. This is a coding agent able to inspect files, run commands, and edit code, not merely answer a chat question.
+Assess work volume, uncertainty, and the cost of mistakes, not message length. A short choice approving a build inherits the size of that build. Closing remarks need little effort. "Think hard" or thorough reasoning requires at least high; an explicit quick answer calls for low.
+Low and medium are only for turns that need no judgment: low for chit-chat, thanks, or a direct answer needing no inspection; medium for one fully specified, low-risk step the user spelled out (run this command, rename this). Ordinary coding that asks the agent to decide, explain why, review, verify, debug with a known direction, delegate, or change more than one thing is high.
+Go above high when the outcome hinges on judgment rather than labor. xhigh: debugging whose cause is unknown, changes across interacting modules, or planning a feature. max: decisions that shape the product or system (architecture, an important plan or strategy, a design meant to last), work where a wrong call risks security, money, or data loss, and problems that earlier attempts in this conversation failed to solve. Not every plan is max; a small or routine plan is high or xhigh.
+When the user says the previous attempt failed, is wrong, or still does not work, choose at least one level above the running effort. Other corrections and steering keep at least the running effort. Consider the current model's strength.
 Return only JSON {"effort":"low|medium|high|xhigh|max","sure":0.0,"why":"short reason"}. Confidence is between zero and one. The reason uses the user's language and at most six words.`
 
 /** A terse continuation usually carries no new scope; answers to questions are handled separately. */
 export function isShortFollowUp(text: string): boolean {
   const trimmed = text.trim()
   return trimmed.length > 0 && trimmed.length <= 12 && trimmed.split(/\s+/).length <= 2
+}
+
+/** "Still broken" is short but asks for more thought, so it is judged rather than inheriting the effort that failed. */
+export function looksLikeRetry(text: string): boolean {
+  return /안\s*[돼되]|다시|틀렸|아직|여전|그대로|실패|\bstill\b|\bagain\b|\bwrong\b|\bbroken\b|n['’]?t work|\bfail/i.test(text)
 }
 
 export function looksLikeQuestion(assistantTail: string): boolean {
@@ -28,7 +39,7 @@ export function shouldJudge(input: {
   if (!input.auto || !['composer', 'bridge', 'sdk'].includes(input.origin) || (!input.text.trim() && !input.attachments?.length) || input.hostCommand) return false
   if (input.modelId !== undefined && !isCacheSafeModel(input.modelId)) return false
   const followup = input.current && input.current.by !== 'manual' && !input.text.trim().startsWith('/') &&
-    !input.attachments?.length && isShortFollowUp(input.text) && !looksLikeQuestion(input.assistantTail ?? '')
+    !input.attachments?.length && isShortFollowUp(input.text) && !looksLikeRetry(input.text) && !looksLikeQuestion(input.assistantTail ?? '')
   return !followup
 }
 
@@ -110,11 +121,11 @@ function looseVerdictObject(text: string): Record<string, unknown> | undefined {
 }
 
 const effortCriteria = {
-  low: 'Small direct work with little uncertainty or planning.',
-  medium: 'Ordinary bounded coding with a few inspections or edits.',
-  high: 'Substantial multi-step coding or debugging where mistakes matter.',
-  xhigh: 'Difficult extended investigation with interacting constraints.',
-  max: 'Exceptional open-ended research or the hardest reasoning problems.',
+  low: 'Chit-chat, thanks, or a direct answer needing no inspection.',
+  medium: 'One fully specified, low-risk step the user spelled out.',
+  high: 'Ordinary coding: implement, fix, review, or debug with a known direction.',
+  xhigh: 'Debugging with an unknown cause, changes across interacting modules, or planning a feature.',
+  max: 'Product or architecture decisions, important plans or strategy, security or data-loss risk, or a problem earlier attempts failed to solve.',
 }
 // Read with the brief, the old wording sent 49 of 64 delegated tasks to deep, against 19 from their
 // one-line descriptions alone: a brief's warnings ("do not restart", "read-only", "no guessing")

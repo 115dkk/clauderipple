@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { DEFAULTS } from '../../packages/mod/hooks/settings.ts'
-import { EFFORT_JUDGE_SYSTEM, isShortFollowUp, looksLikeQuestion, shouldJudge, judgeContext,
+import { EFFORT_JUDGE_SYSTEM, isShortFollowUp, looksLikeQuestion, looksLikeRetry, shouldJudge, judgeContext,
   parseEffortVerdict, verdictObject, jevEffortRequest, jevWorkerRequest, parseJevEffort, parseJevWorker,
   jevUsage, jevFailure, parseJevKey, tipped, bounded, capped, finalEffort, isCacheSafeModel } from '../../packages/mod/hooks/judge.ts'
 import type { JudgeInput, Pick } from '../../packages/mod/types/index.d.ts'
@@ -39,6 +39,17 @@ test('short answers only skip when they can retain a nonmanual pick without miss
   assert.equal(shouldJudge({ ...base, current: { ...pick, by: 'manual' } }), true)
   assert.equal(shouldJudge({ ...base, attachments: [{ type: 'image' }] }), true)
   assert.equal(shouldJudge({ ...base, text: '/skill' }), true)
+})
+
+test('a short "still broken" is judged, so a failed attempt can climb above the effort that failed', () => {
+  const base = { origin: 'sdk', auto: true, current: pick, assistantTail: 'Fixed the handler.' }
+  for (const text of ['여전히 안 돼', '안되는데', '다시', 'still broken', 'wrong again', "doesn't work"]) {
+    assert.equal(looksLikeRetry(text), true, text)
+    assert.equal(shouldJudge({ ...base, text }), true, text)
+  }
+  for (const text of ['ok', '계속', 'B', 'go now']) assert.equal(looksLikeRetry(text), false, text)
+  assert.ok(EFFORT_JUDGE_SYSTEM.includes('at least one level above the running effort'))
+  assert.ok(EFFORT_JUDGE_SYSTEM.includes('an important plan or strategy'))
 })
 
 test('judge context preserves limited latest excerpts and attachment counts', () => {
