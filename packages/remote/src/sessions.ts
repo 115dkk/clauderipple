@@ -214,6 +214,11 @@ export function nextAttention(current: Attention | null, from: SessionState, to:
   return current;
 }
 
+/** Mac sessions the host asks the router about for the first time in one desktop poll. */
+const FIRST_SIGHTS_PER_POLL = 4;
+/** The SDK's model key without the `@effort` a routed model carries. */
+const windowKey = (model: string): string => model.replace(/@[^@]*$/, "");
+
 export class Sessions {
   private opts: SessionsOptions;
   private records = new Map<string, SessionRecord>();
@@ -224,6 +229,14 @@ export class Sessions {
   private lastCommands: string[] = [];
   private figuresAt = new Map<string, number>();
   private lastFigures = new Map<string, string>();
+  /** model → the context window the SDK reported for it (`modelUsage`), learned from host sessions and
+   * reused for Mac sessions on the same model, which never report one. Kept in `context-windows.json`. */
+  private windows = new Map<string, number>();
+  private windowsFile: string;
+  /** Mac sessions with no record here: the latest figures read, put back into the snapshot a phone reads. */
+  private desktopFigures = new Map<string, Figures>();
+  /** Mac session → whether a turn was running at the last poll; absent until the session is first seen. */
+  private macTurns = new Map<string, boolean>();
   private creating = new Map<string, Promise<string>>();
   private handingOff = new Map<string, { messages: SdkUserMessage[] }>();
   private shuttingDown = false;
@@ -336,6 +349,10 @@ export class Sessions {
     this.now = opts.now ?? Date.now;
     this.file = path.join(opts.dir, "sessions.json");
     this.listFile = path.join(opts.dir, "list-state.json");
+    this.windowsFile = path.join(opts.dir, "context-windows.json");
+    try {
+      for (const [model, window] of Object.entries(readJson<Record<string, unknown>>(this.windowsFile) ?? {})) if (typeof window === "number" && window > 0) this.windows.set(model, window);
+    } catch { /* a damaged file only means the windows are learned again */ }
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
@@ -346,7 +363,7 @@ export class Sessions {
     }) : null;
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       ...(this.sidebar ? { sidebarIds: () => new Set(this.sidebar!.read().sessions.keys()) } : {}),
-      projects: opts.desktopProjects, now: this.now, summarize, ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
+      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
       // desktop app, are hidden; any other one may be open in the app and must stay reachable
@@ -426,6 +443,47 @@ export class Sessions {
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
       this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
     }
+    this.pollMacFigures(sessions);
+  }
+
+  /**
+   * The mod's figures for Claude app sessions, which no SDK query of ours drives: once when a session
+   * is first seen, at most every 15 s while its turn runs, and once more when the turn ends. The
+   * first sights are spread over polls so a host start does not ask the router about every old session at once.
+   */
+  private pollMacFigures(sessions: SessionSummary[]): void {
+    if (!this.desktop) return;
+    const seen = new Set<string>();
+    let firstSights = 0;
+    for (const s of sessions) {
+      const record = this.records.get(s.id);
+      if (record ? !record.desktopBridge : s.origin !== "desktop") continue;
+      if (s.archived || !s.model) continue;
+      seen.add(s.id);
+      const running = s.state === "running" || s.state === "waiting" || s.state === "starting";
+      const wasRunning = this.macTurns.get(s.id);
+      if (wasRunning === undefined && firstSights >= FIRST_SIGHTS_PER_POLL) continue;
+      this.macTurns.set(s.id, running);
+      if (wasRunning === undefined) firstSights++;
+      if (wasRunning === undefined || wasRunning || running) {
+        const forced = wasRunning === undefined || (wasRunning && !running);
+        void this.readFigures(s.id, record?.sdkSessionId ?? s.id, s.model, record?.contextWindow ?? null, forced, true);
+      }
+    }
+    for (const id of this.macTurns.keys()) {
+      if (seen.has(id)) continue;
+      this.macTurns.delete(id);
+      if (this.records.has(id)) continue;
+      this.figuresAt.delete(id); this.lastFigures.delete(id); this.desktopFigures.delete(id);
+    }
+  }
+
+  private learnWindow(model: string, window: number): void {
+    const key = windowKey(model);
+    if (!(window > 0) || this.windows.get(key) === window) return;
+    this.windows.set(key, window);
+    try { writeFileAtomic(this.windowsFile, JSON.stringify(Object.fromEntries(this.windows))); }
+    catch (error) { (this.opts.log ?? console.error)(`[context windows] not saved: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
   /**
@@ -1405,6 +1463,7 @@ export class Sessions {
         const usage = msg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
         const win = usage ? Object.values(usage).map((u) => u.contextWindow ?? 0).find((w) => w > 0) : undefined;
         if (win) r.contextWindow = win;
+        for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
         const error = ok ? undefined : String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error")).slice(0, 500);
         this.append(r.id, { kind: "result", ok, ...(error ? { error } : {}), ms: typeof msg.duration_ms === "number" ? msg.duration_ms : this.now() - live.turnStart, turns: typeof msg.num_turns === "number" ? msg.num_turns : 0 });
         this.setState(r, live.pendingTurns > 0 ? "running" : ok ? "idle" : "error");
@@ -1503,15 +1562,30 @@ export class Sessions {
   /** The mod's figures as events in the same log, so a phone that reconnects sees what it missed. Throttled to one read per 15 s while a turn runs. */
   private async refreshFigures(r: SessionRecord, force: boolean): Promise<void> {
     if (!r.sdkSessionId) return;
-    const last = this.figuresAt.get(r.id) ?? 0;
+    await this.readFigures(r.id, r.sdkSessionId, r.model, r.contextWindow, force, false);
+  }
+
+  /**
+   * One read of the router's records for a session, appended when it changed. `id` is the host's id
+   * for it, `cliId` the id Claude Code sends the router (`X-Claude-Code-Session-Id`). A Mac session
+   * has no window of its own, so the one learned for its model stands; none known stays null.
+   * `mac`: a session the router has no record of yet (an old one, from before it started) says nothing.
+   */
+  private async readFigures(id: string, cliId: string, model: string, contextWindow: number | null, force: boolean, mac: boolean): Promise<void> {
+    const last = this.figuresAt.get(id) ?? 0;
     if (!force && this.now() - last < 15_000) return;
-    this.figuresAt.set(r.id, this.now());
+    this.figuresAt.set(id, this.now());
     let figures: Figures;
-    try { figures = await this.opts.router.figures(r.sdkSessionId, r.model, r.contextWindow); } catch { return; }
+    try { figures = await this.opts.router.figures(cliId, model, contextWindow ?? this.windows.get(windowKey(model)) ?? null); } catch { return; }
+    if (mac && !figures.route && !figures.effort && !figures.workers.length) return;
     const { at: _at, ...rest } = figures;
     const key = JSON.stringify(rest);
-    if (this.lastFigures.get(r.id) === key) return;
-    this.lastFigures.set(r.id, key);
-    this.append(r.id, { kind: "figures", figures });
+    if (this.lastFigures.get(id) === key) return;
+    this.lastFigures.set(id, key);
+    if (this.records.has(id)) { this.append(id, { kind: "figures", figures }); return; }
+    // No record, so no live log: the snapshot a phone is reading gets the event now, and every later snapshot is built with it.
+    this.desktopFigures.set(id, figures);
+    const snapshot = this.desktop?.snapshot(id);
+    if (snapshot) this.opts.onEvent(id, snapshot.append({ kind: "figures", figures }));
   }
 }

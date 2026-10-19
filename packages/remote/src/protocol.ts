@@ -120,6 +120,40 @@ export interface Figures {
   fiveHourResetAt: number | null;
   /** model → requests, for every model other than the session's own that served this session */
   workers: { model: string; provider: string; requests: number }[];
+  /** last request's input tokens and the window they are read against; absent on older hosts */
+  contextTokens?: number | null;
+  contextWindow?: number | null;
+  /** where the session's latest main-model request went; null when the router has none; absent on older hosts */
+  route?: { model: string; provider: string; ok: boolean; status: number | null } | null;
+  at: number;
+}
+
+/** One provider window from the router's /api/limits, as the desktop band's limits row shows it. */
+export interface RippleLimit {
+  /** router provider name, e.g. "anthropic", "chatgpt"; `title` is what the band heads it with */
+  provider: string;
+  title: string;
+  /** account label when a provider pools several; absent for one */
+  account?: string;
+  kind: "five_hour" | "seven_day" | "scoped" | "window";
+  /** the router's own label for scoped/other windows; null for five_hour/seven_day */
+  label: string | null;
+  usedPct: number;
+  windowMinutes: number | null;
+  /** epoch ms; null when the router gave none */
+  resetAt: number | null;
+}
+
+/** What the ClaudeRipple mod is set to on this Mac, host-wide (it is not per session). */
+export interface RippleStatus {
+  /** the active operating mode from mod settings; null when none is active */
+  mode: { id: string; name: string; since: number | null } | null;
+  /** automatic effort on, and the range it is held in */
+  effortAuto: boolean;
+  effortFloor: Effort | null;
+  effortCeiling: Effort | null;
+  /** every provider window with a reset still ahead, Claude first */
+  limits: RippleLimit[];
   at: number;
 }
 
@@ -173,7 +207,9 @@ export interface FolderEntry { path: string; name: string; lastUsed?: number; mo
  * `desktopProblem`: why sends, approvals and live state for Claude app (Mac) sessions cannot work
  * right now — this Mac's Claude login, in the host's words — absent when they can.
  */
-export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string }
+export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string;
+  /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
+  ripple?: RippleStatus }
 
 // ---- client → host --------------------------------------------------------------------
 

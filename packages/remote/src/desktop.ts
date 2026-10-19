@@ -7,7 +7,7 @@ import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import { processCommands } from "./processes.ts";
 import { messageContent, sendUserFileImages, type ImageSink } from "./images.ts";
-import { PERMISSION_MODES, type BackgroundTask, type EventBody, type PermissionMode, type SessionSummary, type ToolCall } from "./protocol.ts";
+import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type SessionSummary, type ToolCall } from "./protocol.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
@@ -65,6 +65,9 @@ export interface DesktopOptions {
   processes?: () => string;
   registry?: () => Map<string, DesktopProcess>;
   sidebarIds?: () => Set<string>;
+  /** The latest figures the host read for a session. A snapshot is rebuilt from the transcript
+   * whenever it grows, so the figures are put back at the end of every rebuild. */
+  figures?: (id: string) => Figures | undefined;
 }
 
 /** Match session flags, not UUIDs appearing in a prompt or another flag's value. */
@@ -658,6 +661,8 @@ export class DesktopSessions {
         if (info.ended) log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
       }
       importing = false;
+      const figures = this.opts.figures?.(id);
+      if (figures) log.append({ kind: "figures", figures });
       return log;
     } catch (error) { log.close(); throw error; }
     finally { fs.closeSync(fd); }
@@ -782,6 +787,17 @@ export class DesktopSessions {
       this.imported.set(id, { size: stat.size, mtime: stat.mtimeMs, log, dir });
       return log;
     } finally { fs.closeSync(fd); }
+  }
+
+  /** The snapshot a phone may be reading, only while it still matches the transcript. Never builds one. */
+  snapshot(id: string): EventLog | null {
+    const cached = this.imported.get(id);
+    const source = this.sources.get(id);
+    if (!cached || !source) return null;
+    try {
+      const stat = fs.statSync(source.file);
+      return cached.size === stat.size && cached.mtime === stat.mtimeMs ? cached.log : null;
+    } catch { return null; }
   }
 
   private dispose(cached: Imported): void { cached.log.close(); fs.rmSync(cached.dir, { recursive: true, force: true }); }

@@ -12,10 +12,11 @@ import { browse, makeFolder, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
 import { gitInfo } from "./worktree.ts";
 import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
-import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp } from "./protocol.ts";
+import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
 import { SEEN_MS, VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
 import { OutcomeUnknownError } from "./receipts.ts";
+import { rippleStatus } from "./router.ts";
 import type { RouterClient } from "./router.ts";
 import type { Sessions } from "./sessions.ts";
 
@@ -23,6 +24,8 @@ import type { Sessions } from "./sessions.ts";
 const HIGH_WATER = 1024 * 1024;
 /** A reconnecting client further behind than this many frames gets the tail instead of a replay. */
 const CATCHUP_FRAMES = 4;
+/** `/api/limits` makes the router read each provider's quota; once a minute is plenty for percentages. */
+const LIMITS_MS = 60_000;
 const BLOB_CHUNK_CHARS = 60_000;
 
 const TYPES: Record<string, string> = {
@@ -46,7 +49,8 @@ export interface ServerOptions {
   token: string;
   webDir: string;
   sessions: Sessions;
-  router: Pick<RouterClient, "models" | "status">;
+  /** `limits` and `modSettings` feed `HostInfo.ripple`; a router without them just leaves it out. */
+  router: Pick<RouterClient, "models" | "status"> & Partial<Pick<RouterClient, "limits" | "modSettings">>;
   hostName: string;
   version: string;
   recentCli: () => Promise<RecentSource[]>;
@@ -123,6 +127,8 @@ export class HostServer {
   private models: { at: number; data: ProviderGroup[] } | null = null;
   private uploads = new Map<string, { data: string; at: number }>();
   private hostInfo: HostInfo;
+  private limitsBody: unknown = null;
+  private limitsAt = -Infinity;
   private timers: ReturnType<typeof setInterval>[] = [];
   private sessionsTimer: ReturnType<typeof setTimeout> | null = null;
   /** session → last time a connected phone looked at it (attach, or visible presence while
@@ -511,8 +517,28 @@ export class HostServer {
     const st = await this.opts.router.status();
     const next: HostInfo = { ...this.hostInfo, routerOk: st.ok, ...(st.problem ? { routerProblem: st.problem } : {}) };
     if (!st.problem) delete next.routerProblem;
-    if (next.routerOk === this.hostInfo.routerOk && next.routerProblem === this.hostInfo.routerProblem) return;
+    const ripple = st.ok ? await this.readRipple() : undefined;
+    if (ripple) next.ripple = ripple; else delete next.ripple;
+    // `at` moves on every read; only a change a phone could see is worth a message.
+    const shown = (r: RippleStatus | undefined): string => JSON.stringify(r && { ...r, at: 0 });
+    if (next.routerOk === this.hostInfo.routerOk && next.routerProblem === this.hostInfo.routerProblem && shown(next.ripple) === shown(this.hostInfo.ripple)) return;
     this.setHostInfo(next);
+  }
+
+  /**
+   * The mod's mode and effort range every check, the provider limits at most once a minute (the
+   * router asks each provider's own API for them). A failed limits read keeps the last good body;
+   * without mod settings there is nothing to say and `ripple` is left out.
+   */
+  private async readRipple(): Promise<RippleStatus | undefined> {
+    const { limits, modSettings } = this.opts.router;
+    if (!limits || !modSettings) return undefined;
+    const now = (this.opts.now ?? Date.now)();
+    if (now - this.limitsAt >= LIMITS_MS) {
+      this.limitsAt = now;
+      try { this.limitsBody = await limits.call(this.opts.router); } catch { /* keep the last good body */ }
+    }
+    try { return rippleStatus(this.limitsBody, await modSettings.call(this.opts.router), now); } catch { return undefined; }
   }
 
   /** Sessions says Claude app sessions became unreachable (the Mac's login) or reachable again. */

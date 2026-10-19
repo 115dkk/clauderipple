@@ -711,3 +711,52 @@ test("browse req lists only visible subdirectories in sorted order", { timeout: 
   assert.equal(result.truncated, false);
   assert.deepEqual(result.entries, ["Alpha", "folder2", "folder10", "zeta"].map(name => ({ name, path: path.join(dir, name) })));
 });
+
+test("host info carries the mod's status, refreshes limits once a minute, and reaches connected phones when it changes", { timeout: 6000 }, async t => {
+  let clock = 1_792_380_000_000;
+  const calls = { limits: 0, settings: 0 };
+  let activeMode = "m1", failLimits = false, routerOk = true;
+  const limits = () => ({ providers: [{ provider: "anthropic", type: "anthropic", title: "Claude", accounts: [{ account: 0, windows: [{ kind: "five_hour", used_percent: 38, window_minutes: 300, reset_at: Math.round((clock + 600_000) / 1000) }] }] }] });
+  const modRouter = {
+    ...router,
+    status: async () => ({ ok: routerOk, ...(routerOk ? {} : { problem: "down" }), proxyEnv: {} }),
+    limits: async () => { calls.limits++; if (failLimits) throw new Error("limits down"); return limits(); },
+    modSettings: async () => { calls.settings++; return { settings: { activeMode, effortAuto: true, floor: "low", ceiling: "max", modes: [{ id: "m1", name: "Saver" }, { id: "m2", name: "Maxing" }] } }; },
+  };
+  const f = await fixture(t, { router: modRouter, now: () => clock });
+  const check = () => (f.server as unknown as { checkRouter(): Promise<void> }).checkRouter();
+  await check();
+  const peer = await f.auth();
+  const ready = peer.received.find(frame => frame.msg.t === "ready")!.msg as Extract<HostMsg, { t: "ready" }>;
+  assert.equal(ready.host.ripple?.mode?.name, "Saver", "ready carries the status");
+  assert.deepEqual(ready.host.ripple?.limits.map(l => [l.provider, l.usedPct]), [["anthropic", 38]]);
+
+  const limitsBefore = calls.limits;
+  clock += 20_000; await check(); await peer.barrier();
+  assert.equal(calls.limits, limitsBefore, "limits are not read again inside a minute");
+  assert.equal(peer.frames.filter(frame => frame.msg.t === "host").length, 0, "nothing changed, so nothing is sent (the `at` moving is not a change)");
+
+  activeMode = "m2";
+  clock += 20_000; await check();
+  const changed = (await peer.take("host")).msg;
+  assert.equal(changed.host.ripple?.mode?.name, "Maxing", "a changed mode reaches a connected phone without reconnecting");
+
+  clock += 61_000; failLimits = true; await check();
+  assert.equal(calls.limits, limitsBefore + 1, "a minute on, limits are read again");
+  assert.equal(peer.frames.filter(frame => frame.msg.t === "host").length, 0, "a failed read keeps the last good limits, so nothing changes");
+  await peer.barrier();
+  clock += 600_000; await check();
+  const expired = (await peer.take("host")).msg;
+  assert.deepEqual(expired.host.ripple?.limits, [], "the kept window's reset has passed by now and it is dropped");
+
+  routerOk = false; await check();
+  const down = (await peer.take("host")).msg;
+  assert.equal(down.host.routerOk, false);
+  assert.equal("ripple" in down.host, false, "with the router down there is no status to show");
+});
+
+test("the context window the SDK reports for a model is kept for Mac sessions on that model", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  await f.create();
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.dir, "context-windows.json"), "utf8")), { x: 1000 });
+});
