@@ -2600,8 +2600,8 @@ function openProviderForm(options) {
 //
 // The mod's settings live in the router (GET/PUT /api/mod-settings); the ⚙ panel in the bar edits
 // the same object. As in System Settings a change applies itself: it is saved after a short pause
-// with the revision it was made on. A 409 means another surface saved first — its settings are
-// shown and the change made here is dropped, rather than quietly overwriting theirs.
+// with the revision it was made on. A 409 means another surface saved first: the fields changed
+// here are laid over its settings and sent again, so neither side's change is lost.
 
 const MOD_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 // The band's parts the person can turn off (`hide`), then the ones it shows only when turned on
@@ -2634,10 +2634,13 @@ const MOD_DEFAULTS = {
   swampAt: 50, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
 
-let modState = { settings: null, revision: 0, options: null, retiredNote: false };
+// `base` is the router's copy `settings` was edited from: what differs between them is this page's own change.
+let modState = { settings: null, base: null, revision: 0, options: null, retiredNote: false };
 let modSaveTimer = null;
 let modSaving = false;
 let modSaveAgain = false;
+// Counts the router's answers to saves, so a read that went out before one does not undo it.
+let modWrites = 0;
 
 /**
  * The router hands back the mod's full normalized settings; this only fills what an older router
@@ -2656,6 +2659,42 @@ function modNormalize(raw) {
     providers: { ...(value.providers || {}) },
     hide: Array.isArray(value.hide) ? value.hide : clone(MOD_DEFAULTS.hide),
   };
+}
+
+/**
+ * The fields changed from `before` to `after`, found as the mod's settingsChanges finds them: values
+ * and arrays whole, objects field by field, and a rule whose mode changed replaced whole.
+ */
+function modChanges(before, after, path = []) {
+  if (JSON.stringify(before) === JSON.stringify(after)) return [];
+  if (after === undefined) return [{ path, remove: true }];
+  const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (isObject(before) && isObject(after) && before.mode === after.mode) {
+    return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) => modChanges(before[key], after[key], [...path, key]));
+  }
+  return [{ path, value: after }];
+}
+function modApply(base, changes) {
+  const result = clone(base);
+  for (const change of changes) {
+    const key = change.path.at(-1);
+    if (key === undefined) continue;
+    let parent = result;
+    for (const step of change.path.slice(0, -1)) {
+      if (!parent[step] || typeof parent[step] !== "object" || Array.isArray(parent[step])) parent[step] = {};
+      parent = parent[step];
+    }
+    if (change.remove) delete parent[key];
+    else parent[key] = clone(change.value);
+  }
+  return result;
+}
+/** Take the router's copy, keeping on it what was changed here and is not saved yet (unless `drop`). */
+function modAdopt(snapshot, drop) {
+  const changes = !drop && modState.base && modState.settings ? modChanges(modState.base, modState.settings) : [];
+  modState.base = modNormalize(snapshot.settings);
+  modState.settings = modApply(modState.base, changes);
+  modState.revision = Number(snapshot.revision) || 0;
 }
 
 function modCap(text) { return text ? text.charAt(0).toLocaleUpperCase() + text.slice(1) : text; }
@@ -2745,42 +2784,57 @@ async function saveMod() {
   if (modSaving) { modSaveAgain = true; return; }
   modSaving = true;
   try {
-    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, settings: modState.settings, revision: modState.revision }) });
-    modState.revision = Number(out.revision) || modState.revision + 1;
-    // The router's copy is the normalized one; take it unless a newer change is already waiting.
-    if (out.settings && !modSaveTimer && !modSaveAgain) { modState.settings = modNormalize(out.settings); modRefresh(); }
-    modStatus(t("mod.saved"));
-  } catch (error) {
-    if (error.status === 409 && error.body && "settings" in error.body) {
-      clearTimeout(modSaveTimer);
-      modSaveTimer = null;
-      modSaveAgain = false;
-      modState.settings = modNormalize(error.body.settings);
-      modState.revision = Number(error.body.revision) || 0;
-      modRefresh();
-      modStatus(t("mod.conflict"), true);
-      toast(t("mod.conflict"), true);
-    } else {
-      modStatus(`${t("common.saveFailed")} ${error.message}`, true);
+    // Another surface saving first (the bar's ⚙ panel, another tab of this page) costs this change
+    // nothing: it is laid over their settings and sent again. Only a router that keeps moving under
+    // it, three times running, gets the change dropped.
+    for (let attempt = 1; ; attempt++) {
+      const sent = clone(modState.settings);
+      let out;
+      try {
+        out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, settings: sent, revision: modState.revision }) });
+      } catch (error) {
+        if (error.status !== 409 || !error.body || !("settings" in error.body)) throw error;
+        modWrites++;
+        if (attempt < 3) { modAdopt(error.body); modRefresh(); continue; }
+        clearTimeout(modSaveTimer);
+        modSaveTimer = null;
+        modSaveAgain = false;
+        modAdopt(error.body, true);
+        modRefresh();
+        modStatus(t("mod.conflict"), true);
+        toast(t("mod.conflict"), true);
+        return;
+      }
+      modWrites++;
+      modState.revision = Number(out.revision) || modState.revision + 1;
+      // The router's copy is the normalized one; take it unless a newer change is already waiting.
+      if (out.settings && !modSaveTimer && !modSaveAgain) { modAdopt(out, true); modRefresh(); }
+      else modState.base = sent;
+      modStatus(t("mod.saved"));
+      return;
     }
+  } catch (error) {
+    modStatus(`${t("common.saveFailed")} ${error.message}`, true);
   } finally {
     modSaving = false;
     if (modSaveAgain) { modSaveAgain = false; void saveMod(); }
   }
 }
 async function loadMod() {
-  // A change still on its way would be overwritten by what the router holds now.
+  // A save on its way brings back the router's copy itself.
   if (modSaveTimer || modSaving) return;
   let retired = false;
+  const writes = modWrites;
   const [settingsResult, optionsResult] = await Promise.allSettled([api("/api/mod-settings"), api("/api/mod-options")]);
   if (settingsResult.status === "rejected") {
     if (!modState.settings) {
       $("#mod-content").replaceChildren(modSection(null, [el("div", { class: "cell-note bad-text", text: `${t("common.loadFailed")} ${settingsResult.reason.message}` })]));
       return;
     }
-  } else {
-    modState.settings = modNormalize(settingsResult.value.settings);
-    modState.revision = Number(settingsResult.value.revision) || 0;
+  } else if (!modSaving && modWrites === writes) {
+    // A change made while this read was out stays on top of what it brought. One already saved, or
+    // being saved, has the router's newer answer from that save instead.
+    modAdopt(settingsResult.value);
     retired = settingsResult.value.legacy === true;
   }
   modState.options = optionsResult.status === "fulfilled" ? optionsResult.value : null;
@@ -2790,6 +2844,10 @@ async function loadMod() {
   // The settings came back without Auto and the field rules; saving them as they are keeps the note to this once.
   if (retired) modPatch({});
 }
+// Back on this page after a while: the bar's ⚙ panel or another tab may have saved meanwhile.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && $("#view-mod").classList.contains("active")) void loadMod();
+});
 function modRefresh() {
   if (!modState.settings) return;
   renderModNotice();
