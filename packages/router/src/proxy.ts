@@ -788,7 +788,8 @@ export class Proxy {
     // limited for the next hour is skipped rather than rediscovered once per request. A distinct
     // prompt refusal can also select one fallback below, but only before any response is written.
     let route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
-    const originalJson = json;
+    /** The request before any target rewrote it, kept only when a Google target may hand the turn back. */
+    let pristine: typeof json | undefined;
     const source = typeof model === "string" ? model : "-";
     record = {
       ...record,
@@ -844,258 +845,260 @@ export class Proxy {
     // Re-enter only for the one unwritten Google prompt refusal. Each target sees the original
     // request, not the primary's rewritten effort, stripped thread, or translated body.
     for (;;) {
-    if (route && originalJson) {
-      json = structuredClone(originalJson);
-      record = { ...record, target: route.model, provider: route.provider };
-      delete record.effort;
-      const configured = cfg.providers[route.provider];
-      if (!configured) {
-        finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
-        res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "clauderipple_config", message: `unknown provider ${route.provider}` } }));
-        return;
-      }
-      // A model may speak another wire than the rest of its provider: one subscription serving
-      // several protocols is one provider, and this is where the model's own shape is folded in so
-      // the branches below pick the adapter it actually needs.
-      const provider = providerFor(configured, route.model);
-      rewriteBody(json, route, cfg.effortClamp);
-      if (provider.type === "chatgpt") {
-        const td = threadDecision(json);
-        if (td === "refuse") {
-          const out = JSON.stringify(THREAD_UNSUPPORTED);
-          res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
+      if (pristine) json = structuredClone(pristine);
+      if (route && json) {
+        record = { ...record, target: route.model, provider: route.provider };
+        delete record.effort;
+        const configured = cfg.providers[route.provider];
+        if (!configured) {
+          finish("500", 0, `unknown provider ${route.provider}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unknown-provider" });
+          res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "clauderipple_config", message: `unknown provider ${route.provider}` } }));
           return;
         }
-        if (td === "strip") stripThreadFields(json);
-        const routeEffort = effortOf(json);
-        if (routeEffort) record.effort = routeEffort;
-        tag = `CHATGPT ${route.tag} effort=${routeEffort ?? "-"}`;
-        try {
-          // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
-          // here fails over once every account is out (chooseTarget asks the adapter).
-          const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
-          if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
-        } catch (e) {
-          finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
-          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
-          else res.destroy();
-        }
-        return;
-      }
-      if (provider.type === "openai-compatible") {
-        const td = threadDecision(json);
-        if (td === "refuse") {
-          const out = JSON.stringify(THREAD_UNSUPPORTED);
-          res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
-          return;
-        }
-        if (td === "strip") stripThreadFields(json);
-        const routeEffort = effortOf(json);
-        if (routeEffort) record.effort = routeEffort;
-        tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
-        try {
-          const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
-          this.recordOutcome(route.provider, o.status);
-          if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
-        } catch (e) {
-          this.recordOutcome(route.provider, 0);
-          finish("-", 0, `openai error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
-          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
-          else res.destroy();
-        }
-        return;
-      }
-      if (provider.type === "google") {
-        // Google holds no server-side thread either, so a `continue` is refused as it is for the
-        // other translated providers; the CLI resends the turn with the full history.
-        const td = threadDecision(json);
-        if (td === "refuse") {
-          const out = JSON.stringify(THREAD_UNSUPPORTED);
-          res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
-          return;
-        }
-        if (td === "strip") stripThreadFields(json);
-        const routeEffort = effortOf(json);
-        if (routeEffort) record.effort = routeEffort;
-        tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
-        try {
-          const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
-          if (o.kind === "prompt-incompatible") {
-            const alreadyRetried = promptRefusalSeen;
-            promptRefusalSeen = true;
-            if (res.destroyed || res.writableEnded || res.headersSent) {
-              finish("0", 0, "client closed before prompt-refusal fallback", true);
-              if (!res.destroyed && !res.writableEnded) res.destroy();
-              return;
-            }
-            const fallback = !alreadyRetried && resolved
-              ? this.promptFallback(resolved, route, cfg) : null;
-            if (fallback) {
-              promptFallbackNote = `${o.note}; fallback ${route.provider}/${route.model} → ${fallback.provider}/${fallback.model}`;
-              log.info(`FAILOVER ${promptFallbackNote}`);
-              route = fallback;
-              continue;
-            }
-            // Refusal is request-specific: neither cool nor mark success for this provider.
-            res.writeHead(400, { "content-type": "application/json" }).end(o.errorBody);
-            finish("400", Buffer.byteLength(o.errorBody), o.note, true, { refusal: "prompt-incompatible" });
+        // A model may speak another wire than the rest of its provider: one subscription serving
+        // several protocols is one provider, and this is where the model's own shape is folded in so
+        // the branches below pick the adapter it actually needs.
+        const provider = providerFor(configured, route.model);
+        // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
+        if (!pristine && provider.type === "google") pristine = structuredClone(json);
+        rewriteBody(json, route, cfg.effortClamp);
+        if (provider.type === "chatgpt") {
+          const td = threadDecision(json);
+          if (td === "refuse") {
+            const out = JSON.stringify(THREAD_UNSUPPORTED);
+            res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+            finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
             return;
           }
-          this.recordOutcome(route.provider, o.status);
-          if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
-        } catch (e) {
-          this.recordOutcome(route.provider, 0);
-          finish("-", 0, `google error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
-          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
-          else res.destroy();
+          if (td === "strip") stripThreadFields(json);
+          const routeEffort = effortOf(json);
+          if (routeEffort) record.effort = routeEffort;
+          tag = `CHATGPT ${route.tag} effort=${routeEffort ?? "-"}`;
+          try {
+            // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
+            // here fails over once every account is out (chooseTarget asks the adapter).
+            const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
+            if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+            finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
+          } catch (e) {
+            finish("-", 0, `chatgpt error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+            if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+            else res.destroy();
+          }
+          return;
         }
-        return;
-      }
-      if (provider.type === "grok") {
-        // The chat proxy keeps no server-side thread, so a `continue` is refused like on the other
-        // translated providers and the CLI resends the turn with the full history.
-        const td = threadDecision(json);
-        if (td === "refuse") {
+        if (provider.type === "openai-compatible") {
+          const td = threadDecision(json);
+          if (td === "refuse") {
+            const out = JSON.stringify(THREAD_UNSUPPORTED);
+            res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+            finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
+            return;
+          }
+          if (td === "strip") stripThreadFields(json);
+          const routeEffort = effortOf(json);
+          if (routeEffort) record.effort = routeEffort;
+          tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
+          try {
+            const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+            this.recordOutcome(route.provider, o.status);
+            if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+            finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
+          } catch (e) {
+            this.recordOutcome(route.provider, 0);
+            finish("-", 0, `openai error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+            if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+            else res.destroy();
+          }
+          return;
+        }
+        if (provider.type === "google") {
+          // Google holds no server-side thread either, so a `continue` is refused as it is for the
+          // other translated providers; the CLI resends the turn with the full history.
+          const td = threadDecision(json);
+          if (td === "refuse") {
+            const out = JSON.stringify(THREAD_UNSUPPORTED);
+            res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+            finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
+            return;
+          }
+          if (td === "strip") stripThreadFields(json);
+          const routeEffort = effortOf(json);
+          if (routeEffort) record.effort = routeEffort;
+          tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
+          try {
+            const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+            if (o.kind === "prompt-incompatible") {
+              const alreadyRetried = promptRefusalSeen;
+              promptRefusalSeen = true;
+              if (res.destroyed || res.writableEnded || res.headersSent) {
+                finish("0", 0, "client closed before prompt-refusal fallback", true);
+                if (!res.destroyed && !res.writableEnded) res.destroy();
+                return;
+              }
+              const fallback = !alreadyRetried && resolved
+                ? this.promptFallback(resolved, route, cfg) : null;
+              if (fallback) {
+                promptFallbackNote = `${o.note}; fallback ${route.provider}/${route.model} → ${fallback.provider}/${fallback.model}`;
+                log.info(`FAILOVER ${promptFallbackNote}`);
+                route = fallback;
+                continue;
+              }
+              // Refusal is request-specific: neither cool nor mark success for this provider.
+              res.writeHead(400, { "content-type": "application/json" }).end(o.errorBody);
+              finish("400", Buffer.byteLength(o.errorBody), o.note, true, { refusal: "prompt-incompatible" });
+              return;
+            }
+            this.recordOutcome(route.provider, o.status);
+            if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+            finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
+          } catch (e) {
+            this.recordOutcome(route.provider, 0);
+            finish("-", 0, `google error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+            if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+            else res.destroy();
+          }
+          return;
+        }
+        if (provider.type === "grok") {
+          // The chat proxy keeps no server-side thread, so a `continue` is refused like on the other
+          // translated providers and the CLI resends the turn with the full history.
+          const td = threadDecision(json);
+          if (td === "refuse") {
+            const out = JSON.stringify(THREAD_UNSUPPORTED);
+            res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+            finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+            return;
+          }
+          if (td === "strip") stripThreadFields(json);
+          record = { ...record, target: route.model, provider: route.provider };
+          const routeEffort = effortOf(json);
+          if (routeEffort) record.effort = routeEffort;
+          tag = `GROK ${route.tag} effort=${routeEffort ?? "-"}`;
+          try {
+            const o = await this.grok(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+            this.recordOutcome(route.provider, o.status);
+            finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
+          } catch (e) {
+            this.recordOutcome(route.provider, 0);
+            finish("-", 0, `grok error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
+            if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
+            else res.destroy();
+          }
+          return;
+        }
+        if (provider.type === "anthropic") {
+          if (!provider.accountPool || provider.auth !== "claude-code") {
+            finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
+            res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
+            return;
+          }
+          // Native Messages need no translation. Only authentication changes, so server-side threads,
+          // prompt caching, beta features and the client's exact tool contract remain first-party.
+          const credentials = await this.claudeAccounts.credentials();
+          if (credentials.length === 0) {
+            const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "ClaudeRipple: no usable Claude account; sign in or reauthenticate an account" } });
+            res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+            finish("401", out.length, "no usable Claude account", true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "no-account" });
+            return;
+          }
+          dropForeignThinking(json);
+          body = Buffer.from(JSON.stringify(json));
+          chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+          const using = chosen ?? credentials[0]!;
+          chosen = using;
+          penalised = { provider: route.provider, id: using.id };
+          target = {
+            protocol: "https:",
+            host: cfg.upstream,
+            port: this.deps.upstreamPort ?? 443,
+            agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"),
+            extraHeaders: withClientBetas(using.headers, req.headers["anthropic-beta"]),
+            dropClientAuth: true,
+            dropHeaders: new Set(credentials.flatMap((credential) => Object.keys(credential.headers).map((name) => name.toLowerCase()))),
+            dropHeaderPrefixes: ["anthropic-client-", "x-stainless-"],
+          };
+          const routeEffort = effortOf(json);
+          if (routeEffort) record.effort = routeEffort;
+          tag = `CLAUDE ${route.tag} account=${using.ownerId?.slice(0, 8) ?? "current"}`;
+        } else {
+        // An Anthropic-shaped endpoint keeps no server-side thread either, so a `continue` is refused
+        // here as it is for the translated providers. sanitizeForCompatible used to strip the field
+        // and forward the rest, which is only the delta: DeepSeek (via Bailian) received two orphan
+        // tool_results with no task and answered that none had been given (measured 2026-09-24, CLI
+        // 2.1.280). Refused, the CLI resends the turn with the full history.
+        if (threadDecision(json) === "refuse") {
           const out = JSON.stringify(THREAD_UNSUPPORTED);
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true });
+          finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
           return;
         }
-        if (td === "strip") stripThreadFields(json);
-        record = { ...record, target: route.model, provider: route.provider };
-        const routeEffort = effortOf(json);
-        if (routeEffort) record.effort = routeEffort;
-        tag = `GROK ${route.tag} effort=${routeEffort ?? "-"}`;
-        try {
-          const o = await this.grok(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
-          this.recordOutcome(route.provider, o.status);
-          finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
-        } catch (e) {
-          this.recordOutcome(route.provider, 0);
-          finish("-", 0, `grok error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
-          if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
-          else res.destroy();
-        }
-        return;
-      }
-      if (provider.type === "anthropic") {
-        if (!provider.accountPool || provider.auth !== "claude-code") {
-          finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
-          res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
-          return;
-        }
-        // Native Messages need no translation. Only authentication changes, so server-side threads,
-        // prompt caching, beta features and the client's exact tool contract remain first-party.
-        const credentials = await this.claudeAccounts.credentials();
-        if (credentials.length === 0) {
-          const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "ClaudeRipple: no usable Claude account; sign in or reauthenticate an account" } });
-          res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-          finish("401", out.length, "no usable Claude account", true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "no-account" });
-          return;
-        }
-        dropForeignThinking(json);
+        const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
+        const routeModel = route.model;
+        const modelEffortLevels = provider.models?.find((entry) => entry.id === routeModel)?.effortLevels;
+        compatCaps = resolveCompatibleCaps(
+          preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined,
+          modelEffortLevels === undefined ? provider.caps : { ...provider.caps, effortLevels: modelEffortLevels },
+        );
+        const sanitized = sanitizeForCompatible(json, compatCaps);
+        json = sanitized.json;
+        compatChanges = sanitized.changes;
+        // The upstream would otherwise read Claude Code's own system prompt and answer that it is
+        // Claude. After sanitizing, so the effort named is the one the provider actually receives.
+        applyIdentityToAnthropicBody(json, {
+          model: route.model,
+          effort: effortOf(json),
+          identity: provider.identity,
+          instructionsAppend: provider.instructionsAppend,
+        });
         body = Buffer.from(JSON.stringify(json));
+        const u = new URL(provider.url);
+        const protocol = u.protocol === "https:" ? "https:" : "http:";
+        // Which credential answers this turn. The conversation keeps the one it is on while that one
+        // is healthy, because moving it moves the prompt cache with it. Every credential cooling or
+        // quarantined leaves `chosen` null, and the request goes out on the configured headers so the
+        // provider — not us — gets to say no.
+        const credentials = this.credentialsOf(route.provider, provider);
+        // The same key the prompt cache is keyed on. `metadata.user_id` alone is one value for every
+        // conversation a user has, so using it raw would drag all of them onto one credential at once
+        // — the opposite of what stickiness is for (see conversationKey and ARCHITECTURE §4).
         chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+        // Nothing usable means every credential is cooling, and the turn still has to go somewhere:
+        // the first one, so the request carries real credentials rather than none, and so the answer
+        // is charged to the credential that actually produced it.
         const using = chosen ?? credentials[0]!;
         chosen = using;
         penalised = { provider: route.provider, id: using.id };
         target = {
-          protocol: "https:",
-          host: cfg.upstream,
-          port: this.deps.upstreamPort ?? 443,
-          agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"),
-          extraHeaders: withClientBetas(using.headers, req.headers["anthropic-beta"]),
+          protocol,
+          host: u.hostname,
+          port: Number(u.port) || (protocol === "https:" ? 443 : 80),
+          agent: this.agentFor(route.provider, protocol),
+          // The credential wins over the session header: they are different names in practice, but a
+          // vendor that reused one would mean the request going out unauthenticated.
+          extraHeaders: provider.sessionHeader
+            ? { [provider.sessionHeader]: conversationKey(json as AnthropicRequest), ...using.headers }
+            : using.headers,
           dropClientAuth: true,
-          dropHeaders: new Set(credentials.flatMap((credential) => Object.keys(credential.headers).map((name) => name.toLowerCase()))),
-          dropHeaderPrefixes: ["anthropic-client-", "x-stainless-"],
+          // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
+          // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
+          // vendor's website, which answered 200 with HTML (measured 2026-09-13 with OpenRouter).
+          basePath: u.pathname.replace(/\/+$/, ""),
         };
         const routeEffort = effortOf(json);
         if (routeEffort) record.effort = routeEffort;
-        tag = `CLAUDE ${route.tag} account=${using.ownerId?.slice(0, 8) ?? "current"}`;
+        tag = `${route.provider.toUpperCase()} ${route.tag} effort=${routeEffort ?? "-"}`;
+        }
+      } else if (isApiHost) {
+        target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
+        tag = `PASS ${typeof model === "string" ? model : "-"}`;
+        // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
+        if (json && dropForeignThinking(json) > 0) body = Buffer.from(JSON.stringify(json));
       } else {
-      // An Anthropic-shaped endpoint keeps no server-side thread either, so a `continue` is refused
-      // here as it is for the translated providers. sanitizeForCompatible used to strip the field
-      // and forward the rest, which is only the delta: DeepSeek (via Bailian) received two orphan
-      // tool_results with no task and answered that none had been given (measured 2026-09-24, CLI
-      // 2.1.280). Refused, the CLI resends the turn with the full history.
-      if (threadDecision(json) === "refuse") {
-        const out = JSON.stringify(THREAD_UNSUPPORTED);
-        res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
-        finish("400", out.length, "thread continue refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
-        return;
+        target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
+        tag = `WEB ${reqHost}`;
       }
-      const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
-      const routeModel = route.model;
-      const modelEffortLevels = provider.models?.find((entry) => entry.id === routeModel)?.effortLevels;
-      compatCaps = resolveCompatibleCaps(
-        preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking, ...(preset.serverTools ? { serverTools: true } : {}) } : undefined,
-        modelEffortLevels === undefined ? provider.caps : { ...provider.caps, effortLevels: modelEffortLevels },
-      );
-      const sanitized = sanitizeForCompatible(json, compatCaps);
-      json = sanitized.json;
-      compatChanges = sanitized.changes;
-      // The upstream would otherwise read Claude Code's own system prompt and answer that it is
-      // Claude. After sanitizing, so the effort named is the one the provider actually receives.
-      applyIdentityToAnthropicBody(json, {
-        model: route.model,
-        effort: effortOf(json),
-        identity: provider.identity,
-        instructionsAppend: provider.instructionsAppend,
-      });
-      body = Buffer.from(JSON.stringify(json));
-      const u = new URL(provider.url);
-      const protocol = u.protocol === "https:" ? "https:" : "http:";
-      // Which credential answers this turn. The conversation keeps the one it is on while that one
-      // is healthy, because moving it moves the prompt cache with it. Every credential cooling or
-      // quarantined leaves `chosen` null, and the request goes out on the configured headers so the
-      // provider — not us — gets to say no.
-      const credentials = this.credentialsOf(route.provider, provider);
-      // The same key the prompt cache is keyed on. `metadata.user_id` alone is one value for every
-      // conversation a user has, so using it raw would drag all of them onto one credential at once
-      // — the opposite of what stickiness is for (see conversationKey and ARCHITECTURE §4).
-      chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
-      // Nothing usable means every credential is cooling, and the turn still has to go somewhere:
-      // the first one, so the request carries real credentials rather than none, and so the answer
-      // is charged to the credential that actually produced it.
-      const using = chosen ?? credentials[0]!;
-      chosen = using;
-      penalised = { provider: route.provider, id: using.id };
-      target = {
-        protocol,
-        host: u.hostname,
-        port: Number(u.port) || (protocol === "https:" ? 443 : 80),
-        agent: this.agentFor(route.provider, protocol),
-        // The credential wins over the session header: they are different names in practice, but a
-        // vendor that reused one would mean the request going out unauthenticated.
-        extraHeaders: provider.sessionHeader
-          ? { [provider.sessionHeader]: conversationKey(json as AnthropicRequest), ...using.headers }
-          : using.headers,
-        dropClientAuth: true,
-        // Providers mount their Anthropic-compatible API under a path (DeepSeek /anthropic, OpenRouter /api,
-        // Qwen /apps/anthropic): the CLI's /v1/messages is appended to it. Dropping it sent requests to the
-        // vendor's website, which answered 200 with HTML (measured 2026-09-13 with OpenRouter).
-        basePath: u.pathname.replace(/\/+$/, ""),
-      };
-      const routeEffort = effortOf(json);
-      if (routeEffort) record.effort = routeEffort;
-      tag = `${route.provider.toUpperCase()} ${route.tag} effort=${routeEffort ?? "-"}`;
-      }
-    } else if (isApiHost) {
-      target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
-      tag = `PASS ${typeof model === "string" ? model : "-"}`;
-      // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
-      if (json && dropForeignThinking(json) > 0) body = Buffer.from(JSON.stringify(json));
-    } else {
-      target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
-      tag = `WEB ${reqHost}`;
-    }
-    break;
+      break;
     }
 
     if (json && typeof json.service_tier === "string") record.requestedTier = json.service_tier;
