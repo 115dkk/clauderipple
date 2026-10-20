@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://apps.apple.com/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <a href="https://apps.apple.com/jp/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
   <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-%E6%BA%96%E5%82%99%E4%B8%AD-666666?style=for-the-badge&logo=googleplay&logoColor=white">
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-%E5%8F%82%E5%8A%A0%E3%81%99%E3%82%8B-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
@@ -214,7 +214,7 @@ Claudeデスクトップアプリで作業を始めて、ノートPCを閉じ、
   リレーサーバーもプッシュサービスも読めません。アカウント登録・広告・トラッキングなし、無料。
 
 コンピュータにClaudeRippleをインストールし、ダッシュボードの**スマートフォン**画面でQRコードを
-一度スキャンするだけです。iPhone：[App Store](https://apps.apple.com/app/id6823063731)。
+一度スキャンするだけです。iPhone：[App Store](https://apps.apple.com/jp/app/id6823063731)。
 Android：Google Playのクローズドテスト中で、[Discord](https://discord.gg/R8ZgGSNHjw)で申請を
 受け付けています。Claudeアプリのセッション連携はmacOSで利用でき、コンピュータなしでも
 アプリ内のデモですぐ試せます。

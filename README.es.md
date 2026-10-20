@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://apps.apple.com/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Descargar-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <a href="https://apps.apple.com/es/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Descargar-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
   <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Pr%C3%B3ximamente-666666?style=for-the-badge&logo=googleplay&logoColor=white">
   <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-Unirse-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
 </p>
@@ -380,7 +380,7 @@ sesiones, sea cual sea el modelo que las ejecute, en tu teléfono, y no te desco
   leerlos. Sin cuenta, sin anuncios, sin rastreo, gratis.
 
 Instala ClaudeRipple en tu computadora, abre la vista **Teléfono** del panel y escanea el
-código QR una vez. iPhone: [App Store](https://apps.apple.com/app/id6823063731). Android:
+código QR una vez. iPhone: [App Store](https://apps.apple.com/es/app/id6823063731). Android:
 en prueba cerrada en Google Play; pide acceso en
 [Discord](https://discord.gg/R8ZgGSNHjw). Las sesiones de la app de Claude funcionan en
 macOS; la app incluye una demo para probarla sin computadora.
