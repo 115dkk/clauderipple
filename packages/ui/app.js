@@ -1417,8 +1417,6 @@ function macTetherCard(tt, setupOk) {
     side = !tt.lastSwitch.ok ? t("mac.switch.failed", { time }) : t(tt.lastSwitch.to === "hotspot" ? "mac.switch.toHotspot" : "mac.switch.toWifi", { time });
   }
   const enabled = modSwitch("mac-tether", tt.enabled, t("mac.tether.switch"), (on) => void macPut({ tether: { enabled: on } }));
-  const pin = modSwitch("mac-pin", tt.pinned, t("mac.pin.label"), (on) => void macPut({ tether: { pin: on } }));
-  $("input", pin).disabled = !tt.enabled && !tt.pinned;
   const name = tt.hotspotSsid || "";
   const rename = el("button", { class: "btn secondary compact", type: "button", "data-key": "mac-rename", text: t(name ? "mac.ssid.change" : "mac.ssid.set") });
   rename.disabled = macSetup.running || !setupOk;
@@ -1426,8 +1424,9 @@ function macTetherCard(tt, setupOk) {
   const rows = [
     cell(el("label", { class: "cell-label", text: t("mac.tether.switch") }), enabled, t("mac.tether.switchHelp")),
     macStateRow(tone, t(`mac.net.${network}`), I18N.en[`mac.tstate.${tt.state}`] ? t(`mac.tstate.${tt.state}`) : tt.state, side),
+    // No "keep this network" pin here: beside the switch above it read as the same thing twice
+    // (2026-10-20). The API keeps `pin` for the CLI.
     cell(t("mac.ssid.label"), [el("span", { class: name ? "mac-ssid" : "mac-ssid empty", text: name || t("mac.ssid.none") }), rename]),
-    cell(el("span", { class: "cell-label", text: t("mac.pin.label") }), pin, t("mac.pin.help")),
   ];
   let notice = null;
   // Before setup the card above says what to do; the router's own setup hint would only repeat it.
