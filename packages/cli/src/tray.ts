@@ -65,10 +65,13 @@ export function trayEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv
  */
 export async function startTray(options: { detached?: boolean } = {}): Promise<TrayStart> {
   const current = runtime();
+  // Started by hand (the app icon, `clauderipple tray`), the window opens; started by the logon
+  // supervisor in the foreground, it stays in the tray. The login item launches Electron directly.
+  const env = { ...trayEnv(), ...((options.detached ?? true) ? { CLAUDERIPPLE_APP_SHOW: "1" } : {}) };
   if (current.packaged) {
     // The packaged app IS the tray: relaunching its own binary with no script is what opens it.
     // Our own CLI runs under ELECTRON_RUN_AS_NODE here, and inheriting it would relaunch Node.
-    const child = spawn(current.node, [], { detached: true, stdio: "ignore", env: trayEnv() });
+    const child = spawn(current.node, [], { detached: true, stdio: "ignore", env });
     child.unref();
     return { ok: true, message: "✓ tray started" };
   }
@@ -92,7 +95,7 @@ export async function startTray(options: { detached?: boolean } = {}): Promise<T
     detached: options.detached ?? true,
     stdio: ["ignore", out, out],
     // Electron would otherwise re-enter as a plain Node process, since that is how the CLI runs.
-    env: trayEnv(),
+    env,
   });
   fs.closeSync(out);
   if (options.detached ?? true) child.unref();

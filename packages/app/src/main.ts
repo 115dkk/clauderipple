@@ -1300,6 +1300,12 @@ app.whenReady().then(() => {
   tray = new Tray(icon("down"));
   tray.on("click", () => tray?.popUpContextMenu());
   render();
+  // Opened from its icon (the CLI sets this; a login launch does not): show the window, not just a
+  // tray icon the person may never notice. Taken out so an update's relaunch does not inherit it.
+  if (process.env.CLAUDERIPPLE_APP_SHOW === "1") {
+    delete process.env.CLAUDERIPPLE_APP_SHOW;
+    showWindow("health");
+  }
   void poll();
   setInterval(() => void poll(), POLL_MS);
   // What the health poll cannot see (the direct mode, a supervisor gone missing) comes from doctor.
