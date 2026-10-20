@@ -313,11 +313,16 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
   const groups = (await google.usage?.(name)) ?? {};
   const kept = statuses.filter((a) => a.state !== "paused" && a.state !== "needs-login");
   const at = Date.now();
+  // The third-party (Claude and GPT) windows only when this provider has such a model selected:
+  // beside Gemini's own they made four figures, two of them a pool nobody here spends (2026-10-20).
+  const provider = deps.config().providers[name];
+  const models = provider && "models" in provider && Array.isArray(provider.models) ? provider.models : [];
+  const thirdParty = models.some((m) => /^(claude-|gpt-oss(-|$))/i.test(typeof m === "string" ? m : m.id));
   const out: LimitsAccount[] = [];
   kept.forEach((account, index) => {
     const quotient = groups[account.id];
     if (!quotient || !quotient.length) return;
-    const windows: LimitsWindow[] = googleWindowsFromGroups(quotient);
+    const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped");
     if (windows.length) out.push({ account: index, windows, at });
   });
   return out;
