@@ -14,6 +14,8 @@
 //   PATCH/DELETE /api/google-accounts/:id rename, pause/resume, clear a cooldown; remove
 //   GET  /api/update    whether a newer version is published, and how this copy was installed
 //   POST /api/update    start `clauderipple update` in the background (it restarts this router)
+//   GET  /api/power     lid-closed awake + hotspot failover state (power.ts)
+//   PUT  /api/power     change awake mode/until, tether on/off (saved), pin (in memory)
 //   GET  /*           static files from packages/ui (the GUI itself)
 
 import crypto from "node:crypto";
@@ -72,6 +74,7 @@ import { GROK_AUTH_HINT, grokAuthPath, grokHome, readGrokToken, sharedGrokAuth }
 import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS, GROK_FALLBACK_MODELS, grokModelsFromListing } from "./providers/grok/catalog.ts";
 import { GROK_WARNING, grokHeaders } from "./providers/grok/index.ts";
 import type { TunnelStatus } from "./remote-tunnel.ts";
+import { parsePowerChange, persistPowerChange, type PowerApi } from "./power.ts";
 
 const MAX_BODY = 1024 * 1024;
 /** `/api/image` carries reference images inline, so it gets more room than a config save. */
@@ -186,6 +189,8 @@ export type AdminDeps = {
    * `POST /api/remote/reload` re-reads `remote.hosts` from the config (after `remote add|remove`).
    */
   remote?: { status: () => TunnelStatus[]; reload: () => TunnelStatus[] };
+  /** Lid-closed awake and hotspot failover (`GET|PUT /api/power`). Absent: 501. */
+  power?: PowerApi;
 };
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -1841,6 +1846,26 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (pathname === "/api/remote/reload" && method === "POST") {
         if (!deps.remote) { sendJson(res, 501, { error: "remote tunnels not available" }); return; }
         sendJson(res, 200, { hosts: deps.remote.reload() });
+        return;
+      }
+      if (pathname === "/api/power" && (method === "GET" || method === "PUT")) {
+        if (!deps.power) { sendJson(res, 501, { error: "power control not available" }); return; }
+        if (method === "GET") { sendJson(res, 200, deps.power.status()); return; }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse((await readBody(req, 4096)).toString("utf8"));
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        const change = parsePowerChange(parsed);
+        if (typeof change === "string") { sendJson(res, 400, { error: change }); return; }
+        if (persistPowerChange(deps.configFile, change)) {
+          deps.log.info(`admin: power saved (${JSON.stringify({ ...(change.awake ? { awake: change.awake } : {}), ...(change.tether?.enabled !== undefined ? { tether: { enabled: change.tether.enabled } } : {}) })})`);
+        }
+        if (change.tether?.pin !== undefined) deps.power.pin(change.tether.pin);
+        await deps.power.poke();
+        sendJson(res, 200, deps.power.status());
         return;
       }
       // Liveness is answering at all; readiness is 200 only when a request can actually go through.

@@ -217,6 +217,9 @@ export type Stats = {
   started: number;
   completed: number;
   failed: number;
+  /** Epoch ms of the last model call that started / finished here; the awake and tether logic read them. */
+  lastMessageStartedAt?: number;
+  lastMessageEndedAt?: number;
 };
 
 export class Proxy {
@@ -657,7 +660,10 @@ export class Proxy {
     // The CLI sends `/v1/messages?beta=true`: compare the pathname, not the raw path.
     const pathname = path.split("?")[0] ?? path;
     const isLoggedRequest = pathname === "/v1/messages" || pathname === "/v1/messages/count_tokens";
-    if (isMessages) this.stats.messagesInFlight++;
+    if (isMessages) {
+      this.stats.messagesInFlight++;
+      this.stats.lastMessageStartedAt = t0;
+    }
     let tag = "PASS";
     let finished = false;
     let record: Omit<RequestRecord, "at" | "id" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = {
@@ -680,7 +686,10 @@ export class Proxy {
       finished = true;
       if (promptFallbackNote) note = [promptFallbackNote, note].filter(Boolean).join("; ");
       this.stats.inFlight--;
-      if (isMessages) this.stats.messagesInFlight--;
+      if (isMessages) {
+        this.stats.messagesInFlight--;
+        this.stats.lastMessageEndedAt = Date.now();
+      }
       if (failed) this.stats.failed++;
       else this.stats.completed++;
       const ms = Date.now() - t0;

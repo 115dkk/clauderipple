@@ -1571,3 +1571,102 @@ overloads and interrupted streams remain retryable.
 Both streaming and non-streaming early-rejection paths are covered by adapter
 tests. The client still needs to compact its history or otherwise reduce input;
 this mapping does not increase the backend's context limit.
+
+## 8. Lid-closed awake and hotspot failover (2026-10-20)
+
+**What.** For the owner who drives the Mac from Ripple Remote while away: keep a MacBook running
+with its lid closed while Claude works, and when Wi-Fi drops or has no internet move to the iPhone
+Personal Hotspot, then back to a known Wi-Fi when one works again. macOS only; both are off until
+configured and are no-ops elsewhere (`/api/power` says `unsupported`). Replaces the Insomnia app
+(krishhgg/Insomnia), which `awake setup` removes.
+
+**Why the router owns it.** It is already supervised (launchd KeepAlive) and it is the only process
+that knows whether a model call is in flight (`Stats.messagesInFlight`, `lastMessageStartedAt/EndedAt`
+on the proxy and the OpenAI ingress). Code: `packages/router/src/awake.ts`, `tether.ts`, `power.ts`
+(admin contract); CLI `packages/cli/src/awake-setup.ts`, `power.ts`.
+
+**Lid-closed awake.** The only mechanism that holds a closed MacBook awake on battery or without an
+external display is `pmset -a disablesleep 1` as root: undocumented (absent from `man pmset`), but it
+is what Insomnia, MacMiniMode, Sleepless, Capsomnia and WiFiGuard all run; `caffeinate`/IOPMAssertion
+cannot do it (KeepingYouAwake README, "Does it work … with a closed lid? No."). Modes: `off`;
+`working` = a model call in flight or one in the last 10 min; `on` (optionally `until`). Evaluated
+every 15s. Forced off by: battery below `batteryFloorPercent` (default 20) on battery (`pmset -g
+batt`), a recorded thermal warning (`pmset -g therm`; measured on macOS 27.0.1 with nothing recorded:
+"No thermal warning level has been recorded" — unrecognised output is reported `unknown` and not
+acted on, a failed read is), and any error reading either. Releasing it with the lid closed and
+`AppleClamshellCausesSleep = Yes` (`ioreg`, no privilege) runs `pmset sleepnow` (unprivileged first,
+then through the rule): clearing the bit alone leaves a bagged Mac running (MacMiniMode does the
+same). With an external display (closed-display mode) CausesSleep reads No and nothing is slept.
+`<home>/awake.json` journals `{applied, since, reason, lastActivityAt}`; the journal is written
+before setting the bit and after clearing it. A bit that reads cleared while the journal says set
+(reboot, another tool) is re-applied if still wanted.
+
+**Exit ordering (decided).** The router's exit does **not** clear the bit, in any mode. A restart is
+the common exit; clearing then setting again ~1s later is exactly the off-then-on window in which a
+closed lid could sleep mid-work, and the new process would otherwise not know Claude was working a
+minute ago. So the drain path only writes the journal (with the last activity time), and the
+successor's first tick — run right after `listen()` — keeps or clears the bit from it. A router
+stopped for good has no successor: `clauderipple stop`, `uninstall` and `awake off` (router down) clear
+a journaled bit with `sudo -n`.
+
+**Privilege.** `clauderipple awake setup [--ssid NAME]` installs `/etc/sudoers.d/clauderipple`
+(0440 root:wheel) allowing this user exactly `pmset -a disablesleep 0|1`, `pmset sleepnow` and, with a
+hotspot name, `networksetup -setairportnetwork <wifi dev> <NAME>`. The rule is per user, not per app
+(Insomnia's README says the same of its own). The text is built in the CLI, written to a temp file,
+and installed by **one** `osascript … do shell script … with administrator privileges` (macOS's own
+password dialog): install it root-owned as `.clauderipple.new` (sudo ignores names with a dot), check
+its SHA-256 against the text built, `visudo -cf` it, move it into place, `visudo -c` the whole config
+(removing ours if that fails). The hotspot name is held to `[A-Za-z0-9 ._'’-]`, ≤32 bytes, single
+spaces — nothing sudoers, fnmatch or a shell reads specially — and never enters the script. Only
+after ours is in place does the same script clear Insomnia's bit and delete `/etc/sudoers.d/insomnia`;
+then, unprivileged: `launchctl bootout gui/<uid>/com.insomnia.backstop`, its plist and
+`~/Applications/Insomnia.app` to the Trash (`/usr/bin/trash`, else `~/.Trash`), `killall Insomnia`,
+`security delete-generic-password -s insomnia-hotspot`. `awake setup --remove` turns both features
+off and removes the rule. The router only ever runs `sudo -n` (never prompts); a refusal reads
+`setup: needs-setup`. A Developer ID–signed privileged helper (SMAppService) would be the cleaner
+boundary but needs a stable signature the ad-hoc app does not have (WakeBee README; research §3.2).
+
+**Hotspot failover.** Every `probeEverySec` (10): HTTP GET bound to the Wi-Fi interface's IPv4
+(`localAddress`) to `captive.apple.com/hotspot-detect.html` (body `Success`) and
+`connectivitycheck.gstatic.com/generate_204` (204), 4s each; a round fails only if both fail; an
+outage is 3 failures in the last 5 rounds (wifihop's rule), so a 1s blip never switches. Not
+`NWPathMonitor`: "satisfied" is a local path assessment, and a router with a dead uplink or a captive
+portal reads satisfied — the reason Insomnia never failed over in that state. On the hotspot is read
+from the address (iPhone hotspots hand out 172.20.10.0/28), not the SSID, which macOS redacts without
+Location (measured: `ipconfig getsummary en0` → `SSID : <redacted>`). Failover (on Wi-Fi or no
+address, outage): wait at most 30s for an in-flight call, then `sudo -n networksetup
+-setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). networksetup
+reports failure on stdout and may exit 0, so its text decides: "Could not find network" →
+`hotspot-not-visible` with a hint to open Personal Hotspot on the iPhone once (an idle iPhone stops
+advertising — Apple mchl7403f0ee; waking it needs entitlement-gated APIs). Return (on the hotspot):
+every `returnEverySec` (180), only with no call in flight and none started in the last 20s,
+disassociate via JXA as the console user (wifihop's exact call: `ObjC.import("CoreWLAN");
+$.CWWiFiClient.sharedWiFiClient.interface.disassociate`) so macOS auto-joins the best known network;
+two good probes within 20s keep it; otherwise stay on (or rejoin) the hotspot and double the
+interval, up to 15 min. At most one switch per 60s. `tether.pin` (in memory, via the API) pauses all
+switching. Every decision is logged once, with its reason. "Ask to join hotspots: Automatic"
+(macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting lives in a root-only
+file (`com.apple.airport.preferences.plist`: permission denied, measured), so it is only hinted at.
+
+**Surfaces.** `GET /api/power` → `{ awake: { mode, applied, reason, setup, battery, thermal, lidClosed,
+until }, tether: { enabled, network, state, pinned, hotspotSsid, lastSwitch, lastProbe, hint } }`;
+`PUT /api/power` `{ awake?: { mode?, until?: ISO|null }, tether?: { enabled?, pin? } }` (mode, until
+and enabled are saved to config.json; pin is not; unknown fields are refused; the same cross-site
+guard as every admin write). Config: `awake: { mode, until?, batteryFloorPercent }`, `tether:
+{ enabled, hotspotSsid, probeEverySec, returnEverySec }`. CLI: `awake setup [--ssid] [--remove]`,
+`awake on|off|working [--until HH:MM]`, `tether on|off`, `power [--json]`.
+
+**Failure modes (designed against; not yet observed in this product).**
+- `disablesleep` is undocumented and could change in a future macOS: status reads the bit back
+  (`ioreg SleepDisabled`) every tick and re-applies on drift; never promise "never sleeps".
+- A closed Mac in a bag overheats (Apple 102336): the battery floor and thermal guard release it, and
+  release puts a closed lid to sleep. There is no session length cap.
+- The router cannot start at all (bad certs, exit 2 before `listen()`): a journaled bit stays set until
+  `clauderipple stop`/`awake off` or a reboot.
+- The hotspot is not broadcasting: reported with its hint, retried at most once a minute.
+- The hotspot name in config differs from the one in the rule: `sudo -n` refuses → `needs-setup`.
+
+Sources: research report 2026-10-20 (Insomnia install.sh/backstop.sh/NetworkFailover.swift and logs;
+MacMiniMode `Sources/daemon/main.swift`; wifihop script; WiFiGuard `Connectivity.swift`; Apple
+102282, 102336, 109321, mchl7403f0ee; Apple DTS forum 816619, 799718, 692709). Behavioural references
+only; no code was copied.

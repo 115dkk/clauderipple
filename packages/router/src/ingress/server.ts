@@ -87,6 +87,9 @@ export type IngressStats = {
   started: number;
   completed: number;
   failed: number;
+  /** Epoch ms of the last model call that started / finished here (see proxy.ts `Stats`). */
+  lastMessageStartedAt?: number;
+  lastMessageEndedAt?: number;
 };
 
 type Outcome = { status: number; bytes: number; usage?: RequestUsage; stopReason?: string; note?: string };
@@ -233,15 +236,21 @@ export class OpenAiIngress {
     const isCall = method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/chat/completions");
     this.stats.started++;
     this.stats.inFlight++;
-    if (isCall) this.stats.messagesInFlight++;
     const started = Date.now();
+    if (isCall) {
+      this.stats.messagesInFlight++;
+      this.stats.lastMessageStartedAt = started;
+    }
     let record: Omit<RequestRecord, "id" | "at" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = { kind: "messages", source: "-", target: "-", provider: "-", stream: false };
     let completed = false;
     const finish = (status: number, bytes: number, extra: Omit<Outcome, "status" | "bytes"> = {}): void => {
       if (completed) return;
       completed = true;
       this.stats.inFlight--;
-      if (isCall) this.stats.messagesInFlight--;
+      if (isCall) {
+        this.stats.messagesInFlight--;
+        this.stats.lastMessageEndedAt = Date.now();
+      }
       if (status >= 200 && status < 400) this.stats.completed++;
       else this.stats.failed++;
       const ms = Date.now() - started;

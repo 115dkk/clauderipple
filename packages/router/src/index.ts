@@ -9,7 +9,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src/codex.ts";
 import { ingressModels } from "./ingress/models.ts";
-import { ConfigStore, configPath, homeDir, terminateHosts } from "./config.ts";
+import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
+import { AwakeController, execRunner, type Activity } from "./awake.ts";
+import { TetherController } from "./tether.ts";
 import { defaultAgentDir, syncAgentFiles } from "./agents.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
@@ -101,6 +103,37 @@ allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name) });
 
+// Lid-closed awake and hotspot failover (macOS; both are no-ops elsewhere and off until configured).
+// They read Claude's activity from the two servers' counters. Started after listen(), below.
+const activity = (): Activity => {
+  const p = proxy.stats;
+  const i = ingress.stats;
+  const latest = (a?: number, b?: number): number | undefined => (a === undefined ? b : b === undefined ? a : Math.max(a, b));
+  const lastStartedAt = latest(p.lastMessageStartedAt, i.lastMessageStartedAt);
+  const lastEndedAt = latest(p.lastMessageEndedAt, i.lastMessageEndedAt);
+  return {
+    inFlight: p.messagesInFlight + i.messagesInFlight,
+    ...(lastStartedAt !== undefined ? { lastStartedAt } : {}),
+    ...(lastEndedAt !== undefined ? { lastEndedAt } : {}),
+  };
+};
+const powerRunner = execRunner();
+const awake = new AwakeController({
+  platform: process.platform,
+  run: powerRunner,
+  settings: () => awakeSettings(store.get()),
+  activity,
+  journalFile: path.join(home, "awake.json"),
+  log: { info: (m) => log!.info(m), warn: (m) => log!.warn(m) },
+});
+const tether = new TetherController({
+  platform: process.platform,
+  run: powerRunner,
+  settings: () => tetherSettings(store.get()),
+  activity,
+  log: { info: (m) => log!.info(m), warn: (m) => log!.warn(m) },
+});
+
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
 process.on("unhandledRejection", (e) => log!.error(`unhandled ${(e as Error)?.stack ?? e}`));
 const DRAIN_MS = 90_000; // new model calls are refused during drain, so this is the longest single call we wait for; `clauderipple restart` waits 120s
@@ -126,6 +159,11 @@ function beginDrain(reason: string): void {
     .then(() => {
       const left = proxy.stats.messagesInFlight + ingress.stats.messagesInFlight;
       if (left !== lastReported) log!.info(`drain complete, exiting (model calls still open: ${left})`);
+      // The sleep bit is left as it is (awake.ts header): the successor reconciles it within one
+      // tick, and the journal carries the working window across the restart.
+      tether.stop();
+      awake.stop();
+      awake.beforeExit();
       setTimeout(() => process.exit(0), 200).unref();
     });
 }
@@ -218,9 +256,20 @@ proxy
           return tunnels!.status();
         },
       },
+      power: {
+        status: () => ({ awake: awake.status(), tether: tether.status() }),
+        pin: (on) => tether.setPin(on),
+        poke: async () => {
+          tether.kick();
+          await awake.refresh();
+        },
+      },
     };
     const admin = await startAdmin(adminDeps);
     log!.info(`clauderipple admin GUI on http://127.0.0.1:${admin.port}/`);
+    // The first awake tick is the reconcile: a bit a previous process set is kept or cleared now.
+    void awake.start().catch((e: Error) => log!.warn(`awake: ${e.message}`));
+    tether.start();
     setImmediate(premintLeaves);
     // A minute in, once start-up traffic has settled: first the catalogue's context windows are
     // written into models already saved without one (a one-shot pass), then a few one-token requests

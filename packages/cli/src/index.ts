@@ -263,7 +263,7 @@ async function install(): Promise<void> {
   console.log("\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
 }
 
-function uninstall(): void {
+async function uninstall(): Promise<void> {
   const home = homeDir();
   const cfg = new ConfigStore(configPath()).get();
   // Stop the router before unregistering it. On macOS unloading the agent takes the process with
@@ -271,6 +271,8 @@ function uninstall(): void {
   // so --purge then fails with EPERM and leaves the home directory behind (measured 2026-09-16 in a
   // Windows 11 arm64 VM).
   if (stopAgent()) console.log("✓ router stopped");
+  // Before --purge can take the journal that says whether the router left sleep disabled.
+  await releaseHeldSleep("uninstalled");
   const removed = removeAgent();
   console.log(removed ? `✓ ${supervisorName()} removed (${agentDefinitionPath()})` : `✓ no ${supervisorName()} registered`);
   removeBundle(home);
@@ -531,6 +533,18 @@ async function recovery(): Promise<void> {
   }
 }
 
+/**
+ * A router that exits leaves the lid-closed sleep bit as it was, for its successor to reconcile
+ * (router awake.ts). When it is stopped for good there is no successor, so clear it here.
+ */
+async function releaseHeldSleep(reason: string): Promise<void> {
+  const { releaseAwake } = await import("./awake-setup.ts");
+  const { execRunner } = await import("../../router/src/awake.ts");
+  const r = await releaseAwake(execRunner(), homeDir(), reason);
+  if (r === "released") console.log("✓ sleep re-enabled (lid-closed awake was holding the Mac awake)");
+  if (r === "failed") console.log("✗ could not re-enable sleep: run `sudo pmset -a disablesleep 0`");
+}
+
 function help(): void {
   console.log(`clauderipple <command>
 
@@ -569,6 +583,13 @@ function help(): void {
   agent-title on|off|status
                     prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
   mod on|off|status show where each request went above the Claude Code prompt, and the request log in a pane (/ripple-log), via a Claude Code mod
+  awake setup [--ssid <hotspot name>] [--remove]
+                    macOS: allow ClaudeRipple to keep the Mac awake with the lid closed (and join that iPhone hotspot);
+                    asks for your password once in macOS's own dialog, and removes Insomnia if it is installed
+  awake on|off|working [--until HH:MM]
+                    working: awake while Claude works and 10 min after; on: always (until HH:MM); off: never
+  tether on|off     macOS: join the iPhone hotspot when Wi-Fi has no internet, and go back to Wi-Fi when a known one works
+  power [--json]    lid-closed awake and hotspot state
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
@@ -611,7 +632,7 @@ try {
       await install();
       break;
     case "uninstall":
-      uninstall();
+      await uninstall();
       break;
     case "status":
       await status();
@@ -632,6 +653,7 @@ try {
       break;
     case "stop":
       console.log(stopAgent() ? "stopped (run `clauderipple start` or `install` to bring it back)" : "stop failed (not loaded?)");
+      await releaseHeldSleep("router stopped");
       break;
     case "logs":
       logs();
@@ -762,6 +784,24 @@ try {
     case "image":
       await image();
       break;
+    case "power":
+    case "awake":
+    case "tether": {
+      const { powerCli, adminPowerCall } = await import("./power.ts");
+      const { defaultSetupDeps } = await import("./awake-setup.ts");
+      const { execRunner } = await import("../../router/src/awake.ts");
+      const run = execRunner();
+      process.exitCode = await powerCli(args, {
+        call: adminPowerCall(adminPort(new ConfigStore(configPath()).get())),
+        configFile: configPath(),
+        rippleHome: homeDir(),
+        run,
+        setupDeps: () => defaultSetupDeps(run, homeDir()),
+        print: (line) => console.log(line),
+        now: () => new Date(),
+      });
+      break;
+    }
     case "ui":
       ui();
       break;

@@ -412,7 +412,83 @@ export type Config = {
    * by `clauderipple remote add|remove`, which also sets up the remote side (remote-host.ts).
    */
   remote?: { hosts: { host: string; port: number }[] };
+  /**
+   * Keep a MacBook awake with its lid closed (awake.ts). Off unless set. Needs the one-time
+   * `clauderipple awake setup`, which installs a narrow sudoers rule for `pmset -a disablesleep`.
+   */
+  awake?: Partial<AwakeSettings>;
+  /** Fail over to the iPhone hotspot when Wi-Fi has no internet, and come back later (tether.ts). Off unless set. */
+  tether?: Partial<TetherSettings>;
 };
+
+export type AwakeMode = "off" | "working" | "on";
+export type AwakeSettings = {
+  /** off: never touch sleep. working: while model calls run and for 10 min after. on: always (until `until`). */
+  mode: AwakeMode;
+  /** ISO time after which the mode stops holding the Mac awake. */
+  until?: string;
+  /** On battery below this percentage, sleep is allowed again whatever the mode. */
+  batteryFloorPercent: number;
+};
+export type TetherSettings = {
+  enabled: boolean;
+  /** The iPhone's Personal Hotspot network name, exactly as the sudoers rule names it. */
+  hotspotSsid: string;
+  probeEverySec: number;
+  /** How often, while on the hotspot, to try going back to a known Wi-Fi (doubles on failure, up to 15 min). */
+  returnEverySec: number;
+};
+
+export const AWAKE_DEFAULTS: AwakeSettings = { mode: "off", batteryFloorPercent: 20 };
+export const TETHER_DEFAULTS: TetherSettings = { enabled: false, hotspotSsid: "", probeEverySec: 10, returnEverySec: 180 };
+
+export function awakeSettings(c: Config): AwakeSettings {
+  return { ...AWAKE_DEFAULTS, ...(c.awake ?? {}) } as AwakeSettings;
+}
+
+export function tetherSettings(c: Config): TetherSettings {
+  return { ...TETHER_DEFAULTS, ...(c.tether ?? {}) } as TetherSettings;
+}
+
+/**
+ * A hotspot name is written into a sudoers rule and handed to `networksetup` as one argument, so it
+ * is held to a charset that is literal in both: letters, digits, single spaces, `. _ -`, and the
+ * straight and typographic apostrophes iPhone names use ("Name’s iPhone"). Nothing sudoers or fnmatch
+ * reads specially (`, : = \ * ? [ ] #` and quotes) can get through. Returns what is wrong, or null.
+ */
+export function ssidProblem(ssid: unknown): string | null {
+  if (typeof ssid !== "string" || !ssid) return "the hotspot name is empty";
+  if (Buffer.byteLength(ssid, "utf8") > 32) return "a Wi-Fi name is at most 32 bytes";
+  if (!/^[A-Za-z0-9 ._'’-]+$/u.test(ssid)) return "the hotspot name may contain only letters, digits, spaces and . _ - ' ’";
+  if (/^ | $|  /.test(ssid)) return "the hotspot name cannot start or end with a space or contain two in a row";
+  if (ssid.startsWith("-")) return "the hotspot name cannot start with -";
+  return null;
+}
+
+function validatePower(c: Config, errors: string[]): void {
+  if (c.awake !== undefined) {
+    const a = c.awake as Record<string, unknown> | null;
+    if (!a || typeof a !== "object" || Array.isArray(a)) errors.push("awake must be an object");
+    else {
+      if (a.mode !== undefined && a.mode !== "off" && a.mode !== "working" && a.mode !== "on") errors.push('awake.mode must be "off", "working" or "on"');
+      if (a.until !== undefined && (typeof a.until !== "string" || Number.isNaN(Date.parse(a.until)))) errors.push("awake.until must be an ISO date-time");
+      if (a.batteryFloorPercent !== undefined && !(typeof a.batteryFloorPercent === "number" && a.batteryFloorPercent >= 0 && a.batteryFloorPercent <= 100)) errors.push("awake.batteryFloorPercent must be a number from 0 to 100");
+    }
+  }
+  if (c.tether !== undefined) {
+    const t = c.tether as Record<string, unknown> | null;
+    if (!t || typeof t !== "object" || Array.isArray(t)) errors.push("tether must be an object");
+    else {
+      if (t.enabled !== undefined && typeof t.enabled !== "boolean") errors.push("tether.enabled must be true or false");
+      if (t.hotspotSsid !== undefined && t.hotspotSsid !== "") {
+        const problem = ssidProblem(t.hotspotSsid);
+        if (problem) errors.push(`tether.hotspotSsid: ${problem}`);
+      }
+      if (t.probeEverySec !== undefined && !(typeof t.probeEverySec === "number" && t.probeEverySec >= 5 && t.probeEverySec <= 3600)) errors.push("tether.probeEverySec must be a number from 5 to 3600");
+      if (t.returnEverySec !== undefined && !(typeof t.returnEverySec === "number" && t.returnEverySec >= 30 && t.returnEverySec <= 86400)) errors.push("tether.returnEverySec must be a number from 30 to 86400");
+    }
+  }
+}
 
 export const PICKER_HOSTS_DEFAULT = ["claude.ai"];
 
@@ -746,6 +822,7 @@ export function validate(c: Config): string[] {
       });
     }
   }
+  validatePower(c, errors);
   return errors;
 }
 
