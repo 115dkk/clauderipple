@@ -36,6 +36,8 @@ function run(script: string): { ok: boolean; out: string } {
       env: windowsPowerShellEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      // A hung PowerShell must not hang doctor/repair, which the menu-bar app waits on.
+      timeout: 60_000,
     }).toString();
     return { ok: true, out: out.trim() };
   } catch (e) {

@@ -160,6 +160,29 @@ export function removeProxyEnv(opts: { proxyUrl: string; caPath: string }): Sett
   return { changed: true, backup: b, notes, wroteSlots: [] };
 }
 
+/**
+ * Applies `mutate` to a copy of settings.json's env block and writes it back (with a backup) only
+ * when it reports a change. Every other key in the file is kept as it was; an emptied env block is
+ * dropped. For callers that own a precise set of keys, such as `direct on|off`.
+ */
+export function editSettingsEnv(mutate: (env: Record<string, string>) => boolean): SettingsEdit {
+  const file = settingsPath();
+  const s = readSettings(file);
+  const env = { ...((s.env as Record<string, string> | undefined) ?? {}) };
+  if (!mutate(env)) return { changed: false, backup: null, notes: [], wroteSlots: [] };
+  const b = backup(file);
+  const next = { ...s };
+  if (Object.keys(env).length === 0) delete next.env;
+  else next.env = env;
+  write(file, next);
+  return { changed: true, backup: b, notes: [], wroteSlots: [] };
+}
+
+/** settings.json's whole env block (empty when the file or the block is missing). */
+export function settingsEnv(): Record<string, string> {
+  return { ...((readSettings(settingsPath()).env as Record<string, string> | undefined) ?? {}) };
+}
+
 export function currentProxyEnv(): { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string; CLAUDE_CODE_MAX_CONTEXT_TOKENS?: string } {
   const env = (readSettings(settingsPath()).env as Record<string, string> | undefined) ?? {};
   const out: { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string; CLAUDE_CODE_MAX_CONTEXT_TOKENS?: string } = {};
