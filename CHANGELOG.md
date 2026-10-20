@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.11.0 — 2026-10-20
+
+### Added
+
+- **Close the laptop, Claude keeps working.** For sessions driven from a phone, the laptop now
+  stays awake with the lid shut while a model call runs and for 10 minutes after (or until a time
+  you set), and lets go under a 20% battery floor or, on macOS, a thermal warning, putting a closed
+  laptop to sleep when it does. macOS needs one setup: macOS's own password dialog installs a
+  sudoers rule for exactly the commands used, and Insomnia is cleaned up. Windows needs no
+  administrator rights: a router child holds `SetThreadExecutionState` and sets the lid action
+  only while held, restoring yours afterwards. Off until turned on in the dashboard's Laptop view.
+- **Wi-Fi without internet fails over to the phone hotspot, and comes back.** The router probes the
+  internet through the Wi-Fi interface (a dead uplink or a captive portal still reads "connected"
+  to the OS), joins the hotspot you name after 3 of 5 failed rounds, and tries the way back to a
+  known Wi-Fi 5, 10, 20, 30, 40, 50 and 60 minutes after landing, then every 10 minutes. iPhone and
+  Android hotspots both work: an Android hotspot's subnet is learned from the router's own join.
+  When calls never stop, the switch holds new model calls for a moment instead of waiting forever;
+  nothing is refused.
+- **The app's window is the dashboard, and it opens with the router down.** It draws its own copy
+  of the dashboard, so a broken router no longer takes the only screen with it; the Status view
+  offers repair and a switch to Claude's own connection. `clauderipple doctor`, `repair` and
+  `direct on|off` do the same from a terminal. Opening the app from its icon shows the window.
+- **The app and its tray wear 리플이,** and the Dock shows that icon instead of Electron's.
+
+### Changed
+
+- **Gemini 3.8 Flash's high effort uses the medium tier.** `-high` thinks without a budget, and
+  on a normal day the requests past medium's 4,000 tokens took 64% of all request time.
+- **Every model goes to the Antigravity host that offers it** (Gemini 3.1 Pro is on prod only),
+  and the limits row reads the quota of the host the requests spend.
+- **Korean reads as everyday Korean** across the dashboard, the mod and the menu-bar app, and the
+  power screens name no device brand: laptop and phone, with iPhone and Android steps side by side.
+- **An agent's conversation shows whole,** with no "earlier" to press, and a back button floats at
+  the top once you scroll down. Narrow agent cards give the elapsed time no row of its own and cut
+  titles at two lines; the band and log drop a hosted model's vendor path.
+
+### Fixed
+
+- **A Mac offline no longer restarts the router in a loop.** The health self-exit, meant for a
+  wedged process, fired 27 times in 18 minutes on a commute and kept the hotspot failover from ever
+  counting its failures; it now asks a fresh process first and stays up when the machine is offline.
+- **Google's "no capacity" no longer rests the account.** A 503 `MODEL_CAPACITY_EXHAUSTED` is retried
+  twice, slowly, then handed to the route fallback or answered 529 overloaded; other turns are not
+  refused with "all accounts resting".
+- **Ripple Remote keeps sending when the `claude` CLI's login lapses.** The phone host borrowed the
+  CLI's keychain login, which only the CLI refreshes; it now falls back to the login the Claude app
+  is using.
+- **Gemini's quota is read from the host the requests spend it on,** a window past its reset reads
+  0% instead of vanishing, and Gemini's Claude-and-GPT windows show only when such a model runs
+  through it.
+
 ## 0.10.0 — 2026-10-20
 
 ### Added
