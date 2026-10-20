@@ -112,9 +112,16 @@ export function openWindow(deps: WindowDeps, view?: string): void {
   deps.shown();
 }
 
-/** Our icon on the Dock, on macOS: set again once the window shows, which put the bundle's back. */
+/**
+ * Our icon on the Dock, on macOS: set again once the window shows, which put the bundle's back. Set
+ * right after a launch from the app's icon, macOS put Electron's back once the launch finished
+ * (two calls with the Dock visible, both lost; 2026-10-20), so it is set once more 2s later.
+ */
 function dockIcon(): void {
-  if (process.platform === "darwin") app.dock?.setIcon(path.join(__dirname, "..", "assets", "icon.png"));
+  if (process.platform !== "darwin") return;
+  const set = (): void => app.dock?.setIcon(path.join(__dirname, "..", "assets", "icon.png"));
+  set();
+  setTimeout(set, 2_000).unref();
 }
 
 /** The tray app has no Dock icon until a window opens, so a window opened from it could come up behind the frontmost app. */
