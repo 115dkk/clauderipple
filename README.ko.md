@@ -276,6 +276,35 @@ ClaudeRipple은 Claude Code 프로세스만 신뢰하는 작은 HTTPS 프록시�
   <img src="docs/media/mapping.png" width="880" alt="모델 매핑: Claude 이름마다 실제로 답할 모델과 추론 강도">
 </p>
 
+## Ripple Remote: 어떤 모델이든, 휴대폰으로, 몇 시간이고
+
+Claude 데스크톱 앱에 일을 맡기고, 노트북을 덮고, 소파에서 이어서 지시하세요.
+**Ripple Remote**는 ClaudeRipple의 휴대폰 앱입니다. 어떤 모델이 돌리는 세션이든 휴대폰에서 그대로 다루고,
+30분이 지나도 연결이 끊기지 않습니다.
+
+<p align="center">
+  <img src="docs/media/remote/store/ko-1.png" width="260" alt="끊기지 않는 원격: 1시간 47분째 이어지는 GPT 세션">
+  <img src="docs/media/remote/store/ko-2.png" width="260" alt="휴대폰의 모델 선택기 하나에 GPT·DeepSeek·Gemini">
+  <img src="docs/media/remote/store/ko-3.png" width="260" alt="DeepSeek 세션의 요청을 휴대폰에서 승인">
+</p>
+
+- **몇 분이 아니라 몇 시간.** 컴퓨터가 켜져 있는 동안 연결이 유지됩니다. 두 시간짜리 리팩터링도 끝까지
+  지켜보고, 승인을 물으면 그 자리에서 답하세요.
+- **모델을 가리지 않습니다.** GPT·DeepSeek·Gemini·Claude, 어떤 세션이든 똑같이 보이고 똑같이 다룹니다.
+  다음 턴의 모델과 추론 강도도 휴대폰에서 바꿉니다.
+- **Claude 앱 세션 그대로.** Mac의 Code 탭에서 시작한 세션이 휴대폰에서 이어집니다. 실시간 타임라인, 도구 실행,
+  diff, 하위 에이전트와 그 모델, 계획 승인과 질문 카드, 사진·파일 첨부까지.
+- **Mac의 상태 표시줄을 주머니에.** 응답한 모델, 캐시, 사용 한도를 Mac의 ClaudeRipple 띠와 똑같이 보여 줍니다.
+- **노트북 기능과 짝을 이룹니다.** [노트북 덮개와 휴대폰 핫스팟](#노트북-덮개와-휴대폰-핫스팟)을 켜 두면
+  노트북은 가방 안에서도 일하고, 와이파이가 끊겨도 온라인을 유지합니다.
+- **처음부터 비공개.** 메시지·첨부·알림은 종단간 암호화되어 중계 서버도 푸시 서비스도 읽지 못합니다.
+  회원가입·광고·추적 없음, 무료.
+
+컴퓨터에 ClaudeRipple을 설치하고 대시보드의 **휴대폰** 화면에서 QR 코드를 한 번 스캔하면 끝입니다.
+아이폰: [App Store](https://apps.apple.com/app/id6823063731). 안드로이드: Google Play 비공개 테스트 중이며
+[디스코드](https://discord.gg/R8ZgGSNHjw)에서 신청받습니다. Claude 앱 세션 연동은 macOS에서 되고,
+컴퓨터 없이도 앱 안의 데모로 먼저 써 볼 수 있습니다.
+
 ## 설치
 
 **macOS**

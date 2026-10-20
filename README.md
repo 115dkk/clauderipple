@@ -333,6 +333,40 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
   <img src="docs/media/mapping.png" width="880" alt="Model mapping: which model answers for each Claude name, with per-model reasoning effort">
 </p>
 
+## Ripple Remote: every model, from your phone, for hours
+
+Start a job in the Claude desktop app, close the laptop, and keep going from the couch.
+**Ripple Remote** is the phone app for ClaudeRipple: the same sessions, whichever model
+runs them, on your phone, and it does not drop you after 30 minutes.
+
+<p align="center">
+  <img src="docs/media/remote/store/en-1.png" width="260" alt="A remote that doesn't time out: a GPT session followed for 1h 47m">
+  <img src="docs/media/remote/store/en-2.png" width="260" alt="GPT, DeepSeek and Gemini in one model picker on the phone">
+  <img src="docs/media/remote/store/en-3.png" width="260" alt="Approve a DeepSeek session's request from the phone">
+</p>
+
+- **Hours, not minutes.** The connection holds as long as your computer is on. Watch a
+  two-hour refactor through to the end and approve it when it asks.
+- **Any model you route.** GPT, DeepSeek, Gemini or Claude: every session looks and works
+  the same. Switch the next turn's model and reasoning effort from your phone.
+- **Your Claude app sessions, as they are.** Sessions you started in the Code tab on your
+  Mac continue on the phone — the live timeline, tool calls, diffs, subagents and their
+  models, plan approvals and question cards, photos and files.
+- **Your Mac's status bar in your pocket.** The model that answered, the cache and your
+  usage limits, as the ClaudeRipple band shows them on the Mac.
+- **Pairs with the laptop features.** With [lid-closed awake and the phone
+  hotspot](#lid-closed-and-the-phone-hotspot), the laptop keeps working in a bag and stays
+  online when the Wi-Fi does not.
+- **Private by design.** Messages, attachments and notifications are end-to-end
+  encrypted; the relay and the push service cannot read them. No account, no ads, no
+  tracking, free.
+
+Install ClaudeRipple on your computer, open the dashboard's **Phone** view and scan the
+QR code once. iPhone: [App Store](https://apps.apple.com/app/id6823063731). Android: in a
+closed test on Google Play — ask on [Discord](https://discord.gg/R8ZgGSNHjw).
+Claude app sessions are supported on macOS; the app has a demo you can try without a
+computer.
+
 ## Install
 
 **macOS**
