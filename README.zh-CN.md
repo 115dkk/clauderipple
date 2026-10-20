@@ -188,6 +188,36 @@ Claude Code 的系统提示词和工具描述是为 Claude 编写的，所以其
   <img src="docs/media/mapping.png" width="880" alt="模型映射：每个 Claude 模型名由哪个模型作答，以及各模型的推理强度">
 </p>
 
+## Ripple Remote：任何模型，手机在手，几小时不断
+
+在 Claude 桌面应用里交办一件事，合上笔记本，然后在沙发上继续下指令。
+**Ripple Remote** 是 ClaudeRipple 的手机应用：不管是哪个模型在跑的会话，都能在手机上原样接着用，
+也不会在 30 分钟后把你断开。
+
+<p align="center">
+  <img src="docs/media/remote/store/en-1.png" width="260" alt="不断线的远程：持续 1 小时 47 分钟的 GPT 会话">
+  <img src="docs/media/remote/store/en-2.png" width="260" alt="手机上的一个模型选择器里同时有 GPT、DeepSeek 和 Gemini">
+  <img src="docs/media/remote/store/en-3.png" width="260" alt="在手机上批准 DeepSeek 会话的请求">
+</p>
+
+- **按小时算，不是按分钟。** 只要电脑开着，连接就一直保持。两小时的代码重构也能盯到最后，
+  它请求批准时当场作答。
+- **路由哪个模型都行。** GPT、DeepSeek、Gemini 还是 Claude：每个会话看起来、用起来都一样。
+  下一轮用哪个模型、推理强度多高，也在手机上切换。
+- **Claude 应用里的会话原样搬来。** 你在 Mac 上 Code 标签页开始的会话，在手机上接着跑：
+  实时时间线、工具调用、diff、子代理及各自的模型、计划批准和提问卡片、照片和文件附件。
+- **Mac 的状态栏装进口袋。** 哪个模型作答、缓存情况、用量上限，显示得和 Mac 上的
+  ClaudeRipple 横栏一模一样。
+- **和笔记本功能配合。** 打开[合盖与手机热点](#合盖与手机热点)，笔记本装进包里照样干活，
+  Wi-Fi 断网也能保持在线。
+- **天生私密。** 消息、附件和通知端到端加密，中继服务器和推送服务都读不到。
+  无需注册、无广告、无跟踪，免费。
+
+在电脑上安装 ClaudeRipple，打开控制面板的**手机**页面，扫一次二维码即可。
+iPhone：[App Store](https://apps.apple.com/app/id6823063731)。Android：正在 Google Play
+进行封闭测试，请到 [Discord](https://discord.gg/R8ZgGSNHjw) 申请。Claude 应用会话联动
+支持 macOS；即使没有电脑，也能先用应用内的演示体验。
+
 ## 安装
 
 **macOS**

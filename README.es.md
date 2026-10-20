@@ -347,6 +347,44 @@ los modelos que asignas van a tu proveedor, y todo lo demás va a Anthropic byte
   <img src="docs/media/mapping.png" width="880" alt="Asignación de modelos: qué modelo responde por cada nombre de Claude, con esfuerzo de razonamiento por modelo">
 </p>
 
+## Ripple Remote: cualquier modelo, desde el teléfono, durante horas
+
+Empieza un trabajo en la app de escritorio de Claude, cierra el portátil y sigue dando
+órdenes desde el sofá. **Ripple Remote** es la app para el teléfono de ClaudeRipple: las mismas
+sesiones, sea cual sea el modelo que las ejecute, en tu teléfono, y no te desconecta a los
+30 minutos.
+
+<p align="center">
+  <img src="docs/media/remote/store/en-1.png" width="260" alt="Un remoto que no se corta: una sesión de GPT seguida durante 1 h 47 min">
+  <img src="docs/media/remote/store/en-2.png" width="260" alt="GPT, DeepSeek y Gemini en un solo selector de modelos en el teléfono">
+  <img src="docs/media/remote/store/en-3.png" width="260" alt="Aprueba desde el teléfono la solicitud de una sesión de DeepSeek">
+</p>
+
+- **Horas, no minutos.** La conexión se mantiene mientras tu computadora esté encendida.
+  Sigue una refactorización de dos horas hasta el final y apruébala cuando te lo pida.
+- **Cualquier modelo que enrutes.** GPT, DeepSeek, Gemini o Claude: todas las sesiones se
+  ven y funcionan igual. Cambia el modelo y el esfuerzo de razonamiento del siguiente
+  turno desde el teléfono.
+- **Tus sesiones de la app de Claude, tal cual.** Las sesiones que empezaste en la pestaña
+  Code de tu Mac continúan en el teléfono: la línea de tiempo en vivo, las llamadas a
+  herramientas, los diffs, los subagentes y sus modelos, las aprobaciones de plan y las
+  tarjetas de preguntas, las fotos y los archivos.
+- **La barra de estado de tu Mac en el bolsillo.** El modelo que respondió, la caché y tus
+  límites de uso, tal como los muestra la banda de ClaudeRipple en la Mac.
+- **Se combina con las funciones del portátil.** Con la [tapa cerrada y el punto de
+  acceso del teléfono](#tapa-cerrada-y-el-punto-de-acceso-del-teléfono) activados, el
+  portátil sigue trabajando dentro de la mochila y se mantiene en línea cuando el Wi-Fi
+  no lo está.
+- **Privado desde el diseño.** Los mensajes, los archivos adjuntos y las notificaciones van
+  cifrados de extremo a extremo; ni el relay ni el servicio de notificaciones pueden
+  leerlos. Sin cuenta, sin anuncios, sin rastreo, gratis.
+
+Instala ClaudeRipple en tu computadora, abre la vista **Teléfono** del panel y escanea el
+código QR una vez. iPhone: [App Store](https://apps.apple.com/app/id6823063731). Android:
+en prueba cerrada en Google Play; pide acceso en
+[Discord](https://discord.gg/R8ZgGSNHjw). Las sesiones de la app de Claude funcionan en
+macOS; la app incluye una demo para probarla sin computadora.
+
 ## Instalación
 
 **macOS**
