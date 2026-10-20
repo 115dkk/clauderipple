@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.1 — 2026-10-20
+
+### Fixed
+
+- **The Dock shows ClaudeRipple's icon when the app is opened from its icon.** In 0.11.0 the icon
+  was set while the launch was still finishing, and macOS put Electron's back; it is now set once
+  more two seconds later.
+
 ## 0.11.0 — 2026-10-20
 
 ### Added
