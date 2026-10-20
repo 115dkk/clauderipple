@@ -762,6 +762,101 @@ a.cell { color: inherit; text-decoration: none; }
 .chooser-tiles > .chooser-tile:first-child { border-top-left-radius: var(--radius); }
 .chooser-tiles.single > .chooser-tile { border-radius: var(--radius); }
 
+/* ---- Inside the app: connection card, pages while Ripple is down, window chrome -------- */
+/* Only the ClaudeRipple app draws these (html.in-app, window.rippleApp); a browser never does. */
+
+:root { --tint-bad: rgba(255, 59, 48, 0.075); --tint-warn: rgba(255, 149, 0, 0.09); --tint-direct: rgba(120, 130, 150, 0.1); --direct-dot: #7d8796; }
+@media (prefers-color-scheme: dark) {
+  :root { --tint-bad: rgba(255, 69, 58, 0.13); --tint-warn: rgba(255, 159, 10, 0.12); --tint-direct: rgba(150, 160, 180, 0.12); --direct-dot: #98a2b3; }
+}
+
+.page-header + .conn[hidden] + .section { margin-top: 0; }
+:lang(ko) .conn, :lang(ko) .offline-state { word-break: keep-all; overflow-wrap: anywhere; }
+.conn { margin-bottom: 28px; }
+#view-health.router-off > .section { display: none; }
+
+/* Calm: one row, the way out on the right. */
+.conn-calm-row { min-height: 58px; }
+.conn-dot { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--ok-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok-dot) 18%, transparent); }
+.conn-checking .conn-dot { background: var(--label-3); box-shadow: none; animation: conn-pulse 1.4s ease-in-out infinite; }
+@keyframes conn-pulse { 50% { opacity: 0.35; } }
+.conn-calm-note { padding-top: 10px; padding-bottom: 12px; color: var(--label); font-size: var(--fs-sub); }
+.conn-calm-note .conn-note, .conn-calm-note .conn-login { margin-top: 0; }
+
+/* Loud: what happened, in a sentence, and one obvious button. */
+.conn-card {
+  --tone: var(--bad-dot);
+  --tint: var(--tint-bad);
+  padding: 22px 22px 14px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, var(--tint) 0, transparent 150px), var(--group);
+  box-shadow: 0 0 0 1px var(--group-edge), 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.conn-warn .conn-card { --tone: var(--warn-dot); --tint: var(--tint-warn); }
+.conn-direct .conn-card { --tone: var(--direct-dot); --tint: var(--tint-direct); }
+.conn-hero { display: flex; align-items: flex-start; gap: 16px; }
+.conn-icon { display: grid; place-items: center; width: 44px; height: 44px; flex: 0 0 auto; border-radius: 50%; background: var(--tone); color: #fff; box-shadow: 0 0 0 5px color-mix(in srgb, var(--tone) 16%, transparent); }
+.conn-icon svg { width: 22px; height: 22px; stroke-width: 2.3; }
+.conn-hero-text { min-width: 0; padding-top: 1px; }
+.conn-title { font-size: 20px; font-weight: 700; line-height: 1.25; letter-spacing: -0.015em; }
+.conn-lead { margin: 5px 0 0; color: var(--label); font-size: var(--fs-body); line-height: 1.45; }
+.conn-reason { margin: 3px 0 0; color: var(--label-2); font-size: var(--fs-sub); line-height: 1.45; }
+
+.conn-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 22px; }
+.conn-action { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.conn-action .hint { margin: 0 4px; }
+.btn.large { width: 100%; min-height: 40px; padding: 8px 18px; border-radius: 10px; font-size: var(--fs-body); font-weight: 600; white-space: normal; }
+
+.conn-note { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: var(--fill); font-size: var(--fs-sub); }
+.conn-note.busy { display: flex; align-items: center; gap: 10px; }
+.conn-note-line { display: flex; align-items: flex-start; gap: 8px; }
+.conn-note-icon { width: 18px; height: 18px; flex: 0 0 auto; margin-top: 1px; stroke-width: 2.2; }
+.conn-note.good .conn-note-icon { color: var(--ok); }
+.conn-note.bad .conn-note-icon { color: var(--bad); }
+.conn-note.restart { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: var(--group); box-shadow: inset 0 0 0 1px var(--separator), inset 3px 0 0 var(--accent); }
+.conn-note-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.conn-note-text span { color: var(--label-2); font-size: var(--fs-foot); }
+.conn-note.restart .btn { flex: 0 0 auto; }
+.conn-fold { margin: 8px 0 0 26px; }
+.conn-fold summary, .conn-details summary { width: max-content; color: var(--label-2); font-size: var(--fs-foot); cursor: pointer; }
+.conn-fold pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--label-2); font: 12px/1.5 var(--mono); -webkit-user-select: text; user-select: text; }
+.spinner { width: 16px; height: 16px; flex: 0 0 auto; border-radius: 50%; border: 2px solid var(--fill-press); border-top-color: var(--label); animation: conn-spin 0.8s linear infinite; }
+@keyframes conn-spin { to { transform: rotate(360deg); } }
+
+.conn-login { display: flex; align-items: center; gap: 12px; margin-top: 16px; color: var(--label-2); font-size: var(--fs-foot); }
+.conn-login span { flex: 1 1 auto; }
+
+/* "Details" opens to the card's full width; "Check again" stays on its summary line. */
+.conn-foot { position: relative; margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--separator); }
+.conn-foot > .link-btn { position: absolute; top: 12px; right: 0; }
+.conn-details { min-width: 0; }
+.conn-details[open] summary { margin-bottom: 10px; }
+.conn-detail-rows { background: var(--fill); box-shadow: none; }
+.conn-detail-rows .row { min-height: 38px; align-items: baseline; }
+.conn-detail-rows .row .k { flex: 0 0 132px; color: var(--label-2); font-size: var(--fs-foot); overflow-wrap: anywhere; }
+.conn-detail-rows .row .v { flex: 1 1 auto; font-size: 12px; text-align: left; }
+.conn-log-head { display: flex; align-items: center; justify-content: space-between; margin: 16px 4px 8px; }
+.conn-log { max-height: 190px; margin: 0; padding: 10px 12px; overflow: auto; border-radius: 10px; background: var(--fill); color: var(--label-2); font: 11.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.link-btn { appearance: none; padding: 0; border: 0; background: none; color: var(--accent); font-size: var(--fs-foot); cursor: pointer; white-space: nowrap; }
+.link-btn:hover { text-decoration: underline; }
+.link-btn:disabled { opacity: 0.45; cursor: default; text-decoration: none; }
+
+/* Every page but Status, while Ripple is down: a short note and the way to Status. */
+.view.offline > :not(.page-header):not(.offline-state) { display: none !important; }
+.view.offline .page-actions, .view.offline .logs-tabs, .view.offline .page-header > button { display: none; }
+.offline-state { max-width: 420px; margin: 56px auto 0; padding: 0 16px; text-align: center; }
+.offline-icon { display: inline-grid; place-items: center; width: 56px; height: 56px; margin-bottom: 16px; border-radius: 50%; background: var(--tint-bad); color: var(--bad); }
+.offline-icon.direct { background: var(--tint-direct); color: var(--direct-dot); }
+.offline-icon svg { width: 26px; height: 26px; }
+.offline-state h2 { font-size: 19px; font-weight: 700; letter-spacing: -0.015em; }
+.offline-state p { margin: 8px 0 20px; color: var(--label-2); font-size: var(--fs-sub); line-height: 1.5; }
+
+/* macOS: the window's title bar is hidden and the sidebar sits under the traffic lights. */
+.in-app.platform-darwin .sidebar { padding-top: 52px; -webkit-app-region: drag; }
+.in-app .sidebar button, .in-app .sidebar select { -webkit-app-region: no-drag; }
+.in-app.platform-darwin body::before { content: ""; position: fixed; top: 0; left: 228px; right: 0; height: 28px; -webkit-app-region: drag; z-index: 4; }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } .conn-checking .conn-dot { animation: none; } }
+
 /* ---- Narrow windows ------------------------------------------------------------------ */
 
 @media (max-width: 1020px) {

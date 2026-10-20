@@ -21,6 +21,20 @@ function el(tag, attrs, children) {
   return node;
 }
 
+// Inside the ClaudeRipple app the page is the app's own copy, so it is here even with the router
+// down; window.rippleApp is how it asks the app for what only the app can do (repair, the direct
+// switch). In a browser the object is absent and none of the app-only parts are drawn.
+const APP = window.rippleApp || null;
+if (APP) {
+  document.documentElement.classList.add("in-app", `platform-${APP.platform}`);
+  // Korean wraps between words in the app's own sentences (style.css :lang(ko)).
+  document.documentElement.lang = CURRENT_LANG;
+}
+/** The router's admin API answered 503 "routerDown" (the app's way of saying it is not running). */
+let routerDown = false;
+/** What the app last said about the connection (doctor, a running repair, …); see renderConnection. */
+let shellState = null;
+
 let toastTimer = null;
 function toast(message, isError, raw) {
   const box = $("#toast");
@@ -204,10 +218,14 @@ function chevronIcon() { return svgIcon("0 0 8 13", ["M1.5 1.5l5 5-5 5"], "chevr
 
 function showView(name) {
   if (name !== "phone") { phoneGeneration++; hidePhoneQr(); }
-  if (name === "phone") queueMicrotask(() => void loadPhone());
   for (const button of $all(".nav-btn")) button.classList.toggle("active", button.dataset.view === name);
   for (const view of $all(".view")) view.classList.toggle("active", view.id === `view-${name}`);
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
+  applyOffline();
+  // With the router down (inside the app) a page has nothing to load; it says so instead of
+  // failing, and loads when the router is back (setRouterDown).
+  if (offline()) return;
+  if (name === "phone") queueMicrotask(() => void loadPhone());
   if (name === "slots" && !slotsLoaded) void loadSlots();
   if (name === "providers" && !providersLoaded) void loadProviders();
   if (name === "clients" && !clientsLoaded) void loadClients();
@@ -251,8 +269,11 @@ async function refreshHealth() {
     status = await api("/api/status");
   } catch (error) {
     $("#health-desktop").replaceChildren(cell(t("health.connection"), badge("bad", t("health.disconnected"))));
+    // Inside the app a router that does not answer is a state with a way out, not an error.
+    if (APP && error.body && error.body.routerDown) setRouterDown(true);
     return;
   }
+  if (APP) setRouterDown(false);
   // Served files changed underneath an open window (e.g. after an update): reload, unless a form is open.
   if (status.uiRevision) {
     if (loadedUiRevision === null) loadedUiRevision = status.uiRevision;
@@ -330,6 +351,257 @@ async function startUpdate() {
     toast(t("update.failed"), true, error.message);
   }
   renderVersionRow();
+}
+
+// ---- Inside the app: the connection card, and pages while the router is down -------------
+// The app can do what this page cannot once the router is down: ask the CLI what is wrong
+// (doctor), repair it, switch Claude to its default connection and back, reopen Claude. The card at
+// the top of Status draws that, calm while all is well and plain about what to press when not. The
+// other pages say where to go instead of failing. None of it exists in a browser.
+
+function offline() { return Boolean(APP) && routerDown; }
+function inDirectMode() { return Boolean(shellState && shellState.doctor && shellState.doctor.mode === "direct"); }
+
+function setRouterDown(down) {
+  if (routerDown === down) return;
+  routerDown = down;
+  if (!down) {
+    // Back: what failed or was skipped while it was down loads now.
+    slotsLoaded = false;
+    providersLoaded = false;
+    clientsLoaded = false;
+    showView((location.hash || "#health").slice(1) || "health");
+  } else applyOffline();
+  renderConnection();
+}
+
+/** Every page but Status shows a short note (and the way to Status) instead of its contents. */
+function applyOffline() {
+  const off = offline();
+  const direct = inDirectMode();
+  for (const view of $all(".view")) {
+    if (view.id === "view-health") {
+      view.classList.toggle("router-off", off);
+      continue;
+    }
+    view.classList.toggle("offline", off);
+    let box = $(".offline-state", view);
+    if (!off) {
+      if (box) box.remove();
+      continue;
+    }
+    if (!box) {
+      box = el("div", { class: "offline-state", role: "status" });
+      const header = $(".page-header", view);
+      view.insertBefore(box, header ? header.nextSibling : view.firstChild);
+    }
+    box.replaceChildren(
+      el("div", { class: `offline-icon${direct ? " direct" : ""}` }, [svgIcon("0 0 20 20", direct ? CONN_ICONS.direct : ["M3 3l14 14", "M6.2 15.5h8.1c.4 0 .8-.1 1.2-.2", "M17.4 12.6a3.3 3.3 0 0 0-2.7-3.7 4.8 4.8 0 0 0-6.8-3.5", "M5.6 8.3a3.7 3.7 0 0 0 .6 7.2"])]),
+      el("h2", { text: t(direct ? "conn.offlineDirectTitle" : "conn.offlineTitle") }),
+      el("p", { text: t(direct ? "conn.offlineDirectBody" : "conn.offlineBody") }),
+      el("button", { class: "btn", type: "button", text: t("conn.goStatus"), onclick: () => showView("health") }),
+    );
+  }
+}
+
+const CONN_ICONS = {
+  ok: ["M5.5 10.4l3 3 6-6.6"],
+  bad: ["M10 5.6v5.2", "M10 14.3v.1"],
+  warn: ["M10 5.6v5.2", "M10 14.3v.1"],
+  direct: ["M3.8 10h12", "M12.2 6.2L16 10l-3.8 3.8"],
+  checking: ["M10 3.8a6.2 6.2 0 1 1-6.2 6.2"],
+};
+// What doctor's codes mean to someone who only wants Claude to answer. The cause comes before the
+// symptom: a startup entry gone missing is why the router is down.
+const CONN_REASONS = [
+  ["not-installed", "conn.why.notInstalled"],
+  ["supervisor-missing", "conn.why.supervisorMissing"],
+  ["supervisor-program-missing", "conn.why.programMissing"],
+  ["supervisor-other-install", "conn.why.otherInstall"],
+  ["supervisor-not-running", "conn.why.stopped"],
+  ["router-down", "conn.why.stopped"],
+  ["router-version-mismatch", "conn.why.version"],
+  ["cli-port-mismatch", "conn.why.oldSetting"],
+  ["desktop-port-mismatch", "conn.why.oldSetting"],
+  ["cli-foreign-proxy", "conn.why.cliOther"],
+  ["desktop-foreign-proxy", "conn.why.desktopOther"],
+];
+function connReason(doctor) {
+  const problems = (doctor && doctor.problems) || [];
+  for (const [code, key] of CONN_REASONS) if (problems.some((problem) => problem.code === code)) return t(key);
+  const other = problems.find((problem) => problem.code !== "mixed-mode" && problem.message);
+  return other ? other.message : null;
+}
+function connRoute(proxy) { return t(proxy === "ripple" ? "conn.routeRipple" : proxy === "none" ? "conn.routeDirect" : "conn.routeOther"); }
+
+/** Whether the router answers, by this page's own 5-second check first, then the app's. */
+function connAnswering(s) {
+  if (routerDown) return false;
+  if (status) return true;
+  if (s && typeof s.routerAnswering === "boolean") return s.routerAnswering;
+  return null;
+}
+
+/** Which state the card is in, what it says, and which button is the obvious one. */
+function connectionModel(s) {
+  const d = s && s.doctor;
+  const answering = connAnswering(s);
+  const lastResult = s && s.result;
+  if (d && d.mode === "direct") return { kind: "direct", title: t("conn.directTitle"), lead: t("conn.directBody"), primary: "direct-off", secondary: null };
+  if (answering === false) {
+    // A repair that did not work leaves the switch as the way to a working Claude now.
+    const repairFailed = Boolean(lastResult && lastResult.action === "repair" && !lastResult.ok);
+    const reason = d ? connReason(d) || t("conn.why.stopped") : s && s.doctorFailed ? t("conn.why.checkFailed") : null;
+    return { kind: "bad", title: t("conn.downTitle"), lead: t("conn.downLead"), reason, primary: repairFailed ? "direct-on" : "repair", secondary: repairFailed ? "repair" : "direct-on" };
+  }
+  if (!d && !(s && s.doctorFailed) && answering === null) return { kind: "checking", title: t("conn.checking"), lead: "", primary: null, secondary: null };
+  if (d && d.mode === "mixed") return { kind: "warn", title: t("conn.mixedTitle"), lead: t("conn.mixedBody", { desktop: connRoute(d.desktop && d.desktop.proxy), cli: connRoute(d.cli && d.cli.proxy) }), primary: "direct-off", secondary: "direct-on" };
+  const reason = d && connReason(d);
+  if (reason) return { kind: "warn", title: t("conn.warnTitle"), lead: reason, primary: "repair", secondary: "direct-on" };
+  return { kind: "ok", title: t("conn.okTitle"), lead: s && s.doctorFailed ? t("conn.why.checkFailed") : t("conn.okBody"), primary: null, secondary: "direct-on" };
+}
+
+const CONN_ACTIONS = {
+  "repair": { label: "conn.repair", hint: "conn.repairHint", run: () => APP.repair() },
+  "direct-on": { label: "conn.directOn", hint: "conn.directOnHint", run: () => APP.directOn() },
+  "direct-off": { label: "conn.directOff", hint: "conn.directOffHint", run: () => APP.directOff() },
+  "restart-claude": { label: "conn.restart", hint: null, run: () => APP.restartClaude() },
+};
+const CONN_BUSY = { "repair": "conn.busy.repair", "direct-on": "conn.busy.directOn", "direct-off": "conn.busy.directOff", "restart-claude": "conn.busy.restart", "checking": "conn.busy.checking" };
+/** A result older than this is history, not news. */
+const CONN_RESULT_MS = 10 * 60 * 1000;
+
+async function connRun(run) {
+  try {
+    const next = await run();
+    if (next) shellState = next;
+  } catch (error) { toast(t("common.actionFailed"), true, error.message); }
+  renderConnection();
+  void refreshHealth();
+}
+function connButton(id, cls) {
+  const action = CONN_ACTIONS[id];
+  const button = el("button", { class: cls, type: "button", text: t(action.label), onclick: () => void connRun(action.run) });
+  button.disabled = Boolean(shellState && shellState.busy);
+  return button;
+}
+function connResultText(r) {
+  if (r.timedOut) return t("conn.res.timeout");
+  const keys = {
+    "repair": r.ok ? "conn.res.repairOk" : "conn.res.repairFail",
+    "direct-on": r.ok ? "conn.res.directOnOk" : "conn.res.fail",
+    "direct-off": r.ok ? "conn.res.directOffOk" : "conn.res.fail",
+    "restart-claude": r.ok ? "conn.res.restartOk" : "conn.res.restartFail",
+  };
+  return t(keys[r.action] || "conn.res.fail");
+}
+
+/** The running action, the last result and the "reopen Claude" step: the same in both card sizes. */
+function connNotes(s) {
+  const notes = [];
+  if (s && s.busy) notes.push(el("div", { class: "conn-note busy", role: "status" }, [el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { text: t(CONN_BUSY[s.busy] || "conn.busy.checking") })]));
+  const r = s && s.result;
+  if (r && !s.busy && (!r.at || Date.now() - r.at < CONN_RESULT_MS)) {
+    const ok = r.ok && !r.timedOut;
+    notes.push(el("div", { class: `conn-note ${ok ? "good" : "bad"}`, role: "status" }, [
+      el("div", { class: "conn-note-line" }, [svgIcon("0 0 20 20", ok ? CONN_ICONS.ok : CONN_ICONS.bad, "conn-note-icon"), el("span", { text: connResultText(r) })]),
+      r.details && r.details.length ? el("details", { class: "conn-fold" }, [el("summary", { text: t("conn.details") }), el("pre", { text: r.details.join("\n") })]) : null,
+    ]));
+  }
+  if (s && s.restartClaude) {
+    notes.push(el("div", { class: "conn-note restart" }, [
+      el("div", { class: "conn-note-text" }, [el("strong", { text: t("conn.restartTitle") }), el("span", { text: t("conn.restartBody") })]),
+      connButton("restart-claude", "btn"),
+    ]));
+  }
+  return notes;
+}
+
+let connDetailsOpen = false;
+let connLogLines = null;
+function connDetails(s) {
+  const d = (s && s.doctor) || {};
+  const router = d.router || {};
+  const supervisor = d.supervisor || {};
+  const row = (k, v) => el("div", { class: "row" }, [el("span", { class: "k", text: k }), el("span", { class: "v mono", text: v })]);
+  const rows = [
+    row(t("conn.d.router"), `${router.responding ? "responding" : "not responding"}${router.version ? ` · ${router.version}` : ""}${router.url ? ` · ${router.url}` : ""}`),
+    row(t("conn.d.supervisor"), `${supervisor.registered ? "registered" : "not registered"}${supervisor.state ? ` · ${supervisor.state}` : ""}${supervisor.program ? ` · ${supervisor.program}` : ""}`),
+    row(t("conn.d.desktop"), `${(d.desktop && d.desktop.proxy) || "?"}${d.desktop && d.desktop.url ? ` · ${d.desktop.url}` : ""}`),
+    row(t("conn.d.cli"), `${(d.cli && d.cli.proxy) || "?"}${d.cli && d.cli.url ? ` · ${d.cli.url}` : ""}`),
+    ...((d.problems || []).map((problem) => row(problem.code || "?", problem.message || ""))),
+  ];
+  const log = el("pre", { class: "conn-log", text: connLogLines === null ? "…" : connLogLines.length ? connLogLines.join("\n") : t("conn.noLog") });
+  const fold = el("details", { class: "conn-details" }, [
+    el("summary", { text: t("conn.details") }),
+    el("div", { class: "group conn-detail-rows" }, rows),
+    el("div", { class: "conn-log-head" }, [el("span", { class: "section-title", text: t("conn.recentLog") }), el("button", { class: "btn secondary compact", type: "button", text: t("conn.openLogs"), onclick: () => void APP.openLogs() })]),
+    log,
+  ]);
+  fold.open = connDetailsOpen;
+  fold.addEventListener("toggle", () => {
+    connDetailsOpen = fold.open;
+    if (fold.open) void APP.recentLog().then((lines) => { connLogLines = lines || []; log.textContent = connLogLines.length ? connLogLines.join("\n") : t("conn.noLog"); log.scrollTop = log.scrollHeight; });
+  });
+  return fold;
+}
+
+function connLoginOffer(s) {
+  if (!s || s.loginItem !== false) return null;
+  return el("div", { class: "conn-login" }, [
+    el("span", { text: t("conn.loginOffer") }),
+    el("button", { class: "btn secondary compact", type: "button", text: t("conn.loginOn"), onclick: () => void connRun(() => APP.enableLoginItem()) }),
+  ]);
+}
+
+function renderConnection() {
+  const host = $("#health-connection");
+  if (!APP || !host) return;
+  host.hidden = false;
+  $("#health-desktop-section").hidden = true;
+  const s = shellState;
+  const m = connectionModel(s);
+  const calm = m.kind === "ok" || m.kind === "checking";
+  // After a switch, reopening Claude is the one thing left to do; the rest steps back.
+  const demote = Boolean(s && s.restartClaude);
+  host.className = `conn conn-${m.kind}${calm ? " calm" : " loud"}`;
+  const refresh = el("button", { class: "link-btn", type: "button", text: t("conn.refresh"), onclick: () => void connRun(() => APP.refresh()) });
+  refresh.disabled = Boolean(s && s.busy);
+  if (calm) {
+    host.replaceChildren(el("div", { class: "group" }, [
+      el("div", { class: "cell conn-calm-row" }, [
+        el("span", { class: "conn-dot", "aria-hidden": "true" }),
+        el("div", { class: "cell-text" }, [el("span", { class: "cell-label strong", text: m.title }), m.lead ? el("span", { class: "cell-sub", text: m.lead }) : null]),
+        m.secondary ? el("div", { class: "cell-value" }, [connButton(m.secondary, "btn secondary compact")]) : null,
+      ]),
+      ...connNotes(s).map((note) => el("div", { class: "cell-note conn-calm-note" }, [note])),
+      connLoginOffer(s) ? el("div", { class: "cell-note conn-calm-note" }, [connLoginOffer(s)]) : null,
+    ]));
+    return;
+  }
+  const actions = [m.primary, m.secondary].filter(Boolean).map((id, index) => el("div", { class: "conn-action" }, [
+    connButton(id, `btn large${index === 0 && !demote ? "" : " secondary"}`),
+    CONN_ACTIONS[id].hint ? el("p", { class: "hint", text: t(CONN_ACTIONS[id].hint) }) : null,
+  ]));
+  host.replaceChildren(el("div", { class: "conn-card" }, [
+    el("div", { class: "conn-hero" }, [
+      el("div", { class: "conn-icon" }, [svgIcon("0 0 20 20", CONN_ICONS[m.kind] || CONN_ICONS.bad)]),
+      el("div", { class: "conn-hero-text" }, [
+        el("h2", { class: "conn-title", text: m.title }),
+        m.lead ? el("p", { class: "conn-lead", text: m.lead }) : null,
+        m.reason ? el("p", { class: "conn-reason", text: m.reason }) : null,
+      ]),
+    ]),
+    ...connNotes(s),
+    actions.length ? el("div", { class: "conn-actions" }, actions) : null,
+    connLoginOffer(s),
+    el("div", { class: "conn-foot" }, [connDetails(s), refresh]),
+  ]));
+}
+
+if (APP) {
+  APP.onState((next) => { shellState = next; renderConnection(); applyOffline(); });
+  void APP.state().then((next) => { shellState = next; renderConnection(); applyOffline(); });
 }
 
 function quotaLine(name) {
@@ -837,7 +1109,7 @@ function phoneControls(data) {
     phoneSettings(data), phoneRestart(), phones, section(null, [rotate], t("phone.sharedKey"))];
 }
 async function refreshPhone(rebuild = false) {
-  if (!phoneActive()) return;
+  if (!phoneActive() || offline()) return;
   const generation = phoneGeneration;
   try {
     const data = await api("/api/phone/status");

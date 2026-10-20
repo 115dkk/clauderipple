@@ -1,12 +1,22 @@
-// ClaudeRipple menu-bar app. It owns no logic: the router serves the GUI and the admin API on
-// 127.0.0.1; this shell adds a tray icon with live health, a window for the GUI, and shortcuts
-// for restart / logs / login. If the router is down the tray says so and offers to start it.
+// ClaudeRipple menu-bar app. The router owns the logic and the admin API on 127.0.0.1; this shell
+// adds a tray icon with live health, the dashboard window, and shortcuts for restart / logs / login.
+//
+// The window draws the dashboard from the app's own copy of packages/ui (protocol.ts) and only asks
+// the router for data, so it opens with the router dead — which is when it is needed: on
+// 2026-10-20 a broken launch entry took the router down, and the router-served dashboard with it,
+// and nothing was left to fix it from. A preload bridge lets the dashboard repair the router or
+// switch Claude to its default connection through the CLI (`doctor` / `repair` / `direct`).
 
-import { app, Menu, Tray, Notification, nativeImage, shell, dialog, clipboard } from "electron";
+import { app, Menu, Tray, Notification, nativeImage, shell, dialog, clipboard, ipcMain } from "electron";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+import { reopenClaude } from "./claude-desktop";
+import { handleScheme, ORIGIN, registerScheme } from "./protocol";
+import { parseJsonOutput, repairDetails, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
+import { mainWindow, openWindow, sendToWindow, windowVisible, type Bounds } from "./window";
 
 type QuotaWindow = { used_percent?: number; window_minutes?: number };
 type Quota = { rate_limits?: { primary?: QuotaWindow | null; secondary?: QuotaWindow | null } };
@@ -90,12 +100,17 @@ const STRINGS = {
     proxyLine: (host: string, port: number, slots: string, flight: string) => `Proxy ${host}:${port} · ${slots} · ${flight}`,
     startAtLogin: "Start at login",
     downNotifyTitle: "Claude Desktop cannot connect",
-    downNotifyBody: "The ClaudeRipple router is not running, so Claude Desktop has no way out. Click to start it.",
     starting: "starting the router…",
-    openDashboard: "Open Dashboard in Browser…",
-    offlineHeading: "The router is not running",
-    offlineBody:
-      "Claude Desktop sends all of its traffic through ClaudeRipple, so while the router is down the app shows a blank window with ERR_PROXY_CONNECTION_FAILED. Start the router and reload Claude Desktop.",
+    open: "Open ClaudeRipple…",
+    directHeadline: "Claude's default connection (Ripple off)",
+    tooltipDirect: "ClaudeRipple: using Claude's default connection",
+    notifyDownTitle: "Ripple is not responding",
+    notifyDownBody: "Claude cannot reach AI right now. Repair Ripple, or switch to Claude's default connection.",
+    actRepair: "Repair",
+    actDirectOn: "Use Claude's default connection",
+    restartConfirm: "Quit and reopen the Claude app?",
+    restartConfirmDetail: "Open conversations and any work in progress in the Claude app will stop.",
+    restartNow: "Reopen",
     setupNeeded: "setup not finished",
     setupNeededDetail: "ClaudeRipple is installed but not set up yet",
     runSetup: "Finish setting up ClaudeRipple…",
@@ -169,12 +184,17 @@ const STRINGS = {
     proxyLine: (host: string, port: number, slots: string, flight: string) => `프록시 ${host}:${port} · ${slots} · ${flight}`,
     startAtLogin: "로그인 시 자동 시작",
     downNotifyTitle: "Claude Desktop이 연결되지 않습니다",
-    downNotifyBody: "ClaudeRipple 라우터가 꺼져 있어 Claude Desktop이 밖으로 나가지 못합니다. 눌러서 시작하세요.",
     starting: "라우터를 시작하는 중…",
-    openDashboard: "브라우저에서 대시보드 열기…",
-    offlineHeading: "라우터가 꺼져 있습니다",
-    offlineBody:
-      "Claude Desktop은 모든 통신을 ClaudeRipple로 보냅니다. 그래서 라우터가 꺼져 있는 동안에는 앱이 흰 화면과 ERR_PROXY_CONNECTION_FAILED만 보여줍니다. 라우터를 시작한 뒤 Claude Desktop을 새로고침하세요.",
+    open: "ClaudeRipple 열기…",
+    directHeadline: "Claude 기본 연결 사용 중 (리플 꺼짐)",
+    tooltipDirect: "ClaudeRipple: Claude 기본 연결 사용 중",
+    notifyDownTitle: "리플이 응답하지 않습니다",
+    notifyDownBody: "지금 Claude가 AI에 연결되지 않습니다. 복구하거나 Claude 기본 연결로 바꿀 수 있습니다.",
+    actRepair: "복구",
+    actDirectOn: "Claude 기본 연결로 전환",
+    restartConfirm: "Claude 앱을 종료했다가 다시 열까요?",
+    restartConfirmDetail: "Claude 앱에 열려 있는 대화와 진행 중인 작업이 멈춥니다.",
+    restartNow: "다시 열기",
     setupNeeded: "설정이 끝나지 않았습니다",
     setupNeededDetail: "설치는 됐지만 아직 설정하지 않았습니다",
     runSetup: "ClaudeRipple 설정 마치기…",
@@ -248,12 +268,17 @@ const STRINGS = {
     proxyLine: (host: string, port: number, slots: string, flight: string) => `代理 ${host}:${port} · ${slots} · ${flight}`,
     startAtLogin: "登录时启动",
     downNotifyTitle: "Claude Desktop 无法连接",
-    downNotifyBody: "ClaudeRipple 路由服务未运行，因此 Claude Desktop 无法向外发送请求。点击即可启动路由服务。",
     starting: "正在启动路由服务…",
-    openDashboard: "在浏览器中打开控制面板…",
-    offlineHeading: "路由服务未运行",
-    offlineBody:
-      "Claude Desktop 的所有流量都经过 ClaudeRipple，因此路由服务停止期间，应用会显示空白窗口并报 ERR_PROXY_CONNECTION_FAILED。请启动路由服务，然后重新加载 Claude Desktop。",
+    open: "打开 ClaudeRipple…",
+    directHeadline: "正在使用 Claude 默认连接（Ripple 已关闭）",
+    tooltipDirect: "ClaudeRipple：正在使用 Claude 默认连接",
+    notifyDownTitle: "Ripple 没有响应",
+    notifyDownBody: "Claude 现在无法连接 AI。可以修复 Ripple，或切换到 Claude 默认连接。",
+    actRepair: "修复",
+    actDirectOn: "切换到 Claude 默认连接",
+    restartConfirm: "要退出并重新打开 Claude 应用吗？",
+    restartConfirmDetail: "Claude 应用中打开的对话和进行中的工作会停止。",
+    restartNow: "重新打开",
     setupNeeded: "设置未完成",
     setupNeededDetail: "ClaudeRipple 已安装，但尚未完成设置",
     runSetup: "完成 ClaudeRipple 设置…",
@@ -327,12 +352,17 @@ const STRINGS = {
     proxyLine: (host: string, port: number, slots: string, flight: string) => `プロキシ ${host}:${port} · ${slots} · ${flight}`,
     startAtLogin: "ログイン時に起動",
     downNotifyTitle: "Claude Desktopが接続できません",
-    downNotifyBody: "ClaudeRippleのルーターが停止しているため、Claude Desktopは外部と通信できません。クリックして起動してください。",
     starting: "ルーターを起動中…",
-    openDashboard: "ブラウザでダッシュボードを開く…",
-    offlineHeading: "ルーターが停止しています",
-    offlineBody:
-      "Claude Desktopはすべての通信をClaudeRipple経由で送るため、ルーターが停止している間はERR_PROXY_CONNECTION_FAILEDと表示された空白のウィンドウになります。ルーターを起動してから、Claude Desktopを再読み込みしてください。",
+    open: "ClaudeRippleを開く…",
+    directHeadline: "Claude の標準接続を使用中（Ripple はオフ）",
+    tooltipDirect: "ClaudeRipple：Claude の標準接続を使用中",
+    notifyDownTitle: "Ripple が応答しません",
+    notifyDownBody: "現在 Claude は AI に接続できません。Ripple を修復するか、Claude の標準接続に切り替えられます。",
+    actRepair: "修復",
+    actDirectOn: "Claude の標準接続に切り替え",
+    restartConfirm: "Claude アプリを終了して開き直しますか？",
+    restartConfirmDetail: "Claude アプリで開いている会話や進行中の作業は止まります。",
+    restartNow: "開き直す",
     setupNeeded: "セットアップ未完了",
     setupNeededDetail: "ClaudeRippleはインストール済みですが、まだセットアップされていません",
     runSetup: "ClaudeRippleのセットアップを完了…",
@@ -406,12 +436,17 @@ const STRINGS = {
     proxyLine: (host: string, port: number, slots: string, flight: string) => `Proxy ${host}:${port} · ${slots} · ${flight}`,
     startAtLogin: "Abrir al iniciar sesión",
     downNotifyTitle: "Claude Desktop no puede conectarse",
-    downNotifyBody: "El router de ClaudeRipple no está en ejecución, así que Claude Desktop no puede conectarse. Haz clic para iniciarlo.",
     starting: "iniciando el router…",
-    openDashboard: "Abrir el panel en el navegador…",
-    offlineHeading: "El router no está en ejecución",
-    offlineBody:
-      "Claude Desktop envía todo su tráfico a través de ClaudeRipple, así que mientras el router esté detenido la app muestra una ventana en blanco con ERR_PROXY_CONNECTION_FAILED. Inicia el router y recarga Claude Desktop.",
+    open: "Abrir ClaudeRipple…",
+    directHeadline: "Conexión predeterminada de Claude (Ripple apagado)",
+    tooltipDirect: "ClaudeRipple: usando la conexión predeterminada de Claude",
+    notifyDownTitle: "Ripple no responde",
+    notifyDownBody: "Claude no puede conectarse a la IA ahora mismo. Repara Ripple o usa la conexión predeterminada de Claude.",
+    actRepair: "Reparar",
+    actDirectOn: "Usar la conexión predeterminada de Claude",
+    restartConfirm: "¿Cerrar y volver a abrir la app de Claude?",
+    restartConfirmDetail: "Las conversaciones abiertas y el trabajo en curso en la app de Claude se detendrán.",
+    restartNow: "Reabrir",
     setupNeeded: "configuración pendiente",
     setupNeededDetail: "ClaudeRipple está instalado, pero aún no está configurado",
     runSetup: "Terminar de configurar ClaudeRipple…",
@@ -485,12 +520,17 @@ const STRINGS = {
     proxyLine: (host: string, port: number, slots: string, flight: string) => `Proxy ${host}:${port} · ${slots} · ${flight}`,
     startAtLogin: "Iniciar ao fazer login",
     downNotifyTitle: "O Claude Desktop não consegue se conectar",
-    downNotifyBody: "O roteador do ClaudeRipple não está rodando, então o Claude Desktop não consegue acessar a rede. Clique para iniciá-lo.",
     starting: "iniciando o roteador…",
-    openDashboard: "Abrir painel no navegador…",
-    offlineHeading: "O roteador não está rodando",
-    offlineBody:
-      "O Claude Desktop envia todo o tráfego pelo ClaudeRipple, então, enquanto o roteador estiver parado, o app mostra uma janela em branco com ERR_PROXY_CONNECTION_FAILED. Inicie o roteador e recarregue o Claude Desktop.",
+    open: "Abrir o ClaudeRipple…",
+    directHeadline: "Conexão padrão do Claude (Ripple desligado)",
+    tooltipDirect: "ClaudeRipple: usando a conexão padrão do Claude",
+    notifyDownTitle: "O Ripple não está respondendo",
+    notifyDownBody: "O Claude não consegue acessar a IA agora. Repare o Ripple ou use a conexão padrão do Claude.",
+    actRepair: "Reparar",
+    actDirectOn: "Usar a conexão padrão do Claude",
+    restartConfirm: "Encerrar e reabrir o app do Claude?",
+    restartConfirmDetail: "As conversas abertas e o trabalho em andamento no app do Claude vão parar.",
+    restartNow: "Reabrir",
     setupNeeded: "configuração não concluída",
     setupNeededDetail: "O ClaudeRipple está instalado, mas ainda não foi configurado",
     runSetup: "Concluir a configuração do ClaudeRipple…",
@@ -532,6 +572,8 @@ let lastError: string | null = null;
 let starting = false;
 let downSince: number | null = null;
 let downNotified = false;
+/** Whether the last health poll got an answer; null before the first poll. */
+let answered: boolean | null = null;
 // Long enough that a router still coming up after login does not fire a notification.
 const DOWN_NOTIFY_AFTER_MS = 20_000;
 
@@ -541,9 +583,11 @@ const DOWN_NOTIFY_AFTER_MS = 20_000;
 
 const stateFile = path.join(home, "app.json");
 
-function appState(): { loginItemInitialized?: boolean } {
+type SavedAppState = { loginItemInitialized?: boolean; window?: Bounds };
+
+function appState(): SavedAppState {
   try {
-    return JSON.parse(fs.readFileSync(stateFile, "utf8")) as { loginItemInitialized?: boolean };
+    return JSON.parse(fs.readFileSync(stateFile, "utf8")) as SavedAppState;
   } catch {
     return {};
   }
@@ -585,7 +629,15 @@ function setLoginItem(on: boolean): void {
   writeAppState({ loginItemInitialized: true });
 }
 
+// Overrides for running this app against stand-ins instead of the real installation (tests, and
+// trying a change without touching the router someone depends on):
+//   CLAUDERIPPLE_APP_ADMIN_URL  the admin API base the health poll and the dashboard use
+//   CLAUDERIPPLE_APP_CLI        a CLI script to run instead of the installed one
+//   CLAUDERIPPLE_APP_USER_DATA  Electron's data folder, which also keys the one-tray lock
+// CLAUDERIPPLE_HOME (logs, app.json, config.json) is honoured as everywhere else.
 function adminUrl(): string {
+  const override = process.env.CLAUDERIPPLE_APP_ADMIN_URL;
+  if (override) return override.endsWith("/") ? override : `${override}/`;
   return `http://127.0.0.1:${readConfigPorts().admin}/`;
 }
 
@@ -602,12 +654,8 @@ function uiLang(): keyof typeof STRINGS {
   return base in STRINGS ? (base as keyof typeof STRINGS) : "en";
 }
 
-/** The GUI follows the OS language by default; a language the user picked in the GUI itself wins (it is stored in the page). */
-function guiUrl(): string {
-  return `${adminUrl()}?lang=${uiLang()}`;
-}
-
 async function poll(): Promise<void> {
+  const before = answered;
   try {
     const res = await fetch(`${adminUrl()}api/status`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -615,26 +663,55 @@ async function poll(): Promise<void> {
     lastError = null;
     downSince = null;
     downNotified = false;
+    answered = true;
     void reconcileRouter(last);
   } catch (e) {
     last = null;
     lastError = (e as Error).message;
+    answered = false;
     downSince ??= Date.now();
-    // An update restarts the router on purpose; that is not the outage the notification is for.
-    if (!downNotified && !updating && Date.now() - downSince >= DOWN_NOTIFY_AFTER_MS) {
+    // An update or one of the window's own actions restarts the router on purpose; that is not
+    // the outage the notification is for. Neither is the direct mode, where the router being off
+    // is the point — so doctor is asked first, and once per outage. With the window on screen the
+    // user is already looking at the same news.
+    if (shouldNotifyDown({ downForMs: Date.now() - downSince, graceMs: DOWN_NOTIFY_AFTER_MS, alreadyNotified: downNotified, updating, busy: !!rec.busy || windowVisible(), mode: rec.doctor?.mode ?? null })) {
       downNotified = true;
-      notifyDown();
+      void refreshDoctor().then(() => {
+        if (!last && rec.doctor?.mode !== "direct") notifyDown();
+      });
     }
   }
+  // Up or down changed: what doctor said about the rest (direct, mixed) may have changed with it.
+  if (before !== null && before !== answered && !rec.busy) void refreshDoctor();
   render();
 }
 
-/** The router being down means Claude Desktop is dead in the water, so say so out loud. */
+// Held so the handlers are not collected with it before the user gets to the notification.
+let downNotification: Notification | null = null;
+
+/** The router being down means Claude is silent, so say so out loud, with the two ways out. */
 function notifyDown(): void {
-  if (!Notification.isSupported()) return;
-  const n = new Notification({ title: L.downNotifyTitle, body: L.downNotifyBody });
-  n.on("click", () => void startRouter());
+  if (!Notification.isSupported()) {
+    // Nothing else would tell the user; the window does.
+    showWindow("health");
+    return;
+  }
+  const n = new Notification({
+    title: L.notifyDownTitle,
+    body: L.notifyDownBody,
+    // macOS shows these as buttons on the notification (an Options menu when there are two).
+    actions: [
+      { type: "button", text: L.actRepair },
+      { type: "button", text: L.actDirectOn },
+    ],
+  });
+  n.on("click", () => showWindow("health"));
+  n.on("action", (_event, index) => {
+    showWindow("health");
+    void act(index === 0 ? "repair" : "direct-on");
+  });
   n.show();
+  downNotification = n;
 }
 
 /** Idempotent: `clauderipple start` leaves a router that is already coming up alone. */
@@ -664,34 +741,25 @@ const isMac = process.platform === "darwin";
  * mark would vanish on a dark taskbar — it gets a coloured variant instead, which also lets the
  * state read as a colour rather than only a shape.
  */
-function icon(state: "ok" | "warn" | "down"): Electron.NativeImage {
-  const mac = { ok: "trayTemplate.png", warn: "trayWarnTemplate.png", down: "trayDownTemplate.png" };
-  const win = { ok: "trayWin.png", warn: "trayWinWarn.png", down: "trayWinDown.png" };
+function icon(state: "ok" | "warn" | "down" | "direct"): Electron.NativeImage {
+  const mac = { ok: "trayTemplate.png", warn: "trayWarnTemplate.png", down: "trayDownTemplate.png", direct: "trayDirectTemplate.png" };
+  const win = { ok: "trayWin.png", warn: "trayWinWarn.png", down: "trayWinDown.png", direct: "trayWinDirect.png" };
   const img = nativeImage.createFromPath(path.join(__dirname, "..", "assets", (isMac ? mac : win)[state]));
   if (isMac) img.setTemplateImage(true);
   return img;
 }
 
 /**
- * The dashboard is a web page served by the router, so it opens in the user's own browser. With
- * the router down there is nothing to open: start it (or run setup, when that is what is missing)
- * and open the page once it answers, rather than sending the browser to a refused connection.
+ * The dashboard window. It opens with the router down too (its page is the app's own), and then on
+ * Status, where the way back is. Before setup there is no router to ask anything of, so the step
+ * that is actually missing comes first.
  */
 async function openDashboard(): Promise<void> {
-  if (last) {
-    void shell.openExternal(guiUrl());
-    return;
+  if (!last && needsSetup()) {
+    await setup();
+    await poll();
   }
-  // Before setup there is no router to start, so offer the step that is actually missing.
-  const message = needsSetup() ? (await setup(), "") : await startRouter();
-  // startRouter() returns once the CLI has finished; ask the router itself rather than waiting
-  // for the next tick, since the user is standing in front of the menu.
-  await poll();
-  if (last) {
-    void shell.openExternal(guiUrl());
-    return;
-  }
-  await dialog.showMessageBox({ type: "warning", message: L.offlineHeading, detail: [L.offlineBody, message].filter(Boolean).join("\n\n") });
+  showWindow(last ? undefined : "health");
 }
 
 type CliRuntime = { node: string; env: Record<string, string>; cli: string; router?: string };
@@ -770,6 +838,8 @@ function packagedRuntime(): CliRuntime | null {
 
 /** Prefer this app's bundled Electron runtime; existing installations retain their recorded runtime. */
 function cliPaths(): CliRuntime {
+  const override = process.env.CLAUDERIPPLE_APP_CLI;
+  if (override) return { node: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" }, cli: override };
   const packaged = packagedRuntime();
   if (packaged && fs.existsSync(packaged.cli)) return packaged;
   try {
@@ -791,14 +861,209 @@ function runCli(args: string[]): Promise<string> {
   return runCliResult(args).then((r) => r.output);
 }
 
-function runCliResult(args: string[]): Promise<{ ok: boolean; output: string }> {
+/**
+ * Runs the CLI without blocking anything. `stdout` is kept apart for the `--json` commands, whose
+ * one object must not be mixed with warnings on stderr. With `timeoutMs` a CLI that hangs (a
+ * supervisor that never answers) is ended rather than left holding a button down.
+ */
+function runCliResult(args: string[], timeoutMs = 0): Promise<{ ok: boolean; output: string; stdout: string; timedOut: boolean }> {
   const { node, env, cli } = cliPaths();
   return new Promise((resolve) => {
     // An update prints npm's and the installer's own lines; the default 1MB buffer is not for that.
-    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home }, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim() });
+    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home }, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+      const timedOut = !!err && timeoutMs > 0 && (err as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
+      resolve({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim(), stdout: String(stdout), timedOut });
     });
   });
+}
+
+// ---- recovery: doctor, repair, direct -----------------------------------------------------
+// The CLI does the work and answers in JSON; this keeps what it last said and what is running,
+// and hands both to the dashboard (window.rippleApp) to draw its connection card.
+
+const ACTION_TIMEOUT_MS = 40_000;
+const DOCTOR_TIMEOUT_MS = 15_000;
+/** Background check, mainly to notice the direct mode while the router is still answering. */
+const DOCTOR_EVERY_MS = 5 * 60_000;
+/** While the window is open it should not show something a minute old. */
+const DOCTOR_WHILE_OPEN_MS = 10_000;
+const LOG_LINES = 40;
+
+const rec: { doctor: Doctor | null; doctorFailed: boolean; busy: Busy; result: ActionResult | null; restartClaude: boolean } = {
+  doctor: null,
+  doctorFailed: false,
+  busy: null,
+  result: null,
+  restartClaude: false,
+};
+let doctorRun: Promise<void> | null = null;
+
+/** One `doctor` at a time; callers that arrive while one runs share it. */
+function refreshDoctor(): Promise<void> {
+  doctorRun ??= (async () => {
+    const r = await runCliResult(["doctor", "--json"], DOCTOR_TIMEOUT_MS);
+    const d = parseJsonOutput<Doctor>(r.stdout);
+    rec.doctor = d;
+    rec.doctorFailed = !d;
+  })().finally(() => {
+    doctorRun = null;
+    render();
+  });
+  return doctorRun;
+}
+
+/** The end of router.log, read from disk: it is there to look at precisely when the router is not. */
+function logTail(): string[] {
+  const file = path.join(home, "logs", "router.log");
+  try {
+    const size = fs.statSync(file).size;
+    const length = Math.min(size, 16 * 1024);
+    const fd = fs.openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(length);
+      fs.readSync(fd, buf, 0, length, size - length);
+      return tailLines(buf.toString("utf8"), LOG_LINES).map((l) => (l.length > 400 ? `${l.slice(0, 400)}…` : l));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+}
+
+/** What the dashboard's connection card is drawn from. */
+function bridgeState(): AppState {
+  return {
+    doctor: rec.doctor,
+    doctorFailed: rec.doctorFailed,
+    routerAnswering: answered,
+    busy: rec.busy,
+    result: rec.result,
+    restartClaude: rec.restartClaude,
+    loginItem: loginItemOn(),
+    appVersion: app.getVersion(),
+    platform: process.platform,
+  };
+}
+
+let lastSent = "";
+/** Tells the open window, if any, when the state changed (render() runs on every poll). */
+function pushState(): void {
+  if (!mainWindow()) return;
+  const state = bridgeState();
+  const key = JSON.stringify(state);
+  if (key === lastSent) return;
+  lastSent = key;
+  sendToWindow("ripple-app:state", state);
+}
+
+function showWindow(view?: string): void {
+  openWindow(
+    {
+      lang: uiLang(),
+      savedBounds: () => appState().window ?? null,
+      saveBounds: (bounds) => writeAppState({ window: bounds }),
+      shown: () => {
+        lastSent = "";
+        if (!rec.busy) void refreshDoctor();
+      },
+    },
+    view,
+  );
+}
+
+type BridgeAction = Action | "refresh" | "login-item" | "logs";
+const BRIDGE_ACTIONS = new Set<string>(["repair", "direct-on", "direct-off", "restart-claude", "refresh", "login-item", "logs"]);
+
+/** Only our own page may drive the bridge, never something it navigated to. */
+function fromOurPage(event: Electron.IpcMainInvokeEvent): boolean {
+  return (event.senderFrame?.url ?? "").startsWith(`${ORIGIN}/`);
+}
+
+function wireBridge(): void {
+  ipcMain.handle("ripple-app:state", (event) => (fromOurPage(event) ? bridgeState() : null));
+  ipcMain.handle("ripple-app:log", (event) => (fromOurPage(event) ? logTail() : []));
+  ipcMain.handle("ripple-app:act", async (event, id: unknown) => {
+    if (!fromOurPage(event) || typeof id !== "string" || !BRIDGE_ACTIONS.has(id)) return null;
+    await act(id as BridgeAction);
+    return bridgeState();
+  });
+}
+
+async function act(id: BridgeAction): Promise<void> {
+  switch (id) {
+    case "repair":
+      return runAction("repair", ["repair", "--json"]);
+    case "direct-on":
+      return runAction("direct-on", ["direct", "on", "--json"]);
+    case "direct-off":
+      return runAction("direct-off", ["direct", "off", "--json"]);
+    case "restart-claude":
+      return restartClaude();
+    case "logs":
+      fs.mkdirSync(path.join(home, "logs"), { recursive: true });
+      void shell.openPath(path.join(home, "logs"));
+      return;
+    case "refresh":
+      if (rec.busy) return;
+      rec.busy = "checking";
+      render();
+      await Promise.all([poll(), refreshDoctor()]);
+      rec.busy = null;
+      render();
+      return;
+    case "login-item":
+      setLoginItem(true);
+      render();
+      return;
+  }
+}
+
+async function runAction(action: "repair" | "direct-on" | "direct-off", args: string[]): Promise<void> {
+  if (rec.busy) return;
+  rec.busy = action;
+  rec.result = null;
+  render();
+  const r = await runCliResult(args, ACTION_TIMEOUT_MS);
+  const out = parseJsonOutput<RepairOutput & DirectOutput>(r.stdout);
+  const ok = !r.timedOut && out?.ok === true;
+  const details =
+    action === "repair"
+      ? repairDetails(out, r.output)
+      : [out?.detail ?? "", ...(ok ? [] : tailLines(out ? "" : r.output, 8))].filter(Boolean);
+  rec.result = { action, ok, timedOut: r.timedOut, details, at: Date.now() };
+  if (ok && out?.restartClaude) rec.restartClaude = true;
+  if (out?.doctor) {
+    rec.doctor = out.doctor;
+    rec.doctorFailed = false;
+  }
+  rec.busy = null;
+  await poll();
+  if (!out?.doctor) await refreshDoctor();
+  render();
+}
+
+async function restartClaude(): Promise<void> {
+  if (rec.busy) return;
+  const options: Electron.MessageBoxOptions = {
+    type: "question",
+    message: L.restartConfirm,
+    detail: L.restartConfirmDetail,
+    buttons: [L.restartNow, L.cancel],
+    defaultId: 0,
+    cancelId: 1,
+  };
+  const parent = mainWindow();
+  const choice = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+  if (choice.response !== 0) return;
+  rec.busy = "restart-claude";
+  rec.result = null;
+  render();
+  const ok = await reopenClaude();
+  rec.busy = null;
+  rec.result = { action: "restart-claude", ok, details: [], at: Date.now() };
+  if (ok) rec.restartClaude = false;
+  render();
 }
 
 // ---- updates ----------------------------------------------------------------------------
@@ -918,9 +1183,13 @@ function windowsText(quota: Quota | undefined): string {
 }
 
 function render(): void {
+  pushState();
   if (!tray) return;
   const state = healthy(last);
-  tray.setImage(icon(state));
+  // The direct mode is chosen, not broken: its own mark, and no "cannot connect" line.
+  const shown = trayState(state, rec.doctor);
+  const direct = shown === "direct";
+  tray.setImage(icon(shown));
   const s = last;
   const quota = Object.values(s?.chatgpt?.quota ?? {}).find((q) => q) as { plan_type?: string; rate_limits?: { primary?: { used_percent?: number; reset_after_seconds?: number } } } | undefined;
   const quotaLine = quota?.rate_limits?.primary
@@ -932,22 +1201,29 @@ function render(): void {
   // "Router not running" is useless advice to someone who has never set it up — that reads as a
   // fault when the truth is there is one step left. Separate the two states everywhere.
   const unconfigured = !s && needsSetup();
-  const headline = s
-    ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}`
-    : `ClaudeRipple · ${unconfigured ? L.setupNeeded : L.routerNotRunning}`;
+  const headline = direct
+    ? `ClaudeRipple · ${L.directHeadline}`
+    : s
+      ? `ClaudeRipple · ${state === "ok" ? L.healthy : L.attentionNeeded}`
+      : `ClaudeRipple · ${unconfigured ? L.setupNeeded : L.routerNotRunning}`;
   // What is actually in the way, not only that something is: the router's readiness list names it.
   const problems = (s?.readiness?.problems ?? []).map((code) => L.problem(code));
-  const detail = s
-    ? [connected ? L.connected : L.notConnected, ...problems, quotaLine].filter(Boolean).join(" · ")
-    : unconfigured
-      ? L.setupNeededDetail
-      : L.downNotifyTitle;
+  const detail = direct
+    ? null
+    : s
+      ? [connected ? L.connected : L.notConnected, ...problems, quotaLine].filter(Boolean).join(" · ")
+      : unconfigured
+        ? L.setupNeededDetail
+        : L.downNotifyTitle;
   // One line per Claude subscription account, current login first (#40).
   const claudeLines = (s?.claude?.accounts ?? [])
     .map((account) => ({ account, windows: windowsText(account.quota) }))
     .filter(({ windows }) => windows)
     .map(({ account, windows }) => ({ label: L.claudeUsage(account.id === "current" ? L.claudeCurrent : account.label, windows), click: () => void openDashboard() }) as Electron.MenuItemConstructorOptions);
   const template: Electron.MenuItemConstructorOptions[] = [
+    // First, because it is the way back when nothing else works: the window needs no router.
+    { label: L.open, click: () => void openDashboard() },
+    { type: "separator" },
     { label: headline, click: () => void openDashboard() },
     ...(detail ? [{ label: detail, click: () => void openDashboard() } as Electron.MenuItemConstructorOptions] : []),
     ...claudeLines,
@@ -955,8 +1231,6 @@ function render(): void {
       ? [{ label: updating ? L.updating(availableUpdate.latest ?? "") : L.updateAvailableItem(availableUpdate.latest ?? ""), enabled: !updating, click: () => void offerUpdate(availableUpdate!) } as Electron.MenuItemConstructorOptions]
       : []),
     { type: "separator" },
-    // Enabled even when the router is down: it is started first, then the page is opened.
-    { label: L.openDashboard, click: () => void openDashboard() },
     { label: L.startAtLogin, type: "checkbox", checked: loginItemOn(), click: (item) => setLoginItem(item.checked) },
     { type: "separator" },
     { label: unconfigured ? L.runSetup : L.rerunSetup, click: () => void setup() },
@@ -979,15 +1253,40 @@ function render(): void {
     { label: L.quit, role: "quit" },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(template));
-  tray.setToolTip(s ? L.tooltip(state) : L.tooltipDown);
+  tray.setToolTip(direct ? L.tooltipDirect : s ? L.tooltip(state) : L.tooltipDown);
 }
+
+/**
+ * The dashboard this app draws: the copy of packages/ui inside a packaged build, else the one next
+ * to the tray's own folder (a checkout's packages/ui, an npm install's dist/ui — the same files the
+ * router serves).
+ */
+function uiRoot(): string {
+  const resources = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  const candidates = [
+    ...(resources ? [path.join(resources, "clauderipple", "packages", "ui")] : []),
+    path.resolve(__dirname, "..", "..", "ui"),
+  ];
+  return candidates.find((dir) => fs.existsSync(path.join(dir, "index.html"))) ?? candidates[candidates.length - 1]!;
+}
+
+registerScheme();
 
 // One tray. `clauderipple tray` run while one is up started a second icon (Windows VM,
 // 2026-10-10); the newcomer now leaves at once with code 0, which the CLI reads as "already running".
+if (process.env.CLAUDERIPPLE_APP_USER_DATA) app.setPath("userData", process.env.CLAUDERIPPLE_APP_USER_DATA);
 if (!app.requestSingleInstanceLock()) app.exit(0);
+
+// Opening the app again (Finder, Start menu, `clauderipple tray`) while it already runs in the
+// tray is someone looking for it: bring the window forward rather than nothing.
+app.on("second-instance", () => {
+  if (app.isReady()) showWindow(last ? undefined : "health");
+});
 
 app.whenReady().then(() => {
   L = STRINGS[uiLang()];
+  handleScheme(uiRoot(), adminUrl);
+  wireBridge();
   // Without this, Windows attributes our notifications to "Electron" instead of ClaudeRipple.
   if (process.platform === "win32") app.setAppUserModelId("com.clauderipple.app");
   // macOS keeps its application menu (it owns Cmd-Q and the edit shortcuts); elsewhere it is noise.
@@ -1003,6 +1302,10 @@ app.whenReady().then(() => {
   render();
   void poll();
   setInterval(() => void poll(), POLL_MS);
+  // What the health poll cannot see (the direct mode, a supervisor gone missing) comes from doctor.
+  setTimeout(() => void refreshDoctor(), 3_000);
+  setInterval(() => void (!rec.busy && refreshDoctor()), DOCTOR_EVERY_MS);
+  setInterval(() => void (windowVisible() && !rec.busy && refreshDoctor()), DOCTOR_WHILE_OPEN_MS);
   if (needsSetup()) void promptForSetup();
   // Not at the very start: a tray opened at login shares the first minute with everything else.
   setTimeout(() => void checkForUpdate(), 60_000);

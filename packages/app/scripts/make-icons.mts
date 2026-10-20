@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Generates the three 22×22 (and @2x 44×44) template tray icons as PNGs with no dependencies:
+// Generates the four 22×22 (and @2x 44×44) template tray icons as PNGs with no dependencies:
 // a "ripple" of concentric arcs. Template images are black + alpha; macOS tints them.
 //   ok   : three full rings
 //   warn : rings with a gap (broken ring)
 //   down : outline circle only
+//   direct : solid core only (Ripple switched off on purpose; Claude goes straight out)
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -56,12 +57,13 @@ function ring(x: number, y: number, cx: number, cy: number, r: number, w: number
   return Math.max(0, Math.min(1, w / 2 - d + 0.5));
 }
 
-type Variant = "ok" | "warn" | "down";
+type Variant = "ok" | "warn" | "down" | "direct";
 
 // The Ripple family mark (same geometry as BodyRipple's assets/logo.svg, 1024 grid): a solid core
 // (r 128), a full ring (r 245, stroke 56, 62%), and a 270° arc from the top clockwise to the left
 // (r 404, stroke 56, 28%). Tray variants, black on transparent (macOS tints template images):
 //   ok   : core + ring + arc      warn : core + ring      down : hollow core only
+//   direct : solid core only
 const ARC_START = -Math.PI / 2; // top
 function arcAlpha(x: number, y: number, cx: number, cy: number, r: number, w: number, sweep: number): number {
   let ang = Math.atan2(y - cy, x - cx) - ARC_START;
@@ -82,14 +84,14 @@ function draw(variant: Variant, scale: number) {
     let a = 0;
     if (variant === "down") a = Math.max(0, Math.min(1, w / 2 - Math.abs(d - 2.2 * s) + 0.5));
     else a = Math.max(0, Math.min(1, 2.6 * s - d + 0.5));
-    if (variant !== "down") a = Math.max(a, ring(x, y, c, c, 5.4 * s, w));
+    if (variant !== "down" && variant !== "direct") a = Math.max(a, ring(x, y, c, c, 5.4 * s, w));
     if (variant === "ok") a = Math.max(a, arcAlpha(x, y, c, c, 9.2 * s, w, Math.PI * 1.5));
     return a;
   };
 }
 
-for (const v of ["ok", "warn", "down"] as Variant[]) {
-  const base = v === "ok" ? "trayTemplate" : v === "warn" ? "trayWarnTemplate" : "trayDownTemplate";
+for (const v of ["ok", "warn", "down", "direct"] as Variant[]) {
+  const base = v === "ok" ? "trayTemplate" : v === "warn" ? "trayWarnTemplate" : v === "down" ? "trayDownTemplate" : "trayDirectTemplate";
   fs.writeFileSync(path.join(out, `${base}.png`), png(22, (x, y) => [0, 0, 0, Math.round(draw(v, 1)(x, y) * 255)]));
   fs.writeFileSync(path.join(out, `${base}@2x.png`), png(44, (x, y) => [0, 0, 0, Math.round(draw(v, 2)(x, y) * 255)]));
 }
@@ -101,10 +103,11 @@ const TRAY_WIN: Record<Variant, [number, number, number]> = {
   ok: [0x7c, 0x69, 0xef], // brand violet
   warn: [0xe0, 0x8c, 0x2a], // amber
   down: [0xd2, 0x4b, 0x4b], // red
+  direct: [0x8a, 0x96, 0xa6], // slate: off on purpose, not an alarm
 };
-for (const v of ["ok", "warn", "down"] as Variant[]) {
+for (const v of ["ok", "warn", "down", "direct"] as Variant[]) {
   const rgb = TRAY_WIN[v];
-  const name = v === "ok" ? "trayWin" : v === "warn" ? "trayWinWarn" : "trayWinDown";
+  const name = v === "ok" ? "trayWin" : v === "warn" ? "trayWinWarn" : v === "down" ? "trayWinDown" : "trayWinDirect";
   for (const [size, scale] of [[32, 32 / 22], [64, 64 / 22]] as [number, number][]) {
     const mask = draw(v, scale);
     const suffix = size === 32 ? "" : "@2x";

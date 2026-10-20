@@ -25,7 +25,9 @@
 <main>
   <section id="view-health" class="view">
     <header class="page-header"><div><h1 data-i18n="health.title">Status</h1><p class="page-subtitle" data-i18n="health.subtitle"></p></div></header>
-    <section class="section">
+    <!-- Drawn only inside the ClaudeRipple app, which can repair or switch the connection (window.rippleApp). -->
+    <div class="conn" id="health-connection" hidden></div>
+    <section class="section" id="health-desktop-section">
       <div class="section-head"><h2 class="section-title" data-i18n="health.desktop">Claude Desktop connection</h2></div>
       <div class="group" id="health-desktop"></div>
     </section>
