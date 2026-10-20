@@ -66,7 +66,7 @@ export function sudoersRule(o: { user: string; wifiDevice?: string; ssid?: strin
     commands.push(`${NETWORKSETUP} -setairportnetwork ${o.wifiDevice} ${o.ssid}`);
   }
   return [
-    "# ClaudeRipple: keep the Mac awake with the lid closed, and join the iPhone hotspot.",
+    "# ClaudeRipple: keep the Mac awake with the lid closed, and join the phone hotspot.",
     "# Installed by `clauderipple awake setup`; removed by `clauderipple awake setup --remove`.",
     `${o.user} ALL=(root) NOPASSWD: ${commands.join(", ")}`,
     "",
@@ -240,7 +240,7 @@ export async function awakeSetup(o: { ssid?: string }, d: SetupDeps): Promise<Se
   try {
     const script = installScript({ tempFile: temp, sha256: crypto.createHash("sha256").update(rule).digest("hex"), removeInsomnia });
     d.print("macOS will ask for your password once, in its own dialog (ClaudeRipple never sees it).");
-    r = await d.run(OSASCRIPT, adminOsascriptArgs(script, "ClaudeRipple wants to keep your Mac awake with the lid closed and join your iPhone hotspot when Wi-Fi fails."), { timeoutMs: 5 * 60_000 });
+    r = await d.run(OSASCRIPT, adminOsascriptArgs(script, "ClaudeRipple wants to keep your Mac awake with the lid closed and join your phone hotspot when Wi-Fi fails."), { timeoutMs: 5 * 60_000 });
   } finally {
     d.removeTemp(temp);
   }

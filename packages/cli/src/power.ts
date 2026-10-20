@@ -155,7 +155,7 @@ export async function powerCli(args: string[], d: PowerCliDeps): Promise<number>
       d.print("Next:");
       d.print(`  clauderipple awake working   keep the ${machine} awake (lid closed too) while Claude works, and 10 min after`);
       d.print("  clauderipple awake on [--until HH:MM]   keep it awake regardless");
-      if (ssid !== undefined) d.print("  clauderipple tether on       join the iPhone hotspot when Wi-Fi has no internet, and come back later");
+      if (ssid !== undefined) d.print("  clauderipple tether on       join the phone hotspot when Wi-Fi has no internet, and come back later");
       d.print(`Keep a closed ${machine === "PC" ? "laptop" : "Mac"} on a hard, ventilated surface — never in a bag while it is held awake.`);
       return 0;
     }

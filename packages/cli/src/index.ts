@@ -584,12 +584,12 @@ function help(): void {
                     prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
   mod on|off|status show where each request went above the Claude Code prompt, and the request log in a pane (/ripple-log), via a Claude Code mod
   awake setup [--ssid <hotspot name>] [--remove]
-                    allow ClaudeRipple to keep the laptop awake with the lid closed (and join that iPhone hotspot).
+                    allow ClaudeRipple to keep the laptop awake with the lid closed (and join that phone hotspot).
                     macOS: asks for your password once in macOS's own dialog, and removes Insomnia if it is installed;
                     Windows: no administrator step, only checks (power plan, Wi-Fi adapter, saved hotspot profile)
   awake on|off|working [--until HH:MM]
                     working: awake while Claude works and 10 min after; on: always (until HH:MM); off: never
-  tether on|off     join the iPhone hotspot when Wi-Fi has no internet, and go back to Wi-Fi when a known one works
+  tether on|off     join the phone hotspot when Wi-Fi has no internet, and go back to Wi-Fi when a known one works
   power [--json]    lid-closed awake and hotspot state
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
