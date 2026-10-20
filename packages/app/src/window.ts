@@ -64,7 +64,8 @@ export function openWindow(deps: WindowDeps, view?: string): void {
     // Its first frame is the page's own background, not a white flash in dark mode.
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#1c1c1e" : "#f5f5f7",
     autoHideMenuBar: true,
-    icon: mac ? undefined : path.join(__dirname, "..", "assets", "trayWin@2x.png"),
+    // The app icon (macOS takes it from the bundle): Windows reads every size from the .ico.
+    icon: mac ? undefined : path.join(__dirname, "..", "assets", process.platform === "win32" ? "icon.ico" : "icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

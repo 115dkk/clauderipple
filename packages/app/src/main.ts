@@ -699,6 +699,7 @@ function notifyDown(): void {
   const n = new Notification({
     title: L.notifyDownTitle,
     body: L.notifyDownBody,
+    icon: notifyIcon(),
     // macOS shows these as buttons on the notification (an Options menu when there are two).
     actions: [
       { type: "button", text: L.actRepair },
@@ -747,6 +748,11 @@ function icon(state: "ok" | "warn" | "down" | "direct"): Electron.NativeImage {
   const img = nativeImage.createFromPath(path.join(__dirname, "..", "assets", (isMac ? mac : win)[state]));
   if (isMac) img.setTemplateImage(true);
   return img;
+}
+
+/** The app icon on notifications: macOS uses the bundle's own; elsewhere Electron would show its default. */
+function notifyIcon(): string | undefined {
+  return isMac ? undefined : path.join(__dirname, "..", "assets", "icon.png");
 }
 
 /**
@@ -807,7 +813,7 @@ async function reconcileRouter(s: Status): Promise<void> {
   if (!installedElsewhere && !runningElsewhere && !otherVersion) return;
   reconciled = true;
   const from = `${s.version}${s.runtime?.router ? ` (${s.runtime.router})` : ""}`;
-  if (Notification.isSupported()) new Notification({ title: L.updatedTitle(app.getVersion()), body: L.updatedRestarting(from) }).show();
+  if (Notification.isSupported()) new Notification({ title: L.updatedTitle(app.getVersion()), body: L.updatedRestarting(from), icon: notifyIcon() }).show();
   const outputs: string[] = [];
   if (installedElsewhere || runningElsewhere) outputs.push(await runCli(["install"]));
   outputs.push(await runCli(["restart"]));
@@ -1117,7 +1123,7 @@ async function offerUpdate(check: UpdateCheck): Promise<void> {
   updating = true;
   render();
   const version = check.latest ?? "";
-  if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updating(version) }).show();
+  if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updating(version), icon: notifyIcon() }).show();
   const r = await runCliResult(["update"]);
   updating = false;
   if (!r.ok) {
@@ -1126,7 +1132,7 @@ async function offerUpdate(check: UpdateCheck): Promise<void> {
     return;
   }
   availableUpdate = null;
-  if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updateDone(version) }).show();
+  if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.updateDone(version), icon: notifyIcon() }).show();
   // A new tray from the new files, then this one goes. The lock is let go first, or the new tray
   // would see this one and leave.
   app.releaseSingleInstanceLock();

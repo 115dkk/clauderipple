@@ -9,7 +9,7 @@
 //   dist/router/src/index.js     the router
 //   dist/ui/                     the dashboard, served by the router's admin API
 //   dist/mod/                    the status mod, a plugin folder Claude Code loads
-//   dist/app/dist/main.js        the tray, with dist/app/assets next to it as it expects
+//   dist/app/dist/main.js        the tray, with dist/app/assets (tray and app icons) next to it as it expects
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -40,6 +40,11 @@ fs.cpSync(path.join(root, "packages", "mod"), path.join(dist, "mod"), {
 });
 fs.cpSync(path.join(root, "packages", "app", "dist"), path.join(dist, "app", "dist"), { recursive: true });
 fs.cpSync(path.join(root, "packages", "app", "assets"), path.join(dist, "app", "assets"), { recursive: true });
+// The app icon travels with the tray's assets: `clauderipple app --install` puts it on the launcher
+// it makes (icns on macOS, png on Linux, ico on Windows) and the tray uses it for its window.
+for (const name of ["icon.icns", "icon.png", "icon.ico"]) {
+  if (!fs.existsSync(path.join(dist, "app", "assets", name))) throw new Error(`packages/app/assets/${name} is missing; run: npm --workspace @clauderipple/app run icons`);
+}
 // The tray is compiled to CommonJS, but the package root says "type": "module", and the nearest
 // package.json decides: without this one Electron loaded main.js as an ES module and died with
 // "exports is not defined in ES module scope" (issue #8, Windows, 0.3.1). In a checkout

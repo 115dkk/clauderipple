@@ -64,9 +64,9 @@ function launchEnv(rt: Runtime, home: string): Record<string, string> {
   return { CLAUDERIPPLE_HOME: home, ...rt.env };
 }
 
-/** The icon the packaged app is built with, when this installation has one (a checkout after `npm run icons`). */
+/** The app icon (icon.icns / icon.png / icon.ico), committed in the app's assets and shipped in the npm package beside the tray. */
 function findIcon(rt: Runtime, file: string): string | null {
-  for (const dir of [path.join(rt.repo, "packages", "app", "build"), path.join(rt.repo, "dist", "app", "build")]) {
+  for (const dir of [path.join(rt.repo, "packages", "app", "assets"), path.join(rt.repo, "dist", "app", "assets")]) {
     const p = path.join(dir, file);
     if (fs.existsSync(p)) return p;
   }
@@ -200,7 +200,7 @@ export function installLauncher(opts: Opts): LauncherResult {
     const launcher = windowsTrayLauncherPath(opts.home);
     fs.mkdirSync(opts.home, { recursive: true });
     fs.writeFileSync(launcher, windowsTrayLauncher(opts.rt, opts.home));
-    const out = (opts.powershell ?? runPowerShell)(windowsShortcutScript(launcher, opts.rt.node, overrideDir()));
+    const out = (opts.powershell ?? runPowerShell)(windowsShortcutScript(launcher, findIcon(opts.rt, "icon.ico") ?? opts.rt.node, overrideDir()));
     const paths = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     return { ok: true, paths, detail: `${APP_NAME} is in the Start Menu and on the Desktop.` };
   }

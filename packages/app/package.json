@@ -96,7 +96,7 @@
           ]
         }
       ],
-      "icon": "build/icon.png",
+      "icon": "assets/icon.ico",
       "artifactName": "${productName}-${version}-win-${arch}.${ext}",
       "signExecutable": false
     },
