@@ -134,9 +134,10 @@ test('the whole row comes from /api/limits: every provider, in the router order'
   assert.equal(items[3]!.type, 'chatgpt')
   assert.equal(items[9]!.windowMinutes, 43200)
   assert.equal(items[9]!.percent, 92)
-  // A window whose reset has passed no longer stands; an unreadable body leaves nothing.
+  // A window whose reset has passed starts again at 0% with no reset to show; an unreadable body leaves nothing.
   const stale = { providers: [{ provider: 'x', type: 'chatgpt', title: 'GPT', accounts: [{ account: 0, at: NOW, windows: [win('seven_day', 5, 10080, past.getTime() / 1000)] }] }] }
-  assert.deepEqual(routerLimitItems(stale, NOW), [])
+  const reset = routerLimitItems(stale, NOW)
+  assert.deepEqual(reset.map(i => [i.kind, i.percent, i.resetsAt]), [['seven_day', 0, undefined]])
   assert.deepEqual(routerLimitItems({}, NOW), [])
   assert.deepEqual(routerLimitItems(null, NOW), [])
 })

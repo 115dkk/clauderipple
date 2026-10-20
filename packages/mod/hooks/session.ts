@@ -68,8 +68,12 @@ function limitItemFromWindow(w: unknown, provider: string, type: string | undefi
   if (typeof used !== 'number' || !Number.isFinite(used)) return null
   const minutes = typeof o.window_minutes === 'number' && o.window_minutes > 0 ? o.window_minutes : undefined
   const reset = typeof o.reset_at === 'number' && Number.isFinite(o.reset_at) ? o.reset_at * (o.reset_at < 1e12 ? 1000 : 1) : NaN
-  // A window whose reset has passed no longer stands (as the ChatGPT reader has always said).
-  if (Number.isFinite(reset) && reset <= now) return null
+  // A window whose reset has passed starts again from nothing: it reads 0% until the provider next
+  // reports, not gone. Dropped, Claude's five-hour window vanished from the row the minute it reset,
+  // and the row read as one of Claude's figures cut off (2026-10-20).
+  if (Number.isFinite(reset) && reset <= now) {
+    return { provider, ...(type ? { type } : {}), ...(title ? { title } : {}), account, kind: kind as LimitKind, label: typeof o.label === 'string' ? o.label : '', ...(minutes !== undefined ? { windowMinutes: minutes } : {}), percent: 0 }
+  }
   return {
     provider,
     ...(type ? { type } : {}),
