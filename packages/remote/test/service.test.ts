@@ -44,7 +44,8 @@ test("the plist runs this checkout's main.ts with an absolute node, KeepAlive, a
   assert.ok(pathValue.includes("/usr/bin") && pathValue.includes("/bin"));
 });
 
-test("agentPath has no duplicates and works without a claude", () => {
+// The launchd agent's PATH: other platforms pass the inherited PATH through.
+test("agentPath has no duplicates and works without a claude", { skip: process.platform !== "darwin" && "launchd only" }, () => {
   assert.equal(agentPath(undefined, "/usr/local/bin/node"), "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
 });
 
@@ -109,7 +110,8 @@ function fakeSpawner() {
 
 test("caffeinate is held once while any turn runs and released when none does", () => {
   const { spawned, spawner } = fakeSpawner();
-  const power = new PowerHold({ spawner, pid: 4242 });
+  // caffeinate is the Mac's: named so the test also runs on the Linux CI runner.
+  const power = new PowerHold({ platform: "darwin", spawner, pid: 4242 });
   power.update(false);
   assert.equal(spawned.length, 0);
   power.update(true);
@@ -128,7 +130,7 @@ test("caffeinate is held once while any turn runs and released when none does", 
 
 test("a caffeinate killed by someone else is taken again while a turn still runs, not in a tight loop", async () => {
   const { spawned, spawner } = fakeSpawner();
-  const power = new PowerHold({ spawner, retryMs: 20 });
+  const power = new PowerHold({ platform: "darwin", spawner, retryMs: 20 });
   power.update(true);
   spawned[0]!.exit();
   assert.equal(power.holding, false);
