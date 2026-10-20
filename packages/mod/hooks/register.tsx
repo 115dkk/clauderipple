@@ -89,7 +89,7 @@ const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const agentOpen = atom({ plugin: 'ripple', key: 'agentOpen' } as const, null)
 const agentEarlier = atom({ plugin: 'ripple', key: 'agentEarlier' } as const, 0)
-const agentRunsFolded = atom({ plugin: 'ripple', key: 'agentRunsFolded' } as const, [])
+const agentRunsOpen = atom({ plugin: 'ripple', key: 'agentRunsOpen' } as const, [])
 const agentsTick = atom({ plugin: 'ripple', key: 'agentsTick' } as const, 0)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
@@ -1317,11 +1317,11 @@ function alertActions($: EngineInterface, view: AlertView): AlertActions {
 function agentsActions($: EngineInterface): AgentsActions {
   return {
     toggleDone: () => update($, agentsShowDone, value => !value),
-    open: async id => { await update($, agentEarlier, () => 0); await update($, agentRunsFolded, () => []); await update($, agentOpen, () => id) },
-    // Back on the list, the runs folded in that conversation open again: it opens unfolded next time.
-    back: async () => { await update($, agentRunsFolded, () => []); await update($, agentOpen, () => null) },
+    open: async id => { await update($, agentEarlier, () => 0); await update($, agentRunsOpen, () => []); await update($, agentOpen, () => id) },
+    // Back on the list, the runs unfolded in that conversation fold again: it opens folded next time.
+    back: async () => { await update($, agentRunsOpen, () => []); await update($, agentOpen, () => null) },
     earlier: () => update($, agentEarlier, n => n + 1),
-    toggleRun: id => update($, agentRunsFolded, ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]),
+    toggleRun: id => update($, agentRunsOpen, ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]),
   }
 }
 /**
@@ -1759,7 +1759,7 @@ export const register: Register = on => {
       // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
       await read($, agentsTick)
       const id = await read($, agentOpen)
-      const open = id === null ? undefined : { id, talk: await agentTalk($, id), earlier: await read($, agentEarlier), runsFolded: await read($, agentRunsFolded) }
+      const open = id === null ? undefined : { id, talk: await agentTalk($, id), earlier: await read($, agentEarlier), runsOpen: await read($, agentRunsOpen) }
       return renderAgents($.ui.resolve(e), frame, { agents: await read($, agents), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { await report($, 'agents render', error); return next(e) }
   })

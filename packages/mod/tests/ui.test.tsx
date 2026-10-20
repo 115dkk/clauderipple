@@ -663,16 +663,16 @@ test('an agent\'s conversation reads in the pane: the task, its words, its tools
   ]
   const done: AgentRec = { ...AGENTS[0]!, id: 'a9', state: 'done', endedAt: NOW - 1000, now: undefined, toolSince: undefined }
   const long: AgentEntry[] = [talk[0]!, ...Array.from({ length: 45 }, (_, i): AgentEntry => ({ kind: 'tool', id: 'x' + i, tool: 'Grep', detail: 'pattern ' + i, state: 'ok' }))]
-  drawPane(on, 'talk-live', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, earlier: 0, runsFolded: ['t1'] } }, actions))
+  drawPane(on, 'talk-live', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, earlier: 0 } }, actions))
   drawPane(on, 'talk-done', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: [...talk.slice(0, 3), { kind: 'text', text: 'Ported; tests pass.' }] }, earlier: 0 } }, actions))
-  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, earlier: 0, runsOpen: ['x15'] } }, actions))
   drawPane(on, 'talk-deny', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { deny: 'no saved transcript for a1' }, earlier: 0 } }, actions))
   drawPane(on, 'talk-gone', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'zz', talk: { entries: [] }, earlier: 0 } }, actions))
   for (const surface of SURFACES) {
     const live = await mount($, 'talk-live', surface, 64)
     expect(await live.find({ type: 'Text', text: 'Port the request log renderer' }), surface).toBeDefined()
     expect(await live.find({ type: 'Text', text: 'Task' }), surface).toBeDefined()
-    // Folded, its three calls are its head; the one it is in now still shows under it.
+    // Its three calls fold into one line; the one it is in now still shows under it.
     expect(await live.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Read 1 file, Ran 1 command, Edited 1 file/ }), surface).toBeDefined()
     expect(await live.find({ type: 'Text', text: '1 failed' }), surface).toBeDefined()
     expect(await live.find({ type: 'Text', text: /^Edit$/ }), surface).toBeDefined()
@@ -1176,7 +1176,7 @@ test('a call reads as one short line: no leading cd, paths short, a command\'s d
     .toEqual([{ kind: 'tool', id: 'u1', tool: 'Read', detail: 'a.kt', state: 'ok' }])
 })
 
-test('a run of calls shows call by call under its head, folds into it when pressed, and a single call stays one line', async ($, on) => {
+test('a run of calls folds into its head, unfolds call by call when pressed, and a single call stays one line', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = { ...AGENT_NOOP, toggleRun: fn('run') }
   const bash = (i: number, state: 'ok' | 'error' = 'ok'): AgentEntry => ({ kind: 'tool', id: 'b' + i, tool: 'Bash', detail: commandLine('cd /Users/pbj/Documents/tabripple/android && ./gradlew :core:test --tests "*Parser*" -q 2>&1 | grep -vE "^(w:|warning)" | tail -40 # run ' + i), state })
@@ -1189,8 +1189,8 @@ test('a run of calls shows call by call under its head, folds into it when press
     { kind: 'tool', id: 'solo', tool: 'Bash', detail: 'git status', state: 'ok' },
   ]
   const done: AgentRec = { ...AGENTS[0]!, id: 'a9', state: 'done', endedAt: NOW - 1000, now: undefined, toolSince: undefined }
-  drawPane(on, 'runs-folded', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0, runsFolded: ['b0'] } }, actions))
-  drawPane(on, 'runs-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0 } }, actions))
+  drawPane(on, 'runs-folded', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0 } }, actions))
+  drawPane(on, 'runs-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0, runsOpen: ['b0'] } }, actions))
   for (const surface of SURFACES) {
     const folded = await mount($, 'runs-folded', surface, 64)
     expect(await folded.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Ran 8 commands, Edited 1 file/ }), surface).toBeDefined()

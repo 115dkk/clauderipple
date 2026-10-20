@@ -602,8 +602,8 @@ function toolRow(el: Els, frame: Frame, entry: ToolCall, agentLive: boolean, ind
 
 /**
  * A run of tool calls on the page: its head ("명령어 7개 실행함, 파일 1개를 편집함", its mark, how many
- * failed) over its calls, pressed to fold them into it; folded, the call the agent is in now still
- * shows under it. A single call is its own line.
+ * failed), pressed to unfold it call by call; folded, the call the agent is in now still shows
+ * under it. A single call is its own line.
  */
 function runDrawn(el: Els, frame: Frame, calls: readonly ToolCall[], agentLive: boolean, open: boolean, inFlight: AgentEntry | undefined, since: string | undefined, onToggle: (id: string) => void): RenderNode {
   const { Box, Text } = el
@@ -674,12 +674,12 @@ function talkDrawn(el: Els, frame: Frame, view: AgentsView, agent: AgentRec, tal
   // The call it is in now carries its time; with none in flight a last line says what it does.
   const inFlight = live(agent) ? page.shown.findLast(e => e.kind === 'tool' && e.state === 'running') : undefined
   const since = agent.toolSince ? elapsed(view.now - agent.toolSince, L) : undefined
-  // Tool calls in a run are headed in one line, as the Claude app heads them ("명령어 9개 실행함,
-  // 파일 2개 읽음 ⌄"), and show call by call under it; pressed, the run folds to its head. Folded
-  // by default, the owner read what the agent did as hidden (2026-10-20).
-  const folded = view.open?.runsFolded ?? []
+  // Tool calls in a run fold into one line, as the Claude app shows them ("명령어 9개 실행함, 파일
+  // 2개 읽음 ›"), and unfold call by call when pressed. Listed whole, a worker's dozens of commands
+  // read as a wall (2026-10-20).
+  const opened = view.open?.runsOpen ?? []
   for (const part of partsOf(page.shown)) {
-    if (part.kind === 'run') items.push(runDrawn(el, frame, part.calls, live(agent), !folded.includes(part.calls[0]!.id), inFlight, since, actions.toggleRun))
+    if (part.kind === 'run') items.push(runDrawn(el, frame, part.calls, live(agent), opened.includes(part.calls[0]!.id), inFlight, since, actions.toggleRun))
     else if (part.kind === 'prompt') items.push(block(el, frame, 'prompt-' + items.length, <Text key="label" bold {...k.sub}>{t(L, 'agents.task')}</Text>, cut(part.text, PROMPT_MAX)))
     else items.push(<Box key={'text-' + items.length} paddingX={1} minWidth={0}><Markdown text={cut(part.text, TEXT_MAX)} /></Box>)
   }
@@ -865,10 +865,9 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
     const page = pageOf(talk.entries, view.open?.earlier ?? 0, !live(agent))
     if (page.first?.kind === 'prompt') lines.push(<Box key="task" flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(page.first.text, 600)}</Text></Box>)
     if (page.hidden > 0) lines.push(<Box key="earlier">{textButton(el, 'earlier', t(L, 'agents.earlier', { count: Math.min(page.hidden, TALK_PAGE) }), actions.earlier, 'e')}</Box>)
-    // A run of calls shows under its head here too, and folds into it when pressed; a single call,
-    // and the one in flight, stay lines.
+    // A run of calls folds into one line here too; a single call, and the one in flight, stay lines.
     const inFlight = live(agent) ? page.shown.findLast(e => e.kind === 'tool' && e.state === 'running') : undefined
-    const folded = view.open?.runsFolded ?? []
+    const opened = view.open?.runsOpen ?? []
     const markColor = (m: Mark) => m === 'ok' ? tone.ok : m === 'error' ? tone.bad : m === 'running' ? tone.accent : undefined
     const callLine = (call: ToolCall, indent: number) => {
       const state = callMark(call, live(agent))
@@ -883,7 +882,7 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
     partsOf(page.shown).forEach((part, i) => {
       if (part.kind === 'run') {
         const id = part.calls[0]!.id
-        const open = !folded.includes(id)
+        const open = opened.includes(id)
         const rows = shownCalls(part.calls, open, inFlight).map(call => callLine(call, part.calls.length === 1 ? 1 : 3))
         if (part.calls.length === 1) { lines.push(<Box key={'e' + i} flexDirection="column">{rows}</Box>); return }
         const summary = runSummary(part.calls, L)
