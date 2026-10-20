@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.10.0 — 2026-10-20
+
+### Added
+
+- **Code tab sessions on an SSH host route through Ripple.** Claude Code on a remote host went
+  straight to Anthropic and could not find the GPT workers, because Claude Desktop opens that
+  connection itself and never reads `RemoteForward` (#67). `clauderipple remote add <host>` copies
+  the CA and the generated agent files over plain `sh`, points the host's `settings.json` at a
+  router-held reverse tunnel on `127.0.0.1:18791`, re-syncs the agents whenever they change, and
+  `remote hosts` / `remote remove` manage them. It needs key-based `ssh` with no password prompt;
+  the mod is not on the remote host yet.
+- **The logs page shows token usage for any period, and every provider.** The chips covered only
+  the last hour. A period control (1 hour, today, 7 days, 30 days, this month, all time, custom
+  dates) now reads an hourly history that survives restarts, a per-model table shows where the
+  tokens went, and the provider menu lists every configured provider instead of only the ones in
+  the last 200 requests, filtering the chips, the table and the recent requests together. A figure
+  too wide for a narrow pane or a 1,024px window steps its type down instead of being cut.
+- **The band's limits row shows every provider.** Claude, ChatGPT, Antigravity (Gemini), OpenCode
+  Go and a Grok subscription each draw a group in their provider's colour, from one
+  `/api/limits` read; before, only Claude and ChatGPT did. At about 100 columns four providers
+  took roughly 207 cells as gauges against 96, so the row picks the roomiest of three densities
+  and gives up later groups only when none fits. Each provider can be kept off the status bar.
+- **The Agents pane gives each agent a card.** The pane showed "no agents running · 2 done" over
+  an empty panel. Each card now holds the state, title, the model that answered and the effort it
+  was sent at, the API's real token counts with cache share, the tool count, and the elapsed time,
+  and keeps its size steady while the agent runs. Opening a card shows its conversation in the
+  pane, with a run of tool calls collapsed into one summary line ("3 files read, 1 command run"),
+  as the Claude app draws it.
+- **The dashboard's Phone view pairs Ripple Remote and manages the connection.** Pairing used to
+  mean running `npm run remote -- pair` in a source checkout. The view now shows the host's state,
+  a pairing QR on request, the mode, the phones seen and a key rotation, answered on a
+  loopback-only `/local` API with a secret from a `0600` file. The published CLI and dashboard now
+  install the phone host, which runs under Windows and Linux user supervisors as well as launchd.
+- **Ripple Remote tells you which session finished and what it did.** Notifications carried one
+  fixed line for every session; the host now sends the title and the last answer, approval request
+  or failure reason inside an encrypted blob, leaving Expo, APNs and FCM with only the fallback
+  text. Mac sessions push when a turn ends while the Mac is away, Claude app sessions send and
+  receive photos, a subagent shows its model and opens its own chat, and thinking no longer
+  splits a run (one real session went from 1,442 rows to 549).
+- **The desktop has two skins, deep and flat.** A `skin` setting picks them on the quick settings
+  panel and the dashboard's Look card; deep stays the default. Flat follows the app's own surface
+  and quiet text colour, keeps one accent, and the band's labels, counts and controls carry the
+  right colour.
+
+### Fixed
+
+- **Google and Antigravity prompt refusals are retried instead of failing the turn.** A refusal is
+  now returned unwritten and retried once along a configured fallback route with the original
+  request, and an Antigravity 429 is called a real limit only when fresh account and project quota
+  evidence says so.
+- **Parallel tool results with images stay together on the OpenAI-compatible wire.** Three image
+  Reads used to interleave `tool|user|tool|user`, and DeepSeek refused them
+  ("insufficient tool messages following tool_calls", #64). Images now wait until the run of tool
+  results ends.
+- **A slow reasoning model passes the connection check.** Hive answers a streamed request in 0.3
+  seconds but a whole one in 3–23, past the 8-second probe, so a working key read as "could not
+  connect"; the check now streams and drops the body once the status is in.
+- **A provider named in Hangul is named after its domain.** "하이브" slugged to nothing and showed
+  as "provider"; it now falls back to the URL's domain ("thehive").
+- **A failed restart no longer ends the Windows supervisor loop.** One `Start-Process` error, such
+  as a locked log file, stopped the script and left the router and host unsupervised until logon.
+- **A dark-mode select's options are readable.** Native options and optgroups now get opaque,
+  theme-aware backgrounds.
+- **Slash commands stay available when settings fail to load.** A throw while loading settings
+  took `/ripple`, `/ripple-log` and `/ripple-bar` with it (#62); the settings step now has its own
+  catch, so the commands register either way.
+
 ## 0.9.5 — 2026-10-14
 
 ### Fixed
