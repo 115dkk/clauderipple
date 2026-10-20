@@ -46,7 +46,7 @@ test("MacAway: the lock or 180 s of no input is away, and the answer is cached",
   let idle = 0;
   let probes = 0;
   const away = new MacAway({
-    now: () => now, log: () => {},
+    platform: "darwin", now: () => now, log: () => {},
     runner: async (_cmd, args) => {
       if (args.includes("-a")) return rootPlist(locked ? lockKey("true") : "");
       probes++;
@@ -76,7 +76,7 @@ test("MacAway: the lock or 180 s of no input is away, and the answer is cached",
 test("MacAway: a failing probe is here, logs once per failure streak, and never runs off darwin", async () => {
   const logs: string[] = [];
   let now = 1_000_000;
-  const away = new MacAway({ now: () => now, log: l => logs.push(l), runner: async () => { throw new Error("ioreg is missing"); } });
+  const away = new MacAway({ platform: "darwin", now: () => now, log: l => logs.push(l), runner: async () => { throw new Error("ioreg is missing"); } });
   assert.equal(await away.away(), false);
   now += 11_000;
   assert.equal(await away.away(), false);
