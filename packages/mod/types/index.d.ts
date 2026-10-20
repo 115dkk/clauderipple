@@ -402,8 +402,8 @@ declare module 'claude-code' {
       agentOpen: string | null
       /** Pages of earlier entries the open conversation shows beyond its latest. */
       agentEarlier: number
-      /** The open conversation's tool runs shown call by call, by their first call's id. */
-      agentRunsOpen: string[]
+      /** The open conversation's tool runs folded into their head, by their first call's id. */
+      agentRunsFolded: string[]
       /** Counts the Agents pane's seconds while an agent runs: a write redraws its clocks. */
       agentsTick: number
       jev: JevState

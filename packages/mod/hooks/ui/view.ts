@@ -222,8 +222,8 @@ export type AgentsView = {
   now: number
   /** Every finished agent, not only the latest few. */
   showDone: boolean
-  /** The agent whose conversation is open, what of it was read, and how many earlier pages show. */
-  open?: { id: string; talk: AgentTalk; earlier: number; runsOpen?: readonly string[] }
+  /** The agent whose conversation is open, what of it was read, how many earlier pages show, and the runs of calls folded. */
+  open?: { id: string; talk: AgentTalk; earlier: number; runsFolded?: readonly string[] }
 }
 
 export type AgentsActions = {

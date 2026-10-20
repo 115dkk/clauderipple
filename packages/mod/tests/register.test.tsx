@@ -1561,7 +1561,7 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   expect(await ui.find({ type: 'Button', key: 'open-worker-1' })).toBeDefined()
 })
 
-test('an agent\'s run of tool calls unfolds on press, its paths short against the session folder, and folds again once the pane goes back', async ($, on) => {
+test('an agent\'s run of tool calls shows unfolded, its paths short against the session folder, folds on press, and opens again once the pane goes back', async ($, on) => {
   boundaries(on, {}, { agentMessages: () => [
     { role: 'user', text: 'Run the tests.', toolUses: [] },
     { role: 'assistant', text: 'Running.', toolUses: [
@@ -1574,7 +1574,7 @@ test('an agent\'s run of tool calls unfolds on press, its paths short against th
   spawnStub(on)
   stepStub(on)
   const runs: unknown[] = []
-  on('state.set', { plugin: 'ripple', key: 'agentRunsOpen' }, async ($, e, next) => {
+  on('state.set', { plugin: 'ripple', key: 'agentRunsFolded' }, async ($, e, next) => {
     runs.push(e.value)
     return next(e)
   })
@@ -1583,19 +1583,19 @@ test('an agent\'s run of tool calls unfolds on press, its paths short against th
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
   await ui.press({ key: 'open-worker-1' })
   expect(await ui.find({ type: 'Button', text: /^Ran 1 command, Read 1 file/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
-  await ui.press({ key: 'run-c1' })
   expect(await ui.find({ type: 'Text', text: /^\.\/gradlew test$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^core\/A\.kt$/ })).toBeDefined()
   await ui.press({ key: 'run-c1' })
   expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
   await ui.press({ key: 'run-c1' })
+  expect(await ui.find({ type: 'Text', text: /^\.\/gradlew test$/ })).toBeDefined()
+  await ui.press({ key: 'run-c1' })
   expect(runs.at(-1)).toEqual(['c1'])
   await ui.press({ key: 'back' })
-  // Back on the list, the unfolded run is forgotten.
+  // Back on the list, the folded run is forgotten.
   expect(runs.at(-1)).toEqual([])
   await ui.press({ key: 'open-worker-1' })
-  expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^\.\/gradlew test$/ })).toBeDefined()
 })
 
 /** The claude:// link a handoff opened, and its query. */
