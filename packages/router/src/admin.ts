@@ -16,6 +16,7 @@
 //   POST /api/update    start `clauderipple update` in the background (it restarts this router)
 //   GET  /api/power     lid-closed awake + hotspot failover state (power.ts)
 //   PUT  /api/power     change awake mode/until, tether on/off (saved), pin (in memory)
+//   POST /api/power/setup  start `clauderipple awake setup [--ssid]` (macOS password dialog); GET polls it
 //   GET  /*           static files from packages/ui (the GUI itself)
 
 import crypto from "node:crypto";
@@ -29,7 +30,7 @@ import http from "node:http";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderModel } from "./config.ts";
-import { adminPort, headerValueProblem, homeDir, searchProviderFor, validate } from "./config.ts";
+import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
@@ -1776,6 +1777,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
   const scores = new ModelScoreCatalog({ home: homeDir(), warn: message => deps.log.warn(message), ...(deps.modelScoresFetch ? { fetch: deps.modelScoresFetch } : {}) });
   // Set again once the socket is bound (port 0 in tests); the Origin check below compares against it.
   let boundPort = adminPort(deps.config());
+  /** The dashboard's `awake setup` run in progress (or the last one), for GET /api/power/setup. */
+  let powerSetup: { running: boolean; startedAt?: string; finishedAt?: string; ok?: boolean; output?: string } = { running: false };
   const server = http.createServer((req, res) => {
     void handle(req, res);
   });
@@ -1866,6 +1869,48 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (change.tether?.pin !== undefined) deps.power.pin(change.tether.pin);
         await deps.power.poke();
         sendJson(res, 200, deps.power.status());
+        return;
+      }
+      // The one privileged step, from the dashboard: the CLI's `awake setup`, which shows macOS's own
+      // password dialog. It runs in the background and is polled, like the ChatGPT sign-in: the user
+      // may take minutes to type, and the app's window gives up on a response with no headers after
+      // 4s (packages/app/src/protocol.ts) — a reply held open until the end would read as a dead router.
+      if (pathname === "/api/power/setup" && (method === "GET" || method === "POST")) {
+        if (!deps.power) { sendJson(res, 501, { error: "power control not available" }); return; }
+        if (method === "GET") { sendJson(res, 200, powerSetup); return; }
+        let parsed: unknown;
+        try {
+          const text = (await readBody(req, 4096)).toString("utf8");
+          parsed = text.trim() ? JSON.parse(text) : {};
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) { sendJson(res, 400, { error: "expected an object" }); return; }
+        const extra = Object.keys(parsed).find((key) => key !== "ssid");
+        if (extra) { sendJson(res, 400, { error: `unknown field "${extra}"` }); return; }
+        const ssid = (parsed as { ssid?: unknown }).ssid;
+        if (ssid !== undefined) {
+          // Checked here too so a bad name is refused before a password dialog, not after it.
+          const problem = ssidProblem(ssid);
+          if (problem) { sendJson(res, 400, { error: problem }); return; }
+        }
+        if (powerSetup.running) { sendJson(res, 409, { error: "setup is already running", running: true }); return; }
+        powerSetup = { running: true, startedAt: new Date().toISOString() };
+        const args = ["awake", "setup", ...(typeof ssid === "string" ? ["--ssid", ssid] : [])];
+        deps.log.info(`admin: awake setup via GUI -> started${typeof ssid === "string" ? ` (hotspot "${ssid}")` : ""}`);
+        const power = deps.power;
+        // The CLI's own dialog times out at 5 min; this leaves it room to say so itself.
+        void (deps.runCli ?? runCli)(args, 330_000).then(
+          (result) => ({ ok: result.ok, output: result.output }),
+          (error: unknown) => ({ ok: false, output: errorText(error) }),
+        ).then(async (result) => {
+          powerSetup = { ...powerSetup, running: false, finishedAt: new Date().toISOString(), ...result };
+          deps.log.info(`admin: awake setup via GUI -> ${result.ok ? "ok" : "failed"}`);
+          // Re-read whether the rule is in place now, so the next GET /api/power says so.
+          try { await power.poke(); } catch { /* the next tick does it */ }
+        });
+        sendJson(res, 202, { started: true });
         return;
       }
       // Liveness is answering at all; readiness is 200 only when a request can actually go through.

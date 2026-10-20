@@ -651,6 +651,40 @@ a.cell { color: inherit; text-decoration: none; }
 .lean-ticks { display: flex; justify-content: space-between; padding: 0 9px; pointer-events: none; }
 .lean-ticks span { width: 2px; height: 5px; border-radius: 1px; background: var(--label-3); }
 
+/* ---- Mac (awake with the lid closed, hotspot failover) ------------------------------- */
+
+/* The one-time setup: the connection card's shape, in the accent instead of an alarm colour. */
+.conn-card.mac-setup { --tone: var(--accent-fill); --tint: var(--accent-soft); margin-bottom: 40px; padding-bottom: 22px; }
+.mac-setup .conn-icon svg { stroke-width: 2; }
+.mac-allow { display: grid; gap: 6px; margin: 18px 0 0; padding: 0 0 0 60px; list-style: none; }
+.mac-allow li { position: relative; padding-left: 22px; font-size: var(--fs-body); }
+.mac-allow li::before { content: ""; position: absolute; left: 2px; top: 0.42em; width: 9px; height: 5px; border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(-45deg); }
+.mac-setup-note { margin: 10px 0 0 60px; }
+.mac-setup-note + .mac-setup-note { margin-top: 4px; }
+.mac-setup .form-field { margin: 20px 0 0 60px; max-width: 360px; }
+.mac-setup-actions { margin: 18px 0 0 60px; max-width: 360px; }
+.mac-setup .conn-note { margin-left: 60px; }
+.mac-run { margin-bottom: 28px; }
+.mac-run .conn-note { margin-top: 0; }
+
+/* Everything below the setup card waits for it: visible, so it is clear what setup unlocks. */
+.mac-locked { opacity: 0.45; filter: saturate(0.6); user-select: none; }
+
+.mac-card .notice { margin-bottom: 10px; }
+.mac-card .details { margin: 12px 4px 0; }
+.mac-card .details .group { margin-top: 8px; }
+.mac-state { min-height: 58px; }
+.mac-dot { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: var(--label-3); }
+.mac-dot.on { background: var(--accent-fill); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent-fill) 18%, transparent); }
+.mac-dot.ok { background: var(--ok-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok-dot) 18%, transparent); }
+.mac-dot.warn { background: var(--warn-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn-dot) 18%, transparent); }
+.mac-dot.bad { background: var(--bad-dot); box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad-dot) 18%, transparent); }
+.mac-side { flex: 0 1 auto; min-width: 0; color: var(--label-2); font-size: var(--fs-foot); font-variant-numeric: tabular-nums; text-align: right; }
+.mac-ssid { color: var(--label); font-weight: 500; }
+.mac-ssid.empty { color: var(--label-3); font-weight: 400; }
+.mac-time { width: auto; min-width: 112px; font-variant-numeric: tabular-nums; }
+:lang(ko) .mac-card, :lang(ko) .mac-setup { word-break: keep-all; overflow-wrap: anywhere; }
+
 /* ---- About --------------------------------------------------------------------------- */
 
 /* The language menu lives in the sidebar; on a phone the sidebar is a tab bar, so About carries it. */
@@ -951,6 +985,10 @@ a.cell { color: inherit; text-decoration: none; }
   .mod-card .cell-value select { width: 100%; }
   .mod-card .cell-value select.narrow { width: 140px; }
   .mod-card .cell-value select.rung-model { width: 100%; }
+  .mac-state { flex-wrap: wrap; }
+  .mac-side { flex: 1 1 100%; padding-left: 24px; text-align: left; }
+  .mac-allow, .mac-setup-note, .mac-setup .form-field, .mac-setup-actions, .mac-setup .conn-note { margin-left: 0; padding-left: 0; }
+  .mac-setup .form-field, .mac-setup-actions { max-width: none; }
 
   /* Requests read as a list: model and status on top, the numbers on one quiet line below. */
   .logs-table-card { overflow: visible; }
@@ -993,4 +1031,9 @@ a.cell { color: inherit; text-decoration: none; }
   #modal-content { padding: 20px 16px 20px; }
   .modal .actions.end { margin: 20px -16px -20px; padding: 12px 16px; }
   .toast { bottom: calc(84px + env(safe-area-inset-bottom)); }
+}
+
+/* Nine tabs on a 375pt phone leave 41px each: the longest labels ("프로바이더", "Providers") need a hair less. */
+@media (max-width: 400px) {
+  .nav-btn { font-size: 9.5px; letter-spacing: -0.025em; }
 }

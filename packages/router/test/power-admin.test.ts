@@ -14,7 +14,9 @@ const STATUS: PowerStatus = {
   tether: { enabled: true, network: "wifi", state: "watching", pinned: false, hotspotSsid: "PBJ", lastSwitch: null, lastProbe: { at: "2026-10-20T12:00:00.000Z", ok: true, network: "wifi" }, hint: null },
 };
 
-async function withAdmin(power: PowerApi | undefined, fn: (o: { port: number; configFile: string }) => Promise<void>): Promise<void> {
+type RunCli = (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
+
+async function withAdmin(power: PowerApi | undefined, fn: (o: { port: number; configFile: string }) => Promise<void>, runCli?: RunCli): Promise<void> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-power-"));
   const prevHome = process.env.CLAUDERIPPLE_HOME;
   process.env.CLAUDERIPPLE_HOME = home;
@@ -30,6 +32,7 @@ async function withAdmin(power: PowerApi | undefined, fn: (o: { port: number; co
     version: "0.0.0-test",
     requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
     ...(power ? { power } : {}),
+    ...(runCli ? { runCli } : {}),
   });
   try {
     await fn({ port: admin.port, configFile });
@@ -98,6 +101,66 @@ test("PUT /api/power refuses bad input, cross-site pages, and answers 501 withou
   await withAdmin(undefined, async ({ port }) => {
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/power`)).status, 501);
   });
+});
+
+test("POST /api/power/setup runs `awake setup --ssid` in the background, GET reports it, and the result re-evaluates", async () => {
+  const p = fakePower();
+  const calls: { args: string[]; timeout?: number }[] = [];
+  let finish!: (r: { ok: boolean; output: string }) => void;
+  const runCli: RunCli = (args, timeout) => {
+    calls.push({ args, ...(timeout === undefined ? {} : { timeout }) });
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  await withAdmin(p.api, async ({ port }) => {
+    const base = `http://127.0.0.1:${port}/api/power/setup`;
+    assert.deepEqual(await (await fetch(base)).json(), { running: false });
+    const started = await fetch(base, { method: "POST", headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` }, body: JSON.stringify({ ssid: "Name’s iPhone" }) });
+    assert.equal(started.status, 202);
+    assert.deepEqual(await started.json(), { started: true });
+    assert.deepEqual(calls.map((c) => c.args), [["awake", "setup", "--ssid", "Name’s iPhone"]]);
+    assert.ok((calls[0]!.timeout ?? 0) >= 300_000, "a password dialog gets minutes, not the default");
+    const running = (await (await fetch(base)).json()) as { running: boolean; startedAt?: string };
+    assert.equal(running.running, true);
+    assert.ok(running.startedAt);
+    // A second press while the dialog is up does not open another.
+    assert.equal((await fetch(base, { method: "POST", body: "{}" })).status, 409);
+    assert.equal(calls.length, 1);
+    finish({ ok: true, output: "✓ installed /etc/sudoers.d/clauderipple" });
+    let done: { running: boolean; ok?: boolean; output?: string } = { running: true };
+    for (let i = 0; i < 50 && done.running; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      done = (await (await fetch(base)).json()) as typeof done;
+    }
+    assert.equal(done.running, false);
+    assert.equal(done.ok, true);
+    assert.match(done.output ?? "", /installed/);
+    assert.deepEqual(p.log, ["poke"], "the rule is looked for again right away");
+    // Without a name: pmset only.
+    assert.equal((await fetch(base, { method: "POST" })).status, 202);
+    assert.deepEqual(calls[1]!.args, ["awake", "setup"]);
+    finish({ ok: false, output: "✗ cancelled; nothing was changed" });
+  }, runCli);
+});
+
+test("POST /api/power/setup refuses a bad name, unknown fields and cross-site pages before any dialog", async () => {
+  const p = fakePower();
+  const calls: string[][] = [];
+  const runCli: RunCli = async (args) => { calls.push(args); return { ok: true, output: "" }; };
+  await withAdmin(p.api, async ({ port }) => {
+    const base = `http://127.0.0.1:${port}/api/power/setup`;
+    for (const body of [{ ssid: "a;b" }, { ssid: "" }, { ssid: "박의 iPhone" }, { ssid: 5 }, { ssid: "PBJ", remove: true }, [], "x"]) {
+      const res = await fetch(base, { method: "POST", body: JSON.stringify(body) });
+      assert.equal(res.status, 400, JSON.stringify(body));
+    }
+    assert.equal((await fetch(base, { method: "POST", body: "{" })).status, 400);
+    const cross = await fetch(base, { method: "POST", headers: { origin: "https://evil.example" }, body: JSON.stringify({ ssid: "PBJ" }) });
+    assert.equal(cross.status, 403);
+    assert.deepEqual(calls, []);
+  }, runCli);
+  await withAdmin(undefined, async ({ port }) => {
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/power/setup`, { method: "POST", body: "{}" })).status, 501);
+  }, runCli);
+  assert.deepEqual(calls, []);
 });
 
 test("parsePowerChange accepts exactly the contract", () => {

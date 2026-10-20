@@ -226,6 +226,7 @@ function showView(name) {
   // failing, and loads when the router is back (setRouterDown).
   if (offline()) return;
   if (name === "phone") queueMicrotask(() => void loadPhone());
+  if (name === "mac") queueMicrotask(() => void loadMac());
   if (name === "slots" && !slotsLoaded) void loadSlots();
   if (name === "providers" && !providersLoaded) void loadProviders();
   if (name === "clients" && !clientsLoaded) void loadClients();
@@ -1127,6 +1128,367 @@ async function refreshPhone(rebuild = false) {
 async function loadPhone() { phoneGeneration++; hidePhoneQr(); await refreshPhone(true); }
 $("#phone-refresh").addEventListener("click", () => void loadPhone());
 setInterval(() => { if (!phoneBusy) void refreshPhone(); }, 5000);
+
+// ---- Mac: awake with the lid closed, and the iPhone hotspot when Wi-Fi fails --------------
+// GET|PUT /api/power (router power.ts) and POST|GET /api/power/setup, which runs the CLI's
+// `awake setup` — macOS shows its own password dialog. Written for someone who has never heard of
+// pmset: the router's reasons and states are English codes, so each is turned into a sentence here.
+
+let macPower = null;
+/** null, "unavailable" (a router without the feature) or a load error. */
+let macError = null;
+let macSetup = { running: false };
+/** A setup run this page started or saw running: its progress and result are shown. */
+let macSetupWatched = false;
+let macSetupPoll = null;
+let macBusy = false;
+let macGeneration = 0;
+let macSsidDraft = null;
+const macOpen = { awake: false, tether: false, setup: false };
+
+function macActive() { return $("#view-mac").classList.contains("active"); }
+async function loadMac() { macGeneration++; macDrawn = ""; await refreshMac(true); }
+async function refreshMac(force) {
+  if (!macActive() || offline()) return;
+  const generation = macGeneration;
+  const [power, setup] = await Promise.allSettled([api("/api/power"), api("/api/power/setup")]);
+  if (generation !== macGeneration || !macActive()) return;
+  if (power.status === "fulfilled") { macPower = power.value; macError = null; }
+  else macError = power.reason && power.reason.status === 501 ? "unavailable" : (power.reason && power.reason.message) || "error";
+  if (setup.status === "fulfilled") macAdoptSetup(setup.value);
+  // A field being typed in is not redrawn under the cursor; the next refresh catches up.
+  const focused = document.activeElement;
+  if (!force && focused && $("#mac-content").contains(focused) && focused.matches("input:not([type=checkbox])")) return;
+  renderMac();
+}
+function macAdoptSetup(next) {
+  const was = macSetup;
+  macSetup = next || { running: false };
+  if (macSetup.running) {
+    macSetupWatched = true;
+    if (!macSetupPoll) macSetupPoll = setInterval(() => void macPollSetup(), 1500);
+  } else if (macSetupPoll) {
+    clearInterval(macSetupPoll);
+    macSetupPoll = null;
+  }
+  if (was.running && !macSetup.running && macSetupWatched) {
+    toast(t(macSetup.ok ? "mac.setup.done" : /cancel/i.test(macSetup.output || "") ? "mac.setup.cancelled" : "mac.setup.failed"), !macSetup.ok);
+    // Success shows as the controls coming alive; only a failure stays on screen to be read.
+    if (macSetup.ok) macSetupWatched = false;
+  }
+}
+async function macPollSetup() {
+  try { macAdoptSetup(await api("/api/power/setup")); } catch { return; }
+  if (!macSetup.running) {
+    // The router looks for the rule again when the run ends; read what it found.
+    try { macPower = await api("/api/power"); } catch { /* the 5s refresh retries */ }
+  }
+  if (macActive()) renderMac();
+}
+async function startMacSetup(ssid) {
+  if (macSetup.running) return;
+  try {
+    await api("/api/power/setup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(ssid ? { ssid } : {}) });
+    macSetupWatched = true;
+    macOpen.setup = false;
+    macAdoptSetup({ running: true, startedAt: new Date().toISOString() });
+  } catch (error) {
+    if (error.status === 409) { macSetupWatched = true; macAdoptSetup({ running: true }); }
+    else toast(t("mac.setup.failed"), true, error.message);
+  }
+  renderMac();
+}
+async function macPut(change) {
+  if (macBusy) return;
+  macBusy = true;
+  try {
+    macPower = await api("/api/power", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
+  } catch (error) {
+    toast(t("common.saveFailed"), true, error.message);
+    // Nothing changed, but the switch or field that was touched shows the change: draw it back.
+    macDrawn = "";
+  }
+  finally { macBusy = false; }
+  renderMac();
+}
+
+/** The same rule the router holds a hotspot name to (config.ts ssidProblem), said in words. */
+function macSsidProblem(name) {
+  if (!name) return null;
+  const bytes = new TextEncoder().encode(name).length;
+  if (bytes > 32 || !/^[A-Za-z0-9 ._'’-]+$/u.test(name) || /^ | $| {2}/.test(name) || name.startsWith("-")) return t("mac.ssid.invalid");
+  return null;
+}
+function macTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toLocaleTimeString(CURRENT_LANG, { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return time;
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (d.toDateString() === tomorrow.toDateString()) return t("mac.tomorrowAt", { time });
+  return `${d.toLocaleDateString(CURRENT_LANG, { month: "short", day: "numeric" })} ${time}`;
+}
+/** "HH:MM" → the next time the clock shows it, as an ISO instant. */
+function macNextAt(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  const now = new Date();
+  const at = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0, 0);
+  if (at.getTime() <= now.getTime()) at.setDate(at.getDate() + 1);
+  return at.toISOString();
+}
+function macHHMM(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** The router's one-line reason (awake.ts decideAwake) as a sentence, with whether it is a warning. */
+function macAwakeWhy(a) {
+  const r = String(a.reason || "");
+  let m;
+  if (r === "off") return { text: t("mac.why.off") };
+  if (r === "on") return { text: a.until ? t("mac.why.onUntil", { time: macTime(a.until) }) : t("mac.why.on") };
+  if (/^working: \d+ model call/.test(r)) return { text: t("mac.why.working") };
+  if ((m = /^working: last model call (\d+)s ago/.exec(r))) return { text: t("mac.why.recent", { min: Math.max(1, Math.round(Number(m[1]) / 60)) }) };
+  if (r.startsWith("idle")) return { text: t("mac.why.idle") };
+  if (/^until .* has passed$/.test(r)) return { text: t("mac.why.until") };
+  if ((m = /^battery (\d+)% is below (\d+)%/.exec(r))) return { text: t("mac.why.battery", { floor: m[2], percent: m[1] }), warn: true };
+  if (r === "thermal warning") return { text: t("mac.why.thermal"), warn: true };
+  if (r.startsWith("error:")) return { text: t("mac.why.error"), warn: true };
+  if (r.startsWith("needs setup")) return { text: t("mac.why.setup"), warn: true };
+  if (r.startsWith("pmset failed")) return { text: t("mac.why.failed"), warn: true };
+  if (r === "not started") return { text: t("mac.why.starting") };
+  return { text: r };
+}
+function macFacts(a) {
+  const facts = [];
+  if (a.battery && typeof a.battery.percent === "number") facts.push(t(a.battery.onBattery ? "mac.fact.battery" : "mac.fact.charging", { percent: a.battery.percent }));
+  if (a.lidClosed === true) facts.push(t("mac.fact.lidClosed"));
+  else if (a.lidClosed === false) facts.push(t("mac.fact.lidOpen"));
+  if (a.thermal === "warning") facts.push(t("mac.fact.hot"));
+  return facts.join(" · ");
+}
+/** A status line: a coloured dot, what is true now in a word or two, and why underneath. */
+function macStateRow(tone, title, sub, side) {
+  return el("div", { class: "cell mac-state" }, [
+    el("span", { class: `mac-dot ${tone}`, "aria-hidden": "true" }),
+    el("div", { class: "cell-text" }, [el("span", { class: "cell-label strong", text: title }), sub ? el("span", { class: "cell-sub", text: sub }) : null]),
+    side ? el("span", { class: "mac-side", text: side }) : null,
+  ]);
+}
+function macDetails(key, rows) {
+  const box = el("details", { class: "details mac-details" }, [
+    el("summary", { text: t("mac.details") }),
+    el("div", { class: "group conn-detail-rows" }, rows.filter(Boolean).map(([k, v]) => el("div", { class: "row" }, [el("span", { class: "k", text: k }), el("span", { class: "v mono", text: v })]))),
+  ]);
+  box.open = macOpen[key];
+  box.addEventListener("toggle", () => { macOpen[key] = box.open; });
+  return box;
+}
+
+function macSetupNote() {
+  if (macSetup.running) {
+    return el("div", { class: "conn-note busy", role: "status" }, [el("span", { class: "spinner", "aria-hidden": "true" }),
+      el("div", { class: "conn-note-text" }, [el("strong", { text: t("mac.setup.waiting") }), el("span", { text: t("mac.setup.waitingSub") })])]);
+  }
+  if (!macSetupWatched || macSetup.ok === undefined) return null;
+  const cancelled = /cancel/i.test(macSetup.output || "");
+  const good = macSetup.ok === true;
+  const output = el("details", { class: "conn-fold" }, [el("summary", { text: t("mac.details") }), el("pre", { text: macSetup.output || "" })]);
+  output.open = macOpen.setup;
+  output.addEventListener("toggle", () => { macOpen.setup = output.open; });
+  return el("div", { class: `conn-note ${good ? "good" : "bad"}`, role: "status" }, [
+    el("div", { class: "conn-note-line" }, [
+      svgIcon("0 0 20 20", good ? ["M4.5 10.5l3.5 3.5 7.5-8"] : ["M5.5 5.5l9 9M14.5 5.5l-9 9"], "conn-note-icon"),
+      el("span", { text: t(good ? "mac.setup.done" : cancelled ? "mac.setup.cancelled" : "mac.setup.failed") }),
+    ]),
+    macSetup.output ? output : null,
+  ]);
+}
+function macSetupCard(p) {
+  const saved = (p.tether && p.tether.hotspotSsid) || "";
+  if (macSsidDraft === null) macSsidDraft = saved;
+  const input = el("input", { type: "text", id: "mac-ssid", value: macSsidDraft, placeholder: t("mac.ssid.placeholder"), autocomplete: "off", spellcheck: "false", maxlength: "32" });
+  const problem = el("small", { class: "bad-text", role: "alert" });
+  const button = el("button", { class: "btn large", type: "button", "data-key": "mac-setup", text: t(macSetup.running ? "mac.setup.running" : "mac.setup.button") });
+  const check = () => {
+    const issue = macSsidProblem(input.value.trim());
+    problem.textContent = issue || "";
+    problem.hidden = !issue;
+    button.disabled = Boolean(issue) || macSetup.running;
+  };
+  input.addEventListener("input", () => { macSsidDraft = input.value; check(); });
+  button.addEventListener("click", () => void startMacSetup(input.value.trim()));
+  check();
+  input.disabled = macSetup.running;
+  const allow = ["mac.setup.allowSleep", "mac.setup.allowLid", "mac.setup.allowHotspot"];
+  return el("section", { class: "conn-card mac-setup", "aria-labelledby": "mac-setup-title" }, [
+    el("div", { class: "conn-hero" }, [
+      el("div", { class: "conn-icon" }, [svgIcon("0 0 20 20", ["M6 9V6.5a4 4 0 0 1 8 0V9", "M5 9h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"])]),
+      el("div", { class: "conn-hero-text" }, [
+        el("h2", { class: "conn-title", id: "mac-setup-title", text: t("mac.setup.title") }),
+        el("p", { class: "conn-lead", text: t("mac.setup.lead") }),
+      ]),
+    ]),
+    el("ul", { class: "mac-allow" }, allow.map((key) => el("li", { text: t(key) }))),
+    el("p", { class: "hint mac-setup-note", text: t("mac.setup.private") }),
+    el("p", { class: "hint mac-setup-note", text: t("mac.setup.insomnia") }),
+    el("label", { class: "form-field" }, [el("span", { text: t("mac.ssid.label") }), input, problem, el("small", { text: t("mac.ssid.help") })]),
+    el("div", { class: "mac-setup-actions" }, [button]),
+    macSetupNote(),
+  ]);
+}
+function openMacRename(current) {
+  const input = el("input", { type: "text", value: current, placeholder: t("mac.ssid.placeholder"), autocomplete: "off", spellcheck: "false", maxlength: "32" });
+  const problem = el("small", { class: "bad-text", role: "alert", hidden: "" });
+  const save = el("button", { class: "btn", type: "button", "data-default-action": "", text: t("mac.rename.save") });
+  const check = () => {
+    const name = input.value.trim();
+    const issue = macSsidProblem(name);
+    problem.textContent = issue || "";
+    problem.hidden = !issue;
+    save.disabled = !name || Boolean(issue) || name === current;
+  };
+  input.addEventListener("input", check);
+  save.addEventListener("click", () => { const name = input.value.trim(); closeModal(); void startMacSetup(name); });
+  check();
+  showModal(el("div", {}, [
+    el("h1", { text: t(current ? "mac.rename.title" : "mac.rename.titleNew") }),
+    hint(t("mac.rename.help")),
+    el("label", { class: "form-field" }, [el("span", { text: t("mac.ssid.label") }), input, problem, el("small", { text: t("mac.ssid.help") })]),
+    el("div", { class: "actions end" }, [el("button", { class: "btn secondary", type: "button", text: t("common.cancel"), onclick: closeModal }), save]),
+  ]));
+}
+
+function macAwakeCard(a) {
+  const why = macAwakeWhy(a);
+  const state = a.applied
+    ? macStateRow("on", t("mac.awake.on"), why.text, macFacts(a))
+    : macStateRow(why.warn ? "warn" : "off", t("mac.awake.off"), why.text, macFacts(a));
+  const modes = [{ value: "off", label: t("mac.mode.off") }, { value: "working", label: t("mac.mode.working") }, { value: "on", label: t("mac.mode.on") }];
+  const rows = [
+    state,
+    cell(el("span", { class: "cell-label", text: t("mac.mode.label") }),
+      modSegmented("mac-mode", modes, a.mode, t("mac.mode.label"), (mode) => void macPut({ awake: { mode, until: null } })),
+      t(`mac.mode.${a.mode}Help`), "wide"),
+  ];
+  if (a.mode === "on") {
+    const time = el("input", { type: "time", class: "mac-time", "data-key": "mac-until", value: a.until ? macHHMM(a.until) : "", "aria-label": t("mac.until.label") });
+    // Saved when the field is left, not on each keystroke: a redraw mid-typing would eat the minutes.
+    const commit = () => {
+      const until = time.value ? macNextAt(time.value) : null;
+      if (time.value && !until) return;
+      if ((until ? macHHMM(until) : "") === (a.until ? macHHMM(a.until) : "")) return;
+      void macPut({ awake: { until } });
+    };
+    time.addEventListener("blur", commit);
+    time.addEventListener("keydown", (event) => { if (event.key === "Enter") time.blur(); });
+    const clear = a.until ? el("button", { class: "link-btn", type: "button", "data-key": "mac-until-clear", text: t("mac.until.clear"), onclick: () => void macPut({ awake: { until: null } }) }) : null;
+    rows.push(cell(t("mac.until.label"), [time, clear], a.until ? t("mac.until.set", { time: macTime(a.until) }) : t("mac.until.none")));
+  }
+  return el("section", { class: "mod-card mac-card", "aria-labelledby": "mac-awake-title" }, [
+    el("div", { class: "mod-card-head" }, [el("h2", { id: "mac-awake-title", text: t("mac.awake.title") }), hint(t("mac.awake.blurb"))]),
+    el("div", { class: "group" }, rows),
+    el("p", { class: "group-footer", text: t("mac.awake.safety", { floor: macBatteryFloor(a) }) }),
+    macDetails("awake", [
+      [t("mac.d.reason"), a.reason || "—"],
+      [t("mac.d.applied"), a.applied ? "disablesleep 1" : "disablesleep 0"],
+      [t("mac.d.battery"), a.battery ? `${a.battery.percent ?? "?"}% · ${a.battery.onBattery ? "battery" : "AC"}` : "—"],
+      [t("mac.d.thermal"), a.thermal || "—"],
+      [t("mac.d.lid"), a.lidClosed === null || a.lidClosed === undefined ? "—" : a.lidClosed ? "closed" : "open"],
+      [t("mac.d.until"), a.until || "—"],
+    ]),
+  ]);
+}
+/** The battery floor is in config, not in the status; the reason names it when it bites. */
+function macBatteryFloor(a) {
+  const m = /below (\d+)%/.exec(String(a.reason || ""));
+  return m ? m[1] : "20";
+}
+
+const MAC_HINT_STATES = new Set(["hotspot-not-visible", "join-failed", "no-wifi", "no-hotspot-ssid", "needs-setup"]);
+function macTetherCard(tt, setupOk) {
+  const network = tt.network === "hotspot" ? "hotspot" : tt.network === "wifi" ? "wifi" : "none";
+  const tone = network === "wifi" ? "ok" : network === "hotspot" ? "on" : "bad";
+  let side = "";
+  if (tt.lastSwitch) {
+    const time = macTime(tt.lastSwitch.at);
+    side = !tt.lastSwitch.ok ? t("mac.switch.failed", { time }) : t(tt.lastSwitch.to === "hotspot" ? "mac.switch.toHotspot" : "mac.switch.toWifi", { time });
+  }
+  const enabled = modSwitch("mac-tether", tt.enabled, t("mac.tether.switch"), (on) => void macPut({ tether: { enabled: on } }));
+  const pin = modSwitch("mac-pin", tt.pinned, t("mac.pin.label"), (on) => void macPut({ tether: { pin: on } }));
+  $("input", pin).disabled = !tt.enabled && !tt.pinned;
+  const name = tt.hotspotSsid || "";
+  const rename = el("button", { class: "btn secondary compact", type: "button", "data-key": "mac-rename", text: t(name ? "mac.ssid.change" : "mac.ssid.set") });
+  rename.disabled = macSetup.running || !setupOk;
+  rename.addEventListener("click", () => openMacRename(name));
+  const rows = [
+    cell(el("label", { class: "cell-label", text: t("mac.tether.switch") }), enabled, t("mac.tether.switchHelp")),
+    macStateRow(tone, t(`mac.net.${network}`), I18N.en[`mac.tstate.${tt.state}`] ? t(`mac.tstate.${tt.state}`) : tt.state, side),
+    cell(t("mac.ssid.label"), [el("span", { class: name ? "mac-ssid" : "mac-ssid empty", text: name || t("mac.ssid.none") }), rename]),
+    cell(el("span", { class: "cell-label", text: t("mac.pin.label") }), pin, t("mac.pin.help")),
+  ];
+  let notice = null;
+  // Before setup the card above says what to do; the router's own setup hint would only repeat it.
+  if (tt.hint && tt.state !== "pinned" && setupOk) {
+    const known = MAC_HINT_STATES.has(tt.state);
+    notice = el("div", { class: "notice warn mac-hint", role: "status" }, [
+      el("strong", { text: t(known ? `mac.tstate.${tt.state}` : "mac.hint.title") }),
+      el("span", { text: known ? t(`mac.hint.${tt.state}`) : tt.hint }),
+    ]);
+  }
+  return el("section", { class: "mod-card mac-card", "aria-labelledby": "mac-tether-title" }, [
+    el("div", { class: "mod-card-head" }, [el("h2", { id: "mac-tether-title", text: t("mac.tether.title") }), hint(t("mac.tether.blurb"))]),
+    notice,
+    el("div", { class: "group" }, rows),
+    el("p", { class: "group-footer", text: t("mac.tether.help") }),
+    macDetails("tether", [
+      [t("mac.d.state"), tt.state],
+      [t("mac.d.network"), tt.network],
+      [t("mac.d.probe"), tt.lastProbe ? `${tt.lastProbe.ok ? "ok" : "failed"} · ${tt.lastProbe.network} · ${macTime(tt.lastProbe.at)}` : "—"],
+      [t("mac.d.switch"), tt.lastSwitch ? `${tt.lastSwitch.to} · ${tt.lastSwitch.ok ? "ok" : "failed"} · ${tt.lastSwitch.reason}` : "—"],
+      tt.hint ? [t("mac.d.hint"), tt.hint] : null,
+    ]),
+  ]);
+}
+function macEmpty(title, body) {
+  return el("div", { class: "offline-state", role: "status" }, [
+    el("div", { class: "offline-icon direct" }, [svgIcon("0 0 20 20", ["M3.5 13V5.6c0-.9.7-1.6 1.6-1.6h9.8c.9 0 1.6.7 1.6 1.6V13", "M1.8 15.8h16.4"])]),
+    el("h2", { text: title }),
+    el("p", { text: body }),
+  ]);
+}
+/** What the page was last drawn from: an unchanged refresh leaves the controls alone, so a click
+ *  that lands while it arrives is not lost to a button replaced under the pointer. */
+let macDrawn = "";
+function renderMac() {
+  const root = $("#mac-content");
+  const drawn = JSON.stringify([macPower, macError, macSetup, macSetupWatched, CURRENT_LANG]);
+  if (drawn === macDrawn && root.childElementCount) return;
+  macDrawn = drawn;
+  if (!macPower) {
+    if (macError === "unavailable") root.replaceChildren(macEmpty(t("mac.unavailable.title"), t("mac.unavailable.body")));
+    else if (macError) root.replaceChildren(section(null, [el("div", { class: "cell-note bad-text", text: `${t("common.loadFailed")} ${macError}` })]));
+    return;
+  }
+  const a = macPower.awake;
+  if (a.setup === "unsupported") {
+    root.replaceChildren(macEmpty(t("mac.unsupported.title"), t("mac.unsupported.body")));
+    return;
+  }
+  const setupOk = a.setup === "ok";
+  const cards = el("div", { class: `mac-cards${setupOk ? "" : " mac-locked"}` }, [macAwakeCard(a), macTetherCard(macPower.tether, setupOk)]);
+  if (!setupOk) cards.setAttribute("inert", "");
+  // Once set up, a later run (a new hotspot name) reports here, above the cards.
+  const note = setupOk && macSetupWatched ? macSetupNote() : null;
+  modRedraw(root, [
+    setupOk ? null : macSetupCard(macPower),
+    note ? el("div", { class: "mac-run" }, [note]) : null,
+    cards,
+  ]);
+}
+setInterval(() => { if (!macBusy && !macSetup.running) void refreshMac(); }, 5000);
 
 // ---- Model links --------------------------------------------------------------------
 
