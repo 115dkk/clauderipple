@@ -23,15 +23,49 @@ export const AUTH_REREAD_MS = 30_000;
 export function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
+/** A Claude app login the router saw this long ago still counts as current. */
+export const OBSERVED_FRESH_MS = 6 * 3_600_000;
+/** How long an observed login is trusted before it is read again (its own expiry is not visible). */
+export const OBSERVED_TTL_MS = 10 * 60_000;
+
+/**
+ * The login the Claude app itself is using right now, as the router last saw it on a request it
+ * carried (router observedClaudeCodeAuth, `claude-auth-observed.json`), or null when there is none
+ * recent. The keychain item belongs to the `claude` CLI and is refreshed only while the CLI runs:
+ * working in the desktop app alone left it expired, then emptied (accessToken "", expiresAt 0,
+ * 2026-10-20 21:28), and the phone was told the login had expired while the app worked fine.
+ */
+export function loadObservedAuth(now = Date.now(), home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple")): { accessToken: string; expiresAt: number } | null {
+  try {
+    const seen = object(JSON.parse(fs.readFileSync(path.join(home, "claude-auth-observed.json"), "utf8")));
+    const token = typeof seen?.authorization === "string" ? /^Bearer\s+(\S+)$/.exec(seen.authorization)?.[1] : undefined;
+    if (!token || typeof seen?.observedAt !== "number" || now - seen.observedAt > OBSERVED_FRESH_MS) return null;
+    return { accessToken: token, expiresAt: now + OBSERVED_TTL_MS };
+  } catch { return null; }
+}
+
 export function loadBridgeAuth(): BridgeAuth {
   if (process.platform !== "darwin") throw new Error(DESKTOP_BLOCKED);
+  const now = Date.now();
+  let organizationUuid: string;
+  try {
+    const account = object(object(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8")))?.oauthAccount);
+    if (typeof account?.organizationUuid !== "string") throw new Error();
+    organizationUuid = account.organizationUuid;
+  } catch { throw new BridgeAuthError("이 컴퓨터의 Claude 로그인 정보를 읽을 수 없습니다."); }
+  let keychain: { accessToken: string; expiresAt: number } | null = null;
   try {
     const credentials = object(JSON.parse(execFileSync("security", ["find-generic-password", "-a", process.env.USER ?? os.userInfo().username, "-s", "Claude Code-credentials", "-w"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })));
     const oauth = object(credentials?.claudeAiOauth);
-    const account = object(object(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".claude.json"), "utf8")))?.oauthAccount);
-    if (typeof oauth?.accessToken !== "string" || typeof oauth.expiresAt !== "number" || typeof account?.organizationUuid !== "string") throw new Error();
-    return { accessToken: oauth.accessToken, expiresAt: oauth.expiresAt, organizationUuid: account.organizationUuid };
-  } catch { throw new BridgeAuthError("이 컴퓨터의 Claude 로그인 정보를 읽을 수 없습니다."); }
+    if (typeof oauth?.accessToken === "string" && oauth.accessToken && typeof oauth.expiresAt === "number") keychain = { accessToken: oauth.accessToken, expiresAt: oauth.expiresAt };
+  } catch { /* the observed login may still serve */ }
+  // The CLI's login while it is good; else the one the Claude app is working with; else the
+  // CLI's expired one, so the phone is told it expired.
+  if (keychain && keychain.expiresAt - now > 5 * 60_000) return { ...keychain, organizationUuid };
+  const observed = loadObservedAuth(now);
+  if (observed) return { ...observed, organizationUuid };
+  if (keychain) return { ...keychain, organizationUuid };
+  throw new BridgeAuthError(LOGIN_EXPIRED);
 }
 export interface BridgeFrame { event: string; data: Record<string, unknown> }
 /** `slash_commands` minus `terminal_slash_commands`, which phone UIs should hide (SDK init docs). */

@@ -91,3 +91,22 @@ test("an expired login is logged once and told to phones once, and its end too",
   assert.ok(f.logs.includes("[desktop] Claude app sessions answer again"));
   assert.equal(f.sessions.desktopProblem(), null);
 });
+
+// 2026-10-20: the CLI's keychain login was emptied while the Claude app worked, and the phone said
+// the login had expired. The login the router saw the app use stands in for it.
+test("the Claude app's login the router observed stands in for the CLI's, while it is recent", async () => {
+  const { loadObservedAuth, OBSERVED_FRESH_MS, OBSERVED_TTL_MS } = await import("../src/bridge-client.ts");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "observed-auth-"));
+  const now = 5_000_000_000;
+  assert.equal(loadObservedAuth(now, home), null, "no file, no login");
+  const write = (value: unknown) => fs.writeFileSync(path.join(home, "claude-auth-observed.json"), JSON.stringify(value));
+  write({ authorization: "Bearer sk-ant-oat01-abc", observedAt: now - 60_000 });
+  assert.deepEqual(loadObservedAuth(now, home), { accessToken: "sk-ant-oat01-abc", expiresAt: now + OBSERVED_TTL_MS });
+  write({ authorization: "Bearer sk-ant-oat01-abc", observedAt: now - OBSERVED_FRESH_MS - 1 });
+  assert.equal(loadObservedAuth(now, home), null, "too old to trust");
+  write({ authorization: "Basic xyz", observedAt: now });
+  assert.equal(loadObservedAuth(now, home), null, "not a bearer token");
+  fs.writeFileSync(path.join(home, "claude-auth-observed.json"), "{ not json");
+  assert.equal(loadObservedAuth(now, home), null, "unreadable");
+  fs.rmSync(home, { recursive: true, force: true });
+});
