@@ -71,6 +71,7 @@ import { GoogleOAuthSession, type GoogleOAuthState } from "./providers/google/lo
 import { GROK_AUTH_HINT, grokAuthPath, grokHome, readGrokToken, sharedGrokAuth } from "./providers/grok/auth.ts";
 import { GROK_DEFAULT_URL, GROK_EFFORT_LEVELS, GROK_FALLBACK_MODELS, grokModelsFromListing } from "./providers/grok/catalog.ts";
 import { GROK_WARNING, grokHeaders } from "./providers/grok/index.ts";
+import type { TunnelStatus } from "./remote-tunnel.ts";
 
 const MAX_BODY = 1024 * 1024;
 /** `/api/image` carries reference images inline, so it gets more room than a config save. */
@@ -180,6 +181,11 @@ export type AdminDeps = {
   opencodeUsage?: (name: string) => Promise<OpenCodeWindow[]>;
   /** A Grok provider's usage pool, for the status bar's limits row (`/api/limits`). Absent in tests. */
   grokUsage?: (name: string) => Promise<GrokWindow[]>;
+  /**
+   * Reverse SSH tunnels to remote hosts (remote-tunnel.ts): `GET /api/remote` reports them,
+   * `POST /api/remote/reload` re-reads `remote.hosts` from the config (after `remote add|remove`).
+   */
+  remote?: { status: () => TunnelStatus[]; reload: () => TunnelStatus[] };
 };
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
@@ -1825,6 +1831,16 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // drain can outlive the connection (it waits for in-flight model calls, up to 90s).
         sendJson(res, 202, { draining: true });
         deps.shutdown();
+        return;
+      }
+      if (pathname === "/api/remote" && method === "GET") {
+        if (!deps.remote) { sendJson(res, 501, { error: "remote tunnels not available" }); return; }
+        sendJson(res, 200, { hosts: deps.remote.status() });
+        return;
+      }
+      if (pathname === "/api/remote/reload" && method === "POST") {
+        if (!deps.remote) { sendJson(res, 501, { error: "remote tunnels not available" }); return; }
+        sendJson(res, 200, { hosts: deps.remote.reload() });
         return;
       }
       // Liveness is answering at all; readiness is 200 only when a request can actually go through.

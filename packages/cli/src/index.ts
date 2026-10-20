@@ -459,6 +459,11 @@ function help(): void {
   start | stop | restart
   logs [-n N] [-f]
   remote [install|uninstall|status|pair]  run or manage the phone host (macOS, Windows, Linux systemd)
+  remote add <ssh-host> [--port N] [--force]
+                    route Claude Desktop sessions that run on a remote (SSH) host through ClaudeRipple:
+                    sets up the host over your key-based ssh and keeps a reverse tunnel open (remote port, default 18791)
+  remote remove <ssh-host>   undo "remote add" on that host and stop its tunnel
+  remote hosts      list remote (SSH) hosts and their tunnels (also shown by "remote status")
   config            print the config file path
   ui                open the dashboard in your browser
   tray [--install]  start the menu-bar / tray app (--install fetches Electron, ~270MB, once)
@@ -483,6 +488,19 @@ Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 try {
   switch (cmd) {
     case "remote": {
+      const sub = args[1];
+      // Remote (SSH) hosts for Claude Desktop sessions; every other `remote` verb is the phone host's.
+      if (sub === "add" || sub === "remove" || sub === "hosts") {
+        const { remoteAdd, remoteRemove, remoteHosts, REMOTE_SSH_USAGE } = await import("./remote.ts");
+        const host = args[2];
+        if (sub === "hosts") await remoteHosts();
+        else if (!host || host.startsWith("--")) throw new Error(REMOTE_SSH_USAGE);
+        else if (sub === "add") {
+          const port = opt("port");
+          await remoteAdd(host, { ...(port !== undefined ? { port: Number(port) } : {}), force: flag("force") });
+        } else await remoteRemove(host);
+        break;
+      }
       const script = path.resolve(here, "../../remote/src/main" + path.extname(fileURLToPath(import.meta.url)));
       const { spawn } = await import("node:child_process");
       const child = spawn(installedRuntime.node, [script, ...args.slice(1)], { stdio: "inherit", env: { ...process.env, ...installedRuntime.env } });
@@ -491,6 +509,14 @@ try {
         child.once("error", reject);
         child.once("exit", code => resolve(code ?? 1));
       });
+      if (sub === "status") {
+        // Only when there are any, so the phone host's status reads exactly as before otherwise.
+        const { configuredHosts, remoteHosts } = await import("./remote.ts");
+        if (configuredHosts(configPath()).length > 0) {
+          console.log("\nremote (SSH) hosts:");
+          await remoteHosts();
+        }
+      }
       break;
     }
     case "install":

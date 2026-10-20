@@ -495,6 +495,37 @@ same ChatGPT provider as the search backend in `config.json`:
 This is opt-in. With no `webSearch` setting, Claude Code's existing search path
 is unchanged.
 
+### Remote (SSH) sessions
+
+Claude Desktop's Code tab can run a session on a remote Linux host over SSH.
+Claude Code then runs **on that host**, where ClaudeRipple is not, so routed
+models are unknown there (`Agent type 'gpt-6-1-sol' not found`). Connect the
+host once from the machine ClaudeRipple runs on:
+
+```bash
+clauderipple remote add my-server            # an ssh alias or user@host; --port N (default 18791)
+clauderipple remote hosts                    # tunnel state per host (also in `remote status`)
+clauderipple remote remove my-server         # undo it
+```
+
+`remote add` needs key-based `ssh my-server` to work without a password prompt.
+It copies the router's CA certificate (the public certificate only) to
+`~/.clauderipple-remote/` on the host, points the host's
+`~/.claude/settings.json` at the tunnel (`HTTPS_PROXY=http://127.0.0.1:18791`,
+`NODE_EXTRA_CA_CERTS`; the original is kept as
+`settings.json.clauderipple-backup`; a different proxy already there is refused
+without `--force`), and copies the generated agent files. The router then keeps
+a reverse SSH tunnel open from the host's `127.0.0.1:18791` to itself, restarts
+it when it drops, and copies the agent files again whenever they change. The
+host needs only `sh` — no Node and no ClaudeRipple.
+
+While the tunnel is down, Claude Code on the host gets *connection refused*
+rather than going to Anthropic around the router. The remote session only exists
+while this machine's Claude Desktop is connected to it anyway. The tunnel
+listens on the host's loopback only, but on a shared host every user there can
+reach that port, and through it your router. The status mod and image
+generation are not available on remote hosts yet.
+
 ### Codex app and Codex CLI
 
 ```bash

@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import type { CompatibleCaps } from "./compat.ts";
 import { PRESETS } from "./presets.ts";
+import { hostProblem, portProblem } from "./remote-host.ts";
 
 export type ProviderModel = {
   id: string;
@@ -405,6 +406,12 @@ export type Config = {
    * with our proxy (both done by `clauderipple picker on`).
    */
   picker?: { enabled: boolean; hosts?: string[] };
+  /**
+   * Remote (SSH) hosts that run Claude Code for Claude Desktop sessions. The router holds a reverse
+   * tunnel to each (remote-tunnel.ts), so the remote's 127.0.0.1:<port> reaches this proxy. Written
+   * by `clauderipple remote add|remove`, which also sets up the remote side (remote-host.ts).
+   */
+  remote?: { hosts: { host: string; port: number }[] };
 };
 
 export const PICKER_HOSTS_DEFAULT = ["claude.ai"];
@@ -720,6 +727,25 @@ export function validate(c: Config): string[] {
   if (c.cli.agentFiles !== undefined && typeof c.cli.agentFiles !== "boolean") errors.push("cli.agentFiles must be true or false");
   if (c.cli.limitWorkerTools !== undefined && typeof c.cli.limitWorkerTools !== "boolean") errors.push("cli.limitWorkerTools must be true or false");
   if (c.listen.openaiPort !== undefined && !(c.listen.openaiPort >= 0 && c.listen.openaiPort < 65536)) errors.push("listen.openaiPort out of range");
+  if (c.remote !== undefined) {
+    const hosts = (c.remote as { hosts?: unknown } | null)?.hosts;
+    if (!Array.isArray(hosts)) errors.push("remote.hosts must be a list");
+    else {
+      const seen = new Set<string>();
+      hosts.forEach((entry, i) => {
+        const h = entry as { host?: unknown; port?: unknown } | null;
+        if (!h || typeof h !== "object") { errors.push(`remote.hosts ${i} must be an object`); return; }
+        // Handed to ssh as an argument: the same check `remote add` applies, so a hand edit cannot
+        // slip an option such as -oProxyCommand into the router's own ssh.
+        const hostError = hostProblem(h.host);
+        if (hostError) errors.push(`remote.hosts ${i}: ${hostError}`);
+        else if (seen.has(h.host as string)) errors.push(`remote.hosts ${i}: "${String(h.host)}" is listed twice`);
+        else seen.add(h.host as string);
+        const portError = portProblem(h.port);
+        if (portError) errors.push(`remote.hosts ${i}: ${portError}`);
+      });
+    }
+  }
   return errors;
 }
 

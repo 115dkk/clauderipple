@@ -47,7 +47,8 @@ export const MODEL_SLOT_ENV = {
 
 export type ModelSlots = Partial<Record<keyof typeof MODEL_SLOT_ENV, string>>;
 
-function refuseForeignProxy(existing: string | undefined, proxyUrl: string, force: boolean): void {
+/** Also applied to a remote host's settings.json (remote.ts): one rule for whose proxy wins. */
+export function refuseForeignProxy(existing: string | undefined, proxyUrl: string, force: boolean): void {
   if (existing && existing !== proxyUrl && !force) {
     throw new Error(`settings.json env.HTTPS_PROXY is already "${existing}". Re-run with --force to replace it, or uninstall the other proxy first.`);
   }

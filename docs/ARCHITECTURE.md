@@ -46,6 +46,41 @@ Why this path is stable:
 - The CA is never installed in the keychain. `NODE_EXTRA_CA_CERTS` is a Node-only
   trust addition, no admin password, no effect on other programs.
 
+### 1a. Remote (SSH) sessions (2026-10-20, issue #67)
+
+A Code-tab session on a remote host runs Claude Code **on that host**, started by
+Desktop's remote server with `--setting-sources user,project,local`, so the
+host's own `~/.claude/settings.json` applies and its 127.0.0.1 is itself. Desktop
+opens that connection with its bundled `ssh2` library, uses only `forwardOut`
+(local → remote), and never reads `RemoteForward` from `~/.ssh/config` (verified
+for #67). Nothing Desktop does can carry the host's traffic back to us, so the
+router holds its own reverse tunnel: `ssh -N -o ExitOnForwardFailure=yes -R
+127.0.0.1:<remote port>:127.0.0.1:<proxy port> <host>` per configured host
+(`remote.hosts`, `packages/router/src/remote-tunnel.ts`), with the user's own ssh
+and keys (`BatchMode=yes`: never a prompt). `clauderipple remote add` writes the
+same two env keys as §1 into the host's settings.json (same foreign-proxy rule,
+one backup), the public CA to `~/.clauderipple-remote/ca.pem`, and the generated
+agent files, all by POSIX `sh` scripts on ssh's stdin — the host needs no Node.
+The host name is validated and only ever passed as its own argv element.
+
+- Up is when ssh says `remote forward success for: listen …` (it needs `-v`;
+  every other debug line is dropped before the log). A dropped tunnel restarts
+  with 1s→60s backoff; each comeback re-copies the CA and agent files, and the
+  config callback re-copies them when the router regenerates the agents.
+- While the tunnel is down, the host's Claude Code gets *connection refused* —
+  a visible error, never a silent route to Anthropic around the router. The
+  remote session only exists while this machine's Desktop is connected anyway.
+- Tunnels are killed at process exit, not when a drain starts: a remote
+  session's in-flight model call travels through one (§5, drain). Their pids are
+  kept in `<home>/remote-tunnels.json` and a new router kills any that still run
+  with our command line — an orphan holding the remote port would make every new
+  tunnel fail `ExitOnForwardFailure` for as long as it lives.
+- `clauderipple remote remove` stops the tunnel, removes only the env values
+  that are still ours, the agent files listed in the host's
+  `~/.clauderipple-remote/agents.json`, and that directory.
+- Not yet on remote hosts: the status mod, the `cli.models` slot env, and image
+  generation (generated agents name the admin port, which is not tunnelled).
+
 ## 2. What the app does with the official third-party setting (why competitors lose)
 
 ### Optional Auto mode classifier target
