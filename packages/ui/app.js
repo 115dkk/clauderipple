@@ -3441,6 +3441,15 @@ function fitSummaryValues() {
   for (const value of document.querySelectorAll("#logs-summary .logs-chip .value")) {
     value.style.fontSize = "";
     for (let size = parseFloat(getComputedStyle(value).fontSize); value.scrollWidth > value.clientWidth && size > 14; size--) value.style.fontSize = `${size - 1}px`;
+    // A pane about 300px wide fits no ten digits even then: a plain number goes compact ("78.9억"),
+    // the whole of it on hover. The next refresh draws it whole again.
+    const whole = value.dataset.whole || value.textContent;
+    const number = Number(whole.replace(/,/g, ""));
+    if (value.scrollWidth > value.clientWidth && whole.includes(",") && Number.isFinite(number)) {
+      value.dataset.whole = whole;
+      value.title = whole;
+      value.textContent = new Intl.NumberFormat(CURRENT_LANG, { notation: "compact", maximumFractionDigits: 1 }).format(number);
+    }
   }
 }
 window.addEventListener("resize", fitSummaryValues);
