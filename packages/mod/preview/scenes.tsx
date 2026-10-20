@@ -6,7 +6,7 @@ import type { RenderElement, RenderPropsOf } from 'claude-code'
 
 import type { AgentRec, LimitItem, Settings, Skin } from '../types'
 import { normalizeSettings } from '../hooks/settings'
-import { renderAgents } from '../hooks/ui/agents'
+import { renderAgents, talkOf } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
 import { renderBand } from '../hooks/ui/band'
 import { renderLog } from '../hooks/ui/log'
@@ -109,6 +109,20 @@ const AGENTS: AgentRec[] = [
   },
 ]
 
+/**
+ * As the owner's pane showed them at ~260 px (2026-10-20): a hosted DeepSeek worker picked on the
+ * session's rung, its id with a vendor path; a finished Explore; the failed Astra.
+ */
+const HOSTED: AgentRec = {
+  id: 'h1', description: 'deepseek-v4.1-flash-1017 · 안드로이드 core 파서 테스트 실패 원인 찾아 고치기', type: 'deepseek-ai-deepseek-v4-1-flash-1017', model: 'deepseek-ai/deepseek-v4.1-flash-1017@medium', provider: 'deepseek',
+  pick: { domain: 'general', level: 'standard', effort: 'medium', why: '메인 대화가 정한 등급: standard', target: { agent: 'deepseek-ai-deepseek-v4-1-flash-1017' }, by: 'session', ms: 0 },
+  state: 'running', now: 'Bash cd /Users/pbj/Documents/tabripple/android && ./gradlew :core:test -q', toolSince: NOW - 7000, startedAt: NOW - 1_287_000, cost: 0,
+  effort: 'medium', answeredBy: 'deepseek-ai/deepseek-v4.1-flash-1017', usage: { input: 2100, cached: 410_000, cacheWrite: 12_000, output: 18_400 }, tools: 81,
+}
+const CARDS: AgentRec[] = [HOSTED, AGENTS[2]!, AGENTS[3]!]
+/** The hosted worker at 9분 59초, and a second on at 10분 00초: the card must not move. */
+const at = (ms: number): AgentRec[] => [{ ...HOSTED, startedAt: NOW - ms }]
+
 /** One running agent and eight finished: the list shows the latest four and "more". */
 const MANY: AgentRec[] = [AGENTS[0]!, ...Array.from({ length: 8 }, (_, i): AgentRec => ({ ...AGENTS[i % 2 ? 2 : 4]!, id: 'm' + i, description: ['문서 링크 점검', '타입 오류 정리', 'i18n 키 대조', '빌드 로그 요약', '테스트 이름 정리', '캐시 적중률 확인', '라우터 로그 검색', '설정 스키마 비교'][i]!, endedAt: NOW - 60_000 * (i + 1), startedAt: NOW - 60_000 * (i + 2) }))]
 
@@ -134,7 +148,34 @@ const TALK_DONE: AgentEntry[] = [
   { kind: 'text', text: '설정은 `packages/router/src/config.ts`의 `loadConfig`가 읽습니다.\n\n- 경로: `~/.clauderipple/config.json`\n- 환경변수 `CLAUDERIPPLE_HOME`이 있으면 그 아래를 봅니다' },
 ]
 
-const AGENT_ACTIONS = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined }
+/**
+ * A worker's run as the owner saw it (2026-10-20): eight gradle and grep commands, each behind a
+ * `cd` into the project, one failing, then an edit; a word, then two more commands, the last running.
+ * Read through talkOf, so the commands lose their `cd` and the paths go short as in the app.
+ */
+const GRADLE = 'cd /Users/pbj/Documents/tabripple/android && '
+const PARSER = '/Users/pbj/Documents/tabripple/android/core/src/main/kotlin/com/tabripple/core/TabParser.kt'
+const bash = (id: string, command: string, text?: string, isError?: boolean) => ({ tool_use_id: id, tool: 'Bash', input: { command }, ...(text !== undefined ? { text } : {}), ...(isError ? { isError } : {}) })
+const TALK_TOOLS: AgentEntry[] = talkOf([
+  { role: 'user', text: 'tabripple 안드로이드 core 모듈의 파서 테스트가 깨진 원인을 찾아 고쳐 주세요. `./gradlew :core:test`로 확인합니다.', toolUses: [] },
+  { role: 'assistant', text: '먼저 core 모듈 테스트를 돌려 어디서 깨지는지 보겠습니다.', toolUses: [
+    bash('r1', GRADLE + './gradlew :core:test -q 2>&1 | grep -vE "^(w:|warning:)" | tail -60', 'ok'),
+    bash('r2', GRADLE + './gradlew :core:test --tests "*TabParserTest*" -q 2>&1 | tail -80', 'ok'),
+    bash('r3', GRADLE + 'grep -rn "parseMeasure" core/src/main/kotlin | head -20', 'ok'),
+    bash('r4', GRADLE + './gradlew :core:compileKotlin -q 2>&1 | grep -E "^e:" | head -30', 'e: unresolved reference', true),
+    bash('r5', 'cd /Users/pbj/Documents/tabripple/android; git diff --stat HEAD~3 -- core/', 'ok'),
+    bash('r6', GRADLE + 'sed -n 120,180p core/src/main/kotlin/com/tabripple/core/TabParser.kt', 'ok'),
+    bash('r7', GRADLE + './gradlew :core:test --tests "*MeasureTest*" -q 2>&1 | tail -40', 'ok'),
+    bash('r8', GRADLE + 'git log --oneline -5 -- core/src/main/kotlin/com/tabripple/core/TabParser.kt', 'ok'),
+    { tool_use_id: 'r9', tool: 'Edit', input: { file_path: PARSER, old_string: 'a', new_string: 'b' }, text: 'ok' },
+  ] },
+  { role: 'assistant', text: '마디 경계의 빈 줄을 건너뛰지 않아 인덱스가 하나씩 밀렸습니다. 고친 뒤 전체 테스트를 다시 돌립니다.', toolUses: [
+    bash('s1', GRADLE + './gradlew :core:compileKotlin -q 2>&1 | grep -E "^e:" | head -30', 'ok'),
+    bash('s2', GRADLE + './gradlew :core:test -q 2>&1 | grep -vE "^(w:|warning:)" | tail -60'),
+  ] },
+], { cwd: '/Users/pbj/Documents/tabripple', home: '/Users/pbj' })
+
+const AGENT_ACTIONS = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined, toggleRun: () => undefined }
 
 /** The AbovePrompt site as register.tsx composes it on the desktop: the band, its × inside. */
 function site(el: Els, frame: Frame, view: DashboardView): RenderElement {
@@ -205,6 +246,20 @@ const SCENES: Scene[] = [
   { name: 'agents-talk-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK }, earlier: 0 } }, AGENT_ACTIONS) },
   { name: 'agents-talk-done', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'e1', talk: { entries: TALK_DONE }, earlier: 0 } }, AGENT_ACTIONS) },
   { name: 'agents-talk-deny', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { deny: 'agent g1 has no saved transcript' }, earlier: 0 } }, AGENT_ACTIONS) },
+  // Cards that hold still and read at narrow widths (2026-10-20): ~260 px and ~360 px, running and
+  // done; and one card a second apart across 9분 59초 → 10분 00초.
+  { name: 'cards-260', columns: 33, draw: (el, f) => renderAgents(el, f, { agents: CARDS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'cards-360', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: CARDS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'cards-560', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: CARDS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'cards-tick-959', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: at(599_000), now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'cards-tick-1000', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: at(600_000), now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'cards-tick-959-wide', columns: 56, draw: (el, f) => renderAgents(el, f, { agents: at(599_000), now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'cards-tick-1000-wide', columns: 56, draw: (el, f) => renderAgents(el, f, { agents: at(600_000), now: NOW, showDone: false }, AGENT_ACTIONS) },
+  // A worker's run of commands, folded to its head and unfolded call by call (2026-10-20).
+  { name: 'agents-tools', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK_TOOLS }, earlier: 0 } }, AGENT_ACTIONS) },
+  { name: 'agents-tools-open', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK_TOOLS }, earlier: 0, runsOpen: ['r1', 's1'] } }, AGENT_ACTIONS) },
+  { name: 'agents-tools-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK_TOOLS }, earlier: 0 } }, AGENT_ACTIONS) },
+  { name: 'agents-tools-open-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK_TOOLS }, earlier: 0, runsOpen: ['r1', 's1'] } }, AGENT_ACTIONS) },
   { name: 'flat-agents-live', columns: PANE, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
   { name: 'flat-agents-talk', columns: PANE, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK }, earlier: 0 } }, AGENT_ACTIONS) },
   { name: 'log', columns: 90, draw: (el, f) => renderLog(el, f, { rows: [], mineOnly: true }, noop) },

@@ -1561,6 +1561,43 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   expect(await ui.find({ type: 'Button', key: 'open-worker-1' })).toBeDefined()
 })
 
+test('an agent\'s run of tool calls unfolds on press, its paths short against the session folder, and folds again once the pane goes back', async ($, on) => {
+  boundaries(on, {}, { agentMessages: () => [
+    { role: 'user', text: 'Run the tests.', toolUses: [] },
+    { role: 'assistant', text: 'Running.', toolUses: [
+      { tool_use_id: 'c1', tool: 'Bash', input: { command: 'cd /work/android && ./gradlew test' }, text: 'ok' },
+      { tool_use_id: 'c2', tool: 'Read', input: { file_path: '/work/core/A.kt' }, text: 'ok' },
+    ] },
+  ] })
+  http(on)
+  judgeStub(on)
+  spawnStub(on)
+  stepStub(on)
+  const runs: unknown[] = []
+  on('state.set', { plugin: 'ripple', key: 'agentRunsOpen' }, async ($, e, next) => {
+    runs.push(e.value)
+    return next(e)
+  })
+  await start($)
+  await $.agent.spawn(SPAWN)
+  const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  await ui.press({ key: 'open-worker-1' })
+  expect(await ui.find({ type: 'Button', text: /^Ran 1 command, Read 1 file/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
+  await ui.press({ key: 'run-c1' })
+  expect(await ui.find({ type: 'Text', text: /^\.\/gradlew test$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^core\/A\.kt$/ })).toBeDefined()
+  await ui.press({ key: 'run-c1' })
+  expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
+  await ui.press({ key: 'run-c1' })
+  expect(runs.at(-1)).toEqual(['c1'])
+  await ui.press({ key: 'back' })
+  // Back on the list, the unfolded run is forgotten.
+  expect(runs.at(-1)).toEqual([])
+  await ui.press({ key: 'open-worker-1' })
+  expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
+})
+
 /** The claude:// link a handoff opened, and its query. */
 function opened(b: { processes: { argv: readonly string[] }[] }): URLSearchParams | undefined {
   const link = b.processes.map(p => p.argv.at(-1) ?? '').find(arg => arg.startsWith('claude://code/new?'))

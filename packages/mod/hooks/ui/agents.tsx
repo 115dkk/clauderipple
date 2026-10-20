@@ -26,12 +26,14 @@ import type { RenderNode, SessionMessage } from 'claude-code'
 import type { AgentRec, Effort } from '../../types'
 import { bareTitle } from '../workers'
 import { CELL_PX, CONTROL_PX, METER_H, METER_W } from './art'
-import { blank, capsule, pic, pill, ripple, rowsOf } from './kit'
+import { blank, capsule, pic, pill, press, ripple, rowsOf } from './kit'
 import { lookOf } from './look'
 import type { Look } from './look'
 import { GREET_SIZE, canDraw, speak, textButton } from './parts'
 import type { Els } from './parts'
-import { chOf, clip, providerColor, textTone } from './theme'
+import { chOf, clip, displayWidth, providerColor, textTone } from './theme'
+import { runSummary, toolDetail } from './tools'
+import type { Place, ToolCall } from './tools'
 import type { AgentEntry, AgentTalk, AgentsActions, AgentsView, Frame } from './view'
 import { cachePercent, compactNumber, effortIndex, effortLabel, elapsed, modelName, promptTokens, targetLabel } from './view'
 
@@ -64,8 +66,9 @@ function base(id: string): string {
 
 /** The model it ran on: what answered, else what it was started on, else the pick's target, else its type. */
 export function modelOf(agent: AgentRec, lang: Frame['lang']): string {
-  if (agent.answeredBy) return modelName(base(agent.answeredBy))
-  if (agent.model && agent.model !== 'inherit') return modelName(base(agent.model))
+  // A hosted id's vendor path ("deepseek-ai/") goes, as in the agent's title (workers.ts titleName).
+  if (agent.answeredBy) return modelName(base(agent.answeredBy)).replace(/^.*\//, '')
+  if (agent.model && agent.model !== 'inherit') return modelName(base(agent.model)).replace(/^.*\//, '')
   return agent.pick ? targetLabel(agent.pick.target, lang) : agent.type
 }
 
@@ -135,18 +138,13 @@ function totals(frame: Frame, agents: readonly AgentRec[]): string {
 
 // ---- Conversation, read ----------------------------------------------------------------------
 
-/** A tool call's input in a few words: the command, the path, the pattern, the query. */
-function toolDetail(input: Readonly<Record<string, unknown>>): string {
-  const detail = input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.query ?? input.url ?? input.description ?? input.prompt ?? ''
-  return String(typeof detail === 'string' ? detail : JSON.stringify(detail)).split('\n')[0]!.trim()
-}
-
 /**
  * An agent's conversation as the pane draws it: each prompt it was given, its words, and each tool
- * call with a line of its input and whether it answered (a call's `text` is there once answered,
- * also in a subagent's transcript, which keeps no `result`; `isError` when it failed).
+ * call with a line of its input (tools.ts `toolDetail`: paths short against `place`) and whether it
+ * answered (a call's `text` is there once answered, also in a subagent's transcript, which keeps no
+ * `result`; `isError` when it failed).
  */
-export function talkOf(messages: readonly SessionMessage[]): AgentEntry[] {
+export function talkOf(messages: readonly SessionMessage[], place: Place = {}): AgentEntry[] {
   const out: AgentEntry[] = []
   for (const m of messages) {
     if (m.role === 'user') {
@@ -154,7 +152,7 @@ export function talkOf(messages: readonly SessionMessage[]): AgentEntry[] {
       continue
     }
     if (m.text.trim()) out.push({ kind: 'text', text: m.text.trim() })
-    for (const use of m.toolUses) out.push({ kind: 'tool', id: use.tool_use_id, tool: use.tool, detail: toolDetail(use.input), state: use.isError ? 'error' : use.text === undefined && use.result === undefined ? 'running' : 'ok' })
+    for (const use of m.toolUses) out.push({ kind: 'tool', id: use.tool_use_id, tool: use.tool, detail: toolDetail(use.tool, use.input, place), state: use.isError ? 'error' : use.text === undefined && use.result === undefined ? 'running' : 'ok' })
   }
   return out
 }
@@ -193,16 +191,108 @@ function linesOf(text: string, width: number): number {
   return text ? Math.max(1, Math.ceil(chOf(text) / Math.max(10, width))) : 0
 }
 
-/** Rows a card draws, about: for the presses laid over it and the capsule's water. */
-function cardRows(frame: Frame, agent: AgentRec, now: number): number {
+// A card holds still while its agent runs (2026-10-20: the owner watched the pane jump each step).
+// No row comes or goes and no row's width depends on a value that ticks: what it does now is left to
+// the conversation and the host's task list, the elapsed time has a column as wide as its widest
+// value, and each number a slot as wide as its widest. Only the numbers inside change.
+
+const TIME_COLUMN = new Map<Frame['lang'], number>()
+
+/** `ch` the elapsed time can take in `lang`: 59 seconds, 59 minutes 59, 99 hours 59. */
+function timeCh(lang: Frame['lang']): number {
+  let ch = TIME_COLUMN.get(lang)
+  if (ch === undefined) {
+    ch = Math.max(...[59_000, 3_599_000, 99 * 3_600_000 + 59 * 60_000].map(ms => chOf(elapsed(ms, lang))))
+    TIME_COLUMN.set(lang, ch)
+  }
+  return ch
+}
+
+/** Cells of the time's column: the elapsed time's widest, and "failed" before it when it failed. */
+export function timeCells(frame: Frame, agent: AgentRec): number {
+  return Math.ceil(timeCh(frame.lang)) + (agent.state === 'failed' ? Math.ceil(chOf(t(frame.lang, 'agents.failed'))) + 1 : 0)
+}
+
+/** The widest each number shows, for its slot. */
+const WIDEST: Record<string, readonly string[]> = { in: ['9.9k', '999k', '99.9M'], cache: ['100%'], out: ['9.9k', '999k', '99.9M'], tools: ['999'] }
+
+/** Cells of a number's slot. */
+function slotCells(key: string): number {
+  return Math.ceil(Math.max(...(WIDEST[key] ?? ['999']).map(chOf)))
+}
+
+/**
+ * The card's numbers: all four, each in its slot, once there is any (a running agent always, its
+ * figures a dash until its first step reports them), so the row neither appears mid-run nor wraps
+ * differently as a figure grows.
+ */
+function cardFigures(frame: Frame, agent: AgentRec): Figure[] {
+  const got = figures(frame, agent)
+  if (!got.length && !live(agent)) return []
+  const L = frame.lang
+  const of = (key: string, label: string): Figure => got.find(f => f.key === key) ?? { key, label, value: key === 'tools' ? String(agent.tools ?? 0) : '–' }
+  return [of('in', t(L, 'agents.input')), of('cache', t(L, 'agents.cache')), of('out', t(L, 'agents.output')), of('tools', t(L, 'agents.toolsLabel'))]
+}
+
+/** Cells a row of figures takes in one line: each figure's ring slot, label and number slot, the gaps. */
+function figureCells(figs: readonly Figure[]): number {
+  return figs.reduce((n, f) => n + (f.key === 'cache' ? 3 : 0) + Math.ceil(chOf(f.label)) + 1 + slotCells(f.key), 0) + 2 * Math.max(0, figs.length - 1)
+}
+
+/** Below this many cells across a card, the narrow layout. */
+const NARROW_CELLS = 44
+
+/**
+ * How a card lays out, from the pane's width and its language alone, never a value that ticks.
+ * Wide: the time and the chevron in a fixed column right of the title, the four numbers in a row.
+ * Narrow (or when the four numbers would not fit a row): the title has the row to itself but for the
+ * chevron, the numbers go in two fixed rows (in · cache / out · tools), and the time ends the second
+ * of them, or takes a row of its own when it does not fit there.
+ */
+type CardLayout = { width: number; narrow: boolean; time: number; timeOn: 'head' | 'nums' | 'own'; side: number; title: number }
+function layoutOf(frame: Frame, agent: AgentRec, pressable: boolean): CardLayout {
   const width = innerCells(frame)
-  const head = linesOf(titleOf(agent), width - 14)
-  const ident = 1.2 + (chOf(modelOf(agent, frame.lang)) + 24 > width ? 1 : 0)
-  const nums = figures(frame, agent).length ? linesOf(figureLine(frame, agent) + '      ', width) : 0
-  const act = live(agent) ? linesOf(doing(agent, now, frame.lang), width - 4) : 0
-  const why = linesOf(whyLine(frame, agent), width - 2)
-  const fall = agent.pick?.fallbackReason ? linesOf(t(frame.lang, 'agents.fallback', { reason: agent.pick.fallbackReason }), width - 2) : 0
-  return head + ident + nums + act + why + fall + 1.3
+  const figs = cardFigures(frame, agent)
+  const narrow = width < NARROW_CELLS || figureCells(figs) > width - 2
+  const time = timeCells(frame, agent)
+  const timeOn = !narrow ? 'head' : figs.length && figureCells(figs.slice(2)) + 2 + time <= width - 2 ? 'nums' : 'own'
+  const side = timeOn === 'head' ? time + (pressable ? 2 : 0) : pressable ? 1 : 0
+  return { width, narrow, time, timeOn, side, title: width - 2 - (side ? side + 1 : 0) }
+}
+
+/** The figures' rows: one, or two fixed ones when narrow. */
+function figureRows(figs: readonly Figure[], narrow: boolean): Figure[][] {
+  if (!figs.length) return []
+  return narrow ? [figs.slice(0, 2), figs.slice(2)] : [[...figs]]
+}
+
+/** Cells the model's name has on its one line: the row less the dot, the effort and the type. */
+function modelRoom(frame: Frame, agent: AgentRec, type: string, word: boolean): number {
+  const effort = effortOf(agent)
+  const effortCells = effort ? 1 + Math.ceil(METER_W / CELL_PX) + 1 + (word ? Math.ceil(chOf(effortLabel(effort, frame.lang))) + 1 : 0) : 0
+  return innerCells(frame) - 2 - (agent.provider ? 2 : 0) - effortCells - (type ? Math.ceil(chOf('· ' + type)) + 1 : 0)
+}
+
+/**
+ * What the model row shows beside the name: the type while the name keeps room, and the effort's
+ * word while the whole name fits with it (its bars stay, and say the level). Fixed per agent and
+ * width, so the row never changes between ticks.
+ */
+function modelRow(frame: Frame, agent: AgentRec, model: string): { type: string; word: boolean; room: number } {
+  const full = typeOf(agent, model)
+  const type = modelRoom(frame, agent, full, true) >= 8 ? full : ''
+  const word = modelRoom(frame, agent, type, true) >= chOf(model)
+  return { type, word, room: modelRoom(frame, agent, type, word) }
+}
+
+/** Rows a card draws, about: for the presses laid over it and the capsule's water. */
+export function cardRows(frame: Frame, agent: AgentRec, pressable = true): number {
+  const layout = layoutOf(frame, agent, pressable)
+  const head = linesOf(titleOf(agent), layout.title)
+  const nums = figureRows(cardFigures(frame, agent), layout.narrow).length
+  const own = layout.timeOn === 'own' ? 1 : 0
+  const fall = agent.pick?.fallbackReason ? linesOf(t(frame.lang, 'agents.fallback', { reason: agent.pick.fallbackReason }), layout.width - 2) : 0
+  return head + 1.2 + nums + own + fall + 1.3
 }
 
 /** A state's mark and its colour: running in the accent, waiting amber, done green, failed red. */
@@ -232,7 +322,10 @@ function cardPress(el: Els, frame: Frame, key: string, rows: number, onPress: ()
   )
 }
 
-/** A card's rows: the head (mark, title, time), the model and effort, the numbers, what it does, why. */
+/**
+ * A card's rows: the head (mark, title, time), the model and effort, the numbers, why. What it does
+ * now is the conversation's (and the terminal's): a line that changed each step made the list jump.
+ */
 function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable: boolean): RenderNode[] {
   const { Box, Text } = el
   const k = lookOf(frame)
@@ -240,10 +333,17 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
   const m = mark(k, agent)
   const model = modelOf(agent, L)
   const effort = effortOf(agent)
-  const type = typeOf(agent, model)
-  const why = whyLine(frame, agent)
-  const nums = figures(frame, agent)
+  const layout = layoutOf(frame, agent, pressable)
+  // The type only while the model's name keeps room beside it.
+  const { type, word, room } = modelRow(frame, agent, model)
+  const nums = figureRows(cardFigures(frame, agent), layout.narrow)
   const auto = agent.pick && ['haiku', 'jev', 'model'].includes(agent.pick.by)
+  const time = (
+    <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.time}>
+      {agent.state === 'failed' ? <Text key="failed" color={k.tone('red')}>{t(L, 'agents.failed')}</Text> : null}
+      <Text key="elapsed" {...(live(agent) ? k.ink : k.sub)}>{ranFor(agent, now, L)}</Text>
+    </Box>
+  )
   const rows: RenderNode[] = [
     <Box key="head" flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" minWidth={0}>
       <Box key="mark" flexShrink={0}>
@@ -252,51 +352,54 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
       <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
         <Text bold {...k.ink} wrap="wrap">{titleOf(agent)}</Text>
       </Box>
-      <Box key="time" flexDirection="row" columnGap={1} flexShrink={0}>
-        {agent.state === 'failed' ? <Text key="failed" color={k.tone('red')}>{t(L, 'agents.failed')}</Text> : null}
-        <Text key="elapsed" {...(live(agent) ? k.ink : k.sub)}>{ranFor(agent, now, L)}</Text>
-        {pressable ? <Text key="chev" {...k.mute}>›</Text> : null}
-      </Box>
+      {layout.side ? (
+        <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.side}>
+          {layout.timeOn === 'head' ? time : null}
+          {pressable ? <Text key="chev" {...k.mute}>›</Text> : null}
+        </Box>
+      ) : null}
     </Box>,
-    <Box key="ident" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} paddingLeft={2} minWidth={0}>
-      {agent.provider ? <Text key="dot" color={providerColor(agent.provider)}>●</Text> : null}
-      <Text key="model" {...k.ink}>{model}</Text>
+    // One line whatever the width: the name cut before the effort ever drops below it.
+    <Box key="ident" flexDirection="row" alignItems="center" columnGap={1} paddingLeft={2} minWidth={0} overflow="hidden">
+      {agent.provider ? <Box key="dot" flexShrink={0}><Text color={providerColor(agent.provider)}>●</Text></Box> : null}
+      <Box key="model" flexShrink={1} minWidth={0} overflow="hidden">
+        <Text {...k.ink}>{clipCh(model, Math.max(4, room))}</Text>
+      </Box>
       {effort ? (
         <Box key="effort" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0} paddingLeft={1}>
           {pic(el, 'meter-' + agent.id, k.art.meter(effortIndex(effort as Effort) + 1, auto ? 'auto' : 'manual'), t(L, 'band.effort'), METER_W, METER_H)}
-          <Text key="effort-word" {...k.sub}>{effortLabel(effort, L)}</Text>
+          {word ? <Text key="effort-word" {...k.sub}>{effortLabel(effort, L)}</Text> : null}
         </Box>
       ) : null}
-      {type ? <Text key="type" {...k.mute}>{'· ' + type}</Text> : null}
+      {type ? <Box key="type" flexShrink={0}><Text {...k.mute}>{'· ' + type}</Text></Box> : null}
     </Box>,
   ]
-  if (nums.length) {
+  nums.forEach((row, i) => {
+    const last = i === nums.length - 1
     rows.push(
-      <Box key="nums" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={2} paddingLeft={2} minWidth={0}>
-        {nums.map(f => (
+      <Box key={'nums-' + i} flexDirection="row" alignItems="center" columnGap={2} paddingLeft={2} minWidth={0}>
+        {row.map(f => (
           <Box key={'n-' + f.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-            {f.ring !== undefined ? pic(el, 'ring-' + agent.id, k.art.ring(f.ring, 'ink'), f.label, 16, 16) : null}
+            {f.key === 'cache' ? (
+              <Box key="ring" width={2} flexShrink={0} alignItems="center">
+                {f.ring !== undefined ? pic(el, 'ring-' + agent.id, k.art.ring(f.ring, 'ink'), f.label, 16, 16) : null}
+              </Box>
+            ) : null}
             <Text key="label" {...k.mute}>{f.label}</Text>
-            <Text key="value" {...k.ink}>{f.value}</Text>
+            <Box key="value" width={slotCells(f.key)} flexShrink={0}>
+              <Text {...k.ink}>{f.value}</Text>
+            </Box>
           </Box>
         ))}
+        {last && layout.timeOn === 'nums' ? <Box key="gap" flexGrow={1} /> : null}
+        {last && layout.timeOn === 'nums' ? time : null}
       </Box>,
     )
-  }
-  if (live(agent)) {
+  })
+  if (layout.timeOn === 'own') {
     rows.push(
-      <Box key="doing" flexDirection="row" alignItems="flex-start" columnGap={1} paddingLeft={2} minWidth={0}>
-        <Text key="arrow" color={agent.state === 'waiting' ? k.tone('amber') : k.tone('violet')}>▸</Text>
-        <Box key="what" flexShrink={1} minWidth={0}>
-          <Text {...k.sub} wrap="wrap">{agent.state === 'waiting' ? t(L, 'agents.waiting') + ' · ' + doing(agent, now, L) : doing(agent, now, L)}</Text>
-        </Box>
-      </Box>,
-    )
-  }
-  if (why) {
-    rows.push(
-      <Box key="why" paddingLeft={2} minWidth={0}>
-        <Text {...k.mute} wrap="wrap">{why}</Text>
+      <Box key="time-row" flexDirection="row" justifyContent="flex-end" paddingLeft={2} minWidth={0}>
+        {time}
       </Box>,
     )
   }
@@ -317,7 +420,7 @@ function card(el: Els, frame: Frame, agent: AgentRec, now: number, onPress?: () 
   return (
     <Box key={'card-' + agent.id} flexDirection="column" width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
       {cardBody(el, frame, agent, now, !!onPress)}
-      {onPress ? cardPress(el, frame, 'open-' + agent.id, cardRows(frame, agent, now), onPress) : null}
+      {onPress ? cardPress(el, frame, 'open-' + agent.id, cardRows(frame, agent), onPress) : null}
     </Box>
   )
 }
@@ -368,7 +471,7 @@ function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
       </Box>,
     )
   }
-  const rows = 3 + [...running, ...shownDone].reduce((n, a) => n + cardRows(frame, a, view.now) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
+  const rows = 3 + [...running, ...shownDone].reduce((n, a) => n + cardRows(frame, a) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
   return capsule(el, frame, {
     key: 'agents',
     // While nothing runs 리플이 floats at the head in calm water; while one runs the water holds
@@ -390,27 +493,127 @@ function pageLook(frame: Frame): Look {
   return lookOf({ ...frame, skin: 'flat' })
 }
 
-/** A tool call's row: its mark, its name, its input in a few words. */
-function toolRow(el: Els, frame: Frame, entry: Extract<AgentEntry, { kind: 'tool' }>, agentLive: boolean, since?: string): RenderNode {
+type Mark = 'ok' | 'error' | 'running' | 'unknown'
+
+/** How a call stands: a call still open on an agent that has ended is not running, only unanswered. */
+function callMark(call: ToolCall, agentLive: boolean): Mark {
+  return call.state === 'running' && !agentLive ? 'unknown' : call.state
+}
+
+/** How a run stands: running while one of its calls runs, failed when one failed, done when all answered. */
+function runMark(calls: readonly ToolCall[], agentLive: boolean): Mark {
+  const marks = calls.map(call => callMark(call, agentLive))
+  if (marks.includes('running')) return 'running'
+  if (marks.includes('error')) return 'error'
+  return marks.every(m => m === 'ok') ? 'ok' : 'unknown'
+}
+
+const GLYPH: Record<Mark, string> = { ok: '✓', error: '✕', running: '◌', unknown: '·' }
+
+/** The conversation's entries with each run of consecutive tool calls taken as one. */
+type Part = Exclude<AgentEntry, { kind: 'tool' }> | { kind: 'run'; calls: ToolCall[] }
+function partsOf(entries: readonly AgentEntry[]): Part[] {
+  const out: Part[] = []
+  for (const entry of entries) {
+    const last = out.at(-1)
+    if (entry.kind !== 'tool') out.push(entry)
+    else if (last?.kind === 'run') last.calls.push(entry)
+    else out.push({ kind: 'run', calls: [entry] })
+  }
+  return out
+}
+
+/**
+ * The calls a run shows under its head: every one when it is unfolded, else only the one the agent
+ * is in now. A run of a single call is that call's own line, with no head.
+ */
+function shownCalls(calls: readonly ToolCall[], open: boolean, inFlight: AgentEntry | undefined): readonly ToolCall[] {
+  if (calls.length === 1 || open) return calls
+  return calls.filter(call => call === inFlight)
+}
+
+/** Cells left for a call's input on a line `cells` wide, after its mark, its name and its time. */
+function detailRoom(cells: number, call: ToolCall, since: string | undefined): number {
+  return Math.max(8, cells - 2 - displayWidth(call.tool) - 1 - (since ? displayWidth(since) + 1 : 0))
+}
+
+/**
+ * `text` cut to `room` of the desktop's `ch` (theme.ts chOf), an ellipsis where it was cut: the
+ * sans draws most characters narrower than a cell, so a cut by cells left a third of the line empty.
+ */
+function clipCh(text: string, room: number): string {
+  if (chOf(text) <= room) return text
+  let out = ''
+  let used = 0
+  for (const char of text) {
+    used += chOf(char)
+    if (used > room - 1) break
+    out += char
+  }
+  return out.trimEnd() + '…'
+}
+
+/**
+ * A tool call's row: its mark, its name, its input, on one line however long the input (cut with
+ * an ellipsis at the pane's edge; a wrapped command was most of the wall of 2026-10-20).
+ */
+function toolRow(el: Els, frame: Frame, entry: ToolCall, agentLive: boolean, indent: number, since?: string): RenderNode {
   const { Box, Text } = el
   const k = pageLook(frame)
-  const state = entry.state === 'running' && !agentLive ? 'unknown' : entry.state
-  const glyph = state === 'ok' ? '✓' : state === 'error' ? '✕' : state === 'running' ? '◌' : '·'
+  const state = callMark(entry, agentLive)
   const color = state === 'ok' ? k.tone('green') : state === 'error' ? k.tone('red') : state === 'running' ? k.tone('violet') : undefined
   return (
-    <Box key={'tool-' + entry.id} flexDirection="row" alignItems="flex-start" columnGap={1} minWidth={0}>
+    <Box key={'tool-' + entry.id} flexDirection="row" alignItems="center" columnGap={1} paddingLeft={indent} minWidth={0} overflow="hidden">
       <Box key="mark" flexShrink={0}>
-        <Text {...(color ? { color } : k.mute)}>{glyph}</Text>
+        <Text {...(color ? { color } : k.mute)}>{GLYPH[state]}</Text>
       </Box>
       <Box key="name" flexShrink={0}>
         <Text bold {...k.ink}>{entry.tool}</Text>
       </Box>
       {entry.detail ? (
-        <Box key="detail" flexShrink={1} minWidth={0}>
-          <Text {...k.sub} wrap="wrap">{clip(entry.detail, 110)}</Text>
+        <Box key="detail" flexShrink={1} minWidth={0} overflow="hidden">
+          <Text {...k.sub} wrap="truncate-end">{clipCh(entry.detail, detailRoom(frame.columns - indent - 3, entry, since))}</Text>
         </Box>
       ) : null}
-      {since ? <Text key="since" color={k.tone('violet')}>{since}</Text> : null}
+      {since ? <Box key="since" flexShrink={0}><Text color={k.tone('violet')}>{since}</Text></Box> : null}
+    </Box>
+  )
+}
+
+/**
+ * A run of tool calls on the page: its head ("명령어 7개 실행함, 파일 1개를 편집함", its mark, how many
+ * failed), pressed to unfold it call by call; folded, the call the agent is in now still shows
+ * under it. A single call is its own line.
+ */
+function runDrawn(el: Els, frame: Frame, calls: readonly ToolCall[], agentLive: boolean, open: boolean, inFlight: AgentEntry | undefined, since: string | undefined, onToggle: (id: string) => void): RenderNode {
+  const { Box, Text } = el
+  const k = pageLook(frame)
+  const id = calls[0]!.id
+  const rows = shownCalls(calls, open, inFlight).map(call => toolRow(el, frame, call, agentLive, calls.length === 1 ? 0 : 2, call === inFlight ? since : undefined))
+  if (calls.length === 1) return <Box key={'run-' + id} flexDirection="column" paddingLeft={1} minWidth={0}>{rows}</Box>
+  const summary = runSummary(calls, frame.lang)
+  const state = runMark(calls, agentLive)
+  const color = state === 'ok' ? k.tone('green') : state === 'error' ? k.tone('red') : state === 'running' ? k.tone('violet') : undefined
+  return (
+    <Box key={'run-' + id} flexDirection="column" paddingLeft={1} minWidth={0}>
+      <Box key="head" flexDirection="row" alignItems="center" columnGap={1} minWidth={0}>
+        <Box key="mark" flexShrink={0}>
+          <Text {...(color ? { color } : k.mute)}>{GLYPH[state]}</Text>
+        </Box>
+        <Box key="what" flexShrink={1} minWidth={0} overflow="hidden">
+          <Text {...k.sub} wrap="truncate-end">{summary.text}</Text>
+        </Box>
+        {summary.failed ? (
+          <Box key="failed" flexShrink={0}>
+            <Text color={k.tone('red')}>{t(frame.lang, 'agents.act.failed', { count: summary.failed })}</Text>
+          </Box>
+        ) : null}
+        <Box key="chev" flexShrink={0}>
+          <Text {...k.mute}>{open ? '⌄' : '›'}</Text>
+        </Box>
+        {press(el, 'run-' + id, (frame.columns - 2) * CELL_PX, () => onToggle(id))}
+      </Box>
+      {rows}
     </Box>
   )
 }
@@ -448,23 +651,18 @@ function talkDrawn(el: Els, frame: Frame, view: AgentsView, agent: AgentRec, tal
       </Box>,
     )
   }
-  // Tool calls in a run stay together, a row apart from the words around them.
-  let run: RenderNode[] = []
-  const flush = () => {
-    if (!run.length) return
-    items.push(<Box key={'run-' + items.length} flexDirection="column" paddingLeft={1} minWidth={0}>{run}</Box>)
-    run = []
-  }
   // The call it is in now carries its time; with none in flight a last line says what it does.
   const inFlight = live(agent) ? page.shown.findLast(e => e.kind === 'tool' && e.state === 'running') : undefined
   const since = agent.toolSince ? elapsed(view.now - agent.toolSince, L) : undefined
-  for (const entry of page.shown) {
-    if (entry.kind === 'tool') { run.push(toolRow(el, frame, entry, live(agent), entry === inFlight ? since : undefined)); continue }
-    flush()
-    if (entry.kind === 'prompt') items.push(block(el, frame, 'prompt-' + items.length, <Text key="label" bold {...k.sub}>{t(L, 'agents.task')}</Text>, cut(entry.text, PROMPT_MAX)))
-    else items.push(<Box key={'text-' + items.length} paddingX={1} minWidth={0}><Markdown text={cut(entry.text, TEXT_MAX)} /></Box>)
+  // Tool calls in a run fold into one line, as the Claude app shows them ("명령어 9개 실행함, 파일
+  // 2개 읽음 ›"), and unfold call by call when pressed. Listed whole, a worker's dozens of commands
+  // read as a wall (2026-10-20).
+  const opened = view.open?.runsOpen ?? []
+  for (const part of partsOf(page.shown)) {
+    if (part.kind === 'run') items.push(runDrawn(el, frame, part.calls, live(agent), opened.includes(part.calls[0]!.id), inFlight, since, actions.toggleRun))
+    else if (part.kind === 'prompt') items.push(block(el, frame, 'prompt-' + items.length, <Text key="label" bold {...k.sub}>{t(L, 'agents.task')}</Text>, cut(part.text, PROMPT_MAX)))
+    else items.push(<Box key={'text-' + items.length} paddingX={1} minWidth={0}><Markdown text={cut(part.text, TEXT_MAX)} /></Box>)
   }
-  flush()
   if (page.answer !== undefined) {
     const ok = agent.state === 'done'
     items.push(block(el, frame, 'answer', (
@@ -518,7 +716,7 @@ function openDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
   const head = capsule(el, frame, {
     key: 'agent-open',
     sea: { tone: 'violet', reach: 120, at: { x: 1.5 * CELL_PX + 30, y: 20 } },
-    rows: rowsOf(CONTROL_PX) + cardRows(frame, agent, view.now) + 3,
+    rows: rowsOf(CONTROL_PX) + cardRows(frame, agent, false) + 3,
     paddingY: 1,
     gap: 1,
     children: [
@@ -647,18 +845,40 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
     const page = pageOf(talk.entries, view.open?.earlier ?? 0, !live(agent))
     if (page.first?.kind === 'prompt') lines.push(<Box key="task" flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(page.first.text, 600)}</Text></Box>)
     if (page.hidden > 0) lines.push(<Box key="earlier">{textButton(el, 'earlier', t(L, 'agents.earlier', { count: Math.min(page.hidden, TALK_PAGE) }), actions.earlier, 'e')}</Box>)
-    page.shown.forEach((entry, i) => {
-      if (entry.kind === 'tool') {
-        const state = entry.state === 'running' && !live(agent) ? 'unknown' : entry.state
+    // A run of calls folds into one line here too; a single call, and the one in flight, stay lines.
+    const inFlight = live(agent) ? page.shown.findLast(e => e.kind === 'tool' && e.state === 'running') : undefined
+    const opened = view.open?.runsOpen ?? []
+    const markColor = (m: Mark) => m === 'ok' ? tone.ok : m === 'error' ? tone.bad : m === 'running' ? tone.accent : undefined
+    const callLine = (call: ToolCall, indent: number) => {
+      const state = callMark(call, live(agent))
+      return (
+        <Box key={'tool-' + call.id} flexDirection="row" columnGap={1} paddingLeft={indent}>
+          <Text color={markColor(state)} dimColor={state === 'unknown'}>{GLYPH[state]}</Text>
+          <Text bold>{call.tool}</Text>
+          {call.detail ? <Text dimColor wrap="truncate-end">{clip(call.detail, detailRoom(frame.columns - indent, call, undefined))}</Text> : null}
+        </Box>
+      )
+    }
+    partsOf(page.shown).forEach((part, i) => {
+      if (part.kind === 'run') {
+        const id = part.calls[0]!.id
+        const open = opened.includes(id)
+        const rows = shownCalls(part.calls, open, inFlight).map(call => callLine(call, part.calls.length === 1 ? 1 : 3))
+        if (part.calls.length === 1) { lines.push(<Box key={'e' + i} flexDirection="column">{rows}</Box>); return }
+        const summary = runSummary(part.calls, L)
+        const state = runMark(part.calls, live(agent))
         lines.push(
-          <Box key={'e' + i} flexDirection="row" columnGap={1} paddingLeft={1}>
-            <Text color={state === 'ok' ? tone.ok : state === 'error' ? tone.bad : state === 'running' ? tone.accent : undefined} dimColor={state === 'unknown'}>{state === 'ok' ? '✓' : state === 'error' ? '✕' : state === 'running' ? '◌' : '·'}</Text>
-            <Text bold>{entry.tool}</Text>
-            {entry.detail ? <Text dimColor wrap="wrap">{clip(entry.detail, 90)}</Text> : null}
+          <Box key={'e' + i} flexDirection="column">
+            <Box key="head" flexDirection="row" columnGap={1} paddingLeft={1}>
+              <Text color={markColor(state)} dimColor={state === 'unknown'}>{GLYPH[state]}</Text>
+              {textButton(el, 'run-' + id, summary.text + (open ? ' ⌄' : ' ›'), () => actions.toggleRun(id))}
+              {summary.failed ? <Text color={tone.bad}>{t(L, 'agents.act.failed', { count: summary.failed })}</Text> : null}
+            </Box>
+            {rows}
           </Box>,
         )
-      } else if (entry.kind === 'prompt') lines.push(<Box key={'e' + i} flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(entry.text, 600)}</Text></Box>)
-      else lines.push(<Text key={'e' + i} wrap="wrap">{cut(entry.text, 1500)}</Text>)
+      } else if (part.kind === 'prompt') lines.push(<Box key={'e' + i} flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(part.text, 600)}</Text></Box>)
+      else lines.push(<Text key={'e' + i} wrap="wrap">{cut(part.text, 1500)}</Text>)
     })
     if (page.answer !== undefined) lines.push(<Box key="answer" flexDirection="column"><Text bold color={agent.state === 'done' ? tone.ok : tone.bad}>{t(L, 'agents.answer')}</Text><Text wrap="wrap">{cut(page.answer, 4000)}</Text></Box>)
     if (!talk.entries.length) lines.push(<Text key="nothing" dimColor>{t(L, 'agents.nothingYet')}</Text>)

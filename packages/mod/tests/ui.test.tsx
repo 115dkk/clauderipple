@@ -12,7 +12,9 @@ import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 import type { AgentRec, Settings, Skin, StatusRequest } from '../types'
 import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
-import { renderAgents, talkOf } from '../hooks/ui/agents'
+import { cardRows, renderAgents, talkOf, timeCells } from '../hooks/ui/agents'
+import { chOf, displayWidth } from '../hooks/ui/theme'
+import { commandLine, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
 import { rippleSource } from '../hooks/ui/parts'
@@ -584,7 +586,7 @@ const AGENTS: AgentRec[] = [
   { id: 'a2', description: 'Summarize the docs', type: 'deepseek-v4-1-flash', state: 'done', startedAt: NOW - 900_000, endedAt: NOW - 800_000, cost: 9000 },
 ]
 
-const AGENT_NOOP: AgentsActions = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined }
+const AGENT_NOOP: AgentsActions = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined, toggleRun: () => undefined }
 
 test('the Agents pane draws a worker the session\'s own model runs', async ($, on) => {
   const onSession: AgentRec = { ...AGENTS[0]!, id: 's1', description: 'Review on the session model', pick: { ...AGENTS[0]!.pick!, target: { agent: 'general-purpose' }, by: 'session' } }
@@ -604,11 +606,17 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
   for (const surface of SURFACES) {
     const ui = await mount($, 'agents', surface, 64)
     expect(await ui.find({ type: 'Text', text: 'Port the request log renderer' }), "ui { type: 'Text', text: 'Port the request log renderer' } " + surface).toBeDefined()
-    // What it does now, on both surfaces: the pane stands in for the host's task list.
-    expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx · 14s/ }), surface).toBeDefined()
+    // What it does now, on the terminal; the desktop's cards hold still and leave it to the
+    // conversation and the host's task list (2026-10-20).
+    const doing = await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx · 14s/ })
+    if (surface === 'terminal') expect(doing, surface).toBeDefined()
+    else expect(doing, surface).toBeUndefined()
     // A finished agent is a card too, not a line behind a fold.
     expect(await ui.find({ type: 'Text', text: 'Summarize the docs' }), surface).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Frontend \/ Standard/ })).toBeDefined()
+    // Who picked it and why, on the terminal; the desktop's cards leave it out (2026-10-20).
+    const why = await ui.find({ type: 'Text', text: /Frontend \/ Standard/ })
+    if (surface === 'terminal') expect(why, surface).toBeDefined()
+    else expect(why, surface).toBeUndefined()
     // The API's own counts: 1200 + 38000 + 800 in, 95% of it from the cache, 5100 out, 12 tools.
     if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'in 40k · cache 95% · out 5.1k · tools 12' }), surface).toBeDefined()
     else for (const value of ['40k', '95%', '5.1k', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
@@ -657,14 +665,18 @@ test('an agent\'s conversation reads in the pane: the task, its words, its tools
   const long: AgentEntry[] = [talk[0]!, ...Array.from({ length: 45 }, (_, i): AgentEntry => ({ kind: 'tool', id: 'x' + i, tool: 'Grep', detail: 'pattern ' + i, state: 'ok' }))]
   drawPane(on, 'talk-live', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, earlier: 0 } }, actions))
   drawPane(on, 'talk-done', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: [...talk.slice(0, 3), { kind: 'text', text: 'Ported; tests pass.' }] }, earlier: 0 } }, actions))
-  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, earlier: 0, runsOpen: ['x15'] } }, actions))
   drawPane(on, 'talk-deny', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { deny: 'no saved transcript for a1' }, earlier: 0 } }, actions))
   drawPane(on, 'talk-gone', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'zz', talk: { entries: [] }, earlier: 0 } }, actions))
   for (const surface of SURFACES) {
     const live = await mount($, 'talk-live', surface, 64)
     expect(await live.find({ type: 'Text', text: 'Port the request log renderer' }), surface).toBeDefined()
     expect(await live.find({ type: 'Text', text: 'Task' }), surface).toBeDefined()
-    for (const tool of ['Read', 'Bash', 'Edit']) expect(await live.find({ type: 'Text', text: tool }), surface + ' ' + tool).toBeDefined()
+    // Its three calls fold into one line; the one it is in now still shows under it.
+    expect(await live.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Read 1 file, Ran 1 command, Edited 1 file/ }), surface).toBeDefined()
+    expect(await live.find({ type: 'Text', text: '1 failed' }), surface).toBeDefined()
+    expect(await live.find({ type: 'Text', text: /^Edit$/ }), surface).toBeDefined()
+    for (const tool of ['Read', 'Bash']) expect(await live.find({ type: 'Text', text: new RegExp('^' + tool + '$') }), surface + ' ' + tool).toBeUndefined()
     // Its words as Markdown on the desktop, plain text on the terminal; no answer while it runs.
     if (surface === 'desktop') expect((await live.findAll({ type: 'Markdown' })).some(m => m.props.text === 'Reading the **current** renderer first.'), surface).toBe(true)
     else expect(await live.find({ type: 'Text', text: 'Reading the **current** renderer first.' }), surface).toBeDefined()
@@ -1126,4 +1138,158 @@ test('with the limits row drawn, save mode\'s word follows Claude\'s windows', a
   const spending = await mount($, 'spending', 'desktop', 100)
   expect(await spending.find({ type: 'Text', text: /^save$/ })).toBeUndefined()
   await spending.unmount()
+})
+
+
+// ---- Tool runs (2026-10-20: a worker's commands read as a wall, each wrapped over lines) ------------
+
+test('a run of tool calls is headed in one line as the Claude app heads it', () => {
+  const call = (id: string, tool: string, detail: string, state: 'ok' | 'error' | 'running' = 'ok') => ({ id, tool, detail, state })
+  const run = [call('1', 'Bash', 'npm test'), call('2', 'Read', 'a.ts'), call('3', 'Read', 'a.ts'), call('4', 'Bash', 'ls', 'error'), call('5', 'Edit', 'a.ts')]
+  // A file read twice counts once; a read and an edit of one file count in each kind.
+  expect(runSummary(run, 'ko')).toEqual({ text: '명령어 2개 실행함, 파일 1개 읽음, 파일 1개를 편집함', failed: 1 })
+  expect(runSummary(run.slice(0, 2), 'en')).toEqual({ text: 'Ran 1 command, Read 1 file', failed: 0 })
+  expect(runSummary([call('1', 'Bash', 'a'), call('2', 'Bash', 'b')], 'es').text).toBe('2 comandos ejecutados')
+  expect(runSummary([call('1', 'Bash', 'a')], 'es').text).toBe('1 comando ejecutado')
+  // Five kinds or more: the first three, the rest counted.
+  const kinds = [call('1', 'Bash', 'x'), call('2', 'Read', 'a'), call('3', 'Edit', 'b'), call('4', 'Grep', 'c'), call('5', 'WebFetch', 'd'), call('6', 'WebFetch', 'e')]
+  expect(runSummary(kinds, 'ko').text).toBe('명령어 1개 실행함, 파일 1개 읽음, 파일 1개를 편집함, 그 외 작업 3개')
+  expect(runSummary(kinds, 'en').text).toBe('Ran 1 command, Read 1 file, Edited 1 file, and 3 more actions')
+})
+
+test('a call reads as one short line: no leading cd, paths short, a command\'s description first', () => {
+  const place = { cwd: '/Users/pbj/Documents/tabripple', home: '/Users/pbj' }
+  expect(commandLine('cd /Users/pbj/Documents/tabripple/android && ./gradlew :core:test -q 2>&1 | grep -vE "^w:"', place)).toBe('./gradlew :core:test -q 2>&1 | grep -vE "^w:"')
+  expect(commandLine('cd "/tmp/a b"; npm test', place)).toBe('npm test')
+  expect(commandLine('cd android\n./gradlew build', place)).toBe('./gradlew build')
+  expect(commandLine('cat > /Users/pbj/Documents/tabripple/notes.md <<\'EOF\'\nline one\nEOF', place)).toBe('cat > notes.md <<\'EOF\'')
+  expect(commandLine('ls /Users/pbj/Documents/tabripple /Users/pbj/.gradle /Users/pbj/Documents/tabripple2', place)).toBe('ls . ~/.gradle ~/Documents/tabripple2')
+  expect(shortPath('/Users/pbj/Documents/tabripple/app/Main.kt', place)).toBe('app/Main.kt')
+  expect(shortPath('/Users/pbj/.zshrc', place)).toBe('~/.zshrc')
+  expect(shortPath('/etc/hosts', place)).toBe('/etc/hosts')
+  expect(shortPath('/Users/pbj/x', { home: '~' })).toBe('/Users/pbj/x')
+  expect(toolDetail('Bash', { command: 'cd /x && npm test', description: 'Run the unit tests\nquietly' }, place)).toBe('Run the unit tests')
+  expect(toolDetail('Bash', { command: 'cd /x && npm test', description: '' }, place)).toBe('npm test')
+  expect(toolDetail('Edit', { file_path: '/Users/pbj/Documents/tabripple/core/A.kt' }, place)).toBe('core/A.kt')
+  expect(toolDetail('Grep', { pattern: 'TODO', path: '/Users/pbj/Documents/tabripple/core' }, place)).toBe('TODO · core')
+  expect(talkOf([{ role: 'assistant', text: '', toolUses: [{ tool_use_id: 'u1', tool: 'Read', input: { file_path: '/Users/pbj/Documents/tabripple/a.kt' }, text: 'ok' }] }], place))
+    .toEqual([{ kind: 'tool', id: 'u1', tool: 'Read', detail: 'a.kt', state: 'ok' }])
+})
+
+test('a run of calls folds into its head, unfolds call by call when pressed, and a single call stays one line', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { ...AGENT_NOOP, toggleRun: fn('run') }
+  const bash = (i: number, state: 'ok' | 'error' = 'ok'): AgentEntry => ({ kind: 'tool', id: 'b' + i, tool: 'Bash', detail: commandLine('cd /Users/pbj/Documents/tabripple/android && ./gradlew :core:test --tests "*Parser*" -q 2>&1 | grep -vE "^(w:|warning)" | tail -40 # run ' + i), state })
+  const talk: AgentEntry[] = [
+    { kind: 'prompt', text: 'Fix the parser tests.' },
+    { kind: 'text', text: 'Running the suite.' },
+    ...Array.from({ length: 8 }, (_, i) => bash(i, i === 3 ? 'error' : 'ok')),
+    { kind: 'tool', id: 'e1', tool: 'Edit', detail: 'core/src/Parser.kt', state: 'ok' },
+    { kind: 'text', text: 'One more check.' },
+    { kind: 'tool', id: 'solo', tool: 'Bash', detail: 'git status', state: 'ok' },
+  ]
+  const done: AgentRec = { ...AGENTS[0]!, id: 'a9', state: 'done', endedAt: NOW - 1000, now: undefined, toolSince: undefined }
+  drawPane(on, 'runs-folded', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0 } }, actions))
+  drawPane(on, 'runs-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0, runsOpen: ['b0'] } }, actions))
+  for (const surface of SURFACES) {
+    const folded = await mount($, 'runs-folded', surface, 64)
+    expect(await folded.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Ran 8 commands, Edited 1 file/ }), surface).toBeDefined()
+    expect(await folded.find({ type: 'Text', text: '1 failed' }), surface).toBeDefined()
+    // Folded, none of its calls show; the single call after the words is its own line, no head.
+    expect(await folded.findAll({ type: 'Text', text: /^Bash$/ }), surface).toHaveLength(1)
+    expect(await folded.find({ type: 'Text', text: 'git status' }), surface).toBeDefined()
+    expect(await folded.find({ type: 'Button', key: 'run-solo' }), surface).toBeUndefined()
+    await folded.press({ key: 'run-b0' })
+    const open = await mount($, 'runs-open', surface, 64)
+    expect(await open.findAll({ type: 'Text', text: /^Bash$/ }), surface).toHaveLength(9)
+    expect(await open.find({ type: 'Text', text: /^Edit$/ }), surface).toBeDefined()
+    // Each call one line, its cd gone, cut with an ellipsis before the pane's edge.
+    const details = (await open.findAll({ type: 'Text', text: /gradlew/ })).map(d => d.text)
+    expect(details, surface).toHaveLength(8)
+    for (const detail of details) {
+      expect(detail.startsWith('./gradlew :core:test'), detail).toBe(true)
+      expect(detail.endsWith('…'), detail).toBe(true)
+      // Narrower than the 64-cell pane in the surface's own measure: cells there, the sans's ch here.
+      expect((surface === 'desktop' ? chOf(detail) : displayWidth(detail)) < 64, surface + ' ' + detail).toBe(true)
+    }
+    await open.press({ key: 'run-b0' })
+  }
+  expect(calls).toEqual(['run:["b0"]', 'run:["b0"]', 'run:["b0"]', 'run:["b0"]'])
+})
+
+// ---- The cards hold still (2026-10-20: titles re-wrapped as the time ticked, and the pane jumped) --
+
+const STILL_TITLE = 'Port the request log renderer to the new kit and keep every test green while doing it'
+const STILL_AGENT: AgentRec = { ...AGENTS[0]!, description: STILL_TITLE, model: 'deepseek-ai/deepseek-v4.1-flash-1017@high', answeredBy: 'deepseek-ai/deepseek-v4.1-flash-1017', provider: 'deepseek' }
+/** Each pair: the agent's elapsed time before and after one second (a tick, 59s → 1m, 9m 59s → 10m). */
+const STILL_PAIRS: [number, number][] = [[192_000, 193_000], [59_000, 60_000], [599_000, 600_000]]
+/** Pane widths: ~560 px, ~360 px, ~260 px. */
+const STILL_COLUMNS = [68, 44, 33]
+const STILL_LANGS = ['en', 'ko', 'es'] as const
+const stillId = (lang: string, columns: number, i: number, side: string) => ['still', lang, columns, i, side].join('-')
+
+test('a running card draws the same tree a tick on and across 59s → 1m 00s and 9m 59s → 10m 00s, but for its time, wide and narrow', async ($, on) => {
+  for (const lang of STILL_LANGS) {
+    for (const columns of STILL_COLUMNS) {
+      for (const [i, [before, after]] of STILL_PAIRS.entries()) {
+        const agent: AgentRec = { ...STILL_AGENT, startedAt: NOW - before }
+        // A step on, the agent is in another tool: the card must not show it.
+        const later: AgentRec = { ...agent, now: 'Edit hooks/ui/log.tsx', toolSince: NOW + 500 }
+        for (const [side, ms, rec] of [['a', 0, agent], ['b', after - before, later]] as const) {
+          drawPane(on, stillId(lang, columns, i, side), el => renderAgents(el, { ...frameOf('desktop', columns), lang, now: NOW + ms }, { agents: [rec], now: NOW + ms, showDone: false }, AGENT_NOOP))
+        }
+      }
+    }
+  }
+  drawPane(on, 'still-fresh', el => renderAgents(el, frameOf('desktop', 68), { agents: [{ ...STILL_AGENT, id: 'a0', usage: undefined, tools: undefined, now: undefined, toolSince: undefined }], now: NOW, showDone: false }, AGENT_NOOP))
+  for (const lang of STILL_LANGS) {
+    for (const columns of STILL_COLUMNS) {
+      for (const [i, [before, after]] of STILL_PAIRS.entries()) {
+        const at = (s: string) => stillId(lang, columns, i, s)
+        const times = [elapsed(before, lang), elapsed(after, lang)]
+        expect(times[0], at('')).not.toBe(times[1])
+        const masked = async (side: string) => {
+          const ui = await mount($, at(side), 'desktop', columns)
+          const tree = unhandled(await ui.drawn()).split(JSON.stringify(times[0])).join('"#"').split(JSON.stringify(times[1])).join('"#"')
+          await ui.unmount()
+          return tree
+        }
+        expect(await masked('b'), at('')).toBe(await masked('a'))
+      }
+    }
+  }
+  // The numbers rows are there from the start, a dash for each figure not yet reported.
+  const fresh = await mount($, 'still-fresh', 'desktop', 68)
+  expect(await fresh.findAll({ type: 'Text', text: /^–$/ })).toHaveLength(3)
+  expect(await fresh.find({ type: 'Text', text: /^0$/ })).toBeDefined()
+  for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
+    for (const columns of STILL_COLUMNS) {
+      const frame = { ...frameOf('desktop', columns), lang }
+      // The time's column holds its widest value in every language.
+      for (const ms of [59_000, 3_599_000, 99 * 3_600_000 + 59 * 60_000]) expect(chOf(elapsed(ms, lang)) <= timeCells(frame, STILL_AGENT), lang + ' ' + elapsed(ms, lang)).toBe(true)
+      // Growing figures never add a row.
+      expect(cardRows(frame, STILL_AGENT), lang + ' ' + columns).toBe(cardRows(frame, { ...STILL_AGENT, usage: { input: 9_900_000, cached: 90_000_000, cacheWrite: 0, output: 99_000_000 }, tools: 999 }))
+    }
+  }
+})
+
+test('a narrow card keeps its model on one line without the vendor path, and its numbers in two fixed rows', async ($, on) => {
+  const why = 'session model · General / Standard'
+  const agent: AgentRec = { ...STILL_AGENT, pick: { ...STILL_AGENT.pick!, why, by: 'session' } }
+  drawPane(on, 'narrow-card', el => renderAgents(el, { ...frameOf('desktop', 33), lang: 'ko' }, { agents: [agent], now: NOW, showDone: false }, AGENT_NOOP))
+  drawPane(on, 'wide-card', el => renderAgents(el, { ...frameOf('desktop', 68), lang: 'ko' }, { agents: [agent], now: NOW, showDone: false }, AGENT_NOOP))
+  const narrow = await mount($, 'narrow-card', 'desktop', 33)
+  const wide = await mount($, 'wide-card', 'desktop', 68)
+  for (const ui of [narrow, wide]) {
+    // No vendor path, and no pick line.
+    expect(await ui.find({ type: 'Text', text: /deepseek-ai\// })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^deepseek-v/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /표준/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: why })).toBeUndefined()
+  }
+  // Narrow: the name is cut to fit beside the effort; the numbers take two rows, the time ends one.
+  expect((await narrow.find({ type: 'Text', text: /^deepseek-v/ }))!.text.endsWith('…')).toBe(true)
+  expect(await narrow.find({ key: 'nums-1' })).toBeDefined()
+  expect(await wide.find({ key: 'nums-1' })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: '3m 12s' }) ?? await narrow.find({ type: 'Text', text: '3분 12초' })).toBeDefined()
 })

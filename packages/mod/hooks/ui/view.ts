@@ -223,7 +223,7 @@ export type AgentsView = {
   /** Every finished agent, not only the latest few. */
   showDone: boolean
   /** The agent whose conversation is open, what of it was read, and how many earlier pages show. */
-  open?: { id: string; talk: AgentTalk; earlier: number }
+  open?: { id: string; talk: AgentTalk; earlier: number; runsOpen?: readonly string[] }
 }
 
 export type AgentsActions = {
@@ -234,6 +234,8 @@ export type AgentsActions = {
   back: () => void
   /** One more page of the open conversation's earlier entries. */
   earlier: () => void
+  /** Folds or unfolds a run of tool calls, named by its first call's id. */
+  toggleRun: (id: string) => void
 }
 
 export type LogView = {

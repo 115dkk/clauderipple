@@ -24,6 +24,7 @@ import { renderAlert } from './ui/alerts'
 import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
 import { renderAgents, talkOf } from './ui/agents'
+import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
 import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
@@ -88,6 +89,7 @@ const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const agentOpen = atom({ plugin: 'ripple', key: 'agentOpen' } as const, null)
 const agentEarlier = atom({ plugin: 'ripple', key: 'agentEarlier' } as const, 0)
+const agentRunsOpen = atom({ plugin: 'ripple', key: 'agentRunsOpen' } as const, [])
 const agentsTick = atom({ plugin: 'ripple', key: 'agentsTick' } as const, 0)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
@@ -1315,25 +1317,30 @@ function alertActions($: EngineInterface, view: AlertView): AlertActions {
 function agentsActions($: EngineInterface): AgentsActions {
   return {
     toggleDone: () => update($, agentsShowDone, value => !value),
-    open: async id => { await update($, agentEarlier, () => 0); await update($, agentOpen, () => id) },
-    back: () => update($, agentOpen, () => null),
+    open: async id => { await update($, agentEarlier, () => 0); await update($, agentRunsOpen, () => []); await update($, agentOpen, () => id) },
+    // Back on the list, the runs unfolded in that conversation fold again: it opens folded next time.
+    back: async () => { await update($, agentRunsOpen, () => []); await update($, agentOpen, () => null) },
     earlier: () => update($, agentEarlier, n => n + 1),
+    toggleRun: id => update($, agentRunsOpen, ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]),
   }
 }
 /**
  * An agent's conversation for the Agents pane, read again at each draw: its steps and tool calls
- * redraw the pane while it runs, so what it says shows as it says it.
+ * redraw the pane while it runs, so what it says shows as it says it. Paths in its tool calls read
+ * relative to the session's folder, or under `~`.
  */
 async function agentTalk($: EngineInterface, id: string): Promise<AgentTalk> {
   try {
     const found = await $.session.messages({ agentId: id })
-    return Array.isArray(found) ? { entries: talkOf(found) } : { deny: found.deny }
+    if (!Array.isArray(found)) return { deny: found.deny }
+    const cwd = await $.session.cwd().catch(() => undefined)
+    return { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }) }
   } catch (error) { return { deny: reason(error) } }
 }
-function toolLine(e: ToolCallInput): string {
-  const fields = object(e)
-  const detail = fields.command ?? fields.file_path ?? fields.pattern ?? fields.query ?? fields.url ?? fields.description ?? ''
-  return `${e.tool} ${String(detail).split('\n')[0]}`.trim().slice(0, 70)
+/** What an agent is doing, in the words its conversation's tool rows use (tools.ts toolDetail): no leading `cd`, paths short. */
+async function toolLine($: EngineInterface, e: ToolCallInput): Promise<string> {
+  const cwd = await $.session.cwd().catch(() => undefined)
+  return `${e.tool} ${toolDetail(e.tool, object(e), { ...(cwd ? { cwd } : {}), home: await userHome($) })}`.trim().slice(0, 70)
 }
 async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnStepInput> {
   const language = await read($, lang)
@@ -1615,7 +1622,8 @@ export const register: Register = on => {
     let started = 0
     try {
       started = await $.clock.now()
-      if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, now: toolLine(e), toolSince: started, state: 'running', tools: (a.tools ?? 0) + 1 } : a))
+      const line = e.agentId ? await toolLine($, e) : ''
+      if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, now: line, toolSince: started, state: 'running', tools: (a.tools ?? 0) + 1 } : a))
     } catch (error) { await report($, 'tool.call start', error) }
     try { return await next(e) }
     finally {
@@ -1751,7 +1759,7 @@ export const register: Register = on => {
       // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
       await read($, agentsTick)
       const id = await read($, agentOpen)
-      const open = id === null ? undefined : { id, talk: await agentTalk($, id), earlier: await read($, agentEarlier) }
+      const open = id === null ? undefined : { id, talk: await agentTalk($, id), earlier: await read($, agentEarlier), runsOpen: await read($, agentRunsOpen) }
       return renderAgents($.ui.resolve(e), frame, { agents: await read($, agents), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { await report($, 'agents render', error); return next(e) }
   })
