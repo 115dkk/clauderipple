@@ -1421,8 +1421,16 @@ export const register: Register = on => {
       await registerAuto($, await currentSettings($))
       startTimers($)
       // Setup keeps its draft across a reload; quick settings never keep one.
-      const open = await read($, panel)
+      let open = await read($, panel)
+      // A setup card kept from a reload while setup is done (left by a router outage) goes.
+      if (open === 'setup' && (await currentSettings($)).setupDone) {
+        await update($, panel, () => null)
+        await update($, settingsDraft, () => null)
+        await update($, settingsBase, () => null)
+        open = null
+      }
       if (open === 'setup') await rebaseDraft($)
+      if ((await currentSettings($)).judge === 'jev' && (await read($, jev)).source === null) await jevKey($)
       if (open === 'settings') { await update($, settingsDraft, () => null); await update($, settingsBase, () => null); await jevKey($) }
       if (!(await currentSettings($)).setupDone && !open) await startPanel($, 'setup')
     } catch (error) { await report($, 'session.start', error) }
