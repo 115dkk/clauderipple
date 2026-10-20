@@ -777,6 +777,24 @@ text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
 - `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent.
 - `servedTier`: the response-reported tier (Responses/Chat `service_tier` or Anthropic `usage.service_tier`); never inferred from the request.
 
+**Hourly usage history (`usage-hourly.jsonl`, 2026-10-20).** `requests.jsonl` is
+bounded (2,000 records in memory, 20 MB plus one `.1` backup), so the GUI could only
+summarise about an hour. `RequestLog` now also owns a `UsageHistory` that appends one
+JSON line per `(hour, provider, model)` partial bucket —
+`{"h": floor(at/3600000), "p", "m", "count","ok","failed","input","cached","cacheWrite","output","ms"}`
+— to `usage-hourly.jsonl` beside `requests.jsonl`. Lines are **additive**: reading
+sums every line with the same `(h,p,m)`, so the file stays append-only. Only the
+**open hour** (the newest record's hour) lives in memory; when the hour advances its
+buckets are flushed, and a late record whose hour is below the open hour is written
+at once as its own line. On startup the highest hour in the file is the watermark and
+request records above it are replayed from `requests.jsonl` (and `.1` when its mtime
+hour is above the watermark — not the first record of `requests.jsonl`, which a long
+request straddling the rotation makes older than records left in `.1`), so the open
+hour survives a restart without an hour being counted twice. An fs error is swallowed: history must never alter the response path.
+`GET /api/requests/summary?from=&to=` reports `{total, providers, models, earliest,
+from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. Source:
+`usage-history.ts`.
+
 - **Server-side threads ("tether").** The first request of a session carries
   `thread: {type:"create"}` and the full history; later turns carry
   `thread: {type:"continue", previous_message_id: <our last assistant msg id>}` and

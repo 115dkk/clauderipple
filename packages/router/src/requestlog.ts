@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
+import { UsageHistory, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_CARRY = 64 * 1024;
@@ -50,24 +51,9 @@ export type RequestRecord = {
 };
 
 type RequestFilter = { provider?: string; kind?: RequestRecord["kind"]; session?: string };
-type SummaryBucket = {
-  count: number;
-  ok: number;
-  failed: number;
-  input: number;
-  cached: number;
-  /** Tokens written to the prompt cache: part of the input, and not a hit. */
-  cacheWrite: number;
-  output: number;
-  cacheHitPercent: number;
-  avgMs: number;
-};
 
-export type RequestSummary = { total: SummaryBucket; providers: Record<string, SummaryBucket> };
-
-function emptyBucket(): SummaryBucket {
-  return { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, cacheHitPercent: 0, avgMs: 0 };
-}
+export type RequestSummary = { total: SummaryBucket; providers: Record<string, SummaryBucket>; models: (SummaryBucket & { provider: string; model: string })[] };
+export type { SummaryBucket };
 
 function isRecord(value: unknown): value is RequestRecord {
   if (!value || typeof value !== "object") return false;
@@ -83,15 +69,31 @@ export class RequestLog {
   private readonly max: number;
   private readonly maxBytes: number;
   private records: RequestRecord[];
+  private readonly history: UsageHistory;
 
   constructor(file: string, max = 2000, maxBytes = DEFAULT_MAX_BYTES) {
     this.file = file;
     this.max = max;
     this.maxBytes = maxBytes;
-    this.records = this.load();
+    const persisted = this.readRecords(this.file);
+    this.records = persisted.slice(-this.max);
+    this.history = new UsageHistory(path.join(path.dirname(file), "usage-hourly.jsonl"));
+    // Replay what the history has not seen yet: the `.1` file first when it may hold a record above
+    // the watermark, so the first run backfills both files. Its mtime is its last append, and a
+    // record starts before it is written, so an mtime at or below the watermark hour rules it out;
+    // the first record of requests.jsonl does not, since a long request that straddled the rotation
+    // starts earlier than records left in `.1`. The history skips everything at or below its
+    // watermark, so a restart counts no hour twice.
+    const watermark = this.history.watermark;
+    const rotatedHour = usageHourOfFile(`${file}.1`);
+    const replay = rotatedHour !== null && (watermark === null || rotatedHour > watermark)
+      ? [...this.readRecords(`${file}.1`), ...persisted]
+      : persisted;
+    this.history.replay(replay);
   }
 
   add(record: RequestRecord): void {
+    this.history.add(record);
     this.records.push(record);
     if (this.records.length > this.max) this.records.splice(0, this.records.length - this.max);
     const line = JSON.stringify(record) + "\n";
@@ -125,43 +127,34 @@ export class RequestLog {
 
   /** Summarise records at or after an epoch timestamp in milliseconds. */
   summary(sinceMs: number): RequestSummary {
-    const total = emptyBucket();
-    const providers: Record<string, SummaryBucket> = {};
-    const cacheBases = new Map<SummaryBucket, number>();
-    const add = (bucket: SummaryBucket, record: RequestRecord): void => {
-      bucket.count++;
-      if (record.ok) bucket.ok++;
-      else if (!record.resent) bucket.failed++;
-      bucket.avgMs += record.ms;
-      if (record.usage) {
-        bucket.input += record.usage.input;
-        bucket.cached += record.usage.cached;
-        bucket.cacheWrite += record.usage.cacheWrite ?? 0;
-        bucket.output += record.usage.output;
-        // A cache write is input the model read fresh, so it counts against the hit rate. Leaving it
-        // out read a turn that wrote 2,218 tokens and uncached 2 as a 100% hit (2026-09-23).
-        cacheBases.set(bucket, (cacheBases.get(bucket) ?? 0) + record.usage.input + record.usage.cached + (record.usage.cacheWrite ?? 0));
-      }
-    };
+    const total = emptyTotals();
+    const providers = new Map<string, BucketTotals>();
+    const models = new Map<string, { totals: BucketTotals; provider: string; model: string }>();
     for (const record of this.records) {
       const at = Date.parse(record.at);
       if (!Number.isFinite(at) || at < sinceMs) continue;
-      const provider = providers[record.provider] ?? (providers[record.provider] = emptyBucket());
-      add(total, record);
-      add(provider, record);
+      const provider = providers.get(record.provider) ?? providers.set(record.provider, emptyTotals()).get(record.provider)!;
+      const key = `${record.provider}\u0000${record.target}`;
+      const model = models.get(key) ?? models.set(key, { totals: emptyTotals(), provider: record.provider, model: record.target }).get(key)!;
+      for (const bucket of [total, provider, model.totals]) addTotals(bucket, recordTotals(record));
     }
-    for (const bucket of [total, ...Object.values(providers)]) {
-      if (bucket.count > 0) bucket.avgMs = Math.round(bucket.avgMs / bucket.count);
-      const base = cacheBases.get(bucket) ?? 0;
-      bucket.cacheHitPercent = base > 0 ? Math.round((bucket.cached / base) * 1000) / 10 : 0;
-    }
-    return { total, providers };
+    const modelsList = [...models.values()].map(({ totals, provider, model }) => ({ ...finishTotals(totals), provider, model }));
+    sortByVolume(modelsList);
+    return {
+      total: finishTotals(total),
+      providers: Object.fromEntries([...providers].map(([name, totals]) => [name, finishTotals(totals)])),
+      models: modelsList,
+    };
   }
 
-  private load(): RequestRecord[] {
+  /** Durable hourly usage over [fromMs, toMs), beyond the in-memory ring. */
+  usage(fromMs: number, toMs: number): UsageSummary {
+    return this.history.summary(fromMs, toMs);
+  }
+
+  private readRecords(file: string): RequestRecord[] {
     try {
-      if (!fs.existsSync(this.file)) return [];
-      const records = fs.readFileSync(this.file, "utf8")
+      return fs.readFileSync(file, "utf8")
         .split("\n")
         .flatMap((line) => {
           try {
@@ -171,10 +164,18 @@ export class RequestLog {
             return [];
           }
         });
-      return records.slice(-this.max);
     } catch {
       return [];
     }
+  }
+}
+
+/** The hour of a file's last write, or null when it does not exist. */
+function usageHourOfFile(file: string): number | null {
+  try {
+    return Math.floor(fs.statSync(file).mtimeMs / 3_600_000);
+  } catch {
+    return null;
   }
 }
 

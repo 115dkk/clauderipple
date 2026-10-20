@@ -2561,7 +2561,20 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         return;
       }
       if (pathname === "/api/requests/summary" && method === "GET") {
-        const seconds = Number(new URL(url, "http://x").searchParams.get("since") ?? 3600);
+        const query = new URL(url, "http://x").searchParams;
+        const fromParam = query.get("from");
+        if (fromParam !== null) {
+          const from = Number(fromParam);
+          const toParam = query.get("to");
+          const to = toParam === null ? Date.now() : Number(toParam);
+          if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+            sendJson(res, 400, { error: "from and to must be epoch milliseconds with from <= to" });
+            return;
+          }
+          sendJson(res, 200, { ...deps.requests.usage(from, to), from, to });
+          return;
+        }
+        const seconds = Number(query.get("since") ?? 3600);
         const safeSeconds = Number.isFinite(seconds) ? Math.min(31_536_000, Math.max(0, seconds)) : 3600;
         sendJson(res, 200, deps.requests.summary(Date.now() - safeSeconds * 1000));
         return;

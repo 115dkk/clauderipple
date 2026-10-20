@@ -1191,6 +1191,51 @@ test("GET /api/requests filters newest records and returns a summary", async () 
   });
 });
 
+test("GET /api/requests/summary?from=&to= answers any period from hourly usage", async () => {
+  await withAdmin(makeCfg(), async ({ home }) => {
+    const records = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    records.add({ id: "a", at: "2026-10-20T10:05:00.000Z", ms: 100, status: 200, ok: true, kind: "messages", source: "claude", target: "gpt", provider: "chatgpt", stream: true, usage: { input: 20, cached: 80, output: 7 } });
+    records.add({ id: "b", at: "2026-10-20T12:05:00.000Z", ms: 300, status: 500, ok: false, kind: "messages", source: "claude", target: "gpt", provider: "chatgpt", stream: true, usage: { input: 5, cached: 5, output: 1 } });
+    const reloaded = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const cfg = makeCfg({ admin: { port: 0 } });
+    const log = new Logger(null, 1_000_000, 1, false);
+    const extra = await startAdmin({ config: () => cfg, configFile: path.join(home, "extra-config.json"), log, stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests: reloaded });
+    try {
+      const from = Date.parse("2026-10-20T00:00:00.000Z");
+      const to = Date.parse("2026-10-21T00:00:00.000Z");
+      const res = await fetch(`${base()}:${extra.port}/api/requests/summary?from=${from}&to=${to}`);
+      assert.equal(res.status, 200);
+      const body = await res.json() as {
+        total: { count: number; failed: number; input: number };
+        models: { provider: string; model: string }[];
+        earliest: string | null;
+        from: number;
+        to: number;
+      };
+      assert.equal(body.total.count, 2);
+      assert.equal(body.total.failed, 1);
+      assert.equal(body.total.input, 25);
+      assert.deepEqual(body.models.map((m) => m.model), ["gpt"]);
+      assert.equal(body.earliest, "2026-10-20T10:00:00.000Z");
+      assert.equal(body.from, from);
+      assert.equal(body.to, to);
+
+      // Hour granularity: the record's own hour alone.
+      const hourStart = Date.parse("2026-10-20T10:00:00.000Z");
+      const firstHour = await fetch(`${base()}:${extra.port}/api/requests/summary?from=${hourStart}&to=${hourStart + 3_600_000}`);
+      assert.deepEqual(((await firstHour.json()) as { total: { count: number } }).total.count, 1);
+
+      for (const query of ["from=abc", "from=-1&to=0xq", `from=${to + 1}&to=${to}`]) {
+        const bad = await fetch(`${base()}:${extra.port}/api/requests/summary?${query}`);
+        assert.equal(bad.status, 400);
+        assert.ok(typeof ((await bad.json()) as { error?: string }).error === "string");
+      }
+    } finally {
+      extra.close();
+    }
+  });
+});
+
 test("GET /api/logs returns the tail of router.log", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const logDir = path.join(home, "logs");
