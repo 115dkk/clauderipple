@@ -1528,7 +1528,7 @@ plan unless marked otherwise.
 
 | Observed | Product requirement |
 |---|---|
-| Router stuck with DNS resolution failure for 10h (`gaierror`, 22,795 lines); 11 remote-control workers died within 17s; app kept showing remote as available | Consecutive upstream connect failures → self-exit; supervisor restarts (launchd KeepAlive). Health view shows remote-worker liveness. |
+| Router stuck with DNS resolution failure for 10h (`gaierror`, 22,795 lines); 11 remote-control workers died within 17s; app kept showing remote as available | Consecutive upstream connect failures → self-exit; supervisor restarts (launchd KeepAlive). Health view shows remote-worker liveness. **Refined 2026-10-20:** the exit is for a *stuck process*, not an offline machine. A MacBook that lost Wi-Fi on the commute exited 75 27 times in ~18 minutes (router.log 19:18:22–19:36:09), and every restart began with an empty hotspot-probe window, so failover (3 failed rounds ≈ 30s of one process's life) never ran; macOS joined the hotspot by itself at 19:19:53. So when the counter trips, a child process asks first (`checkConnectivity`, health.ts: `/usr/bin/curl` — Windows `%SystemRoot%\System32\curl.exe` — `-q -s --noproxy * -m 5` to the same two endpoints as the hotspot probe, its own fresh resolver and sockets): it gets through → this process is stuck → exit 75 as before; it does not (curl network exits 5/6/7/28/35/52/55/56, or only a captive portal's answers) → the machine is offline, a restart cannot help: no exit, one warning per outage ("…but this machine is offline too; not restarting"), the counter re-arms and asks again on the next trip; the check cannot run (no curl, curl's own errors, the runner's timeout) → exit as before. An upstream success during the check also re-arms without exiting. |
 | Python 3.9 asyncio GC'd connection handler tasks; 1 in 10 requests vanished with no log line (`Task was destroyed but it is pending`); surfaced as "retry" banners, `Connection lost mid-response`, and subagent compaction failures | Keep strong refs to in-flight connections; log every request completion; an integration test that counts requests in vs. responses out. |
 | Translator daemon (proxenos) was not supervised; it died and every GPT request failed with connection refused | One supervisor for the whole chain; the router reports adapter health, not just its own. |
 | `router.log` grew to 17MB | Log rotation by default. |
@@ -1580,6 +1580,7 @@ plan unless marked otherwise.
 | Google Antigravity answered `503` `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for model gemini-3.8-flash-high on the server") on its daily host. The adapter retried it ten times on the 250 ms ladder (41–103 s per turn, each refusal slow to arrive), then rested the only account for 10 s as an ordinary 5xx, so every concurrent and following turn got an instant `429 "every signed-in account is at its limit"` — 10 times in 3 minutes for one account that had done nothing wrong (2026-10-20 17:49:58–17:52:51, router.log) | Capacity is the model's on Google's side, not the credential's (same reasoning as the relay-403 row): it is charged **no** rest and moves to no other account. It leaves the shared ladder at once and is asked again at most twice, seconds apart, on the same account; then the turn ends unwritten and the proxy tries one configured route fallback, else answers `529 overloaded_error` that names the cause. Never "all accounts resting" for it, never a vanished turn; any other 503 keeps the ordinary ladder and short rest (§4d-ii). |
 | ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
 | After ~120 host↔relay reconnects no phone could connect for minutes — web and native sat at "connecting" while the host's control socket was open and answering pings, and a host restart did not help (the simulator's own log: every attempt 19:10–19:17 timed out waiting for the relay's `open`, then the next one worked with no change on the phone; 2026-10-15). Measured on the deployed relay with throwaway server ids: a replaced host control socket whose other end never answers the close stays in `getWebSockets("host")`, in acceptance order, for 8+ minutes, and the room sent every phone's `connect` to `sockets("host")[0]` — that dead socket — through any number of reconnects and a restart | The room routes a phone only to the **newest** host socket (each is tagged `at:<accepted ms>`), and only while it pinged within `HOST_SILENT_MS` (the runtime's auto-response timestamp); a silent newest socket is closed `4408` and the phone hears `4404 host offline` at once. The host walks the phone's path itself after every hello and every 5 min (a client socket to its own room must come back `open` within 10 s) and reconnects when it does not; a ping timer that ran late (sleep, blocked event loop) is not taken for a dead socket. Close codes, reasons and ISO timestamps are in `host.log`. In-process tests reproduce the sequence over a network that keeps dead sockets listed (`relay-reconnect.test.ts`). |
+| Return to Wi-Fi postponed forever while subagents keep working (2026-10-20): on the iPhone hotspot, the way back ran only with no model call in flight and none started in the last 20s; with Claude and subagents working back-to-back it logged "Wi-Fi return postponed" at 19:22:54 and never went back to the home Wi-Fi | A return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due makes the gap itself (§8 "Making the gap"): new model calls are **held** at a gate in the proxy and the OpenAI ingress (`hold.ts`) — they wait unread, nothing is written, nothing refused or 503'd, each at most 120s — the running ones get up to 60s to finish, then the usual leave → probe runs and the gate is released whatever the outcome; calls that do not finish in time → release, back off as before. The release is in a `finally` (a thrown error releases it), `stop()` releases it, the gate has its own failsafe timer, and a draining router closes it so a held call meets the retryable 503 instead of being cut. Tests: `tether.test.ts`, `hold.test.ts`. |
 | An expired Claude login on the Mac wrote `[desktop state] …로그인이 만료되었습니다…` every few seconds per Claude app session and read the keychain (a synchronous child process) for every request, while phones learned of it only by a failed send (2026-10-15) | A login problem is one host state: logged when it starts and ends, sent to phones as `HostInfo.desktopProblem` (a banner), and the keychain is reread at most every 30 s while expired or after a 401. Per-session Remote Control errors log once per change. The host never refreshes the login itself. |
 
 ## 6. Blocked paths (measured, do not retry)
@@ -1678,7 +1679,9 @@ portal reads satisfied — the reason Insomnia never failed over in that state. 
 from the address (iPhone hotspots hand out 172.20.10.0/28), not the SSID, which macOS redacts without
 Location (measured: `ipconfig getsummary en0` → `SSID : <redacted>`). Failover (on Wi-Fi or no
 address, outage): wait at most 30s for an in-flight call, then `sudo -n networksetup
--setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). networksetup
+-setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). The probe window
+lives in the process, so it only works if the router is not restarted every few seconds while the
+machine is offline (§5, health self-exit refined 2026-10-20). networksetup
 reports failure on stdout and may exit 0, so its text decides: "Could not find network" →
 `hotspot-not-visible` with a hint to open Personal Hotspot on the iPhone once (an idle iPhone stops
 advertising — Apple mchl7403f0ee; waking it needs entitlement-gated APIs). Return (on the hotspot):
@@ -1690,6 +1693,27 @@ interval, up to 15 min. At most one switch per 60s. `tether.pin` (in memory, via
 switching. Every decision is logged once, with its reason. "Ask to join hotspots: Automatic"
 (macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting lives in a root-only
 file (`com.apple.airport.preferences.plist`: permission denied, measured), so it is only hinted at.
+
+**Making the gap (2026-10-20).** "No call in flight and none in the last 20s" never came while Claude
+and subagents worked back-to-back: the return was postponed from 19:22:54 on and the Mac stayed on
+the hotspot (§5). So a return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due stops waiting
+for a quiet moment and makes one (`returnWithGap`, tether.ts), after the same `MIN_SWITCH_INTERVAL`
+and `returnBlocked` checks: (1) engage the hold gate (`hold.ts`), shared by the proxy (`/v1/messages*`)
+and the OpenAI ingress (Responses/Chat calls). A new model call that arrives while it is engaged
+waits before its body is read and before it is counted in `messagesInFlight` — no bytes written, not
+refused, not 503 — until the gate is released or `HOLD_MAX_MS` (120s) has passed for that call, then
+it proceeds normally (logged `HOLD POST /v1/messages waited N.Ns`). WEB/PASS and any non-model
+request is never held. (2) Wait up to `RETURN_DRAIN_WAIT_MS` (60s; with the switch it stays inside `HOLD_MAX_MS`, and far under the ~180s after which Claude Code gave up on an unanswered call on 2026-10-20) for the calls already running
+(held ones are not counted, so this can only fall, except for a call that hit its 120s). (3) They
+finished → the ordinary leave → probe → keep-or-rejoin sequence above; they did not → no switch, back
+off as before (interval doubles, 15 min cap). (4) Release the gate in a `finally`, whatever happened —
+a thrown error included; `stop()` releases it too, the gate releases itself after
+`RETURN_HOLD_FAILSAFE_MS` (4 min) if its owner never does, and `drain()` closes it (held calls go on,
+meet the retryable 503 and are waited for; a closed gate is never engaged again), as does the health
+self-exit. Each step is logged once: "Wi-Fi return postponed Ns past due while model calls keep running:
+holding new model calls to make a gap…", "running model calls finished after Ns; N held", "hold
+released; N held model calls going ahead". Not measured: how long the CLI's own request timeout lets a
+held request sit (10 min in the Anthropic SDK by default, far above 120s, but the CLI closed unanswered Google turns at 182–190s on 2026-10-20) — no real switch has run yet.
 
 **Surfaces.** `GET /api/power` → `{ platform: "darwin"|"win32"|"linux", awake: { mode, applied, reason,
 setup, battery, thermal, lidClosed, until }, tether: { enabled, network, state, pinned, hotspotSsid,
@@ -1709,6 +1733,11 @@ guard as every admin write). Config: `awake: { mode, until?, batteryFloorPercent
   `clauderipple stop`/`awake off` or a reboot.
 - The hotspot is not broadcasting: reported with its hint, retried at most once a minute.
 - The hotspot name in config differs from the one in the rule: `sudo -n` refuses → `needs-setup`.
+
+**Observed 2026-10-20** (§5): the health self-exit restarted the router every 6–20s while the Mac was
+offline, so the probe window never reached 3 failures and failover never ran — fixed by asking a
+child process before exiting (health.ts); and the return postponed forever while calls kept running —
+fixed by making the gap (above).
 
 Sources: research report 2026-10-20 (Insomnia install.sh/backstop.sh/NetworkFailover.swift and logs;
 MacMiniMode `Sources/daemon/main.swift`; wifihop script; WiFiGuard `Connectivity.swift`; Apple

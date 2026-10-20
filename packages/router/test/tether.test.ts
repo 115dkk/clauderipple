@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import type os from "node:os";
 import {
   classifyJoin, classifyNetwork, DISASSOCIATE_JS, isHotspotAddress, MAX_RETURN_INTERVAL_MS, parseWifiDevice, ProbeWindow, probeRound,
-  TetherController, wifiIPv4, type ProbeGet,
+  RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, TetherController, wifiIPv4, type ProbeGet,
 } from "../src/tether.ts";
 import type { Activity, RunResult } from "../src/awake.ts";
+import { HoldGate } from "../src/hold.ts";
 import { TETHER_DEFAULTS, type TetherSettings } from "../src/config.ts";
 
 // `networksetup -listallhardwareports` measured on this project's Mac (2026-10-20), shortened.
@@ -99,7 +100,7 @@ test("the disassociate call is wifihop's exact JXA", () => {
 
 type Net = { ip: string | null; probeOk: (ip: string) => boolean; joinOutput: { code: number; stdout: string; stderr: string }; joinLandsOn: string | null; disassociateLandsOn: string | null };
 
-function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform } = {}) {
+function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void } = {}) {
   const clock = { t: 1_000_000 };
   const calls: string[] = [];
   const lines: string[] = [];
@@ -121,6 +122,7 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
       return net.joinOutput;
     }
     if (line.startsWith("/usr/bin/osascript -l JavaScript -e ")) {
+      o.onLeave?.();
       net.ip = net.disassociateLandsOn;
       return { code: 0, stdout: "ok\n", stderr: "" };
     }
@@ -137,6 +139,7 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     interfaces: () => (net.ip ? { en0: [iface(net.ip)] } : {}),
     probe: async (ip) => net.probeOk(ip),
     schedule: () => () => {},
+    ...(o.hold ? { hold: o.hold } : {}),
   });
   /** One tick every probeEverySec, like the real loop. */
   const ticks = async (n: number): Promise<void> => {
@@ -305,4 +308,114 @@ test("a pinned network is never switched", async () => {
   r.c.setPin(false);
   await r.ticks(3);
   assert.equal(r.joins(), 1);
+});
+
+// ---- Making a gap when calls never stop (2026-10-20: postponed from 19:22:54 until the hotspot went) ----
+
+/** Calls run back-to-back until `quietAfterMs` after the gate engages; one new call arrives at the gate as it engages. */
+function gapRig(o: { quietAfterMs: number; onLeave?: () => void; net?: Partial<Net>; onEngagedTick?: (sinceMs: number, r: ReturnType<typeof rig>) => void }) {
+  const hold = new HoldGate();
+  const events: string[] = [];
+  let engagedAt: number | null = null;
+  let held: Promise<unknown> = Promise.resolve();
+  const r: ReturnType<typeof rig> = rig({
+    hold,
+    net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4", ...o.net },
+    activity: () => {
+      if (hold.engaged && engagedAt === null) {
+        engagedAt = r.clock.t;
+        events.push("engaged");
+        held = hold.wait().then((h) => events.push(`held call goes ahead after ${h.timedOut ? "the longest hold" : "release"}`));
+      }
+      if (engagedAt !== null) o.onEngagedTick?.(r.clock.t - engagedAt, r);
+      const busy = engagedAt === null || r.clock.t - engagedAt < o.quietAfterMs;
+      return busy ? { inFlight: 1, lastStartedAt: r.clock.t } : { inFlight: 0, lastStartedAt: engagedAt! };
+    },
+    onLeave: () => {
+      events.push(`leave (holding ${hold.waiting})`);
+      o.onLeave?.();
+    },
+  });
+  return { ...r, hold, events, held: () => held, engagedAt: () => engagedAt };
+}
+
+test("calls never stop: 2 min past due new calls are held, the running ones finish, the return runs, the hold is released", async () => {
+  const r = gapRig({ quietAfterMs: 7_000 });
+  // First tick plans the return 180s out; 120s past that is 300s in.
+  await r.ticks(30); // ticks at 0..290s
+  assert.equal(r.events.length, 0, "inside the grace period nothing is held");
+  assert.equal(r.returns(), 0);
+  assert.ok(r.lines.some((l) => /Wi-Fi return postponed: a model call is running/.test(l)));
+  await r.ticks(1); // 300s: 120s past due
+  await r.held();
+  assert.deepEqual(r.events, ["engaged", "leave (holding 1)", "held call goes ahead after release"]);
+  assert.equal(r.engagedAt()! - 1_000_000, 180_000 + RETURN_FORCE_AFTER_MS);
+  assert.equal(r.returns(), 1);
+  assert.equal(r.hold.engaged, false);
+  assert.equal(r.hold.waiting, 0);
+  const s = r.c.status();
+  assert.equal(s.network, "wifi");
+  assert.equal(s.lastSwitch?.ok, true);
+  const log = r.lines.join("\n");
+  assert.match(log, /tether: Wi-Fi return postponed 120s past due while model calls keep running: holding new model calls to make a gap \(waiting up to 60s for 1 running\)/);
+  assert.match(log, /tether: running model calls finished after 7s; 1 held/);
+  assert.match(log, /tether: back on Wi-Fi with internet/);
+  assert.match(log, /tether: hold released; 1 held model call going ahead/);
+  assert.ok(log.indexOf("back on Wi-Fi") < log.indexOf("hold released"), "released after the return, not before");
+});
+
+test("calls that do not finish within the drain wait: release, back off, no switch", async () => {
+  const r = gapRig({ quietAfterMs: Infinity });
+  await r.ticks(30);
+  const before = r.clock.t;
+  await r.c.tick();
+  await r.held();
+  const waited = r.clock.t - before;
+  assert.ok(waited >= RETURN_DRAIN_WAIT_MS && waited < RETURN_DRAIN_WAIT_MS + 2_000, `waited ${waited}ms`);
+  assert.deepEqual(r.events, ["engaged", "held call goes ahead after release"]);
+  assert.equal(r.returns(), 0, "the hotspot was not left");
+  assert.equal(r.hold.engaged, false);
+  assert.equal(r.c.status().state, "on-hotspot");
+  const log = r.lines.join("\n");
+  assert.match(log, /staying on the hotspot \(1 model call still running after 60s; held calls released\); next try in 360s/);
+  assert.match(log, /hold released; 1 held model call going ahead/);
+});
+
+test("an error in the middle of the return still releases the hold", async () => {
+  const r = gapRig({ quietAfterMs: 3_000, onLeave: () => { throw new Error("osascript exploded"); } });
+  await r.ticks(31);
+  await r.held();
+  assert.deepEqual(r.events, ["engaged", "leave (holding 1)", "held call goes ahead after release"]);
+  assert.equal(r.hold.engaged, false);
+  assert.equal(r.hold.waiting, 0);
+  assert.ok(r.lines.includes("WARN tether: osascript exploded"), r.lines.join("\n"));
+  assert.ok(r.lines.some((l) => /hold released; 1 held model call going ahead/.test(l)));
+});
+
+test("stop() while waiting for running calls releases the hold at once and gives the return up", async () => {
+  let stopped = false;
+  const r = gapRig({
+    quietAfterMs: Infinity,
+    onEngagedTick: (since, rr) => {
+      if (since >= 5_000 && !stopped) {
+        stopped = true;
+        rr.c.stop();
+      }
+    },
+  });
+  await r.ticks(31);
+  await r.held();
+  assert.equal(r.hold.engaged, false);
+  assert.deepEqual(r.events, ["engaged", "held call goes ahead after release"]);
+  assert.equal(r.returns(), 0);
+  assert.ok(r.lines.some((l) => /hold released \(the controller stopped\); 1 held model call going ahead/.test(l)), r.lines.join("\n"));
+});
+
+test("a draining router (closed gate) holds nothing: the return just stays postponed", async () => {
+  const r = gapRig({ quietAfterMs: Infinity });
+  r.hold.close();
+  await r.ticks(60);
+  assert.deepEqual(r.events, []);
+  assert.equal(r.returns(), 0);
+  assert.equal(r.c.status().state, "on-hotspot");
 });

@@ -16,7 +16,8 @@ import { powerPlatform } from "./power.ts";
 import { defaultAgentDir, syncAgentFiles } from "./agents.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
-import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE } from "./health.ts";
+import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE, checkConnectivity } from "./health.ts";
+import { HoldGate } from "./hold.ts";
 import { Proxy } from "./proxy.ts";
 import { adoptNewClaudeModels, backfillContextWindows, measureUnsettledModels, startAdmin, type AdminDeps } from "./admin.ts";
 import { loadModelCatalog } from "./catalog.ts";
@@ -90,19 +91,30 @@ function premintLeaves(): void {
   }
 }
 
+// One gate for the proxy and the ingress: the tether controller holds new model calls at it while
+// it switches the network back to Wi-Fi (hold.ts). Closed when the router drains or exits.
+const hold = new HoldGate();
+const powerRunner = execRunner();
 const health = new UpstreamHealth(
   () => store.get().health.maxConsecutiveUpstreamFailures,
-  (n) => {
-    log!.error(`${n} consecutive upstream connect failures; exiting ${EXIT_UPSTREAM_UNREACHABLE} for the supervisor to restart`);
+  (n, c) => {
+    const why = !c ? "" : c.result === "online" ? ` while this machine is online (${c.detail}): this process is stuck` : ` and the connectivity check could not tell (${c.detail})`;
+    log!.error(`${n} consecutive upstream connect failures${why}; exiting ${EXIT_UPSTREAM_UNREACHABLE} for the supervisor to restart`);
+    hold.close();
     setTimeout(() => process.exit(EXIT_UPSTREAM_UNREACHABLE), 100);
+  },
+  {
+    // A fresh process (curl) asks first; a machine that is offline is not helped by a restart.
+    connectivity: () => checkConnectivity(powerRunner, process.platform),
+    onOffline: (n, c) => log!.warn(`${n} consecutive upstream connect failures, but this machine is offline too (${c.detail}); not restarting`),
   },
 );
 
 const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claude-auth-observed.json"));
 // Before any provider fetches: a reasoning model may stay silent past fetch's 300s default.
 allowLongSilences();
-const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
-const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name) });
+const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth, hold });
+const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), hold });
 
 // Lid-closed awake and hotspot failover (macOS and Windows; no-ops elsewhere, off until configured).
 // They read Claude's activity from the two servers' counters. Started after listen(), below.
@@ -118,7 +130,6 @@ const activity = (): Activity => {
     ...(lastEndedAt !== undefined ? { lastEndedAt } : {}),
   };
 };
-const powerRunner = execRunner();
 const awake = new AwakeController({
   platform: process.platform,
   run: powerRunner,
@@ -133,6 +144,7 @@ const tether = new TetherController({
   settings: () => tetherSettings(store.get()),
   activity,
   log: { info: (m) => log!.info(m), warn: (m) => log!.warn(m) },
+  hold,
 });
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));
@@ -153,6 +165,8 @@ function beginDrain(reason: string): void {
   draining = true;
   log!.info(`${reason}: draining, proxy=${proxy.stats.messagesInFlight} ingress=${ingress.stats.messagesInFlight} model calls`);
   let lastReported = -1;
+  // Each drain() closes the shared hold gate first (hold.ts): a call held for a network switch is
+  // let go, refused with the retryable 503 like any new call, and waited for.
   void Promise.all([
     proxy.drain(DRAIN_MS, () => {}),
     ingress.drain(DRAIN_MS, () => {}),

@@ -11,6 +11,7 @@ import zlib from "node:zlib";
 import type { Config, AnthropicCompatibleProvider, AnthropicProvider } from "../config.ts";
 import { providerFor } from "../config.ts";
 import type { Logger } from "../log.ts";
+import type { HoldGate } from "../hold.ts";
 import { resolve } from "../routing.ts";
 import { PRESETS } from "../presets.ts";
 import { resolveCompatibleCaps, sanitizeForCompatible } from "../compat.ts";
@@ -51,6 +52,8 @@ type IngressDeps = {
    * or the first one configured (null name), or — with none configured — Codex's own login alone.
    */
   chatgpt?: (name: string | null) => ChatGptAdapter;
+  /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
+  hold?: HoldGate;
 };
 
 /**
@@ -175,6 +178,8 @@ export class OpenAiIngress {
   private readonly claudeAccounts: ClaudeAccountAuthPool;
   private readonly deps: IngressDeps;
   private draining = false;
+  /** Model calls waiting at the hold gate (not yet in `stats`): drain() waits for them too. */
+  private held = 0;
 
   constructor(deps: IngressDeps) {
     this.deps = deps;
@@ -213,9 +218,12 @@ export class OpenAiIngress {
   /** Stop new connections, reject new model work on keep-alive sockets, then close after model calls drain. */
   async drain(maxMs: number, onProgress?: (n: number) => void): Promise<void> {
     this.draining = true;
+    // As in the proxy: a call held for a network switch goes on now, meets the 503, and is waited for.
+    const released = this.deps.hold?.close() ?? 0;
+    if (released) this.deps.log.info(`OPENAI drain: released ${released} model call(s) held for a network switch`);
     this.server.close();
     const start = Date.now();
-    while (this.stats.messagesInFlight > 0 && Date.now() - start < maxMs) {
+    while ((this.stats.messagesInFlight > 0 || this.held > 0) && Date.now() - start < maxMs) {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((resolveP) => setTimeout(resolveP, 250));
     }
@@ -234,6 +242,18 @@ export class OpenAiIngress {
     const path = (req.url ?? "/").split("?")[0] ?? "/";
     const method = req.method ?? "GET";
     const isCall = method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/chat/completions");
+    // As in the proxy (hold.ts): during a network switch a new model call waits here, unread and
+    // uncounted, then goes ahead. Draining refuses below instead.
+    const hold = this.deps.hold;
+    if (isCall && hold?.engaged && !this.draining) {
+      this.held++;
+      const held = await hold.wait().finally(() => this.held--);
+      this.deps.log.info(`OPENAI HOLD ${method} ${path} waited ${(held.ms / 1000).toFixed(1)}s${held.timedOut ? " (longest hold reached; going ahead)" : ""}`);
+      if (req.socket?.destroyed) {
+        this.deps.log.warn(`OPENAI HOLD ${method} ${path}: the client left while held`);
+        return;
+      }
+    }
     this.stats.started++;
     this.stats.inFlight++;
     const started = Date.now();

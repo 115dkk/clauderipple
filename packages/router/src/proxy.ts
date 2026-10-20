@@ -23,6 +23,7 @@ import type { Duplex } from "node:stream";
 import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
 import { ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
+import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, withAgentAliases } from "./agents.ts";
@@ -208,6 +209,8 @@ export type ProxyDeps = {
   /** Native Anthropic upstream seams for integration tests; production always uses port 443 and the default agent. */
   upstreamAgent?: https.Agent;
   upstreamPort?: number;
+  /** While engaged (a network switch, tether.ts), new model calls wait here instead of starting. */
+  hold?: HoldGate;
 };
 
 export type Stats = {
@@ -227,6 +230,8 @@ export class Proxy {
   private readonly inFlightSockets = new Set<Duplex>();
   /** Set by drain(): new model calls are refused with a retryable 503 so the count can only fall. */
   private draining = false;
+  /** Model calls waiting at the hold gate (not yet in `stats`): drain() waits for them too. */
+  private held = 0;
   private readonly server: net.Server;
   private readonly httpServer: http.Server;
   private readonly upstreamAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
@@ -489,9 +494,13 @@ export class Proxy {
     // server.close() only stops new TCP connections; the CLI keeps sending new requests down
     // its existing tunnels (measured 2026-09-13: in-flight went 2→1→2 and the budget ran out).
     this.draining = true;
+    // A call held for a network switch (hold.ts) goes on now and meets the 503 below; until it has,
+    // it is counted in `held`, so it is not cut by close(). A closed gate never holds again.
+    const released = this.deps.hold?.close() ?? 0;
+    if (released) this.deps.log.info(`drain: released ${released} model call(s) held for a network switch`);
     this.server.close();
     const t0 = Date.now();
-    while (this.stats.messagesInFlight > 0 && Date.now() - t0 < maxMs) {
+    while ((this.stats.messagesInFlight > 0 || this.held > 0) && Date.now() - t0 < maxMs) {
       onProgress?.(this.stats.messagesInFlight);
       await new Promise((r) => setTimeout(r, 250));
     }
@@ -648,6 +657,20 @@ export class Proxy {
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const log = this.deps.log;
+    // A network switch is making a gap (hold.ts): a new model call waits here, before its body is
+    // read or it is counted, so the switch only waits for calls that were already running. Nothing
+    // is written and nothing refused; it goes ahead on release or after the longest hold. A draining
+    // router refuses below instead, so it never holds.
+    const hold = this.deps.hold;
+    if (hold?.engaged && !this.draining && (req.url ?? "/").startsWith("/v1/messages")) {
+      this.held++;
+      const held = await hold.wait().finally(() => this.held--);
+      log.info(`HOLD ${req.method ?? "?"} ${req.url ?? "/"} waited ${(held.ms / 1000).toFixed(1)}s${held.timedOut ? " (longest hold reached; going ahead)" : ""}`);
+      if (req.socket?.destroyed) {
+        log.warn(`HOLD ${req.method ?? "?"} ${req.url ?? "/"}: the client left while held`);
+        return;
+      }
+    }
     // The agent files' derived aliases join the config's own, so a marker naming a worker resolves
     // the same way here as it does everywhere else. Explicit aliases win; the scan is mtime-cached.
     const cfg = withAgentAliases(this.deps.config(), this.deps.agentDir ?? defaultAgentDir(), log);

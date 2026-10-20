@@ -14,6 +14,10 @@
 //             through JXA, as the console user — the router is a launchd agent in the user's session)
 //             so macOS auto-joins the best known network in range; probe it; if that does not give
 //             working Wi-Fi within 20s, rejoin the hotspot and double the interval (up to 15 min).
+//   gap       a return still postponed RETURN_FORCE_AFTER_MS past due (calls back-to-back, so never
+//             a quiet moment — 2026-10-20) makes the gap itself: new model calls are held (hold.ts:
+//             they wait, they are not refused), the running ones get up to RETURN_DRAIN_WAIT_MS to
+//             finish, then the return above runs and the hold is released whatever the outcome.
 //
 // Never more than one switch per 60s; nothing switches while the user has pinned the network.
 // "On the hotspot" is read from the address, not the SSID (which macOS redacts without Location):
@@ -23,6 +27,7 @@ import http from "node:http";
 import os from "node:os";
 import type { TetherSettings } from "./config.ts";
 import { SUDO, sudoRefused, type Activity, type Runner } from "./awake.ts";
+import { HoldGate } from "./hold.ts";
 import { WinTetherBackend } from "./tether-win.ts";
 
 export const NETWORKSETUP = "/usr/sbin/networksetup";
@@ -42,6 +47,17 @@ export const MAX_RETURN_INTERVAL_MS = 15 * 60_000;
 export const RETURN_QUIET_MS = 20_000;
 /** Failover waits at most this long for an in-flight call; a dead network cannot serve it anyway. */
 export const FAILOVER_IDLE_WAIT_MS = 30_000;
+/** A return postponed this long past due stops waiting for a quiet moment and makes one. */
+export const RETURN_FORCE_AFTER_MS = 2 * 60_000;
+/**
+ * With new calls held, the running ones get this long to finish before the attempt is given up.
+ * With the switch after it (up to ~35s) it stays inside a held call's HOLD_MAX_MS, so no held call
+ * goes ahead and refills the gap before the switch; and well under the ~180s after which Claude
+ * Code gave up on a call that had no answer yet (13 Google turns closed at 182–190s, 2026-10-20).
+ */
+export const RETURN_DRAIN_WAIT_MS = 60_000;
+/** The hold releases itself after this even if the return never comes back to release it. */
+export const RETURN_HOLD_FAILSAFE_MS = RETURN_DRAIN_WAIT_MS + 3 * 60_000;
 const JOIN_SETTLE_MS = 15_000;
 /** States that say why the last join failed; they stay (with their hint) until the next attempt. */
 const JOIN_FAILURES: ReadonlySet<string> = new Set(["hotspot-not-visible", "join-failed", "needs-setup", "no-hotspot-profile", "needs-location"]);
@@ -185,6 +201,8 @@ export type TetherDeps = {
   probe?: (localAddress: string) => Promise<boolean>;
   /** Schedules the next tick after `ms`; returns a cancel. Tests pass a no-op. */
   schedule?: (fn: () => void, ms: number) => () => void;
+  /** The gate the proxy and the ingress hold new model calls at; one of its own when not given. */
+  hold?: HoldGate;
 };
 
 const MAC_HINTS: Partial<Record<TetherState, string>> = {
@@ -248,9 +266,14 @@ export class TetherController {
   private busy: Promise<void> | null = null;
   private cancel: (() => void) | null = null;
   private lastLogged = "";
+  private readonly hold: HoldGate;
+  /** True while this controller has the gate engaged (stop() releases it). */
+  private holding = false;
+  private stopped = false;
 
   constructor(deps: TetherDeps) {
     this.deps = deps;
+    this.hold = deps.hold ?? new HoldGate();
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.interfaces = deps.interfaces ?? os.networkInterfaces;
@@ -266,12 +289,16 @@ export class TetherController {
 
   start(): void {
     if (!this.supported) return;
+    this.stopped = false;
     this.loop();
   }
 
+  /** Stops the loop; a hold this controller engaged is released now (a return in progress gives up). */
   stop(): void {
+    this.stopped = true;
     this.cancel?.();
     this.cancel = null;
+    if (this.holding) this.releaseHold("the controller stopped");
   }
 
   /** Run a tick soon (after the settings changed) without waiting for it. */
@@ -432,16 +459,65 @@ export class TetherController {
 
   private async tryReturn(settings: TetherSettings): Promise<void> {
     if (this.now() - this.lastSwitchAt < MIN_SWITCH_INTERVAL_MS) return;
-    if (!this.idle()) {
-      this.decide("Wi-Fi return postponed: a model call is running or just started");
+    const idle = this.idle();
+    if (!idle && (this.now() - this.nextReturnAt < RETURN_FORCE_AFTER_MS || this.hold.closed)) {
+      this.decide(`Wi-Fi return postponed: a model call is running or just started (after ${RETURN_FORCE_AFTER_MS / 1000}s of this, new calls are held to make a gap)`);
       return;
     }
-    const backend = this.backend!;
-    const blocked = (await backend.returnBlocked?.(settings.hotspotSsid)) ?? null;
+    const blocked = (await this.backend!.returnBlocked?.(settings.hotspotSsid)) ?? null;
     if (blocked) {
       this.backOff(settings, blocked);
       return;
     }
+    if (idle) await this.leaveHotspot(settings);
+    else await this.returnWithGap(settings);
+  }
+
+  /**
+   * Calls never stop (Claude and subagents back-to-back), so make the quiet moment: hold new model
+   * calls, let the running ones finish, go back to Wi-Fi, release. The hold is released on every
+   * path out of here, a thrown error included.
+   */
+  private async returnWithGap(settings: TetherSettings): Promise<void> {
+    const late = Math.round((this.now() - this.nextReturnAt) / 1000);
+    if (!this.hold.engage("going back to Wi-Fi", RETURN_HOLD_FAILSAFE_MS)) return;
+    this.holding = true;
+    try {
+      const running = this.deps.activity().inFlight;
+      this.step(`Wi-Fi return postponed ${late}s past due while model calls keep running: holding new model calls to make a gap (waiting up to ${RETURN_DRAIN_WAIT_MS / 1000}s for ${running} running)`);
+      const started = this.now();
+      const until = started + RETURN_DRAIN_WAIT_MS;
+      while (!this.stopped && !this.pinned && this.deps.activity().inFlight > 0 && this.now() < until) await this.sleep(1_000);
+      // stop() already released; a pin made meanwhile pauses switching, so the attempt is dropped.
+      if (this.stopped || this.pinned) return;
+      const left = this.deps.activity().inFlight;
+      if (left > 0) {
+        this.backOff(settings, `${left} model call${left === 1 ? "" : "s"} still running after ${Math.round((this.now() - started) / 1000)}s; held calls released`);
+        return;
+      }
+      this.step(`running model calls finished after ${Math.round((this.now() - started) / 1000)}s; ${this.hold.waiting} held`);
+      await this.leaveHotspot(settings);
+    } finally {
+      this.releaseHold();
+    }
+  }
+
+  private releaseHold(why?: string): void {
+    if (!this.holding) return;
+    this.holding = false;
+    const n = this.hold.release();
+    this.step(`hold released${why ? ` (${why})` : ""}; ${n} held model call${n === 1 ? "" : "s"} going ahead`);
+  }
+
+  /** A one-off step: always logged, and the next state line is logged again after it. */
+  private step(line: string): void {
+    this.lastLogged = "";
+    this.deps.log.info(`tether: ${line}`);
+  }
+
+  /** Leave the hotspot so the OS joins its best known network; keep it only if it has internet. */
+  private async leaveHotspot(settings: TetherSettings): Promise<void> {
+    const backend = this.backend!;
     this.state = "returning";
     this.lastSwitchAt = this.now();
     this.decide(`trying to go back to Wi-Fi: leaving the hotspot so ${this.deps.platform === "win32" ? "Windows" : "macOS"} joins the best known network`);
