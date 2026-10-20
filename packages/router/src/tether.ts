@@ -1,5 +1,6 @@
 // Fail over to the iPhone Personal Hotspot when Wi-Fi has no internet, and come back to a known
-// Wi-Fi later (macOS only).
+// Wi-Fi later. The probe/decision loop below is shared; the OS part is a TetherBackend — macOS here,
+// Windows in tether-win.ts (netsh, no elevation).
 //
 // What decides "no internet" is a real HTTP probe through the Wi-Fi interface, not the OS path
 // status: a router with a dead uplink or a captive portal reads "satisfied" to NWPathMonitor, which
@@ -22,6 +23,7 @@ import http from "node:http";
 import os from "node:os";
 import type { TetherSettings } from "./config.ts";
 import { SUDO, sudoRefused, type Activity, type Runner } from "./awake.ts";
+import { WinTetherBackend } from "./tether-win.ts";
 
 export const NETWORKSETUP = "/usr/sbin/networksetup";
 export const OSASCRIPT = "/usr/bin/osascript";
@@ -41,6 +43,8 @@ export const RETURN_QUIET_MS = 20_000;
 /** Failover waits at most this long for an in-flight call; a dead network cannot serve it anyway. */
 export const FAILOVER_IDLE_WAIT_MS = 30_000;
 const JOIN_SETTLE_MS = 15_000;
+/** States that say why the last join failed; they stay (with their hint) until the next attempt. */
+const JOIN_FAILURES: ReadonlySet<string> = new Set(["hotspot-not-visible", "join-failed", "needs-setup", "no-hotspot-profile", "needs-location"]);
 
 // ---- Pure helpers -------------------------------------------------------------------------------
 
@@ -115,13 +119,14 @@ export async function probeRound(localAddress: string, get: ProbeGet = httpGet):
   return a || g;
 }
 
-export type JoinOutcome = "joined" | "needs-setup" | "hotspot-not-visible" | "join-failed";
+export type JoinOutcome = "joined" | "needs-setup" | "hotspot-not-visible" | "join-failed" | "no-hotspot-profile" | "needs-location";
+export type JoinFailure = Exclude<JoinOutcome, "joined">;
 
 /**
  * `networksetup -setairportnetwork` reports failure on stdout and may still exit 0
  * ("Could not find network X." / "Failed to join network X."), so the text decides.
  */
-export function classifyJoin(r: { code: number; stdout: string; stderr: string }): Exclude<JoinOutcome, "joined"> | null {
+export function classifyJoin(r: { code: number; stdout: string; stderr: string }): JoinFailure | null {
   if (sudoRefused(r)) return "needs-setup";
   const text = `${r.stdout}\n${r.stderr}`;
   if (/could not find network/i.test(text)) return "hotspot-not-visible";
@@ -134,7 +139,27 @@ export function classifyJoin(r: { code: number; stdout: string; stderr: string }
 export type TetherState =
   | "off" | "unsupported" | "no-wifi-device" | "watching" | "no-wifi" | "outage" | "pinned"
   | "joining-hotspot" | "on-hotspot" | "returning" | "hotspot-not-visible" | "join-failed"
-  | "needs-setup" | "no-hotspot-ssid";
+  | "needs-setup" | "no-hotspot-ssid" | "no-hotspot-profile" | "needs-location";
+
+/** What one OS does for the controller. */
+export interface TetherBackend {
+  /** The Wi-Fi interface, as os.networkInterfaces() names it; null when there is none. */
+  findWifi(): Promise<string | null>;
+  /** Asks the OS to join the hotspot. null: the request went through, and the address decides. */
+  join(ssid: string): Promise<JoinFailure | null>;
+  /** What a join that went through but brought no hotspot address within 15s means here. */
+  readonly noAddressOutcome: JoinFailure;
+  /** Leaves the current network so the OS joins its best known one. An error text, or null. */
+  leave(): Promise<string | null>;
+  /** Once, when leave() gave no address after a few seconds: join a known network by name. */
+  joinKnown?(ssid: string): Promise<void>;
+  /** Why a return cannot work at all (nothing would be joined), or null. */
+  returnBlocked?(ssid: string): Promise<string | null>;
+  readonly hints: Partial<Record<TetherState, string>>;
+}
+
+/** Waiting this long after leave() with no address at all, a backend may join a known network itself. */
+export const JOIN_KNOWN_AFTER_MS = 8_000;
 
 export type TetherStatus = {
   enabled: boolean;
@@ -162,7 +187,7 @@ export type TetherDeps = {
   schedule?: (fn: () => void, ms: number) => () => void;
 };
 
-const HINTS: Partial<Record<TetherState, string>> = {
+const MAC_HINTS: Partial<Record<TetherState, string>> = {
   "hotspot-not-visible": "The iPhone is not broadcasting its hotspot. Open Settings → Personal Hotspot on the iPhone once (and keep \"Allow Others to Join\" on) so the Mac can see it.",
   "needs-setup": "Run `clauderipple awake setup --ssid <hotspot name>` once: joining the hotspot needs the rule it installs (and the name must match it).",
   "no-hotspot-ssid": "Set the iPhone hotspot's name: `clauderipple awake setup --ssid <hotspot name>`.",
@@ -171,12 +196,45 @@ const HINTS: Partial<Record<TetherState, string>> = {
   pinned: "Switching is paused because the network was pinned.",
 };
 
+class MacTetherBackend implements TetherBackend {
+  readonly noAddressOutcome = "join-failed" as const;
+  readonly hints = MAC_HINTS;
+  private readonly run: Runner;
+  private readonly log: { info(m: string): void; warn(m: string): void };
+  private device: string | null = null;
+
+  constructor(run: Runner, log: { info(m: string): void; warn(m: string): void }) {
+    this.run = run;
+    this.log = log;
+  }
+
+  async findWifi(): Promise<string | null> {
+    const r = await this.run(NETWORKSETUP, ["-listallhardwareports"]);
+    this.device = r.code === 0 ? parseWifiDevice(r.stdout) : null;
+    return this.device;
+  }
+
+  /** `sudo -n networksetup -setairportnetwork <dev> <ssid>`. */
+  async join(ssid: string): Promise<JoinFailure | null> {
+    const r = await this.run(SUDO, ["-n", NETWORKSETUP, "-setairportnetwork", this.device!, ssid], { timeoutMs: 30_000 });
+    const failed = classifyJoin(r);
+    if (failed && failed !== "needs-setup") this.log.warn(`tether: networksetup said: ${(r.stdout + r.stderr).trim().slice(0, 200)}`);
+    return failed;
+  }
+
+  async leave(): Promise<string | null> {
+    const r = await this.run(OSASCRIPT, ["-l", "JavaScript", "-e", DISASSOCIATE_JS], { timeoutMs: 15_000 });
+    return r.code === 0 ? null : (r.stderr || r.stdout).trim().slice(0, 200);
+  }
+}
+
 export class TetherController {
   private readonly deps: TetherDeps;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly interfaces: () => NodeJS.Dict<os.NetworkInterfaceInfo[]>;
   private readonly probe: (localAddress: string) => Promise<boolean>;
+  private readonly backend: TetherBackend | null;
   private readonly window = new ProbeWindow();
   private device: string | null = null;
   private network: Network = "none";
@@ -197,11 +255,13 @@ export class TetherController {
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.interfaces = deps.interfaces ?? os.networkInterfaces;
     this.probe = deps.probe ?? ((addr) => probeRound(addr));
-    if (deps.platform !== "darwin") this.state = "unsupported";
+    this.backend =
+      deps.platform === "darwin" ? new MacTetherBackend(deps.run, deps.log) : deps.platform === "win32" ? new WinTetherBackend(deps.run, deps.log) : null;
+    if (!this.backend) this.state = "unsupported";
   }
 
   get supported(): boolean {
-    return this.deps.platform === "darwin";
+    return this.backend !== null;
   }
 
   start(): void {
@@ -237,7 +297,7 @@ export class TetherController {
       hotspotSsid: s.hotspotSsid,
       lastSwitch: this.lastSwitch,
       lastProbe: this.lastProbe,
-      hint: HINTS[this.state] ?? null,
+      hint: this.backend?.hints[this.state] ?? null,
     };
   }
 
@@ -285,8 +345,7 @@ export class TetherController {
       return;
     }
     if (!this.device) {
-      const r = await this.deps.run(NETWORKSETUP, ["-listallhardwareports"]);
-      this.device = r.code === 0 ? parseWifiDevice(r.stdout) : null;
+      this.device = await this.backend!.findWifi();
       if (!this.device) {
         this.state = "no-wifi-device";
         this.decide("no Wi-Fi interface found");
@@ -334,7 +393,7 @@ export class TetherController {
     const since = this.now() - this.lastSwitchAt;
     if (since < MIN_SWITCH_INTERVAL_MS) {
       // A failed join keeps saying why (and its hint) until the next attempt.
-      if (this.state !== "hotspot-not-visible" && this.state !== "join-failed" && this.state !== "needs-setup") this.state = "outage";
+      if (!JOIN_FAILURES.has(this.state)) this.state = "outage";
       this.decide(`${why}; waiting ${Math.ceil((MIN_SWITCH_INTERVAL_MS - since) / 1000)}s (at most one switch per minute)`);
       return;
     }
@@ -359,20 +418,16 @@ export class TetherController {
     }
   }
 
-  /** `sudo -n networksetup -setairportnetwork <dev> <ssid>`, then wait for a hotspot address. */
+  /** Asks the OS to join, then waits for a hotspot address. */
   private async join(ssid: string): Promise<JoinOutcome> {
-    const r = await this.deps.run(SUDO, ["-n", NETWORKSETUP, "-setairportnetwork", this.device!, ssid], { timeoutMs: 30_000 });
-    const failed = classifyJoin(r);
-    if (failed) {
-      if (failed !== "needs-setup") this.deps.log.warn(`tether: networksetup said: ${(r.stdout + r.stderr).trim().slice(0, 200)}`);
-      return failed;
-    }
+    const failed = await this.backend!.join(ssid);
+    if (failed) return failed;
     const deadline = this.now() + JOIN_SETTLE_MS;
     while (this.now() < deadline) {
       if (isHotspotAddress(this.currentIp())) return "joined";
       await this.sleep(1_000);
     }
-    return isHotspotAddress(this.currentIp()) ? "joined" : "join-failed";
+    return isHotspotAddress(this.currentIp()) ? "joined" : this.backend!.noAddressOutcome;
   }
 
   private async tryReturn(settings: TetherSettings): Promise<void> {
@@ -381,22 +436,34 @@ export class TetherController {
       this.decide("Wi-Fi return postponed: a model call is running or just started");
       return;
     }
+    const backend = this.backend!;
+    const blocked = (await backend.returnBlocked?.(settings.hotspotSsid)) ?? null;
+    if (blocked) {
+      this.backOff(settings, blocked);
+      return;
+    }
     this.state = "returning";
     this.lastSwitchAt = this.now();
-    this.decide("trying to go back to Wi-Fi: leaving the hotspot so macOS joins the best known network");
-    const r = await this.deps.run(OSASCRIPT, ["-l", "JavaScript", "-e", DISASSOCIATE_JS], { timeoutMs: 15_000 });
-    if (r.code !== 0) {
-      this.deps.log.warn(`tether: disassociate failed: ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
+    this.decide(`trying to go back to Wi-Fi: leaving the hotspot so ${this.deps.platform === "win32" ? "Windows" : "macOS"} joins the best known network`);
+    const left = await backend.leave();
+    if (left !== null) {
+      this.deps.log.warn(`tether: leaving the hotspot failed: ${left}`);
       this.state = "on-hotspot";
-      this.backOff(settings, "disassociate failed");
+      this.backOff(settings, "leaving the hotspot failed");
       return;
     }
     // Back on Wi-Fi only after two good probes through it (one could be a lucky blip).
     let good = 0;
-    const deadline = this.now() + RETURN_PROBE_MS;
+    let askedKnown = false;
+    const started = this.now();
+    const deadline = started + RETURN_PROBE_MS;
     while (this.now() < deadline) {
       await this.sleep(2_000);
       const ip = this.currentIp();
+      if (!ip && !askedKnown && backend.joinKnown && this.now() - started >= JOIN_KNOWN_AFTER_MS) {
+        askedKnown = true;
+        await backend.joinKnown(settings.hotspotSsid);
+      }
       if (ip && !isHotspotAddress(ip) && (await this.probe(ip))) {
         if (++good >= 2) break;
       } else good = 0;
@@ -412,9 +479,10 @@ export class TetherController {
     }
     const ip = this.currentIp();
     let reason: string;
-    if (isHotspotAddress(ip)) reason = "macOS rejoined the hotspot (no better network in range)";
+    const osName = this.deps.platform === "win32" ? "Windows" : "macOS";
+    if (isHotspotAddress(ip)) reason = `${osName} rejoined the hotspot (no better network in range)`;
     else {
-      reason = ip ? "the Wi-Fi macOS chose has no internet" : "no network was joined";
+      reason = ip ? `the Wi-Fi ${osName} chose has no internet` : "no network was joined";
       const outcome = await this.join(settings.hotspotSsid);
       if (outcome !== "joined") reason += `; rejoining the hotspot failed: ${outcome}`;
     }

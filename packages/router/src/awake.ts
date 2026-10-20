@@ -1,6 +1,7 @@
-// Keep a MacBook awake with its lid closed while Claude works (macOS only).
+// Keep a laptop awake with its lid closed while Claude works: macOS here, Windows in awake-win.ts
+// (the decision, journal and controller below are shared; each OS is an AwakeBackend).
 //
-// The only mechanism that holds a closed MacBook awake on battery or without an external display is
+// macOS: the only mechanism that holds a closed MacBook awake on battery or without an external display is
 // `pmset -a disablesleep 1`, run as root. It is undocumented (absent from `man pmset`) but it is what
 // every working open-source tool uses (Insomnia, MacMiniMode, Sleepless, Capsomnia, WiFiGuard), and
 // `pmset -g` reports it as `SleepDisabled`. Root comes from a narrow sudoers rule installed once by
@@ -22,10 +23,22 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { AwakeSettings } from "./config.ts";
+import { WinAwakeBackend, type ExecStateHelper } from "./awake-win.ts";
 
 export type RunResult = { code: number; stdout: string; stderr: string };
+export type RunOptions = {
+  timeoutMs?: number;
+  /**
+   * Windows: hand `args` to the program exactly as written, joined by spaces. For netsh, whose
+   * `name="My Hotspot"` must arrive with its own quotes; only ever used with values that were
+   * checked to contain no quote.
+   */
+  verbatim?: boolean;
+  /** Replaces the environment (Windows PowerShell needs PSModulePath removed, see powershellEnv). */
+  env?: NodeJS.ProcessEnv;
+};
 /** Runs one program with arguments (no shell). Never throws: a spawn failure is code -1. */
-export type Runner = (file: string, args: string[], opts?: { timeoutMs?: number }) => Promise<RunResult>;
+export type Runner = (file: string, args: string[], opts?: RunOptions) => Promise<RunResult>;
 
 export const PMSET = "/usr/bin/pmset";
 export const SUDO = "/usr/bin/sudo";
@@ -38,7 +51,14 @@ export function execRunner(): Runner {
       execFile(
         file,
         args,
-        { timeout: opts.timeoutMs ?? 10_000, encoding: "utf8", maxBuffer: 4 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
+        {
+          timeout: opts.timeoutMs ?? 10_000,
+          encoding: "utf8",
+          maxBuffer: 4 * 1024 * 1024,
+          env: opts.env ?? { ...process.env, LC_ALL: "C" },
+          windowsHide: true,
+          ...(opts.verbatim ? { windowsVerbatimArguments: true } : {}),
+        },
         (error, stdout, stderr) => {
           if (!error) return resolve({ code: 0, stdout, stderr });
           // A non-zero exit carries its status as a number; a spawn failure or timeout does not.
@@ -140,19 +160,40 @@ export function decideAwake(i: AwakeInput): { wanted: boolean; reason: string } 
 
 // ---- Journal -----------------------------------------------------------------------------------
 
-export type AwakeJournal = { applied: boolean; since: string; reason: string; lastActivityAt?: number };
+/** Windows: a power plan's lid-close action on AC and on battery (0 nothing, 1 sleep, 2 hibernate, 3 shut down). */
+export type LidAction = { scheme: string; ac: number; dc: number };
+
+/**
+ * `applied`: macOS, we set the disablesleep bit; Windows, we hold the PC awake and (with `lid`) set the
+ * lid-close action to "Do nothing" — `lid` is the user's own action, to put back.
+ */
+export type AwakeJournal = { applied: boolean; since: string; reason: string; lastActivityAt?: number; lid?: LidAction };
+
+function journalLid(v: unknown): LidAction | undefined {
+  const l = v as Partial<LidAction> | null | undefined;
+  if (!l || typeof l.scheme !== "string" || !/^[0-9a-f-]{36}$/i.test(l.scheme)) return undefined;
+  const ok = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 3;
+  return ok(l.ac) && ok(l.dc) ? { scheme: l.scheme.toLowerCase(), ac: l.ac, dc: l.dc } : undefined;
+}
 
 export function readJournal(file: string): AwakeJournal | null {
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<AwakeJournal>;
     if (typeof j.applied !== "boolean") return null;
-    return { applied: j.applied, since: String(j.since ?? ""), reason: String(j.reason ?? ""), ...(typeof j.lastActivityAt === "number" ? { lastActivityAt: j.lastActivityAt } : {}) };
+    const lid = journalLid(j.lid);
+    return {
+      applied: j.applied,
+      since: String(j.since ?? ""),
+      reason: String(j.reason ?? ""),
+      ...(typeof j.lastActivityAt === "number" ? { lastActivityAt: j.lastActivityAt } : {}),
+      ...(lid ? { lid } : {}),
+    };
   } catch {
     return null;
   }
 }
 
-function writeJournal(file: string, j: AwakeJournal): void {
+export function writeJournal(file: string, j: AwakeJournal): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(j) + "\n", { mode: 0o600 });
@@ -177,6 +218,25 @@ export type AwakeStatus = {
   until: string | null;
 };
 
+export type Guards = { battery: Battery | null; thermal: Thermal | null; lidClosed: boolean | null; error?: string };
+export type HoldOutcome = { ok: true } | { ok: false; refused: boolean; message: string };
+
+/** What one OS does for the controller. Every method that runs a command goes through the Runner. */
+export interface AwakeBackend {
+  /** This tick's guard readings. `needed` is false when nothing wants the machine awake right now. */
+  readGuards(needed: boolean): Promise<Guards>;
+  /** While the journal says held: false when it was undone outside us (nothing of ours left to undo). */
+  stillHeld(): Promise<boolean>;
+  hold(): Promise<HoldOutcome>;
+  release(): Promise<HoldOutcome>;
+  /** Right after a successful release: put a closed lid to sleep where the OS would have. */
+  afterRelease(): Promise<void>;
+  setup(sudoFailed: boolean): "ok" | "needs-setup";
+  /** Fields the backend keeps in the journal (Windows: the lid action to restore). */
+  journalExtra(): Partial<AwakeJournal>;
+  shutdown(): void;
+}
+
 export type AwakeDeps = {
   platform: NodeJS.Platform;
   run: Runner;
@@ -189,6 +249,8 @@ export type AwakeDeps = {
   fileExists?: (file: string) => boolean;
   /** Schedules the periodic tick; returns a cancel. Tests pass a no-op. */
   schedule?: (fn: () => void, everyMs: number) => () => void;
+  /** Windows: the execution-state child (tests pass a fake). */
+  winHelper?: () => ExecStateHelper;
 };
 
 export const AWAKE_TICK_MS = 15_000;
@@ -210,13 +272,12 @@ export class AwakeController {
   private readonly deps: AwakeDeps;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly fileExists: (f: string) => boolean;
+  private readonly backend: AwakeBackend | null;
 
   constructor(deps: AwakeDeps) {
     this.deps = deps;
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-    this.fileExists = deps.fileExists ?? ((f) => fs.existsSync(f));
     const j = readJournal(deps.journalFile);
     // Reconcile starts from what the last process recorded: if it set the bit and died (or was
     // restarted), we own it now and the first tick keeps or clears it.
@@ -225,13 +286,19 @@ export class AwakeController {
       this.lastActivityAt = j.lastActivityAt;
       this.journaledActivityAt = j.lastActivityAt;
     }
+    const log = deps.log;
+    if (deps.platform === "darwin") {
+      this.backend = new MacAwakeBackend({ run: deps.run, sleep: this.sleep, log, fileExists: deps.fileExists ?? ((f) => fs.existsSync(f)) });
+    } else if (deps.platform === "win32") {
+      this.backend = new WinAwakeBackend({ run: deps.run, sleep: this.sleep, now: this.now, log, save: () => this.persist(true), ...(deps.winHelper ? { helper: deps.winHelper } : {}) }, j);
+    } else this.backend = null;
   }
 
   get supported(): boolean {
-    return this.deps.platform === "darwin";
+    return this.backend !== null;
   }
 
-  /** First tick now (the reconcile), then every 15s. A no-op off macOS. */
+  /** First tick now (the reconcile), then every 15s. A no-op where unsupported. */
   async start(): Promise<void> {
     if (!this.supported) {
       this.reason = "unsupported on this platform";
@@ -257,7 +324,7 @@ export class AwakeController {
       mode: s.mode,
       applied: this.applied,
       reason: this.reason,
-      setup: !this.supported ? "unsupported" : this.sudoFailed || !this.fileExists(SUDOERS_FILE) ? "needs-setup" : "ok",
+      setup: this.backend ? this.backend.setup(this.sudoFailed) : "unsupported",
       battery: this.battery,
       thermal: this.thermal,
       lidClosed: this.lidClosed,
@@ -289,6 +356,9 @@ export class AwakeController {
     if (!this.supported) return;
     this.noteActivity();
     this.persist(true);
+    // Windows: the execution-state child exits with stdin closed (it would with the process anyway);
+    // the lid action stays as journaled for the successor, like the macOS bit.
+    this.backend?.shutdown();
   }
 
   private noteActivity(): void {
@@ -308,6 +378,7 @@ export class AwakeController {
         since: prev && prev.applied === this.applied ? prev.since : new Date(this.now()).toISOString(),
         reason: this.reason,
         ...(this.lastActivityAt !== undefined ? { lastActivityAt: this.lastActivityAt } : {}),
+        ...(this.backend?.journalExtra() ?? {}),
       });
       this.journaledActivityAt = this.lastActivityAt;
     } catch (e) {
@@ -325,69 +396,65 @@ export class AwakeController {
     const settings = this.deps.settings();
     this.noteActivity();
     const activity = this.deps.activity();
-    // Nothing to watch: no reads, no processes, unless a bit we set still has to be cleared.
+    const backend = this.backend!;
+    // Nothing to watch: no reads, no processes, unless a hold we took still has to be released.
     if (settings.mode === "off" && !this.applied) {
       this.reason = "off";
       this.battery = null;
       this.thermal = null;
       this.lidClosed = null;
+      backend.shutdown();
       this.persist();
       return;
     }
-    let error: string | undefined;
-    const batt = await this.deps.run(PMSET, ["-g", "batt"]);
-    if (batt.code === 0) this.battery = parseBattery(batt.stdout);
-    else error = `pmset -g batt failed (${batt.code})`;
-    const therm = await this.deps.run(PMSET, ["-g", "therm"]);
-    if (therm.code === 0) this.thermal = parseThermal(therm.stdout);
-    else error ??= `pmset -g therm failed (${therm.code})`;
-    const clam = await this.readClamshell();
-    // The bit reads cleared although we set it: a reboot (it does not survive one) or another tool
-    // (Insomnia saw one reset it every 2s). Take it as not applied, so a wanted state is set again
-    // below — re-asserting at most once per tick — and an unwanted one is not "cleared" twice.
-    if (this.applied && clam?.sleepDisabled === false) {
+    const decide = (g?: Guards) =>
+      decideAwake({
+        settings,
+        now: this.now(),
+        inFlight: activity.inFlight,
+        ...(this.lastActivityAt !== undefined ? { lastActivityAt: this.lastActivityAt } : {}),
+        battery: g?.battery ?? null,
+        thermal: g?.thermal ?? "unknown",
+        ...(g?.error ? { error: g.error } : {}),
+      });
+    // Whether anything wants the machine awake before the guards are read: a backend may skip
+    // reads (on Windows, a whole child process) when nothing does.
+    const guards = await backend.readGuards(decide().wanted);
+    this.battery = guards.battery;
+    this.thermal = guards.thermal;
+    this.lidClosed = guards.lidClosed;
+    // What we set reads as undone: a reboot (the macOS bit does not survive one), another tool
+    // (Insomnia saw one reset it every 2s), or the user changing the Windows lid action. Take it as
+    // not applied, so a wanted state is set again below — re-asserting at most once per tick — and an
+    // unwanted one is not "cleared" twice.
+    if (this.applied && !(await backend.stillHeld())) {
       this.logOnce("awake: sleep was re-enabled outside ClaudeRipple (reboot or another tool)");
       this.applied = false;
     }
-    const d = decideAwake({
-      settings,
-      now: this.now(),
-      inFlight: activity.inFlight,
-      ...(this.lastActivityAt !== undefined ? { lastActivityAt: this.lastActivityAt } : {}),
-      battery: this.battery,
-      thermal: this.thermal ?? "unknown",
-      ...(error ? { error } : {}),
-    });
+    const d = decide(guards);
     this.reason = d.reason;
     if (d.wanted && !this.applied) await this.set(true, d.reason);
     else if (!d.wanted && this.applied) {
-      if (await this.set(false, d.reason)) await this.sleepIfLidClosed();
+      if (await this.set(false, d.reason)) await backend.afterRelease();
     }
     this.persist();
   }
 
-  private async readClamshell(): Promise<Clamshell | null> {
-    const r = await this.deps.run(IOREG, ["-r", "-k", "AppleClamshellState", "-d", "4"]);
-    if (r.code !== 0) return null;
-    const c = parseClamshell(r.stdout);
-    this.lidClosed = c.lidClosed;
-    return c;
-  }
-
-  /** `sudo -n pmset -a disablesleep 1|0`. The journal is written before setting and after clearing. */
+  /** Hold or release. The journal is written before holding and after releasing. */
   private async set(on: boolean, reason: string): Promise<boolean> {
+    const backend = this.backend!;
     if (on) {
       this.applied = true;
       this.persist(true);
     }
-    const r = await this.deps.run(SUDO, ["-n", PMSET, "-a", "disablesleep", on ? "1" : "0"]);
-    if (r.code !== 0) {
-      this.sudoFailed = sudoRefused(r);
+    const r = on ? await backend.hold() : await backend.release();
+    if (!r.ok) {
+      this.sudoFailed = r.refused;
       if (on) {
         this.applied = false;
         this.persist(true);
       }
-      this.reason = this.sudoFailed ? "needs setup: run `clauderipple awake setup` once" : `pmset failed: ${(r.stderr || r.stdout).trim().slice(0, 200)}`;
+      this.reason = r.refused ? "needs setup: run `clauderipple awake setup` once" : r.message;
       this.logOnce(`awake: could not ${on ? "disable" : "re-enable"} sleep (${reason}): ${this.reason}`);
       return false;
     }
@@ -398,6 +465,67 @@ export class AwakeController {
     this.deps.log.info(`awake: sleep ${on ? "disabled" : "re-enabled"} (${reason})`);
     return true;
   }
+}
+
+// ---- macOS ---------------------------------------------------------------------------------------
+
+type MacDeps = { run: Runner; sleep: (ms: number) => Promise<void>; log: { info(m: string): void; warn(m: string): void }; fileExists: (f: string) => boolean };
+
+class MacAwakeBackend implements AwakeBackend {
+  private readonly deps: MacDeps;
+  private clamshell: Clamshell | null = null;
+
+  constructor(deps: MacDeps) {
+    this.deps = deps;
+  }
+
+  setup(sudoFailed: boolean): "ok" | "needs-setup" {
+    return sudoFailed || !this.deps.fileExists(SUDOERS_FILE) ? "needs-setup" : "ok";
+  }
+
+  journalExtra(): Partial<AwakeJournal> {
+    return {};
+  }
+
+  shutdown(): void {}
+
+  async readGuards(): Promise<Guards> {
+    let error: string | undefined;
+    let battery: Battery | null = null;
+    let thermal: Thermal | null = null;
+    const batt = await this.deps.run(PMSET, ["-g", "batt"]);
+    if (batt.code === 0) battery = parseBattery(batt.stdout);
+    else error = `pmset -g batt failed (${batt.code})`;
+    const therm = await this.deps.run(PMSET, ["-g", "therm"]);
+    if (therm.code === 0) thermal = parseThermal(therm.stdout);
+    else error ??= `pmset -g therm failed (${therm.code})`;
+    this.clamshell = await this.readClamshell();
+    return { battery, thermal, lidClosed: this.clamshell?.lidClosed ?? null, ...(error ? { error } : {}) };
+  }
+
+  async stillHeld(): Promise<boolean> {
+    return this.clamshell?.sleepDisabled !== false;
+  }
+
+  private async readClamshell(): Promise<Clamshell | null> {
+    const r = await this.deps.run(IOREG, ["-r", "-k", "AppleClamshellState", "-d", "4"]);
+    return r.code === 0 ? parseClamshell(r.stdout) : null;
+  }
+
+  /** `sudo -n pmset -a disablesleep 1|0`. */
+  private async disableSleep(on: boolean): Promise<HoldOutcome> {
+    const r = await this.deps.run(SUDO, ["-n", PMSET, "-a", "disablesleep", on ? "1" : "0"]);
+    if (r.code === 0) return { ok: true };
+    return { ok: false, refused: sudoRefused(r), message: `pmset failed: ${(r.stderr || r.stdout).trim().slice(0, 200)}` };
+  }
+
+  hold(): Promise<HoldOutcome> {
+    return this.disableSleep(true);
+  }
+
+  release(): Promise<HoldOutcome> {
+    return this.disableSleep(false);
+  }
 
   /**
    * With the bit cleared, a Mac whose lid is shut keeps running: nothing re-evaluates the lid. If the
@@ -405,8 +533,8 @@ export class AwakeController {
    * closed-display mode), put it to sleep so a bagged Mac does not run on. Tried unprivileged first,
    * then through the sudoers rule.
    */
-  private async sleepIfLidClosed(): Promise<void> {
-    await this.sleep(SLEEPNOW_SETTLE_MS);
+  async afterRelease(): Promise<void> {
+    await this.deps.sleep(SLEEPNOW_SETTLE_MS);
     const c = await this.readClamshell();
     if (!c?.lidClosed || c.causesSleep !== true) return;
     this.deps.log.info("awake: lid is closed and nothing else holds the Mac awake; sleeping now");

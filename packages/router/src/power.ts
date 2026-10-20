@@ -1,6 +1,8 @@
 // The admin contract for lid-closed awake + hotspot failover (`GET|PUT /api/power`).
 //
-//   GET  → { awake: AwakeStatus, tether: TetherStatus }
+//   GET  → { platform: "darwin"|"win32"|"linux", awake: AwakeStatus, tether: TetherStatus }
+//        (`platform` lets a client word things per OS: "Mac" or "PC", the Windows hints. Anything
+//        that is neither macOS nor Windows reads "linux", where both features are `unsupported`.)
 //   PUT  { awake?: { mode?: "off"|"working"|"on", until?: ISO string | null },
 //          tether?: { enabled?: boolean, pin?: boolean } }
 //        mode/until/enabled are saved to config.json (the router picks the file up by mtime, like
@@ -13,7 +15,12 @@ import type { AwakeMode } from "./config.ts";
 import type { AwakeStatus } from "./awake.ts";
 import type { TetherStatus } from "./tether.ts";
 
-export type PowerStatus = { awake: AwakeStatus; tether: TetherStatus };
+export type PowerPlatform = "darwin" | "win32" | "linux";
+export type PowerStatus = { platform: PowerPlatform; awake: AwakeStatus; tether: TetherStatus };
+
+export function powerPlatform(p: NodeJS.Platform): PowerPlatform {
+  return p === "darwin" || p === "win32" ? p : "linux";
+}
 
 export type PowerChange = {
   awake?: { mode?: AwakeMode; until?: string | null };

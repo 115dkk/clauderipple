@@ -1576,14 +1576,15 @@ this mapping does not increase the backend's context limit.
 
 **What.** For the owner who drives the Mac from Ripple Remote while away: keep a MacBook running
 with its lid closed while Claude works, and when Wi-Fi drops or has no internet move to the iPhone
-Personal Hotspot, then back to a known Wi-Fi when one works again. macOS only; both are off until
-configured and are no-ops elsewhere (`/api/power` says `unsupported`). Replaces the Insomnia app
-(krishhgg/Insomnia), which `awake setup` removes.
+Personal Hotspot, then back to a known Wi-Fi when one works again. macOS and Windows (Windows: see
+"Windows" below); both are off until configured and are no-ops on Linux (`/api/power` says
+`unsupported`). Replaces the Insomnia app (krishhgg/Insomnia), which `awake setup` removes.
 
 **Why the router owns it.** It is already supervised (launchd KeepAlive) and it is the only process
 that knows whether a model call is in flight (`Stats.messagesInFlight`, `lastMessageStartedAt/EndedAt`
-on the proxy and the OpenAI ingress). Code: `packages/router/src/awake.ts`, `tether.ts`, `power.ts`
-(admin contract); CLI `packages/cli/src/awake-setup.ts`, `power.ts`.
+on the proxy and the OpenAI ingress). Code: `packages/router/src/awake.ts`, `tether.ts` (with their
+Windows backends `awake-win.ts`, `tether-win.ts`), `power.ts` (admin contract); CLI
+`packages/cli/src/awake-setup.ts`, `power.ts`.
 
 **Lid-closed awake.** The only mechanism that holds a closed MacBook awake on battery or without an
 external display is `pmset -a disablesleep 1` as root: undocumented (absent from `man pmset`), but it
@@ -1648,8 +1649,9 @@ switching. Every decision is logged once, with its reason. "Ask to join hotspots
 (macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting lives in a root-only
 file (`com.apple.airport.preferences.plist`: permission denied, measured), so it is only hinted at.
 
-**Surfaces.** `GET /api/power` → `{ awake: { mode, applied, reason, setup, battery, thermal, lidClosed,
-until }, tether: { enabled, network, state, pinned, hotspotSsid, lastSwitch, lastProbe, hint } }`;
+**Surfaces.** `GET /api/power` → `{ platform: "darwin"|"win32"|"linux", awake: { mode, applied, reason,
+setup, battery, thermal, lidClosed, until }, tether: { enabled, network, state, pinned, hotspotSsid,
+lastSwitch, lastProbe, hint } }` (`platform` so a client can say Mac or PC and word hints per OS);
 `PUT /api/power` `{ awake?: { mode?, until?: ISO|null }, tether?: { enabled?, pin? } }` (mode, until
 and enabled are saved to config.json; pin is not; unknown fields are refused; the same cross-site
 guard as every admin write). Config: `awake: { mode, until?, batteryFloorPercent }`, `tether:
@@ -1670,3 +1672,83 @@ Sources: research report 2026-10-20 (Insomnia install.sh/backstop.sh/NetworkFail
 MacMiniMode `Sources/daemon/main.swift`; wifihop script; WiFiGuard `Connectivity.swift`; Apple
 102282, 102336, 109321, mchl7403f0ee; Apple DTS forum 816619, 799718, 692709). Behavioural references
 only; no code was copied.
+
+### Windows (2026-10-20)
+
+Same controller, decision, journal, probe rule and API; the OS part is a backend
+(`awake-win.ts`, `tether-win.ts`). **No elevation anywhere**: `awake setup` installs nothing and only
+checks, `setup` always reads `ok`.
+
+**Keep awake = two halves.** (1) Idle sleep: `SetThreadExecutionState(ES_CONTINUOUS |
+ES_SYSTEM_REQUIRED)` "forces the system to be in the working state" until cleared — held by one
+long-lived Windows PowerShell child the router owns (Add-Type P/Invoke, one dedicated thread, the
+pattern PowerToys Awake's `Core/Manager.cs` uses; behavioural reference only). It reads commands on
+stdin and exits on EOF, which is what a dead router's pipe gives it; the execution state is per
+thread, so it ends with the child. No `ES_DISPLAY_REQUIRED` (the screen may sleep) and no away mode
+(for media PCs, not laptops — same page). (2) The lid: the same page says the function "cannot be
+used to prevent the user from putting the computer to sleep … when they close the lid", so while held
+the active plan's lid-close action (SUB_BUTTONS 4f971e89-…, LIDACTION 5ca83367-…; 0 Do nothing,
+1 Sleep, 2 Hibernate, 3 Shut down — Microsoft Learn "Lid switch close action") is set to 0 on AC and DC
+with `powercfg /setacvalueindex|/setdcvalueindex <scheme> … 0` + `/setactive SCHEME_CURRENT`. The
+user's values (and the scheme GUID) are journaled in `awake.json` as `lid` **before** the write and
+put back on release, on the next start's reconcile, and by `stop`/`uninstall`/`awake off` with no
+router. No admin: "Windows has a single default ACL on all power policy objects … read, write, and
+change permissions to members of the Authenticated Users group" (Microsoft Learn "Administrator
+Overrides"); a Group Policy override makes powercfg fail, which is reported (and what was written is
+put back), not escalated — UAC would not lift a policy. `awake setup` proves the write is allowed by
+writing the current values back (a no-op). `powercfg /q` output is translated, so only GUIDs and the
+two `0x…` indexes (AC first, then DC) are parsed; `/qh` is tried when `/q` hides the setting. A user
+who changes the lid action (or switches plan) while held has decided: their new values become the
+ones to restore (a switched-from plan gets its values back at once).
+
+**Exit ordering.** As on macOS, the router's exit leaves the lid action set for the successor; the
+execution state does go with the child, but the idle timer only restarts from that moment and the
+successor holds again within one tick. A router that never comes back leaves "Do nothing" until
+`stop`/a later start, but the idle timer then sleeps the PC normally — milder than the macOS bit.
+
+**Guards.** Battery from `GetSystemPowerStatus` in the child (ACLineStatus 0 = on battery,
+BatteryFlag 128 = no battery, BatteryLifePercent) rather than `Win32_Battery`: it states the AC line
+directly instead of inferring it from BatteryStatus codes, and needs no extra process per tick.
+Thermal: not readable without admin (root\wmi thermal zones) → `unknown`, reported and not acted on.
+The child is started only when something wants the PC awake or a hold is ours to release; one that
+cannot start (Constrained Language Mode, a blocked Add-Type) is retried once a minute with its error
+as the reason.
+
+**Releasing with the lid closed.** The child registers `PowerSettingRegisterNotification(
+GUID_LIDSWITCH_STATE_CHANGE, DEVICE_NOTIFY_CALLBACK)` — no window needed; "immediately after
+registration, the callback will be invoked with the current value", and not at all without a lid
+device (Microsoft Learn). Windows acts on the lid only when it moves, so after the restore, if the
+lid reads closed and the user's restored action for the current source is Sleep on a machine with S3
+and without AoAc (`GetPwrCapabilities`), the child calls `SetSuspendState(FALSE, FALSE, FALSE)` after
+enabling SeShutdownPrivilege (its docs require it); Hibernate likewise with a hibernation file. Never
+`rundll32 powrprof.dll,SetSuspendState` (rundll32 passes its own argument layout, not three BOOLEANs).
+On Modern Standby (AoAc) SetSuspendState's behaviour is undocumented, so nothing is called and
+Windows' idle timer sleeps it (logged). Shut down / Do nothing: nothing is done.
+
+**Hotspot failover.** Windows 11 24H2 gates the Native Wifi calls that can reveal a BSSID behind
+Location consent: WlanGetAvailableNetworkList, WlanGetNetworkBssList, WlanScan and WlanQueryInterface
+(current_connection) return ERROR_ACCESS_DENIED (Microsoft Learn "Changes to API behavior for Wi-Fi
+access and location"). So `netsh wlan show interfaces` (the last one) is **not** used: the adapter is
+`Get-NetAdapter -Physical` with NdisPhysicalMedium 9 (Native 802.11) or 1, its IPv4 comes from
+`os.networkInterfaces()` under the same name, and "on the hotspot" is the 172.20.10.0/28 address as
+on macOS. Connect, disconnect and profile listing are not on Microsoft's list; if a build gates them
+anyway netsh says so ("…need location permission… ms-settings:privacy-location") and the state is
+`needs-location` with the Settings path. Failover: `netsh wlan connect name="<profile>"
+interface="<adapter>"` (Windows keeps the password in the profile; no profile → `no-hotspot-profile`,
+"join it once from the Wi-Fi menu"). netsh returns once the request is queued, so the address decides:
+none within 15s → `hotspot-not-visible`. Return: only if some other profile has
+`connectionMode=auto` (else no attempt, a hint, the same backoff); `netsh wlan disconnect` lets
+auto-config join the best automatic network; whether a netsh disconnect suppresses that on Vista+ is
+undocumented (WlanDisconnect's "on-demand profile" note is for XP), so with no address after 8s the
+first automatic profile is joined by name. Profile names come from `show profiles` (the text after
+" : " — labels are translated, names are not, order = Windows' preference), SSID and connection mode
+from `export profile` XML (not translated; exported without `key=clear`, into a temp folder removed
+right after). netsh gets `name="…"` verbatim (`windowsVerbatimArguments`), only for names without `"`.
+Every powershell.exe runs with PSModulePath removed (§5, issue #35).
+
+**Not verified on real Windows hardware (2026-10-20).** The Windows 11 VM could not be reached
+(Parallels would not initialise without an admin step), so none of this has run on Windows yet: the
+C# compiling under Add-Type, the child's stdin/EOF behaviour under powershell.exe, the lid callback,
+SetSuspendState, `powercfg /q` output on a real laptop, and every netsh path are covered only by
+fakes and by a Node stand-in for the child's line protocol. Lid and Wi-Fi need a real laptop with an
+iPhone in any case.

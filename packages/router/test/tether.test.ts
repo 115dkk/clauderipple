@@ -150,8 +150,8 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
   return { c, clock, calls, lines, net, ticks, joins, returns, set: (s: Partial<TetherSettings>) => (settings = { ...settings, ...s }) };
 }
 
-test("off this Mac, or disabled: no command and no probe", async () => {
-  const a = rig({ platform: "win32" });
+test("on Linux, or disabled: no command and no probe", async () => {
+  const a = rig({ platform: "linux" });
   a.c.start();
   await a.ticks(5);
   assert.deepEqual(a.calls, []);

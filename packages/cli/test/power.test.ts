@@ -9,6 +9,7 @@ import type { RunResult } from "../../router/src/awake.ts";
 import type { SetupDeps } from "../src/awake-setup.ts";
 
 const STATUS: PowerStatus = {
+  platform: "darwin",
   awake: { mode: "working", applied: true, reason: "working: 1 model call running", setup: "ok", battery: { percent: 55, onBattery: false }, thermal: "normal", lidClosed: true, until: null },
   tether: { enabled: true, network: "hotspot", state: "hotspot-not-visible", pinned: false, hotspotSsid: "PBJ", lastSwitch: null, lastProbe: { at: "2026-10-20T03:00:00.000Z", ok: false, network: "wifi" }, hint: "Open Personal Hotspot" },
 };

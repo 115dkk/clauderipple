@@ -538,11 +538,11 @@ async function recovery(): Promise<void> {
  * (router awake.ts). When it is stopped for good there is no successor, so clear it here.
  */
 async function releaseHeldSleep(reason: string): Promise<void> {
-  const { releaseAwake } = await import("./awake-setup.ts");
+  const { releaseAwake, releaseFailedHint } = await import("./awake-setup.ts");
   const { execRunner } = await import("../../router/src/awake.ts");
   const r = await releaseAwake(execRunner(), homeDir(), reason);
-  if (r === "released") console.log("✓ sleep re-enabled (lid-closed awake was holding the Mac awake)");
-  if (r === "failed") console.log("✗ could not re-enable sleep: run `sudo pmset -a disablesleep 0`");
+  if (r === "released") console.log(process.platform === "win32" ? "✓ the lid-close action is back to yours (lid-closed awake had set it to Do nothing)" : "✓ sleep re-enabled (lid-closed awake was holding the Mac awake)");
+  if (r === "failed") console.log(`✗ could not re-enable sleep: ${releaseFailedHint()}`);
 }
 
 function help(): void {
@@ -584,11 +584,12 @@ function help(): void {
                     prefix subagent titles with the real model and thinking depth ("Terra·high · …") via a Claude Code hook
   mod on|off|status show where each request went above the Claude Code prompt, and the request log in a pane (/ripple-log), via a Claude Code mod
   awake setup [--ssid <hotspot name>] [--remove]
-                    macOS: allow ClaudeRipple to keep the Mac awake with the lid closed (and join that iPhone hotspot);
-                    asks for your password once in macOS's own dialog, and removes Insomnia if it is installed
+                    allow ClaudeRipple to keep the laptop awake with the lid closed (and join that iPhone hotspot).
+                    macOS: asks for your password once in macOS's own dialog, and removes Insomnia if it is installed;
+                    Windows: no administrator step, only checks (power plan, Wi-Fi adapter, saved hotspot profile)
   awake on|off|working [--until HH:MM]
                     working: awake while Claude works and 10 min after; on: always (until HH:MM); off: never
-  tether on|off     macOS: join the iPhone hotspot when Wi-Fi has no internet, and go back to Wi-Fi when a known one works
+  tether on|off     join the iPhone hotspot when Wi-Fi has no internet, and go back to Wi-Fi when a known one works
   power [--json]    lid-closed awake and hotspot state
 
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);

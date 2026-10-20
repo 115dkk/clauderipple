@@ -5,7 +5,7 @@
 
 import { persistPowerChange, type PowerChange, type PowerStatus } from "../../router/src/power.ts";
 import type { Runner } from "../../router/src/awake.ts";
-import { awakeRemove, awakeSetup, releaseAwake, type SetupDeps } from "./awake-setup.ts";
+import { awakeRemove, awakeSetup, releaseAwake, releaseFailedHint, type SetupDeps } from "./awake-setup.ts";
 
 /** `HH:MM` → the next time the clock shows it (today, else tomorrow), as ISO. A full ISO time is accepted too. */
 export function parseUntil(text: string, now: Date): string {
@@ -31,7 +31,8 @@ export function formatPower(s: PowerStatus): string[] {
   const t = s.tether;
   const lines: string[] = [];
   const setup = a.setup === "ok" ? "" : a.setup === "needs-setup" ? " · needs setup: clauderipple awake setup" : " · not supported here";
-  lines.push(`awake   ${a.mode}${a.until ? ` until ${clock(a.until)}` : ""} · ${a.applied ? "holding the Mac awake" : "sleep allowed"} (${a.reason})${setup}`);
+  const machine = s.platform === "win32" ? "PC" : "Mac";
+  lines.push(`awake   ${a.mode}${a.until ? ` until ${clock(a.until)}` : ""} · ${a.applied ? `holding the ${machine} awake` : "sleep allowed"} (${a.reason})${setup}`);
   const facts: string[] = [];
   if (a.battery) facts.push(a.battery.percent === null ? "no battery" : `battery ${a.battery.percent}% ${a.battery.onBattery ? "(on battery)" : "(on power)"}`);
   if (a.thermal) facts.push(`thermal ${a.thermal}`);
@@ -73,6 +74,7 @@ export type PowerCliDeps = {
   setupDeps: () => SetupDeps;
   print: (line: string) => void;
   now: () => Date;
+  platform?: NodeJS.Platform;
 };
 
 export const POWER_USAGE = `usage:
@@ -89,6 +91,8 @@ export async function powerCli(args: string[], d: PowerCliDeps): Promise<number>
     return i >= 0 ? args[i + 1] : undefined;
   };
   const flag = (name: string): boolean => args.includes(`--${name}`);
+  const platform = d.platform ?? process.platform;
+  const machine = platform === "win32" ? "PC" : "Mac";
 
   const show = async (): Promise<number> => {
     const r = await d.call("GET");
@@ -119,9 +123,9 @@ export async function powerCli(args: string[], d: PowerCliDeps): Promise<number>
     persistPowerChange(d.configFile, c);
     d.print("✓ saved to config.json; the router is not running, so it applies when it starts (clauderipple start)");
     if (c.awake?.mode === "off") {
-      const released = await releaseAwake(d.run, d.rippleHome, "awake off (router not running)");
-      if (released === "released") d.print("✓ sleep re-enabled (the router had left it disabled)");
-      if (released === "failed") d.print("✗ could not re-enable sleep: run `sudo pmset -a disablesleep 0`");
+      const released = await releaseAwake(d.run, d.rippleHome, "awake off (router not running)", platform);
+      if (released === "released") d.print(platform === "win32" ? "✓ the lid-close action is back to yours (the router had left it on Do nothing)" : "✓ sleep re-enabled (the router had left it disabled)");
+      if (released === "failed") d.print(`✗ could not re-enable sleep: ${releaseFailedHint(platform)}`);
     }
     return 0;
   };
@@ -149,10 +153,10 @@ export async function powerCli(args: string[], d: PowerCliDeps): Promise<number>
       if (ssid !== undefined) persistPowerChange(d.configFile, { tether: { hotspotSsid: ssid } });
       d.print("");
       d.print("Next:");
-      d.print("  clauderipple awake working   keep the Mac awake (lid closed too) while Claude works, and 10 min after");
+      d.print(`  clauderipple awake working   keep the ${machine} awake (lid closed too) while Claude works, and 10 min after`);
       d.print("  clauderipple awake on [--until HH:MM]   keep it awake regardless");
       if (ssid !== undefined) d.print("  clauderipple tether on       join the iPhone hotspot when Wi-Fi has no internet, and come back later");
-      d.print("Keep a closed Mac on a hard, ventilated surface — never in a bag while it is held awake.");
+      d.print(`Keep a closed ${machine === "PC" ? "laptop" : "Mac"} on a hard, ventilated surface — never in a bag while it is held awake.`);
       return 0;
     }
     if (sub === "on" || sub === "off" || sub === "working") {

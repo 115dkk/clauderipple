@@ -12,6 +12,7 @@ import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
 import { AwakeController, execRunner, type Activity } from "./awake.ts";
 import { TetherController } from "./tether.ts";
+import { powerPlatform } from "./power.ts";
 import { defaultAgentDir, syncAgentFiles } from "./agents.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
@@ -103,7 +104,7 @@ allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth });
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name) });
 
-// Lid-closed awake and hotspot failover (macOS; both are no-ops elsewhere and off until configured).
+// Lid-closed awake and hotspot failover (macOS and Windows; no-ops elsewhere, off until configured).
 // They read Claude's activity from the two servers' counters. Started after listen(), below.
 const activity = (): Activity => {
   const p = proxy.stats;
@@ -257,7 +258,7 @@ proxy
         },
       },
       power: {
-        status: () => ({ awake: awake.status(), tether: tether.status() }),
+        status: () => ({ platform: powerPlatform(process.platform), awake: awake.status(), tether: tether.status() }),
         pin: (on) => tether.setPin(on),
         poke: async () => {
           tether.kick();

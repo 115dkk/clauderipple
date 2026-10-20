@@ -17,6 +17,12 @@
 // leftovers; the rest of Insomnia is removed unprivileged afterwards. Everything is built as data
 // and unit-tested as text: no SSID ever reaches a shell (it is validated, then only written to the
 // file), and every path in the script is single-quoted.
+//
+// Windows has no privileged step (docs/ARCHITECTURE.md §8, Windows): power plans carry one ACL that
+// gives Authenticated Users read/write, and joining a saved Wi-Fi profile is a user action. `awake
+// setup` there checks instead of installing: that this account may change the lid-close action (a
+// write of the values already there — a Group Policy override refuses it), and with `--ssid` that the
+// Wi-Fi adapter, the hotspot's saved profile and an automatic profile to come back to exist.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -24,7 +30,9 @@ import os from "node:os";
 import path from "node:path";
 import { ssidProblem } from "../../router/src/config.ts";
 import { PMSET, SUDO, SUDOERS_FILE, readJournal, type Runner } from "../../router/src/awake.ts";
+import { POWERSHELL, powershellEnv, psArgs, readLidAction, restoreLidFromJournal, writeLidAction } from "../../router/src/awake-win.ts";
 import { NETWORKSETUP, parseWifiDevice } from "../../router/src/tether.ts";
+import { FIND_WIFI_PS, WIN_HINTS, autoProfiles, hotspotProfile, listWifiProfiles, parseAdapterName } from "../../router/src/tether-win.ts";
 
 export const OSASCRIPT = "/usr/bin/osascript";
 const STAGED = "/etc/sudoers.d/.clauderipple.new"; // sudo ignores names containing a dot
@@ -178,8 +186,45 @@ export function defaultSetupDeps(run: Runner, rippleHome: string): SetupDeps {
 
 export type SetupResult = { ok: boolean; detail: string; wifiDevice?: string };
 
+const LID_NAMES = ["Do nothing", "Sleep", "Hibernate", "Shut down"];
+
+/** Windows: nothing to install; check what the router will need, and say what is missing. */
+async function windowsSetup(o: { ssid?: string }, d: SetupDeps): Promise<SetupResult> {
+  if (o.ssid !== undefined) {
+    const problem = ssidProblem(o.ssid);
+    if (problem) return { ok: false, detail: problem };
+  }
+  const { lid, error } = await readLidAction(d.run);
+  if (lid) {
+    // Writing back the values already there changes nothing and proves the write is allowed.
+    const err = await writeLidAction(d.run, lid.scheme, lid.ac, lid.dc);
+    if (err) return { ok: false, detail: `Windows does not let this account change the power plan's lid-close action (a Group Policy setting?): ${err}` };
+    d.print(`✓ the lid-close action can be changed without administrator rights (now: plugged in ${LID_NAMES[lid.ac]}, on battery ${LID_NAMES[lid.dc]}); ClaudeRipple sets "Do nothing" only while it holds the PC awake, and puts these back`);
+  } else d.print(`· this PC has no lid-close setting${error ? ` (${error})` : ""}: only idle sleep is held off`);
+  let wifiDevice: string | undefined;
+  if (o.ssid !== undefined) {
+    const r = await d.run(POWERSHELL, psArgs(FIND_WIFI_PS), { env: powershellEnv(), timeoutMs: 20_000 });
+    wifiDevice = (r.code === 0 ? parseAdapterName(r.stdout) : null) ?? undefined;
+    if (!wifiDevice) return { ok: false, detail: "no Wi-Fi adapter found (Get-NetAdapter)" };
+    const list = await listWifiProfiles(d.run);
+    if (list.location) d.print(`· ${WIN_HINTS["needs-location"]}`);
+    else if (list.error) d.print(`· could not list the saved Wi-Fi networks: ${list.error}`);
+    else {
+      const hotspot = hotspotProfile(list.profiles, o.ssid);
+      d.print(hotspot ? `✓ Windows has joined "${o.ssid}" before (saved profile "${hotspot.name}")` : `· ${WIN_HINTS["no-hotspot-profile"]}`);
+      const autos = autoProfiles(list.profiles, o.ssid);
+      d.print(autos.length
+        ? `✓ ${autos.length} other Wi-Fi network${autos.length === 1 ? "" : "s"} connect${autos.length === 1 ? "s" : ""} automatically, so ClaudeRipple can come back from the hotspot`
+        : "· no other Wi-Fi on this PC is set to connect automatically, so ClaudeRipple would stay on the hotspot");
+      if (hotspot?.auto) d.print(`· the hotspot's profile connects automatically too, so Windows may pick it over your Wi-Fi when coming back; \`netsh wlan set profileparameter name="${hotspot.name}" connectionmode=manual\` stops that (ClaudeRipple joins it by name either way)`);
+    }
+  }
+  return { ok: true, detail: "setup complete (Windows needs no administrator step)", ...(wifiDevice ? { wifiDevice } : {}) };
+}
+
 export async function awakeSetup(o: { ssid?: string }, d: SetupDeps): Promise<SetupResult> {
-  if (d.platform !== "darwin") return { ok: false, detail: "lid-closed awake and hotspot failover are macOS only" };
+  if (d.platform === "win32") return windowsSetup(o, d);
+  if (d.platform !== "darwin") return { ok: false, detail: "lid-closed awake and hotspot failover are macOS and Windows only" };
   let wifiDevice: string | undefined;
   if (o.ssid !== undefined) {
     const problem = ssidProblem(o.ssid);
@@ -226,7 +271,13 @@ async function runCleanupStep(step: CleanupStep, d: SetupDeps): Promise<boolean>
 }
 
 export async function awakeRemove(d: SetupDeps): Promise<SetupResult> {
-  if (d.platform !== "darwin") return { ok: false, detail: "lid-closed awake is macOS only" };
+  if (d.platform === "win32") {
+    // Nothing was installed; put back a lid action a router left changed.
+    const r = await releaseAwake(d.run, d.rippleHome, "awake setup --remove", "win32");
+    if (r === "failed") return { ok: false, detail: `could not restore the lid-close action: ${releaseFailedHint("win32")}` };
+    return { ok: true, detail: `nothing to remove on Windows${r === "released" ? "; the lid-close action is back to yours" : ""}` };
+  }
+  if (d.platform !== "darwin") return { ok: false, detail: "lid-closed awake is macOS and Windows only" };
   const journal = readJournal(path.join(d.rippleHome, "awake.json"));
   const script = removeScript({ clearSleepBit: journal?.applied === true });
   d.print("macOS will ask for your password once, in its own dialog.");
@@ -245,11 +296,26 @@ function writeReleasedJournal(rippleHome: string, reason: string): void {
   fs.writeFileSync(file, JSON.stringify({ applied: false, since: new Date().toISOString(), reason, ...(prev?.lastActivityAt !== undefined ? { lastActivityAt: prev.lastActivityAt } : {}) }) + "\n", { mode: 0o600 });
 }
 
+/** What to tell a user whose machine could not be released. */
+export function releaseFailedHint(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32"
+    ? "set it back in Control Panel → Power Options → Choose what closing the lid does"
+    : "run `sudo pmset -a disablesleep 0`";
+}
+
 /**
- * If the router set the sleep bit (journal), clear it now with `sudo -n`. For `stop`, `uninstall`
- * and `awake off` with no router answering: a router that is gone cannot reconcile it.
+ * If the router set the sleep bit (journal), clear it now with `sudo -n`; on Windows, put back the
+ * lid-close action it saved (the execution state died with the router's child). For `stop`,
+ * `uninstall` and `awake off` with no router answering: a router that is gone cannot reconcile it.
  */
 export async function releaseAwake(run: Runner, rippleHome: string, reason: string, platform: NodeJS.Platform = process.platform): Promise<"released" | "not-held" | "failed"> {
+  if (platform === "win32") {
+    const journal = readJournal(path.join(rippleHome, "awake.json"));
+    const r = await restoreLidFromJournal(run, journal);
+    if (r === "failed") return r;
+    if (journal?.applied) writeReleasedJournal(rippleHome, reason);
+    return r;
+  }
   if (platform !== "darwin") return "not-held";
   const journal = readJournal(path.join(rippleHome, "awake.json"));
   if (!journal?.applied) return "not-held";

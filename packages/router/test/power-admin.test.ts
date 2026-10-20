@@ -10,6 +10,7 @@ import { RequestLog } from "../src/requestlog.ts";
 import { parsePowerChange, persistPowerChange, type PowerApi, type PowerStatus } from "../src/power.ts";
 
 const STATUS: PowerStatus = {
+  platform: "darwin",
   awake: { mode: "working", applied: true, reason: "working: 1 model call running", setup: "ok", battery: { percent: 55, onBattery: false }, thermal: "normal", lidClosed: true, until: null },
   tether: { enabled: true, network: "wifi", state: "watching", pinned: false, hotspotSsid: "PBJ", lastSwitch: null, lastProbe: { at: "2026-10-20T12:00:00.000Z", ok: true, network: "wifi" }, hint: null },
 };
@@ -59,6 +60,7 @@ test("GET /api/power returns the contract shape", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/power`);
     assert.equal(res.status, 200);
     const body = (await res.json()) as PowerStatus;
+    assert.equal(body.platform, "darwin");
     assert.deepEqual(Object.keys(body.awake).sort(), ["applied", "battery", "lidClosed", "mode", "reason", "setup", "thermal", "until"]);
     for (const k of ["enabled", "network", "state", "lastSwitch", "lastProbe", "hint"]) assert.ok(k in body.tether, k);
   });
