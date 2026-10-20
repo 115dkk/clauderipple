@@ -159,14 +159,27 @@
     </header>
     <div id="logs-requests-panel" role="tabpanel">
       <section class="section">
-        <div class="logs-header-row"><div><h2 class="section-title" data-i18n="logs.lastHour">Last hour</h2><span class="small" data-i18n="logs.polling">Updates every 3s</span></div></div>
+        <div class="logs-header-row">
+          <div><h2 class="section-title" data-i18n="logs.usage">Usage</h2><span class="small" id="logs-range-caption"></span></div>
+          <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
+        </div>
+        <div class="logs-period-row">
+          <div class="segmented logs-period" id="logs-period" role="radiogroup" data-i18n-title="logs.period"></div>
+          <div class="logs-custom" id="logs-custom" hidden>
+            <input type="date" id="logs-from" data-i18n-title="logs.customFrom" />
+            <span class="logs-custom-dash" aria-hidden="true">–</span>
+            <input type="date" id="logs-to" data-i18n-title="logs.customTo" />
+          </div>
+        </div>
         <div class="group logs-summary" id="logs-summary"></div>
       </section>
       <section class="section">
-        <div class="logs-header-row">
-          <h2 class="section-title" data-i18n="logs.requests">Requests</h2>
-          <label class="logs-filter"><span data-i18n="logs.provider">Provider</span><select id="logs-provider"><option value="" data-i18n="logs.all">All</option></select></label>
-        </div>
+        <div class="logs-header-row"><h2 class="section-title" data-i18n="logs.byModel">Usage by model</h2></div>
+        <div class="group logs-table-card"><table id="models-table"><thead><tr><th data-i18n="logs.th.models">Model</th><th data-i18n="logs.th.count">Requests</th><th data-i18n="logs.th.input">Input</th><th data-i18n="logs.th.output">Output</th><th data-i18n="logs.th.avg">Avg. duration</th></tr></thead><tbody></tbody></table></div>
+        <div class="group empty-card" id="models-empty" hidden data-i18n="logs.modelsEmpty">No usage in this period.</div>
+      </section>
+      <section class="section">
+        <div class="logs-header-row"><div><h2 class="section-title" data-i18n="logs.recent">Recent requests</h2><span class="small" data-i18n="logs.recentNote">Last 200</span></div></div>
         <div class="group logs-table-card"><table id="requests-table"><thead><tr><th data-i18n="logs.th.time">Time</th><th data-i18n="logs.th.models">Model</th><th data-i18n="logs.th.effort">effort</th><th data-i18n="logs.th.input">Input</th><th data-i18n="logs.th.output">Output</th><th data-i18n="logs.th.duration">Duration</th><th data-i18n="logs.th.status">Status</th></tr></thead><tbody></tbody></table></div>
         <div class="group empty-card" id="requests-empty" hidden data-i18n="logs.empty">No requests yet.</div>
       </section>

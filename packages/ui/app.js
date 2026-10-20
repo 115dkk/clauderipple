@@ -3280,6 +3280,29 @@ let knownRequestProviders = new Set();
 let requestProvider = "";
 let showCountTokens = false;
 let expandedRequestId = null;
+// The usage period. "hour" is the exact rolling hour; every other period reads the hourly history.
+const USAGE_PERIODS = ["hour", "today", "7d", "30d", "month", "all", "custom"];
+const USAGE_STORE = "clauderipple_logs_usage";
+let usagePeriod = "hour";
+let usageFrom = ""; // custom start, a local "YYYY-MM-DD"
+let usageTo = ""; // custom end (inclusive), a local "YYYY-MM-DD"
+let lastSummary = null;
+let configuredProviders = null; // provider names from /api/config, fetched once for this view
+let renderedProviderNames = "";
+let requestsGeneration = 0;
+(function restoreUsage() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(USAGE_STORE) || "null");
+    if (!saved || typeof saved !== "object") return;
+    if (USAGE_PERIODS.includes(saved.period)) usagePeriod = saved.period;
+    if (isDay(saved.from)) usageFrom = saved.from;
+    if (isDay(saved.to)) usageTo = saved.to;
+    if (typeof saved.provider === "string") requestProvider = saved.provider;
+  } catch { /* storage unavailable or unreadable: start from the defaults */ }
+})();
+function saveUsage() {
+  try { localStorage.setItem(USAGE_STORE, JSON.stringify({ period: usagePeriod, from: usageFrom, to: usageTo, provider: requestProvider })); } catch { /* unavailable */ }
+}
 
 function colorizeLogLine(line) {
   const cls = /\bERROR\b|\berror\b/.test(line) ? "tag-ERR" : /\bWARN\b/.test(line) ? "tag-WARN" : "tag-PASS";
@@ -3310,10 +3333,97 @@ function showLogsPanel(name) {
 }
 $("#logs-requests-tab").addEventListener("click", () => showLogsPanel("requests"));
 $("#logs-raw-tab").addEventListener("click", () => showLogsPanel("raw"));
-$("#logs-provider").addEventListener("change", (event) => { requestProvider = event.target.value; void refreshRequests(); });
+$("#logs-provider").addEventListener("change", (event) => { requestProvider = event.target.value; saveUsage(); void refreshRequests(); });
 
+// ---- Usage period: local calendar days, so "today" starts at this machine's midnight.
+function isDay(value) { return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(dayStart(value).valueOf()); }
+function dayStart(value) { const [y, m, d] = value.split("-").map(Number); return new Date(y, m - 1, d); }
+function dayKey(date) { const two = (n) => String(n).padStart(2, "0"); return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`; }
+function daysAgo(n) { const now = new Date(); return new Date(now.getFullYear(), now.getMonth(), now.getDate() - n); }
+/** The period as `{from, to}` in epoch ms (`to` exclusive), or null for the rolling hour. */
+function usageRange() {
+  const now = Date.now();
+  if (usagePeriod === "today") return { from: daysAgo(0).valueOf(), to: now };
+  if (usagePeriod === "7d") return { from: daysAgo(6).valueOf(), to: now };
+  if (usagePeriod === "30d") return { from: daysAgo(29).valueOf(), to: now };
+  if (usagePeriod === "month") { const today = new Date(); return { from: new Date(today.getFullYear(), today.getMonth(), 1).valueOf(), to: now }; }
+  if (usagePeriod === "all") return { from: 0, to: now };
+  if (usagePeriod === "custom") {
+    if (!isDay(usageFrom) || !isDay(usageTo)) return null;
+    const [first, last] = usageFrom <= usageTo ? [usageFrom, usageTo] : [usageTo, usageFrom];
+    const end = dayStart(last);
+    return { from: dayStart(first).valueOf(), to: new Date(end.getFullYear(), end.getMonth(), end.getDate() + 1).valueOf() };
+  }
+  return null;
+}
+function formatDay(ms, withYear) {
+  const options = withYear ? { year: "numeric", month: "short", day: "numeric" } : { month: "short", day: "numeric" };
+  try { return new Intl.DateTimeFormat(CURRENT_LANG, options).format(new Date(ms)); } catch { return dayKey(new Date(ms)); }
+}
+/** What the usage numbers cover, in words: "Last hour · …" or "Oct 14 – Oct 20 · Records start Oct 12". */
+function usageCaption(range, earliest) {
+  if (!range) return `${t("logs.lastHour")} · ${t("logs.polling")}`;
+  const firstRecord = earliest ? new Date(earliest).valueOf() : NaN;
+  // "All" starts where the records do; any other period that starts before them says so.
+  const start = usagePeriod === "all" && Number.isFinite(firstRecord) ? firstRecord : range.from;
+  const end = Math.max(start, Math.min(range.to, Date.now()) - 1);
+  const year = new Date().getFullYear();
+  const withYear = new Date(start).getFullYear() !== year || new Date(end).getFullYear() !== year;
+  const first = formatDay(start, withYear);
+  const last = formatDay(end, withYear);
+  const parts = [first === last ? first : `${first} – ${last}`];
+  if (usagePeriod !== "all" && Number.isFinite(firstRecord) && firstRecord > range.from) parts.push(t("logs.since", { date: formatDay(firstRecord, withYear) }));
+  return parts.join(" · ");
+}
+function renderPeriodControl() {
+  const control = $("#logs-period");
+  control.replaceChildren(...USAGE_PERIODS.map((period) => {
+    const on = period === usagePeriod;
+    return el("button", { type: "button", class: on ? "active" : "", role: "radio", "aria-checked": String(on), text: t(`logs.period.${period}`), onclick: () => pickPeriod(period) });
+  }));
+  $("#logs-custom").hidden = usagePeriod !== "custom";
+}
+function pickPeriod(period) {
+  if (period === usagePeriod) return;
+  usagePeriod = period;
+  if (period === "custom") {
+    // A first custom range starts as the last seven days, so both fields hold something to adjust.
+    if (!isDay(usageFrom)) usageFrom = dayKey(daysAgo(6));
+    if (!isDay(usageTo)) usageTo = dayKey(daysAgo(0));
+    fillCustomDates();
+  }
+  saveUsage();
+  renderPeriodControl();
+  void refreshRequests();
+}
+// Written only on load and when the period becomes custom: the 3-second refresh never touches these
+// fields, so a date being typed is not reset under the cursor.
+function fillCustomDates() {
+  const today = dayKey(daysAgo(0));
+  for (const [selector, value] of [["#logs-from", usageFrom], ["#logs-to", usageTo]]) {
+    const input = $(selector);
+    input.value = value;
+    input.max = today;
+  }
+}
+for (const selector of ["#logs-from", "#logs-to"]) {
+  $(selector).addEventListener("change", () => {
+    const from = $("#logs-from").value;
+    const to = $("#logs-to").value;
+    if (!isDay(from) || !isDay(to)) return;
+    usageFrom = from;
+    usageTo = to;
+    saveUsage();
+    void refreshRequests();
+  });
+}
+renderPeriodControl();
+fillCustomDates();
+
+const EMPTY_BUCKET = { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, avgMs: 0, cacheHitPercent: 0 };
 function renderSummary(summary) {
-  const total = summary && summary.total || { count: 0, ok: 0, failed: 0, input: 0, cached: 0, output: 0, avgMs: 0, cacheHitPercent: 0 };
+  const providers = (summary && summary.providers) || {};
+  const total = (requestProvider ? providers[requestProvider] : summary && summary.total) || EMPTY_BUCKET;
   $("#logs-summary").replaceChildren(
     summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
     summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
@@ -3323,17 +3433,61 @@ function renderSummary(summary) {
     summaryChip(t("logs.summary.output"), formatNumber(total.output)),
     summaryChip(t("logs.summary.duration"), formatSeconds(total.avgMs)),
   );
+  fitSummaryValues();
 }
-function renderProviderFilter(records) {
-  const select = $("#logs-provider");
+// A long period runs the input to ten digits and the requests to "52,939 / 310", wider than a chip
+// in a 1,024px window (2026-10-20): a value that overflows steps its type down before it ellipsizes.
+function fitSummaryValues() {
+  for (const value of document.querySelectorAll("#logs-summary .logs-chip .value")) {
+    value.style.fontSize = "";
+    for (let size = parseFloat(getComputedStyle(value).fontSize); value.scrollWidth > value.clientWidth && size > 14; size--) value.style.fontSize = `${size - 1}px`;
+  }
+}
+window.addEventListener("resize", fitSummaryValues);
+// Every provider that is configured or shows up in the usage or the requests, not only the ones in
+// the last 200 requests: those were all one provider for a heavy user, so the menu offered nothing
+// else (2026-10-20). The chosen provider stays listed even before anything names it.
+function renderProviderFilter(summary, records) {
+  const configured = (currentConfig && currentConfig.providers) || configuredProviders || (status && status.providers) || {};
+  for (const name of Object.keys(configured)) knownRequestProviders.add(name);
+  for (const name of Object.keys((summary && summary.providers) || {})) knownRequestProviders.add(name);
+  for (const model of (summary && Array.isArray(summary.models) ? summary.models : [])) if (model.provider) knownRequestProviders.add(model.provider);
   for (const record of records) if (record.provider) knownRequestProviders.add(record.provider);
+  if (requestProvider) knownRequestProviders.add(requestProvider);
   const names = [...knownRequestProviders].sort();
-  const before = select.value;
-  select.replaceChildren(el("option", { value: "", text: t("logs.all") }));
-  for (const name of names) select.appendChild(el("option", { value: name, text: name }));
-  select.value = names.includes(requestProvider) ? requestProvider : "";
-  if (!names.includes(requestProvider)) requestProvider = "";
-  if (before && before !== select.value) select.value = requestProvider;
+  // Rebuilt only when the list changes, so the 3-second refresh does not close an open menu.
+  const key = names.join("\n");
+  const select = $("#logs-provider");
+  if (key !== renderedProviderNames) {
+    renderedProviderNames = key;
+    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map((name) => el("option", { value: name, text: name })));
+  }
+  if (select.value !== requestProvider) select.value = requestProvider;
+}
+async function loadConfiguredProviders() {
+  if (configuredProviders || currentConfig) return;
+  try { configuredProviders = (await api("/api/config")).providers || {}; } catch { /* the usage and requests still name their providers */ }
+}
+function modelUsageRow(entry) {
+  const total = totalInputOf(entry);
+  const model = el("div", { class: "request-models" }, [
+    el("span", { class: "model", text: entry.model, title: entry.model }),
+    el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: entry.provider }),
+  ]);
+  // The labels show only where a narrow window drops the header row.
+  return el("tr", {}, [
+    el("td", { class: "c-model" }, [model]),
+    el("td", { class: "c-count", "data-label": t("logs.th.count") }, [formatNumber(entry.count)]),
+    el("td", { class: "c-in", "data-label": t("logs.th.input") }, [el("span", { class: "token-cell", text: formatNumber(total) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: entry.cacheHitPercent || 0 }) })])]),
+    el("td", { class: "c-out", "data-label": t("logs.th.output") }, [formatNumber(entry.output)]),
+    el("td", { class: "c-dur", "data-label": t("logs.th.avg") }, [formatSeconds(entry.avgMs)]),
+  ]);
+}
+function renderModelUsage(summary) {
+  const models = (summary && Array.isArray(summary.models) ? summary.models : []).filter((entry) => !requestProvider || entry.provider === requestProvider);
+  $("#models-table tbody").replaceChildren(...models.map(modelUsageRow));
+  $("#models-table").closest(".logs-table-card").hidden = models.length === 0;
+  $("#models-empty").hidden = models.length !== 0;
 }
 /** Everything the model read: uncached, read from the cache, and written to it. */
 function totalInputOf(usage) {
@@ -3384,25 +3538,39 @@ function requestRow(record) {
   return row;
 }
 function renderRequests(records) {
-  const scroll = $(".logs-table-card");
+  const scroll = $("#requests-table").closest(".logs-table-card");
   const left = scroll.scrollLeft;
   const tbody = $("#requests-table tbody");
   tbody.replaceChildren(...records.flatMap((record) => expandedRequestId === record.id ? [requestRow(record), requestDetail(record)] : [requestRow(record)]));
-  $("#requests-table").closest(".logs-table-card").hidden = records.length === 0;
+  scroll.hidden = records.length === 0;
   $("#requests-empty").hidden = records.length !== 0;
   scroll.scrollLeft = left;
 }
 async function refreshRequests() {
   if (logsPanel !== "requests") return;
-  try {
-    const suffix = requestProvider ? `&provider=${encodeURIComponent(requestProvider)}` : "";
-    const kind = "&kind=messages";
-    const [records, summary, allRecords] = await Promise.all([api(`/api/requests?n=200${suffix}${kind}`), api("/api/requests/summary?since=3600"), api("/api/requests?n=200")]);
-    requestRows = Array.isArray(records.requests) ? records.requests : [];
-    renderProviderFilter(Array.isArray(allRecords.requests) ? allRecords.requests : requestRows);
-    renderSummary(summary);
+  // A period or provider picked while an older refresh is in flight must not be painted over by it.
+  const generation = ++requestsGeneration;
+  const provider = requestProvider;
+  const range = usageRange();
+  // A custom range with an unusable date waits for the fields instead of falling back to the hour.
+  if (usagePeriod === "custom" && !range) return;
+  $("#logs-range-caption").textContent = usageCaption(range, lastSummary && lastSummary.earliest);
+  const summaryPath = range ? `/api/requests/summary?from=${range.from}&to=${range.to}` : "/api/requests/summary?since=3600";
+  const suffix = provider ? `&provider=${encodeURIComponent(provider)}` : "";
+  const [records, summary] = await Promise.allSettled([api(`/api/requests?n=200${suffix}&kind=messages`), api(summaryPath), loadConfiguredProviders()]);
+  if (generation !== requestsGeneration) return;
+  // Each half keeps its last good contents when its own call fails.
+  if (summary.status === "fulfilled") {
+    lastSummary = summary.value;
+    $("#logs-range-caption").textContent = usageCaption(range, lastSummary.earliest);
+    renderSummary(lastSummary);
+    renderModelUsage(lastSummary);
+  }
+  if (records.status === "fulfilled") {
+    requestRows = Array.isArray(records.value.requests) ? records.value.requests : [];
     renderRequests(requestRows);
-  } catch { /* preserve the last successful request table */ }
+  }
+  renderProviderFilter(lastSummary, requestRows);
 }
 async function refreshLogs() {
   if (logsPanel !== "raw") return;
