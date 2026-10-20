@@ -9,7 +9,9 @@
 // location"). `netsh wlan show interfaces` is the last of those, so it is not used: the Wi-Fi adapter
 // comes from Get-NetAdapter (NdisPhysicalMedium 9 = Native 802.11, 1 = wireless LAN), its address from
 // os.networkInterfaces() (keyed by the same adapter name), and "on the hotspot" from that address as
-// on macOS (an iPhone hotspot hands out 172.20.10.0/28). Profile listing (WlanGetProfileList /
+// on macOS: the iPhone range 172.20.10.0/28, or the network learned after our own `netsh wlan
+// connect` to the hotspot's profile (address + netmask from os.networkInterfaces(), which Windows
+// fills from GetAdaptersAddresses — no Location, no elevation). Profile listing (WlanGetProfileList /
 // WlanGetProfile), connect and disconnect are not on Microsoft's list; if a build gates them anyway,
 // netsh says so and the state reads `needs-location` with the Settings path.
 //
@@ -143,12 +145,19 @@ export function classifyNetshConnect(r: RunResult): JoinFailure | null {
   return "join-failed";
 }
 
+/**
+ * What an idle phone does to its hotspot differs, so the step to wake it is said per phone. Shared
+ * with the macOS hints; it lives here because tether.ts imports this module (not the other way).
+ */
+export const HOTSPOT_NOT_VISIBLE_STEPS =
+  "On an iPhone, open Settings → Personal Hotspot once (and keep \"Allow Others to Join\" on). On Android, turn Wi-Fi hotspot on again: Android switches it off by itself after a while with nothing connected, unless its \"turn off hotspot automatically\" setting is off.";
+
 export const WIN_HINTS: Partial<Record<TetherState, string>> = {
-  "hotspot-not-visible": "Windows could not find the hotspot. Open Settings → Personal Hotspot on the iPhone once (and keep \"Allow Others to Join\" on) so it broadcasts.",
+  "hotspot-not-visible": `Windows could not find the phone's hotspot. ${HOTSPOT_NOT_VISIBLE_STEPS}`,
   "no-hotspot-profile": "Windows has not joined this hotspot before. Join it once from the Wi-Fi menu so Windows saves its password; ClaudeRipple then switches to it by name.",
   "needs-location": "Windows 11 24H2 and later allow Wi-Fi commands only with Location on: Settings → Privacy & security → Location → turn on Location services and \"Let desktop apps access your location\".",
-  "no-hotspot-ssid": "Set the iPhone hotspot's name: `clauderipple awake setup --ssid <hotspot name>`.",
-  "no-wifi": "Wi-Fi is not connected. Windows joins the iPhone hotspot by itself only if its saved profile is set to connect automatically.",
+  "no-hotspot-ssid": "Set the phone hotspot's name: `clauderipple awake setup --ssid <hotspot name>`.",
+  "no-wifi": "Wi-Fi is not connected. Windows joins the phone hotspot by itself only if its saved profile is set to connect automatically.",
   "join-failed": "Joining the hotspot failed. Check the hotspot name, and that Windows has joined it once before (it keeps the password).",
   pinned: "Switching is paused because the network was pinned.",
 };

@@ -145,6 +145,7 @@ const tether = new TetherController({
   activity,
   log: { info: (m) => log!.info(m), warn: (m) => log!.warn(m) },
   hold,
+  stateFile: path.join(home, "tether.json"),
 });
 
 process.on("uncaughtException", (e) => log!.error(`uncaught ${(e as Error).stack ?? e}`));

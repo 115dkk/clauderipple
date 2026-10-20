@@ -1,4 +1,4 @@
-// Fail over to the iPhone Personal Hotspot when Wi-Fi has no internet, and come back to a known
+// Fail over to a phone's hotspot (iPhone or Android) when Wi-Fi has no internet, and come back to a known
 // Wi-Fi later. The probe/decision loop below is shared; the OS part is a TetherBackend — macOS here,
 // Windows in tether-win.ts (netsh, no elevation).
 //
@@ -24,15 +24,23 @@
 //             finish, then the return above runs and the hold is released whatever the outcome.
 //
 // Never more than one switch per 60s; nothing switches while the user has pinned the network.
-// "On the hotspot" is read from the address, not the SSID (which macOS redacts without Location):
-// an iPhone hotspot hands out 172.20.10.0/28.
+// "On the hotspot" is read from the address, not the SSID (macOS redacts it without Location;
+// Windows 11 24H2 gates the query that returns it, see tether-win.ts): an iPhone hotspot hands out
+// 172.20.10.0/28, and any other phone's network is learned. An Android hotspot hands out a /24 that
+// is not fixed — 192.168.43.x up to Android 10 (IpServer WIFI_HOST_IFACE_ADDR), a random /24 of
+// 192.168.0.0/16 from Android 11, of 192.168.0.0/16, 172.16.0.0/12 or 10.0.0.0/8 by Android 14
+// (PrivateAddressCoordinator) — so after our own join of the hotspot SSID succeeds, the subnet the
+// Wi-Fi interface then has (os.networkInterfaces(): address + netmask, no process, no privilege) is
+// remembered as the hotspot's network and kept in <home>/tether.json.
 
+import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
+import path from "node:path";
 import type { TetherSettings } from "./config.ts";
 import { SUDO, sudoRefused, type Activity, type Runner } from "./awake.ts";
 import { HoldGate } from "./hold.ts";
-import { WinTetherBackend } from "./tether-win.ts";
+import { HOTSPOT_NOT_VISIBLE_STEPS, WinTetherBackend } from "./tether-win.ts";
 
 export const NETWORKSETUP = "/usr/sbin/networksetup";
 export const OSASCRIPT = "/usr/bin/osascript";
@@ -98,9 +106,83 @@ export function isHotspotAddress(ip: string | null): boolean {
   return !!m && Number(m[1]) <= 15;
 }
 
+function ipv4ToInt(ip: string): number | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  if (parts.some((p) => p > 255)) return null;
+  return ((parts[0]! << 24) | (parts[1]! << 16) | (parts[2]! << 8) | parts[3]!) >>> 0;
+}
+
+function intToIpv4(n: number): string {
+  return [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
+}
+
+/** "192.168.43.17" + "255.255.255.0" → "192.168.43.0/24"; null for anything else (no or a non-contiguous mask). */
+export function ipv4Network(address: string, netmask: string): string | null {
+  const a = ipv4ToInt(address);
+  const m = ipv4ToInt(netmask);
+  if (a === null || m === null) return null;
+  const bits = m.toString(2).replace(/0+$/, "");
+  if (m !== 0 && bits.includes("0")) return null;
+  const len = m === 0 ? 0 : bits.length;
+  if (len < 8 || len > 30) return null; // a /31 or /32 is no DHCP network; shorter than /8 is no hotspot
+  return `${intToIpv4((a & m) >>> 0)}/${len}`;
+}
+
+/** Whether `ip` is inside `network` ("a.b.c.d/len"). */
+export function inNetwork(ip: string | null, network: string | null): boolean {
+  if (!ip || !network) return false;
+  const [base, lenText] = network.split("/");
+  const a = ipv4ToInt(ip);
+  const b = base ? ipv4ToInt(base) : null;
+  const len = Number(lenText);
+  if (a === null || b === null || !Number.isInteger(len) || len < 0 || len > 32) return false;
+  const mask = len === 0 ? 0 : (0xffffffff << (32 - len)) >>> 0;
+  return ((a & mask) >>> 0) === ((b & mask) >>> 0);
+}
+
+/** 169.254.0.0/16: what an interface gives itself when DHCP did not answer — not a join. */
+export function isLinkLocal(ip: string | null): boolean {
+  return inNetwork(ip, "169.254.0.0/16");
+}
+
 export type Network = "wifi" | "hotspot" | "none";
-export function classifyNetwork(ip: string | null): Network {
-  return ip === null ? "none" : isHotspotAddress(ip) ? "hotspot" : "wifi";
+/** The iPhone range, or the network remembered from our own join of the hotspot (`learned`). */
+export function classifyNetwork(ip: string | null, learned: string | null = null): Network {
+  return ip === null ? "none" : isHotspotAddress(ip) || inNetwork(ip, learned) ? "hotspot" : "wifi";
+}
+
+/** The interface's IPv4 network ("a.b.c.d/len"), from the same os.networkInterfaces() entry as wifiIPv4. */
+export function wifiIPv4Network(ifaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>, device: string): string | null {
+  const a = ifaces[device]?.find((x) => x.family === "IPv4" && !x.internal);
+  return a ? ipv4Network(a.address, a.netmask) : null;
+}
+
+/** What `<home>/tether.json` keeps: the network a join of `ssid` landed on, outside the iPhone range. */
+export type LearnedHotspot = { ssid: string; network: string; learnedAt: string };
+
+export function readLearnedHotspot(file: string): LearnedHotspot | null {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, "utf8")) as { hotspot?: Partial<LearnedHotspot> };
+    const h = j.hotspot;
+    if (!h || typeof h.ssid !== "string" || typeof h.network !== "string") return null;
+    const [base, len] = h.network.split("/");
+    const bits = Number(len);
+    // Only a canonical "network/len" this module could have written; anything else is forgotten.
+    if (!base || !Number.isInteger(bits) || bits < 8 || bits > 30) return null;
+    if (ipv4Network(base, intToIpv4((0xffffffff << (32 - bits)) >>> 0)) !== h.network) return null;
+    return { ssid: h.ssid, network: h.network, learnedAt: String(h.learnedAt ?? "") };
+  } catch {
+    return null;
+  }
+}
+
+export function writeLearnedHotspot(file: string, h: LearnedHotspot): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify({ hotspot: h }) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, file);
 }
 
 /**
@@ -231,13 +313,15 @@ export type TetherDeps = {
   schedule?: (fn: () => void, ms: number) => () => void;
   /** The gate the proxy and the ingress hold new model calls at; one of its own when not given. */
   hold?: HoldGate;
+  /** Where the learned hotspot network is kept (`<home>/tether.json`); in memory only when not given. */
+  stateFile?: string;
 };
 
 const MAC_HINTS: Partial<Record<TetherState, string>> = {
-  "hotspot-not-visible": "The iPhone is not broadcasting its hotspot. Open Settings → Personal Hotspot on the iPhone once (and keep \"Allow Others to Join\" on) so the Mac can see it.",
+  "hotspot-not-visible": `The phone is not broadcasting its hotspot, so the Mac cannot see it. ${HOTSPOT_NOT_VISIBLE_STEPS}`,
   "needs-setup": "Run `clauderipple awake setup --ssid <hotspot name>` once: joining the hotspot needs the rule it installs (and the name must match it).",
-  "no-hotspot-ssid": "Set the iPhone hotspot's name: `clauderipple awake setup --ssid <hotspot name>`.",
-  "no-wifi": "Wi-Fi is not connected. macOS joins the iPhone hotspot by itself when no Wi-Fi is available if System Settings → Wi-Fi → \"Ask to join hotspots\" is Automatic (ClaudeRipple cannot read that setting: the file is root-only).",
+  "no-hotspot-ssid": "Set the phone hotspot's name: `clauderipple awake setup --ssid <hotspot name>`.",
+  "no-wifi": "Wi-Fi is not connected. macOS joins an iPhone hotspot by itself when no Wi-Fi is available if System Settings → Wi-Fi → \"Ask to join hotspots\" is Automatic (ClaudeRipple cannot read that setting: the file is root-only); an Android hotspot is joined like any known Wi-Fi with Auto-Join on.",
   "join-failed": "Joining the hotspot failed. Check the hotspot name, and that the Mac has joined it once before (macOS keeps its password).",
   pinned: "Switching is paused because the network was pinned.",
 };
@@ -299,9 +383,14 @@ export class TetherController {
   /** True while this controller has the gate engaged (stop() releases it). */
   private holding = false;
   private stopped = false;
+  /** The hotspot's network learned from our own join (outside the iPhone range); see learn(). */
+  private learned: LearnedHotspot | null;
+  /** The subnet last watched as ordinary Wi-Fi: a join landing on it cannot be told apart from it. */
+  private lastWifiNetwork: string | null = null;
 
   constructor(deps: TetherDeps) {
     this.deps = deps;
+    this.learned = deps.stateFile ? readLearnedHotspot(deps.stateFile) : null;
     this.hold = deps.hold ?? new HoldGate();
     this.now = deps.now ?? Date.now;
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -387,6 +476,19 @@ export class TetherController {
     return this.device ? wifiIPv4(this.interfaces(), this.device) : null;
   }
 
+  private currentNetwork(): string | null {
+    return this.device ? wifiIPv4Network(this.interfaces(), this.device) : null;
+  }
+
+  /** The learned network, while it belongs to the hotspot name configured now. */
+  private learnedNetwork(): string | null {
+    return this.learned && this.learned.ssid === this.deps.settings().hotspotSsid ? this.learned.network : null;
+  }
+
+  private onHotspot(ip: string | null): boolean {
+    return classifyNetwork(ip, this.learnedNetwork()) === "hotspot";
+  }
+
   private idle(): boolean {
     const a = this.deps.activity();
     return a.inFlight === 0 && (a.lastStartedAt === undefined || this.now() - a.lastStartedAt >= RETURN_QUIET_MS);
@@ -410,7 +512,8 @@ export class TetherController {
       }
     }
     const ip = this.currentIp();
-    this.network = classifyNetwork(ip);
+    this.network = classifyNetwork(ip, this.learnedNetwork());
+    if (this.network === "wifi") this.lastWifiNetwork = this.currentNetwork();
     const ok = ip ? await this.probe(ip) : false;
     this.window.push(ok);
     this.lastProbe = { at: new Date(this.now()).toISOString(), ok, network: this.network };
@@ -462,7 +565,13 @@ export class TetherController {
     this.decide(`${why}: joining hotspot "${settings.hotspotSsid}"`);
     const outcome = await this.join(settings.hotspotSsid);
     this.recordSwitch("hotspot", outcome === "joined", outcome === "joined" ? why : outcome);
-    if (outcome === "joined") {
+    if (outcome === "joined" && !this.onHotspot(this.currentIp())) {
+      // Joined, but on a network that could not be remembered (see learn()): it reads as Wi-Fi.
+      this.window.reset();
+      this.network = "wifi";
+      this.state = "watching";
+      this.decide("joined the hotspot, but its network cannot be told apart from Wi-Fi; watching it as Wi-Fi (no way back is planned)");
+    } else if (outcome === "joined") {
       this.window.reset();
       this.network = "hotspot";
       this.state = "on-hotspot";
@@ -475,16 +584,55 @@ export class TetherController {
     }
   }
 
-  /** Asks the OS to join, then waits for a hotspot address. */
+  /**
+   * Asks the OS to join, then waits for the hotspot's address: one in the iPhone range or the learned
+   * network, or else — after a join the OS accepted — any new address that is not link-local, whose
+   * network is then learned. Neither OS lets us read the SSID without Location (macOS redacts it;
+   * Windows 24H2 gates `netsh wlan show interfaces`), so "the OS accepted a join of this SSID, and
+   * the address changed" is the strongest evidence there is.
+   */
   private async join(ssid: string): Promise<JoinOutcome> {
+    const before = this.currentIp();
+    const wifiBefore = [before && !this.onHotspot(before) ? this.currentNetwork() : null, this.lastWifiNetwork];
     const failed = await this.backend!.join(ssid);
     if (failed) return failed;
     const deadline = this.now() + JOIN_SETTLE_MS;
-    while (this.now() < deadline) {
-      if (isHotspotAddress(this.currentIp())) return "joined";
+    for (;;) {
+      const ip = this.currentIp();
+      if (this.onHotspot(ip)) return "joined";
+      if (ip && ip !== before && !isLinkLocal(ip)) {
+        this.learn(ssid, ip, wifiBefore);
+        return "joined";
+      }
+      if (this.now() >= deadline) return this.backend!.noAddressOutcome;
       await this.sleep(1_000);
     }
-    return isHotspotAddress(this.currentIp()) ? "joined" : this.backend!.noAddressOutcome;
+  }
+
+  /**
+   * Remembers the network our join of `ssid` landed on. Only a join we made replaces it, and never
+   * with a network just watched as ordinary Wi-Fi: that one would read as the hotspot from then on.
+   */
+  private learn(ssid: string, ip: string, wifiBefore: (string | null)[]): void {
+    const network = this.currentNetwork();
+    if (!network) {
+      this.step(`joined "${ssid}" at ${ip}, but its netmask could not be read; its network is not remembered`);
+      return;
+    }
+    if (wifiBefore.includes(network)) {
+      this.step(`joined "${ssid}", but its network ${network} is the one watched as Wi-Fi before; not remembering it (the two could not be told apart)`);
+      return;
+    }
+    if (this.learned?.ssid === ssid && this.learned.network === network) return;
+    const was = this.learned?.ssid === ssid ? ` (was ${this.learned.network})` : "";
+    this.learned = { ssid, network, learnedAt: new Date(this.now()).toISOString() };
+    this.step(`remembering ${network} as hotspot "${ssid}"'s network${was}`);
+    if (!this.deps.stateFile) return;
+    try {
+      writeLearnedHotspot(this.deps.stateFile, this.learned);
+    } catch (e) {
+      this.deps.log.warn(`tether: could not save the hotspot's network: ${(e as Error).message}`);
+    }
   }
 
   private async tryReturn(settings: TetherSettings): Promise<void> {
@@ -570,7 +718,7 @@ export class TetherController {
         askedKnown = true;
         await backend.joinKnown(settings.hotspotSsid);
       }
-      if (ip && !isHotspotAddress(ip) && (await this.probe(ip))) {
+      if (ip && !this.onHotspot(ip) && (await this.probe(ip))) {
         if (++good >= 2) break;
       } else good = 0;
     }
@@ -586,15 +734,24 @@ export class TetherController {
     const ip = this.currentIp();
     let reason: string;
     const osName = this.deps.platform === "win32" ? "Windows" : "macOS";
-    if (isHotspotAddress(ip)) reason = `${osName} rejoined the hotspot (no better network in range)`;
+    let rejoined = false;
+    if (this.onHotspot(ip)) reason = `${osName} rejoined the hotspot (no better network in range)`;
     else {
       reason = ip ? `the Wi-Fi ${osName} chose has no internet` : "no network was joined";
       const outcome = await this.join(settings.hotspotSsid);
-      if (outcome !== "joined") reason += `; rejoining the hotspot failed: ${outcome}`;
+      rejoined = outcome === "joined";
+      if (!rejoined) reason += `; rejoining the hotspot failed: ${outcome}`;
     }
-    this.network = classifyNetwork(this.currentIp());
-    this.state = this.network === "hotspot" ? "on-hotspot" : "join-failed";
+    this.network = classifyNetwork(this.currentIp(), this.learnedNetwork());
     this.recordSwitch("wifi", false, reason);
+    if (this.network !== "hotspot" && rejoined) {
+      // Rejoined, but on a network that could not be remembered (see learn()): it reads as Wi-Fi.
+      this.state = "watching";
+      this.landedOnHotspotAt = null;
+      this.step(`${reason}; rejoined the hotspot, but its network cannot be told apart from Wi-Fi; watching it as Wi-Fi`);
+      return;
+    }
+    this.state = this.network === "hotspot" ? "on-hotspot" : "join-failed";
     this.backOff(reason);
   }
 

@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type os from "node:os";
 import {
-  classifyJoin, classifyNetwork, DISASSOCIATE_JS, isHotspotAddress, nextReturnPoint, parseWifiDevice, ProbeWindow, probeRound,
-  RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, TetherController, wifiIPv4, type ProbeGet,
+  classifyJoin, classifyNetwork, DISASSOCIATE_JS, inNetwork, ipv4Network, isHotspotAddress, isLinkLocal, nextReturnPoint, parseWifiDevice, ProbeWindow,
+  probeRound, readLearnedHotspot, RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, TetherController, wifiIPv4, wifiIPv4Network, writeLearnedHotspot,
+  type ProbeGet,
 } from "../src/tether.ts";
 import type { Activity, RunResult } from "../src/awake.ts";
 import { HoldGate } from "../src/hold.ts";
@@ -49,8 +50,8 @@ test("hotspot subnet: 172.20.10.0/28 only", () => {
   assert.equal(classifyNetwork("192.168.1.4"), "wifi");
 });
 
-const iface = (address: string, family: "IPv4" | "IPv6" = "IPv4"): os.NetworkInterfaceInfo =>
-  ({ address, family, internal: false, netmask: "", mac: "", cidr: null, ...(family === "IPv6" ? { scopeid: 0 } : {}) }) as os.NetworkInterfaceInfo;
+const iface = (address: string, family: "IPv4" | "IPv6" = "IPv4", netmask = family === "IPv4" ? "255.255.255.0" : "ffff:ffff:ffff:ffff::"): os.NetworkInterfaceInfo =>
+  ({ address, family, internal: false, netmask, mac: "", cidr: null, ...(family === "IPv6" ? { scopeid: 0 } : {}) }) as os.NetworkInterfaceInfo;
 
 test("the Wi-Fi IPv4 ignores IPv6 and other interfaces", () => {
   assert.equal(wifiIPv4({ en0: [iface("fe80::1", "IPv6"), iface("192.168.1.4")], en3: [iface("10.0.0.2")] }, "en0"), "192.168.1.4");
@@ -118,14 +119,15 @@ test("a config that still carries tether.returnEverySec loads without error and 
 
 // ---- Controller with a fake Mac and a fake network ----------------------------------------------
 
-type Net = { ip: string | null; probeOk: (ip: string) => boolean; joinOutput: { code: number; stdout: string; stderr: string }; joinLandsOn: string | null; disassociateLandsOn: string | null };
+type Net = { ip: string | null; netmask: string; probeOk: (ip: string) => boolean; joinOutput: { code: number; stdout: string; stderr: string }; joinLandsOn: string | null; disassociateLandsOn: string | null };
 
-function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void } = {}) {
+function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; stateFile?: string } = {}) {
   const clock = { t: 1_000_000 };
   const calls: string[] = [];
   const lines: string[] = [];
   const net: Net = {
     ip: "192.168.1.4",
+    netmask: "255.255.255.0",
     probeOk: () => true,
     joinOutput: { code: 0, stdout: "", stderr: "" },
     joinLandsOn: "172.20.10.2",
@@ -156,10 +158,11 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     log: { info: (m) => lines.push(m), warn: (m) => lines.push(`WARN ${m}`) },
     now: () => clock.t,
     sleep: async (ms) => { clock.t += ms; },
-    interfaces: () => (net.ip ? { en0: [iface(net.ip)] } : {}),
+    interfaces: () => (net.ip ? { en0: [iface(net.ip, "IPv4", net.netmask)] } : {}),
     probe: async (ip) => net.probeOk(ip),
     schedule: () => () => {},
     ...(o.hold ? { hold: o.hold } : {}),
+    ...(o.stateFile ? { stateFile: o.stateFile } : {}),
   });
   /** One tick every probeEverySec, like the real loop. */
   const ticks = async (n: number): Promise<void> => {
@@ -215,7 +218,9 @@ test("a hotspot that is not broadcasting says so, with the hint, and retries at 
   assert.equal(r.joins(), 1);
   let s = r.c.status();
   assert.equal(s.state, "hotspot-not-visible");
-  assert.match(s.hint ?? "", /Personal Hotspot on the iPhone/);
+  assert.match(s.hint ?? "", /On an iPhone, open Settings → Personal Hotspot/);
+  assert.match(s.hint ?? "", /On Android, turn Wi-Fi hotspot on/);
+  assert.doesNotMatch(s.hint ?? "", /^The iPhone/, "the phone is not assumed to be an iPhone");
   await r.ticks(5); // 50s more: still inside the minute
   assert.equal(r.joins(), 1);
   s = r.c.status();
@@ -376,6 +381,161 @@ test("a pinned network is never switched", async () => {
   await r.ticks(3);
   assert.equal(r.joins(), 1);
 });
+
+// ---- A phone that is not an iPhone: the hotspot's network is learned from our own join (2026-10-20) ----
+
+test("IPv4 networks: address + netmask, membership, link-local, and the learned network in the classification", () => {
+  assert.equal(ipv4Network("192.168.43.17", "255.255.255.0"), "192.168.43.0/24");
+  assert.equal(ipv4Network("10.42.17.5", "255.255.255.0"), "10.42.17.0/24");
+  assert.equal(ipv4Network("172.20.10.2", "255.255.255.240"), "172.20.10.0/28");
+  assert.equal(ipv4Network("192.168.43.17", ""), null);
+  assert.equal(ipv4Network("192.168.43.17", "255.0.255.0"), null, "a non-contiguous mask is refused");
+  assert.equal(ipv4Network("192.168.43.17", "255.255.255.255"), null);
+  assert.equal(inNetwork("192.168.43.200", "192.168.43.0/24"), true);
+  assert.equal(inNetwork("192.168.44.2", "192.168.43.0/24"), false);
+  assert.equal(inNetwork(null, "192.168.43.0/24"), false);
+  assert.equal(inNetwork("192.168.43.2", null), false);
+  assert.equal(isLinkLocal("169.254.12.3"), true);
+  assert.equal(isLinkLocal("192.168.43.2"), false);
+  assert.equal(classifyNetwork("192.168.43.9", "192.168.43.0/24"), "hotspot");
+  assert.equal(classifyNetwork("192.168.1.4", "192.168.43.0/24"), "wifi");
+  assert.equal(classifyNetwork("172.20.10.3", null), "hotspot", "the iPhone range needs no memory");
+  assert.equal(wifiIPv4Network({ en0: [iface("fe80::1", "IPv6"), iface("192.168.43.17")] }, "en0"), "192.168.43.0/24");
+});
+
+test("tether.json: what was written is read back; anything else is forgotten", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "cr-tether-mem-"));
+  try {
+    const file = path.join(dir, "tether.json");
+    assert.equal(readLearnedHotspot(file), null);
+    writeLearnedHotspot(file, { ssid: "Pixel", network: "192.168.43.0/24", learnedAt: "2026-10-20T10:00:00.000Z" });
+    assert.deepEqual(readLearnedHotspot(file), { ssid: "Pixel", network: "192.168.43.0/24", learnedAt: "2026-10-20T10:00:00.000Z" });
+    for (const bad of ["{", "{}", JSON.stringify({ hotspot: { ssid: "Pixel", network: "192.168.43.7/24" } }), JSON.stringify({ hotspot: { ssid: "Pixel", network: "0.0.0.0/0" } })]) {
+      fs.writeFileSync(file, bad);
+      assert.equal(readLearnedHotspot(file), null, bad);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A rig whose hotspot is an Android phone: our join lands in `androidIp`, whose network has internet. */
+function androidRig(stateFile: string, o: { home?: string; androidIp?: string; settings?: Partial<TetherSettings>; net?: Partial<Net> } = {}) {
+  const android = o.androidIp ?? "192.168.43.17";
+  const androidNet = ipv4Network(android, "255.255.255.0")!;
+  return rig({
+    stateFile,
+    settings: { hotspotSsid: "Pixel", ...o.settings },
+    net: { ip: o.home ?? "192.168.1.4", joinLandsOn: android, probeOk: (ip) => inNetwork(ip, androidNet), ...o.net },
+  });
+}
+
+function withDir(fn: (file: string) => Promise<void>): () => Promise<void> {
+  return async () => {
+    const dir = fs.mkdtempSync(path.join(tmpdir(), "cr-tether-android-"));
+    try {
+      await fn(path.join(dir, "tether.json"));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+test("Android hotspot: after our join its network is remembered, it reads as the hotspot, and the way back is planned", withDir(async (file) => {
+  const r = androidRig(file, { net: { disassociateLandsOn: "192.168.43.17" } });
+  await r.ticks(3);
+  assert.equal(r.joins(), 1);
+  let s = r.c.status();
+  assert.equal(s.state, "on-hotspot");
+  assert.equal(s.network, "hotspot");
+  assert.equal(s.lastSwitch?.ok, true);
+  assert.ok(r.lines.includes('tether: remembering 192.168.43.0/24 as hotspot "Pixel"\'s network'), r.lines.join("\n"));
+  assert.equal(readLearnedHotspot(file)?.network, "192.168.43.0/24");
+  await r.ticks(5);
+  s = r.c.status();
+  assert.equal(s.state, "on-hotspot", "not mistaken for Wi-Fi on the next ticks");
+  await r.ticks(30); // the 5 min point
+  assert.equal(r.returns(), 1, "the way back is tried");
+  assert.match(r.c.status().lastSwitch?.reason ?? "", /macOS rejoined the hotspot/);
+}));
+
+test("Android hotspot: the memory survives a new controller, a by-hand join is recognised, home Wi-Fi is not misread", withDir(async (file) => {
+  const first = androidRig(file);
+  await first.ticks(3);
+  assert.equal(first.c.status().network, "hotspot");
+  // A restarted router, already on the phone's hotspot (joined by hand, another address in it).
+  const second = androidRig(file, { home: "192.168.43.30" });
+  await second.ticks(1);
+  assert.equal(second.c.status().network, "hotspot");
+  assert.equal(second.c.status().state, "on-hotspot");
+  assert.equal(second.joins(), 0);
+  // Home Wi-Fi on another subnet stays Wi-Fi under the same memory.
+  const third = androidRig(file, { net: { probeOk: () => true } });
+  await third.ticks(10);
+  assert.equal(third.c.status().network, "wifi");
+  assert.equal(third.c.status().state, "watching");
+  // The way back lands on home Wi-Fi; then a by-hand join to the phone is recognised by the same controller.
+  const fourth = androidRig(file, { home: "192.168.43.30", net: { disassociateLandsOn: "192.168.1.4", probeOk: () => true } });
+  await fourth.ticks(31);
+  assert.equal(fourth.c.status().network, "wifi");
+  assert.equal(fourth.c.status().lastSwitch?.ok, true);
+  fourth.net.ip = "192.168.43.31";
+  await fourth.ticks(1);
+  assert.equal(fourth.c.status().network, "hotspot");
+  assert.equal(fourth.c.status().state, "on-hotspot");
+}));
+
+test("Android hotspot: a join that lands on the subnet watched as Wi-Fi is not remembered (ambiguous), and says so", withDir(async (file) => {
+  const r = androidRig(file, { home: "192.168.43.4", androidIp: "192.168.43.17", net: { probeOk: (ip) => ip !== "192.168.43.4" } });
+  await r.ticks(3);
+  assert.equal(r.joins(), 1);
+  assert.ok(r.lines.some((l) => /joined "Pixel", but its network 192\.168\.43\.0\/24 is the one watched as Wi-Fi before; not remembering it/.test(l)), r.lines.join("\n"));
+  assert.equal(fs.existsSync(file), false, "nothing written");
+  const s = r.c.status();
+  assert.equal(s.network, "wifi");
+  assert.equal(s.state, "watching");
+  await r.ticks(40);
+  assert.equal(r.returns(), 0, "no way back is planned from a network that reads as Wi-Fi");
+}));
+
+test("Android hotspot: a new subnet after a later join replaces the memory; only our join of the hotspot does", withDir(async (file) => {
+  writeLearnedHotspot(file, { ssid: "Pixel", network: "192.168.43.0/24", learnedAt: "2026-10-19T00:00:00.000Z" });
+  const r = androidRig(file, { androidIp: "192.168.77.5" });
+  await r.ticks(3);
+  assert.equal(r.c.status().state, "on-hotspot");
+  assert.ok(r.lines.includes('tether: remembering 192.168.77.0/24 as hotspot "Pixel"\'s network (was 192.168.43.0/24)'), r.lines.join("\n"));
+  assert.equal(readLearnedHotspot(file)?.network, "192.168.77.0/24");
+}));
+
+test("a learned network belongs to its hotspot name: another configured name ignores it", withDir(async (file) => {
+  writeLearnedHotspot(file, { ssid: "Old Phone", network: "192.168.43.0/24", learnedAt: "2026-10-19T00:00:00.000Z" });
+  const r = androidRig(file, { home: "192.168.43.30", net: { probeOk: () => true } });
+  await r.ticks(3);
+  assert.equal(r.c.status().network, "wifi");
+}));
+
+test("iPhone range: recognised with no memory, and nothing is written", withDir(async (file) => {
+  const r = rig({ stateFile: file, net: { probeOk: (ip) => isHotspotAddress(ip) } });
+  await r.ticks(3);
+  assert.equal(r.c.status().state, "on-hotspot");
+  assert.equal(fs.existsSync(file), false);
+  const byHand = rig({ stateFile: file, net: { ip: "172.20.10.4" } });
+  await byHand.ticks(1);
+  assert.equal(byHand.c.status().state, "on-hotspot");
+}));
+
+test("after a join, a self-assigned (169.254) address or an unchanged one is no join; an unreadable netmask is not remembered", withDir(async (file) => {
+  const ll = androidRig(file, { androidIp: "169.254.3.4", net: { probeOk: () => false } });
+  await ll.ticks(3);
+  assert.equal(ll.c.status().state, "join-failed");
+  const same = androidRig(file, { androidIp: "192.168.1.4", net: { probeOk: () => false } });
+  await same.ticks(3);
+  assert.equal(same.c.status().state, "join-failed");
+  const noMask = androidRig(file, { net: { netmask: "" } });
+  await noMask.ticks(3);
+  assert.ok(noMask.lines.some((l) => /joined "Pixel" at 192\.168\.43\.17, but its netmask could not be read/.test(l)), noMask.lines.join("\n"));
+  assert.equal(fs.existsSync(file), false);
+}));
 
 // ---- Making a gap when calls never stop (2026-10-20: postponed from 19:22:54 until the hotspot went) ----
 

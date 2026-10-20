@@ -1581,6 +1581,7 @@ plan unless marked otherwise.
 | ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
 | After ~120 host↔relay reconnects no phone could connect for minutes — web and native sat at "connecting" while the host's control socket was open and answering pings, and a host restart did not help (the simulator's own log: every attempt 19:10–19:17 timed out waiting for the relay's `open`, then the next one worked with no change on the phone; 2026-10-15). Measured on the deployed relay with throwaway server ids: a replaced host control socket whose other end never answers the close stays in `getWebSockets("host")`, in acceptance order, for 8+ minutes, and the room sent every phone's `connect` to `sockets("host")[0]` — that dead socket — through any number of reconnects and a restart | The room routes a phone only to the **newest** host socket (each is tagged `at:<accepted ms>`), and only while it pinged within `HOST_SILENT_MS` (the runtime's auto-response timestamp); a silent newest socket is closed `4408` and the phone hears `4404 host offline` at once. The host walks the phone's path itself after every hello and every 5 min (a client socket to its own room must come back `open` within 10 s) and reconnects when it does not; a ping timer that ran late (sleep, blocked event loop) is not taken for a dead socket. Close codes, reasons and ISO timestamps are in `host.log`. In-process tests reproduce the sequence over a network that keeps dead sockets listed (`relay-reconnect.test.ts`). |
 | Return to Wi-Fi postponed forever while subagents keep working (2026-10-20): on the iPhone hotspot, the way back ran only with no model call in flight and none started in the last 20s; with Claude and subagents working back-to-back it logged "Wi-Fi return postponed" at 19:22:54 and never went back to the home Wi-Fi | A return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due makes the gap itself (§8 "Making the gap"): new model calls are **held** at a gate in the proxy and the OpenAI ingress (`hold.ts`) — they wait unread, nothing is written, nothing refused or 503'd, each at most 120s — the running ones get up to 60s to finish, then the usual leave → probe runs and the gate is released whatever the outcome; calls that do not finish in time → release, next scheduled point (the fixed 5/10/20/30/40/50/60-minute return schedule of §8, 2026-10-20). The release is in a `finally` (a thrown error releases it), `stop()` releases it, the gate has its own failsafe timer, and a draining router closes it so a held call meets the retryable 503 instead of being cut. Tests: `tether.test.ts`, `hold.test.ts`. |
+| Android hotspot never recognised (2026-10-20, found by reading the code for an owner with Windows laptops and Android phones in mind): "on the hotspot" was the iPhone range 172.20.10.0/28 alone, on macOS and Windows. An Android hotspot hands out 192.168.43.x (≤ Android 10) or a random /24 (Android 11+; 192.168/16, 172.16/12, 10/8 by Android 14), so after our own failover `join()` saw no hotspot address and reported `join-failed`/`hotspot-not-visible`, while on the phone the controller read Wi-Fi and never planned the way back, and a by-hand join was never recognised | The product does not assume an iPhone. After our own join of the configured SSID is accepted by the OS, a new, non-link-local address within the settle time is the join, and its subnet (address + netmask from `os.networkInterfaces()`: no Location, no elevation) is kept in `<home>/tether.json` for that hotspot name; "on the hotspot" = iPhone range OR that network (§8). Only our own join replaces it, and a subnet equal to the Wi-Fi watched before is not remembered (logged as ambiguous) so home Wi-Fi is never read as the hotspot. Hints name both phones where the step differs. Not yet run with a real Android phone. |
 | An expired Claude login on the Mac wrote `[desktop state] …로그인이 만료되었습니다…` every few seconds per Claude app session and read the keychain (a synchronous child process) for every request, while phones learned of it only by a failed send (2026-10-15) | A login problem is one host state: logged when it starts and ends, sent to phones as `HostInfo.desktopProblem` (a banner), and the keychain is reread at most every 30 s while expired or after a 401. Per-session Remote Control errors log once per change. The host never refreshes the login itself. |
 
 ## 6. Blocked paths (measured, do not retry)
@@ -1618,8 +1619,8 @@ this mapping does not increase the backend's context limit.
 ## 8. Lid-closed awake and hotspot failover (2026-10-20)
 
 **What.** For the owner who drives the Mac from Ripple Remote while away: keep a MacBook running
-with its lid closed while Claude works, and when Wi-Fi drops or has no internet move to the iPhone
-Personal Hotspot, then back to a known Wi-Fi when one works again. macOS and Windows (Windows: see
+with its lid closed while Claude works, and when Wi-Fi drops or has no internet move to a phone's
+hotspot (iPhone Personal Hotspot or Android Wi-Fi hotspot), then back to a known Wi-Fi when one works again. macOS and Windows (Windows: see
 "Windows" below); both are off until configured and are no-ops on Linux (`/api/power` says
 `unsupported`). Replaces the Insomnia app (krishhgg/Insomnia), which `awake setup` removes.
 
@@ -1676,15 +1677,41 @@ boundary but needs a stable signature the ad-hoc app does not have (WakeBee READ
 outage is 3 failures in the last 5 rounds (wifihop's rule), so a 1s blip never switches. Not
 `NWPathMonitor`: "satisfied" is a local path assessment, and a router with a dead uplink or a captive
 portal reads satisfied — the reason Insomnia never failed over in that state. On the hotspot is read
-from the address (iPhone hotspots hand out 172.20.10.0/28), not the SSID, which macOS redacts without
-Location (measured: `ipconfig getsummary en0` → `SSID : <redacted>`). Failover (on Wi-Fi or no
+from the address, not the SSID, which macOS redacts without Location (measured: `ipconfig getsummary
+en0` → `SSID : <redacted>`; `networksetup -getairportnetwork en0` → "You are not associated with an
+AirPort network." while en0 had an address, macOS 27.0.1, 2026-10-20). An address is on the hotspot
+when it is in the iPhone range 172.20.10.0/28 **or** in the network learned for the configured
+hotspot name (2026-10-20, §5 "Android hotspot never recognised"). An Android hotspot has no fixed
+range: 192.168.43.x/24 up to Android 10 (AOSP `IpServer.java` android-10.0.0_r1,
+`WIFI_HOST_IFACE_ADDR = "192.168.43.1"`, last octet randomised), a random /24 of 192.168.0.0/16 on
+each start from Android 11 (`PrivateAddressCoordinator.java` android-11.0.0_r1, no reuse), and by
+Android 14 a random /24 from 192.168.0.0/16, then 172.16.0.0/12, then 10.0.0.0/8, reusing the last one
+per downstream type while it does not conflict with the phone's upstream (`mCachedAddresses`, same
+file at android-14.0.0_r1). So the network is learned: after **our own** join of the hotspot SSID is
+accepted by the OS, an address that is not the one from before the join and not self-assigned
+(169.254/16) counts as joined within the 15s settle time, and its subnet (address + netmask from
+`os.networkInterfaces()` — libuv's getifaddrs on macOS, GetAdaptersAddresses on Windows: no process,
+no privilege, no Location) is kept in `<home>/tether.json` `{hotspot: {ssid, network, learnedAt}}`
+(atomic write, 0600), so a restart keeps it. It applies only while `hotspotSsid` equals the name it was
+learned for. Only such a join replaces it (a phone that picked a new /24 is re-learned on the next
+failover). A subnet equal to the one just watched as ordinary Wi-Fi (or the Wi-Fi address before the
+join) is **not** remembered — the two could not be told apart — and is logged ("…is the one watched
+as Wi-Fi before; not remembering it"); that join reads as Wi-Fi and no way back is planned. The
+default gateway was not used: it needs a process per OS (`route -n get default`, `Get-NetRoute`) and
+says nothing the subnet does not. Limits: a by-hand join is recognised only on a network learned
+before; a Wi-Fi elsewhere that happens to use the learned /24 reads as the hotspot, so the way back
+drops it for a few seconds at each scheduled point and the OS rejoins it (no harm beyond those drops;
+`tether.pin` stops them). Failover (on Wi-Fi or no
 address, outage): wait at most 30s for an in-flight call, then `sudo -n networksetup
 -setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). The probe window
 lives in the process, so it only works if the router is not restarted every few seconds while the
 machine is offline (§5, health self-exit refined 2026-10-20). networksetup
 reports failure on stdout and may exit 0, so its text decides: "Could not find network" →
-`hotspot-not-visible` with a hint to open Personal Hotspot on the iPhone once (an idle iPhone stops
-advertising — Apple mchl7403f0ee; waking it needs entitlement-gated APIs). Return (on the hotspot):
+`hotspot-not-visible` with a hint that differs per phone: open Personal Hotspot on the iPhone once (an
+idle iPhone stops advertising — Apple mchl7403f0ee; waking it needs entitlement-gated APIs); on
+Android turn the hotspot on again (Android shuts a hotspot down when "there are no devices associated
+to it for the timeout duration" unless auto shutdown is off — AOSP `SoftApConfiguration.java`
+android-11.0.0_r1, `isAutoShutdownEnabled`). Return (on the hotspot):
 on a fixed schedule counted from landing there — 5, 10, 20, 30, 40, 50 and 60 minutes, then every
 10 minutes for as long as it stays (owner's decision, 2026-10-20: at most ~10 minutes on the hotspot
 after reaching a known Wi-Fi, and only a brief drop every 10 minutes on the move — a doubling
@@ -1808,8 +1835,10 @@ Location consent: WlanGetAvailableNetworkList, WlanGetNetworkBssList, WlanScan a
 (current_connection) return ERROR_ACCESS_DENIED (Microsoft Learn "Changes to API behavior for Wi-Fi
 access and location"). So `netsh wlan show interfaces` (the last one) is **not** used: the adapter is
 `Get-NetAdapter -Physical` with NdisPhysicalMedium 9 (Native 802.11) or 1, its IPv4 comes from
-`os.networkInterfaces()` under the same name, and "on the hotspot" is the 172.20.10.0/28 address as
-on macOS. Connect, disconnect and profile listing are not on Microsoft's list; if a build gates them
+`os.networkInterfaces()` under the same name, and "on the hotspot" is the 172.20.10.0/28 address or
+the learned network, as on macOS (the SSID check a join could have used is that same gated
+`show interfaces`, so the learned network rests on "netsh connect was accepted, then a new address
+came" exactly as on macOS). Connect, disconnect and profile listing are not on Microsoft's list; if a build gates them
 anyway netsh says so ("…need location permission… ms-settings:privacy-location") and the state is
 `needs-location` with the Settings path. Failover: `netsh wlan connect name="<profile>"
 interface="<adapter>"` (Windows keeps the password in the profile; no profile → `no-hotspot-profile`,
@@ -1828,5 +1857,5 @@ Every powershell.exe runs with PSModulePath removed (§5, issue #35).
 (Parallels would not initialise without an admin step), so none of this has run on Windows yet: the
 C# compiling under Add-Type, the child's stdin/EOF behaviour under powershell.exe, the lid callback,
 SetSuspendState, `powercfg /q` output on a real laptop, and every netsh path are covered only by
-fakes and by a Node stand-in for the child's line protocol. Lid and Wi-Fi need a real laptop with an
-iPhone in any case.
+fakes and by a Node stand-in for the child's line protocol. Lid and Wi-Fi need a real laptop with a
+phone in any case — and the learned-network path (§5, 2026-10-20) a real Android phone on both OSes.

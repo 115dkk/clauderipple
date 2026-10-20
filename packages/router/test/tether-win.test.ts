@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import type os from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   FIND_WIFI_PS, WIN_HINTS, autoProfiles, classifyNetshConnect, hotspotProfile, listWifiProfiles, needsLocation, parseAdapterName, parseProfileNames,
@@ -101,7 +102,7 @@ type Net = {
   connectCode: number;
 };
 
-function rig(o: { net?: Partial<Net>; settings?: Partial<TetherSettings>; activity?: () => Activity } = {}) {
+function rig(o: { net?: Partial<Net>; settings?: Partial<TetherSettings>; activity?: () => Activity; stateFile?: string } = {}) {
   const clock = { t: 1_000_000 };
   const calls: { line: string; opts?: RunOptions }[] = [];
   const lines: string[] = [];
@@ -152,7 +153,7 @@ function rig(o: { net?: Partial<Net>; settings?: Partial<TetherSettings>; activi
     }
     throw new Error(`unexpected command: ${line}`);
   };
-  const iface = (address: string): os.NetworkInterfaceInfo => ({ address, family: "IPv4", internal: false, netmask: "", mac: "", cidr: null }) as os.NetworkInterfaceInfo;
+  const iface = (address: string): os.NetworkInterfaceInfo => ({ address, family: "IPv4", internal: false, netmask: "255.255.255.0", mac: "", cidr: null }) as os.NetworkInterfaceInfo;
   const c = new TetherController({
     platform: "win32",
     run,
@@ -164,6 +165,7 @@ function rig(o: { net?: Partial<Net>; settings?: Partial<TetherSettings>; activi
     interfaces: () => (net.ip ? { "Wi-Fi": [iface(net.ip)], Ethernet: [iface("10.0.0.9")] } : { Ethernet: [iface("10.0.0.9")] }),
     probe: async (ip) => net.probeOk(ip),
     schedule: () => () => {},
+    ...(o.stateFile ? { stateFile: o.stateFile } : {}),
   });
   const ticks = async (n: number): Promise<void> => {
     for (let i = 0; i < n; i++) {
@@ -216,7 +218,8 @@ test("Windows failover: connect accepted but no hotspot address reads as not bro
   const r = rig({ net: { probeOk: () => false, lands: {} } });
   await r.ticks(3);
   assert.equal(r.c.status().state, "hotspot-not-visible");
-  assert.match(r.c.status().hint ?? "", /Personal Hotspot on the iPhone/);
+  assert.match(r.c.status().hint ?? "", /phone's hotspot\. On an iPhone, open Settings → Personal Hotspot/);
+  assert.match(r.c.status().hint ?? "", /On Android, turn Wi-Fi hotspot on/);
   const n = r.count(/wlan connect/);
   await r.ticks(4);
   assert.equal(r.count(/wlan connect/), n);
@@ -258,4 +261,40 @@ test("Windows return: Windows rejoins the hotspot by itself → stay, back off",
   assert.equal(r.count(/wlan disconnect/), 1);
   assert.equal(r.c.status().state, "on-hotspot");
   assert.match(r.c.status().lastSwitch?.reason ?? "", /Windows rejoined the hotspot/);
+});
+
+test("Windows, Android hotspot: our connect lands on a new subnet, it is remembered, a new controller and a by-hand join read it as the hotspot", async () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "cr-tether-win-android-"));
+  try {
+    const file = path.join(dir, "tether.json");
+    const pixel = { name: "Pixel 9", ssid: "Pixel 9", mode: "manual" as const };
+    const net = {
+      profiles: [{ name: "Home", ssid: "Home", mode: "auto" as const }, pixel],
+      lands: { "Pixel 9": "10.42.17.5", Home: "192.168.1.4" },
+      probeOk: (ip: string) => ip.startsWith("10.42.17."),
+    };
+    const r = rig({ stateFile: file, settings: { hotspotSsid: "Pixel 9" }, net });
+    await r.ticks(3);
+    assert.ok(r.calls.some((x) => x.line === 'netsh.exe wlan connect name="Pixel 9" interface="Wi-Fi"'));
+    assert.equal(r.c.status().state, "on-hotspot");
+    assert.equal(r.c.status().network, "hotspot");
+    assert.ok(r.lines.includes('tether: remembering 10.42.17.0/24 as hotspot "Pixel 9"\'s network'), r.lines.join("\n"));
+    assert.equal(r.count(/show interfaces/), 0, "the Location-gated query is still not used");
+    // The way back: disconnect, Windows auto-joins Home, which works.
+    r.net.probeOk = () => true;
+    await r.ticks(31);
+    assert.equal(r.count(/wlan disconnect/), 1);
+    assert.equal(r.c.status().network, "wifi");
+    // A restarted router already on the phone (joined by hand).
+    const again = rig({ stateFile: file, settings: { hotspotSsid: "Pixel 9" }, net: { ...net, ip: "10.42.17.9" } });
+    await again.ticks(1);
+    assert.equal(again.c.status().state, "on-hotspot");
+    assert.equal(again.count(/wlan connect/), 0);
+    // Home Wi-Fi on another subnet is not misread under the same memory.
+    const home = rig({ stateFile: file, settings: { hotspotSsid: "Pixel 9" }, net: { ...net, probeOk: () => true } });
+    await home.ticks(5);
+    assert.equal(home.c.status().state, "watching");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
