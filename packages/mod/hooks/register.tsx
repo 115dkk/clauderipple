@@ -251,6 +251,16 @@ async function installSettings($: EngineInterface, s: Settings): Promise<void> {
   if (s.keepWarm && !previous.keepWarm) await update($, warm, value => ({ ...value, stopped: undefined }))
   // Settings caught up with this chat's own choice: it follows Settings again.
   if (await read($, warmHere) === s.keepWarm) await update($, warmHere, () => null)
+  // Setup was finished (here, in another chat, or the settings came back from the router): a setup
+  // card still open is stale, and the judge's key is looked up for the source now chosen. Both
+  // survive a reload, so after a router outage they asked for setup and a Jev key again although
+  // the router held both (2026-10-20).
+  if (s.setupDone && await read($, panel) === 'setup') {
+    await update($, panel, () => null)
+    await update($, settingsDraft, () => null)
+    await update($, settingsBase, () => null)
+  }
+  if (s.judge !== previous.judge || s.jevSource !== previous.jevSource || (s.judge === 'jev' && (await read($, jev)).source === null)) await jevKey($)
 }
 function settingsSnapshot(text: string): ModSettingsSnapshot {
   const value = object(JSON.parse(text))
@@ -295,6 +305,13 @@ async function syncSettings($: EngineInterface, admin: string): Promise<void> {
     await update($, settingsBase, () => null)
   }
   if (snapshot.stored && sync.migration) sync = await update($, settingsSync, value => ({ ...value, migration: null }))
+  // A router with no settings stored (a fresh or emptied home, or a stray test router that took the
+  // live one's launchd label, 2026-10-20) is not a reset: settings this chat holds from a finished
+  // setup are kept and written back, instead of taking defaults and asking for setup again.
+  if (!snapshot.stored && !sync.migration) {
+    const held = await read($, settings)
+    if (held !== null && normalizeSettings(held).setupDone) sync = await update($, settingsSync, value => ({ ...value, migrationChecked: true, migration: normalizeSettings(held) }))
+  }
   if (!sync.migrationChecked) {
     let migration: Settings | null = null
     if (!snapshot.stored) {

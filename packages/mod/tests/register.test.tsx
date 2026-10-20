@@ -270,6 +270,37 @@ test('empty router uses defaults without writing when there is no legacy store',
   await ui.unmount()
 })
 
+// 2026-10-20: a stray test router took the live router's launchd label for five minutes and answered
+// with nothing stored; every chat took its defaults, opened setup and asked for the Jev key again,
+// and kept asking after the real router came back.
+test('a router that lost its settings gets this chat\'s back instead of opening setup', async ($, on) => {
+  const b = boundaries(on)
+  b.remote({ settings: normalizeSettings({ setupDone: true, language: 'pt', keepWarm: true }), revision: 7, stored: true })
+  http(on)
+  await start($)
+  expectLanguage(b, 'pt')
+  b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
+  await b.clock.advance(3000)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: 'Welcome to ClaudeRipple' })).toBeUndefined()
+  expectLanguage(b, 'pt')
+  expect(b.router()).toMatchObject({ stored: true, settings: { setupDone: true, language: 'pt', keepWarm: true } })
+  await ui.unmount()
+})
+
+test('a setup card left open closes once the router says setup is done', async ($, on) => {
+  const b = boundaries(on)
+  b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
+  http(on)
+  await start($)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: 'Welcome to ClaudeRipple' })).toBeDefined()
+  b.remote({ settings: normalizeSettings({ setupDone: true }), revision: 3, stored: true })
+  await b.clock.advance(3000)
+  expect(await ui.find({ type: 'Text', text: 'Welcome to ClaudeRipple' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('legacy settings and setup completion migrate once; unrelated store keys survive', async ($, on) => {
   const b = boundaries(on)
   b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
