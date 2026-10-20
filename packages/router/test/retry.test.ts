@@ -114,6 +114,24 @@ test("an abort during backoff stops before the next attempt", async () => {
   } finally { await s.close(); }
 });
 
+test("stopOn hands back a 5xx it names at once, with its body intact; other 5xx keep the ladder", async () => {
+  const marked = JSON.stringify({ error: { code: 503, details: [{ reason: "MARKED" }] } });
+  const stopOn = (status: number, text: string): boolean => status === 503 && text.includes("MARKED");
+  const s = await server([{ status: 503, body: marked }, { status: 200 }]);
+  try {
+    const res = await fetchWithRetry(s.url, { method: "POST", body: "{}" }, { ...opts, stopOn });
+    assert.equal(res.status, 503);
+    assert.equal(await res.text(), marked, "the caller still reads the body the hook read");
+    assert.equal(s.calls(), 1);
+  } finally { await s.close(); }
+  const plain = await server([{ status: 503, body: "{}" }, { status: 200 }]);
+  try {
+    const res = await fetchWithRetry(plain.url, { method: "POST", body: "{}" }, { ...opts, stopOn });
+    assert.equal(res.status, 200);
+    assert.equal(plain.calls(), 2, "an unmarked 503 is retried exactly as without the hook");
+  } finally { await plain.close(); }
+});
+
 test("allowLongSilences sets how long the global fetch waits between body bytes", async () => {
   // A stream that says one event and then nothing for 1.5s: a reasoning model thinking.
   const quiet = http.createServer((_req, res) => {

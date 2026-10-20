@@ -80,7 +80,16 @@ async function wait(ms: number, signal?: AbortSignal | null): Promise<void> {
 export async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  opts: { log: (line: string) => void; attempts?: number },
+  opts: {
+    log: (line: string) => void;
+    attempts?: number;
+    /**
+     * A 5xx the caller wants back at once instead of retried on this ladder — read from its body,
+     * which is only read when this is given. The caller then decides what asking again is worth
+     * (Google's `MODEL_CAPACITY_EXHAUSTED`: a few slower asks, not ten in a row; §5).
+     */
+    stopOn?: (status: number, text: string) => boolean;
+  },
 ): Promise<Response> {
   const attempts = opts.attempts ?? DEFAULT_ATTEMPTS;
   for (let n = 1; n <= attempts; n++) {
@@ -100,7 +109,9 @@ export async function fetchWithRetry(
     // A 403's meaning is in its body and a relay reports its own broken upstream there; every other
     // status is judged from the status alone. Cloned rather than read, so the caller still gets the
     // body to show when this attempt turns out to be the last one.
-    const text = res.status === 403 ? await res.clone().text().catch(() => "") : "";
+    const inspect = res.status === 403 || (opts.stopOn !== undefined && res.status >= 500);
+    const text = inspect ? await res.clone().text().catch(() => "") : "";
+    if (opts.stopOn?.(res.status, text)) return res;
     if (!isWorthRetrying(res.status, text) || n === attempts) return res;
     // This response will never reach the caller. Cancel it before opening another request so a relay
     // with a slow or unbounded error body cannot hold one connection per discarded attempt.

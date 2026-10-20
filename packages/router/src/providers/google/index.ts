@@ -15,6 +15,7 @@
 // next one only on a refusal that has not reached the client (§4 Credential pools).
 
 import http from "node:http";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { GoogleProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
@@ -40,7 +41,36 @@ export type GoogleOutcome = { status: number; bytes: number; note?: string; usag
   | { kind?: "response" }
   // No status or bytes have reached the client; the proxy may try one route fallback.
   | { kind: "prompt-incompatible"; status: 400; bytes: 0; errorBody: string }
+  // Google has no capacity for the model (see `isModelCapacityExhausted`). Unwritten as above.
+  | { kind: "model-capacity"; status: 529; bytes: 0; errorBody: string }
 );
+
+/**
+ * How often a turn asks again when Google says it has no capacity for the model, and how long it
+ * waits first. A few slower asks rather than the ten-in-a-row ladder: each refusal took seconds to
+ * arrive (41–103 s for ten on 2026-10-20), and capacity does not come back in 250 ms. Mutable only so
+ * tests can shorten the waits.
+ */
+export const capacityRetry = { delaysMs: [3_000, 6_000] as number[] };
+
+/**
+ * Cloud Code Assist saying the **model** has no capacity on its servers — not the account, not its
+ * quota. Measured 2026-10-20 on the daily host for `gemini-3.8-flash-high`: HTTP 503,
+ * `{"error":{"code":503,"status":"UNAVAILABLE","message":"No capacity available for model … on the
+ * server","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":
+ * "MODEL_CAPACITY_EXHAUSTED","domain":"cloudcode-pa.googleapis.com","metadata":{"model":…,
+ * "OVERLOADED_TOO_MANY_RETRIES_PER_REQUEST":"true",…}}]}}`. Recognised by the ErrorInfo reason alone;
+ * any other 503 keeps the ordinary transient handling.
+ */
+export function isModelCapacityExhausted(status: number, text: string): boolean {
+  if (status !== 503) return false;
+  try {
+    const details = (JSON.parse(text) as { error?: { details?: unknown } } | null)?.error?.details;
+    return Array.isArray(details) && details.some((d) => typeof d === "object" && d !== null && (d as { reason?: unknown }).reason === "MODEL_CAPACITY_EXHAUSTED");
+  } catch {
+    return false;
+  }
+}
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -133,6 +163,7 @@ export type GoogleAccountStatus = GoogleAccountSummary & {
 type SendResult =
   | { kind: "ok"; upstream: Response; credential: GoogleCredential }
   | { kind: "prompt-refused" }
+  | { kind: "no-capacity"; text: string; asks: number }
   | { kind: "refused"; status: number; text: string; retryAfterSeconds?: number; verify?: { url: string; account: string } }
   | { kind: "all-resting"; backMs?: number }
   | { kind: "no-account" }
@@ -504,6 +535,12 @@ export class GoogleAdapter {
         return { kind: "prompt-incompatible", status: 400, bytes: 0, errorBody: err.body,
           note: "upstream 429: suspected Antigravity SDK prompt refusal with remaining quota", refusal: "prompt-incompatible" };
       }
+      if (sent.kind === "no-capacity") {
+        // Overloaded, so Claude Code asks again on its own when no fallback takes the turn.
+        const err = anthropicError(529, "overloaded_error", `Google provider: ${vendorMessage(sent.text)} — Google is out of capacity for this model (MODEL_CAPACITY_EXHAUSTED), asked ${sent.asks} times. This is Google's server capacity, not your account or its quota; try again shortly, or give the route a fallback.`);
+        return { kind: "model-capacity", status: 529, bytes: 0, errorBody: err.body,
+          note: `upstream 503 MODEL_CAPACITY_EXHAUSTED after ${sent.asks} asks; account not rested` };
+      }
       if (sent.kind === "unreachable") {
         const err = anthropicError(502, "api_error", `Google provider unreachable: ${sent.error.message}`);
         if (!res.headersSent) res.writeHead(err.status, { "content-type": "application/json" }).end(err.body);
@@ -637,6 +674,9 @@ export class GoogleAdapter {
    * - 401, or a 403 that reads as a credential refusal: one refresh of that account and a replay;
    *   refused again with a 401, the account is marked for sign-in.
    * - 429 and 402: the account rests until its stated reset (or a default), and the next takes over.
+   * - A 503 `MODEL_CAPACITY_EXHAUSTED`: no rest and no other account — the model is out of capacity
+   *   on Google's side, not this account. The same account is asked again after `capacityRetry`'s
+   *   waits, then the turn ends unwritten so the proxy can try a route fallback (§5, 2026-10-20).
    * - Any other 403, 5xx, or no connection: a short rest, and the next account.
    * - Anything else is the request's fault; another account would refuse it the same way.
    *
@@ -656,6 +696,7 @@ export class GoogleAdapter {
     const refreshed = new Set<string>();
     let last: Extract<SendResult, { kind: "refused" }> | null = null;
     let lastThrown: Error | null = null;
+    let capacityAsks = 0;
     for (;;) {
       const credential = await this.pickAccount(spec.conversation, tried);
       if (credential === "none") return { kind: "no-account" };
@@ -676,7 +717,7 @@ export class GoogleAdapter {
           headers: built.headers,
           body: built.body,
           signal: spec.signal,
-        }, { log: (line) => this.log.info(`google ${this.name}: ${line}`) });
+        }, { log: (line) => this.log.info(`google ${this.name}: ${line}`), stopOn: isModelCapacityExhausted });
       } catch (e) {
         if (spec.signal.aborted) return { kind: "aborted" };
         this.pool.penalise(this.name, credential.id, 0);
@@ -697,6 +738,21 @@ export class GoogleAdapter {
       const safeText = redactErrorText(text, secrets);
       const status = upstream.status;
       this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
+      // The model, not the account, is out of capacity: resting the account refused every other turn
+      // with "all accounts resting" for its ten seconds (10 times in 3 minutes, 2026-10-20), and
+      // another account would meet the same model on the same host. So nothing is charged to it.
+      if (isModelCapacityExhausted(status, text)) {
+        capacityAsks++;
+        const delay = capacityRetry.delaysMs[capacityAsks - 1];
+        if (delay === undefined) return { kind: "no-capacity", text: safeText, asks: capacityAsks };
+        this.log.info(`google ${this.name}: ${spec.model} out of capacity (ask ${capacityAsks}); asking again in ${delay}ms without resting the account`);
+        try {
+          await sleep(delay, undefined, { signal: spec.signal });
+        } catch {
+          return { kind: "aborted" };
+        }
+        continue;
+      }
       // The generic 429 is also real exhaustion. Only fresh quota evidence for this
       // account/model permits a request-specific refusal; otherwise keep ordinary
       // cooldown and account rotation. The proxy can still try a route fallback.

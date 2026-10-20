@@ -677,14 +677,16 @@ export class Proxy {
     if (typeof session === "string" && /^[\w-]{1,128}$/.test(session)) record.session = session;
     let observedUsage: RequestUsage | undefined;
     let observedStopReason: string | undefined;
-    let promptFallbackNote: string | undefined;
-    let promptRefusalSeen = false;
+    // Set once a Google turn came back unwritten (a prompt refusal or no model capacity), which allows
+    // one route fallback per request.
+    let unwrittenFallbackNote: string | undefined;
+    let unwrittenSeen = false;
     // `failed` counts requests that did not get a proper response (vanished, upstream error,
     // provider error). A note alone is not a failure: adapters attach usage notes on success.
     const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
-      if (promptFallbackNote) note = [promptFallbackNote, note].filter(Boolean).join("; ");
+      if (unwrittenFallbackNote) note = [unwrittenFallbackNote, note].filter(Boolean).join("; ");
       this.stats.inFlight--;
       if (isMessages) {
         this.stats.messagesInFlight--;
@@ -713,7 +715,7 @@ export class Proxy {
         if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
         if (extra?.requestedTier !== undefined) completed.requestedTier = extra.requestedTier;
         if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
-        if (extra?.upstreamCalled === false && !promptRefusalSeen) completed.upstreamCalled = false;
+        if (extra?.upstreamCalled === false && !unwrittenSeen) completed.upstreamCalled = false;
         if (extra?.refusal !== undefined) completed.refusal = extra.refusal;
         this.deps.requests.add(completed);
       }
@@ -851,7 +853,7 @@ export class Proxy {
     let chosen: Credential | null = null;
     let penalised: { provider: string; id: string } | null = null;
     let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
-    // Re-enter only for the one unwritten Google prompt refusal. Each target sees the original
+    // Re-enter only for the one unwritten Google turn (prompt refusal or no model capacity). Each target sees the original
     // request, not the primary's rewritten effort, stripped thread, or translated body.
     for (;;) {
       if (pristine) json = structuredClone(pristine);
@@ -937,25 +939,27 @@ export class Proxy {
           tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
           try {
             const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
-            if (o.kind === "prompt-incompatible") {
-              const alreadyRetried = promptRefusalSeen;
-              promptRefusalSeen = true;
+            if (o.kind === "prompt-incompatible" || o.kind === "model-capacity") {
+              const why = o.kind === "prompt-incompatible" ? "prompt" : "capacity";
+              const alreadyRetried = unwrittenSeen;
+              unwrittenSeen = true;
               if (res.destroyed || res.writableEnded || res.headersSent) {
-                finish("0", 0, "client closed before prompt-refusal fallback", true);
+                finish("0", 0, `client closed before ${why} fallback`, true);
                 if (!res.destroyed && !res.writableEnded) res.destroy();
                 return;
               }
               const fallback = !alreadyRetried && resolved
-                ? this.promptFallback(resolved, route, cfg) : null;
+                ? this.unwrittenFallback(resolved, route, cfg, why) : null;
               if (fallback) {
-                promptFallbackNote = `${o.note}; fallback ${route.provider}/${route.model} → ${fallback.provider}/${fallback.model}`;
-                log.info(`FAILOVER ${promptFallbackNote}`);
+                unwrittenFallbackNote = `${o.note}; fallback ${route.provider}/${route.model} → ${fallback.provider}/${fallback.model}`;
+                log.info(`FAILOVER ${unwrittenFallbackNote}`);
                 route = fallback;
                 continue;
               }
-              // Refusal is request-specific: neither cool nor mark success for this provider.
-              res.writeHead(400, { "content-type": "application/json" }).end(o.errorBody);
-              finish("400", Buffer.byteLength(o.errorBody), o.note, true, { refusal: "prompt-incompatible" });
+              // Neither is about the account or the provider (a refusal is request-specific, missing
+              // capacity is the model's on Google's side): neither cool nor mark success.
+              res.writeHead(o.status, { "content-type": "application/json" }).end(o.errorBody);
+              finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" } : undefined);
               return;
             }
             this.recordOutcome(route.provider, o.status);
@@ -1605,13 +1609,13 @@ export class Proxy {
   }
 
   /** Only configured route fallbacks, not another account or an invented provider. */
-  private promptFallback(resolved: Resolved, attempted: Resolved, cfg: Config): Resolved | null {
+  private unwrittenFallback(resolved: Resolved, attempted: Resolved, cfg: Config, why: "prompt" | "capacity"): Resolved | null {
     for (const f of resolved.fallbacks ?? []) {
       if (f.provider === attempted.provider && f.model === attempted.model) continue;
       if (!this.targetUsable(f, cfg)) continue;
       return {
         provider: f.provider, model: f.model, effort: f.effort ?? resolved.effort,
-        tag: `${resolved.tag.split("->")[0] ?? resolved.model}->${f.model} (prompt fallback from ${attempted.provider})`,
+        tag: `${resolved.tag.split("->")[0] ?? resolved.model}->${f.model} (${why} fallback from ${attempted.provider})`,
       };
     }
     return null;

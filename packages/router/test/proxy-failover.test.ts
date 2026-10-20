@@ -23,7 +23,7 @@ import { Proxy } from "../src/proxy.ts";
 import { RequestLog, type RequestRecord } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 import { saveGoogleAccount } from "../src/providers/google/accounts.ts";
-import { GoogleAdapter } from "../src/providers/google/index.ts";
+import { capacityRetry, GoogleAdapter } from "../src/providers/google/index.ts";
 import { saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
 
 function freePort(): Promise<number> {
@@ -1095,4 +1095,85 @@ test("a prompt without the SDK paragraph is never treated as a prompt refusal", 
     assert.equal(r.compat.hits.length, 0);
     assert.deepEqual(r.states(), ["cooling"]);
   } finally { await r.stop(); }
+});
+
+// ---- Antigravity "no capacity for this model": the same unwritten hand-off ----------------------
+//
+// Measured 2026-10-20: Cloud Code Assist answered 503 MODEL_CAPACITY_EXHAUSTED for
+// gemini-3.8-flash-high; the router asked ten times, rested the only account, and every concurrent
+// turn got an instant 429 "all accounts resting". Now the adapter asks a few times without resting
+// anything and the proxy may hand the turn to ONE configured route fallback (§5).
+const CAPACITY_503 = JSON.stringify({ error: {
+  code: 503, message: "No capacity available for model gemini-3.8-flash-high on the server", status: "UNAVAILABLE",
+  details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "MODEL_CAPACITY_EXHAUSTED", domain: "cloudcode-pa.googleapis.com",
+    metadata: { error_number: "2010", model: "gemini-3.8-flash-high", OVERLOADED_TOO_MANY_RETRIES_PER_REQUEST: "true" } }],
+} });
+
+function withShortCapacityWaits(): () => void {
+  const before = capacityRetry.delaysMs;
+  capacityRetry.delaysMs = [20, 20];
+  return () => { capacityRetry.delaysMs = before; };
+}
+
+test("no capacity, with a fallback: the fallback answers and nothing of the 503 reaches the client", async () => {
+  const restore = withShortCapacityWaits();
+  const r = await frig({ routes: () => route([{ provider: "c", model: "fb-model" }]), google: () => ({ status: 503, body: CAPACITY_503 }) });
+  try {
+    const res = await r.post(turn({ system: "Ordinary system instructions." }));
+    assert.equal(res.status, 200);
+    assert.match(res.text, /compat answer/);
+    assert.doesNotMatch(res.text, /MODEL_CAPACITY_EXHAUSTED|overloaded_error/);
+    assert.equal(r.google.hits.length, 3, "a bounded number of asks before handing over");
+    assert.equal(r.compat.hits.length, 1);
+    const [rec] = await r.records();
+    assert.equal(rec!.ok, true);
+    assert.equal(rec!.provider, "c");
+    assert.equal(rec!.refusal, undefined);
+    assert.equal(rec!.upstreamCalled, undefined);
+    assert.match(rec!.note ?? "", /MODEL_CAPACITY_EXHAUSTED after 3 asks/);
+    assert.match(rec!.note ?? "", /fallback g\/gemini-3\.8-flash → c\/fb-model/);
+    assert.deepEqual(r.states(), ["ready"], "the account is not rested for the model's capacity");
+  } finally { restore(); await r.stop(); }
+});
+
+test("no capacity, without a fallback: a clear 529 overloaded_error, and the next turn still reaches Google", async () => {
+  const restore = withShortCapacityWaits();
+  let capacity = true;
+  const r = await frig({ routes: () => route([]), google: (hit) => capacity ? { status: 503, body: CAPACITY_503 } : googleAnswer(hit) });
+  try {
+    const res = await r.post(turn({ system: "Ordinary system instructions." }));
+    assert.equal(res.status, 529);
+    assert.match(res.headers["content-type"] ?? "", /application\/json/);
+    assert.equal(errorOf(res.text).type, "overloaded_error");
+    assert.match(errorOf(res.text).message, /MODEL_CAPACITY_EXHAUSTED/);
+    assert.doesNotMatch(errorOf(res.text).message, /every signed-in account is at its limit/);
+    assert.equal(r.google.hits.length, 3);
+    const [rec] = await r.records();
+    assert.equal(rec!.status, 529);
+    assert.equal(rec!.ok, false);
+    assert.equal(rec!.provider, "g");
+    assert.equal(rec!.refusal, undefined);
+    assert.deepEqual(r.states(), ["ready"]);
+    capacity = false;
+    const next = await r.post(turn({ system: "Ordinary system instructions.", stream: false }));
+    assert.equal(next.status, 200, "not an instant 429 'all accounts resting'");
+    assert.match(next.text, /google answer/);
+    assert.equal(r.google.hits.length, 4);
+  } finally { restore(); await r.stop(); }
+});
+
+test("no capacity on the fallback too: one fallback only, then the clear 529", async () => {
+  const restore = withShortCapacityWaits();
+  const r = await frig({
+    routes: () => route([{ provider: "g", model: "gemini-3.7-flash" }, { provider: "c", model: "fb-model" }]),
+    google: () => ({ status: 503, body: CAPACITY_503 }),
+  });
+  try {
+    const res = await r.post(turn({ system: "Ordinary system instructions.", stream: false }));
+    assert.equal(res.status, 529);
+    assert.equal(errorOf(res.text).type, "overloaded_error");
+    assert.equal(r.google.hits.length, 6, "three asks on the primary, three on its one fallback");
+    assert.equal(r.compat.hits.length, 0, "the cap holds although another fallback was configured");
+    assert.deepEqual(r.states(), ["ready"]);
+  } finally { restore(); await r.stop(); }
 });
