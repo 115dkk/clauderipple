@@ -95,6 +95,7 @@ export function openWindow(deps: WindowDeps, view?: string): void {
     win?.show();
     focusApp();
     win?.focus();
+    dockIcon();
   });
   win.on("closed", () => {
     win = null;
@@ -103,12 +104,17 @@ export function openWindow(deps: WindowDeps, view?: string): void {
   });
   if (mac) {
     // The window's Dock icon is the running bundle's: installed from npm that is Electron.app, so the
-    // Dock showed Electron's atom (2026-10-20). Ours is set on it whatever bundle runs.
-    app.dock?.setIcon(path.join(__dirname, "..", "assets", "icon.png"));
-    void app.dock?.show();
+    // Dock showed Electron's atom (2026-10-20). Ours is set on it whatever bundle runs, once the Dock
+    // icon is up: set while the app had none, it was dropped when show() put the bundle's back.
+    void app.dock?.show().then(dockIcon);
   }
   void win.loadURL(`${ORIGIN}/?lang=${encodeURIComponent(deps.lang)}${view ? `#${view}` : ""}`);
   deps.shown();
+}
+
+/** Our icon on the Dock, on macOS: set again once the window shows, which put the bundle's back. */
+function dockIcon(): void {
+  if (process.platform === "darwin") app.dock?.setIcon(path.join(__dirname, "..", "assets", "icon.png"));
 }
 
 /** The tray app has no Dock icon until a window opens, so a window opened from it could come up behind the frontmost app. */
