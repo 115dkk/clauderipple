@@ -435,19 +435,20 @@ export type TetherSettings = {
   /** The iPhone's Personal Hotspot network name, exactly as the sudoers rule names it. */
   hotspotSsid: string;
   probeEverySec: number;
-  /** How often, while on the hotspot, to try going back to a known Wi-Fi (doubles on failure, up to 15 min). */
-  returnEverySec: number;
 };
 
 export const AWAKE_DEFAULTS: AwakeSettings = { mode: "off", batteryFloorPercent: 20 };
-export const TETHER_DEFAULTS: TetherSettings = { enabled: false, hotspotSsid: "", probeEverySec: 10, returnEverySec: 180 };
+export const TETHER_DEFAULTS: TetherSettings = { enabled: false, hotspotSsid: "", probeEverySec: 10 };
 
 export function awakeSettings(c: Config): AwakeSettings {
   return { ...AWAKE_DEFAULTS, ...(c.awake ?? {}) } as AwakeSettings;
 }
 
 export function tetherSettings(c: Config): TetherSettings {
-  return { ...TETHER_DEFAULTS, ...(c.tether ?? {}) } as TetherSettings;
+  const t = { ...TETHER_DEFAULTS, ...(c.tether ?? {}) } as TetherSettings & Record<string, unknown>;
+  // A config from before 2026-10-20 still carries `returnEverySec`; it loads fine (unknown keys are
+  // not refused) and is dropped here rather than carried into the controller's settings.
+  return { enabled: t.enabled, hotspotSsid: t.hotspotSsid, probeEverySec: t.probeEverySec };
 }
 
 /**
@@ -485,7 +486,8 @@ function validatePower(c: Config, errors: string[]): void {
         if (problem) errors.push(`tether.hotspotSsid: ${problem}`);
       }
       if (t.probeEverySec !== undefined && !(typeof t.probeEverySec === "number" && t.probeEverySec >= 5 && t.probeEverySec <= 3600)) errors.push("tether.probeEverySec must be a number from 5 to 3600");
-      if (t.returnEverySec !== undefined && !(typeof t.returnEverySec === "number" && t.returnEverySec >= 30 && t.returnEverySec <= 86400)) errors.push("tether.returnEverySec must be a number from 30 to 86400");
+      // `tether.returnEverySec` was dropped on 2026-10-20 (the way back is a fixed schedule now).
+      // A config still carrying it is left alone: unknown keys are not refused here.
     }
   }
 }

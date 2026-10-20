@@ -10,10 +10,14 @@
 //
 //   failover  on Wi-Fi (or none), 3 of the last 5 probe rounds failed → `sudo -n networksetup
 //             -setairportnetwork <dev> <hotspot>`; macOS takes the password from the System keychain.
-//   return    on the hotspot, every returnEverySec while no model call runs → disassociate (CoreWLAN
-//             through JXA, as the console user — the router is a launchd agent in the user's session)
-//             so macOS auto-joins the best known network in range; probe it; if that does not give
-//             working Wi-Fi within 20s, rejoin the hotspot and double the interval (up to 15 min).
+//   return    on the hotspot, at 5, 10, 20, 30, 40, 50 and 60 min after landing and every 10 min
+//             after that, while no model call runs → disassociate (CoreWLAN through JXA, as the
+//             console user — the router is a launchd agent in the user's session) so macOS
+//             auto-joins the best known network in range; probe it; if that does not give working
+//             Wi-Fi within 20s, rejoin the hotspot and wait for the next point. The times are fixed
+//             from landing rather than a doubling backoff (owner's decision, 2026-10-20): at most
+//             ~10 min on the hotspot after arriving at a known Wi-Fi, and a brief drop every 10 min
+//             on the move, instead of a cap of 15 min.
 //   gap       a return still postponed RETURN_FORCE_AFTER_MS past due (calls back-to-back, so never
 //             a quiet moment — 2026-10-20) makes the gap itself: new model calls are held (hold.ts:
 //             they wait, they are not refused), the running ones get up to RETURN_DRAIN_WAIT_MS to
@@ -42,7 +46,15 @@ export const PROBE_URLS = {
 export const PROBE_TIMEOUT_MS = 4_000;
 export const MIN_SWITCH_INTERVAL_MS = 60_000;
 export const RETURN_PROBE_MS = 20_000;
-export const MAX_RETURN_INTERVAL_MS = 15 * 60_000;
+/**
+ * When to try the way back, counted from the moment the Mac landed on the hotspot: 5, 10, 20, 30,
+ * 40, 50 and 60 min, then every 10 min for as long as it stays there (owner's decision, 2026-10-20 —
+ * a fixed schedule rather than a doubling one: at most ~10 min on the hotspot after arriving at a
+ * known Wi-Fi, and only a brief drop every 10 min on the move).
+ */
+export const RETURN_SCHEDULE_MINUTES = [5, 10, 20, 30, 40, 50, 60] as const;
+/** After the last scheduled point, every this long. */
+export const RETURN_INTERVAL_AFTER_MS = 10 * 60_000;
 /** A model call this recent counts as "Claude is working": no return attempt (it drops the link for seconds). */
 export const RETURN_QUIET_MS = 20_000;
 /** Failover waits at most this long for an in-flight call; a dead network cannot serve it anyway. */
@@ -89,6 +101,22 @@ export function isHotspotAddress(ip: string | null): boolean {
 export type Network = "wifi" | "hotspot" | "none";
 export function classifyNetwork(ip: string | null): Network {
   return ip === null ? "none" : isHotspotAddress(ip) ? "hotspot" : "wifi";
+}
+
+/**
+ * The next scheduled return time at or after `now + minGapMs`, on the fixed schedule counted from
+ * `landedAt` (5, 10, 20, 30, 40, 50, 60 min, then every 10). A point already passed is skipped, so a
+ * long gap attempt or a slow tick never retries in the past or bursts two switches together.
+ */
+export function nextReturnPoint(landedAt: number, now: number, minGapMs = MIN_SWITCH_INTERVAL_MS): number {
+  const floor = now + minGapMs;
+  for (const minutes of RETURN_SCHEDULE_MINUTES) {
+    const at = landedAt + minutes * 60_000;
+    if (at >= floor) return at;
+  }
+  const last = landedAt + RETURN_SCHEDULE_MINUTES[RETURN_SCHEDULE_MINUTES.length - 1]! * 60_000;
+  const steps = Math.max(1, Math.ceil((floor - last) / RETURN_INTERVAL_AFTER_MS));
+  return last + steps * RETURN_INTERVAL_AFTER_MS;
 }
 
 /** The last five probe rounds; an outage is 3 failures among them, so a 1s blip never switches. */
@@ -261,7 +289,8 @@ export class TetherController {
   private lastSwitchAt = 0;
   private lastSwitch: TetherStatus["lastSwitch"] = null;
   private lastProbe: TetherStatus["lastProbe"] = null;
-  private returnIntervalMs: number | null = null;
+  /** When the Mac landed on the hotspot (ours or by hand); null off the hotspot. The schedule counts from here. */
+  private landedOnHotspotAt: number | null = null;
   private nextReturnAt = 0;
   private busy: Promise<void> | null = null;
   private cancel: (() => void) | null = null;
@@ -368,6 +397,7 @@ export class TetherController {
     if (!settings.enabled) {
       if (this.state !== "off") this.decide("disabled");
       this.state = "off";
+      this.landedOnHotspotAt = null;
       this.window.reset();
       return;
     }
@@ -389,18 +419,18 @@ export class TetherController {
       return;
     }
     if (this.network === "hotspot") {
-      // Landed here by our own failover or by hand: either way, plan the way back.
-      if (this.returnIntervalMs === null) {
-        this.returnIntervalMs = settings.returnEverySec * 1000;
-        this.nextReturnAt = this.now() + this.returnIntervalMs;
+      // Landed here by our own failover or by hand: either way, plan the way back from here.
+      if (this.landedOnHotspotAt === null) {
+        this.landedOnHotspotAt = this.now();
+        this.nextReturnAt = nextReturnPoint(this.landedOnHotspotAt, this.now());
       }
       if (this.state !== "on-hotspot") this.decide(`on the hotspot; next try for Wi-Fi in ${Math.round((this.nextReturnAt - this.now()) / 1000)}s`);
       this.state = "on-hotspot";
       if (this.now() >= this.nextReturnAt) await this.tryReturn(settings);
       return;
     }
-    // On Wi-Fi (or none): the way back is no longer pending.
-    this.returnIntervalMs = null;
+    // On Wi-Fi (or none): the way back is no longer pending, and landing again starts the schedule over.
+    this.landedOnHotspotAt = null;
     if (!this.window.outage()) {
       this.state = this.network === "wifi" ? "watching" : "no-wifi";
       if (this.network === "wifi") this.decide(`watching Wi-Fi (${5 - this.window.failures()}/5 recent probes ok)`);
@@ -436,9 +466,9 @@ export class TetherController {
       this.window.reset();
       this.network = "hotspot";
       this.state = "on-hotspot";
-      this.returnIntervalMs = settings.returnEverySec * 1000;
-      this.nextReturnAt = this.now() + this.returnIntervalMs;
-      this.decide(`joined the hotspot; next try for Wi-Fi in ${settings.returnEverySec}s`);
+      this.landedOnHotspotAt = this.now();
+      this.nextReturnAt = nextReturnPoint(this.landedOnHotspotAt, this.now());
+      this.decide(`joined the hotspot; next try for Wi-Fi in ${Math.round((this.nextReturnAt - this.now()) / 1000)}s`);
     } else {
       this.state = outcome;
       this.decide(`could not join the hotspot: ${outcome}`);
@@ -466,7 +496,7 @@ export class TetherController {
     }
     const blocked = (await this.backend!.returnBlocked?.(settings.hotspotSsid)) ?? null;
     if (blocked) {
-      this.backOff(settings, blocked);
+      this.backOff(blocked);
       return;
     }
     if (idle) await this.leaveHotspot(settings);
@@ -492,7 +522,7 @@ export class TetherController {
       if (this.stopped || this.pinned) return;
       const left = this.deps.activity().inFlight;
       if (left > 0) {
-        this.backOff(settings, `${left} model call${left === 1 ? "" : "s"} still running after ${Math.round((this.now() - started) / 1000)}s; held calls released`);
+        this.backOff(`${left} model call${left === 1 ? "" : "s"} still running after ${Math.round((this.now() - started) / 1000)}s; held calls released`);
         return;
       }
       this.step(`running model calls finished after ${Math.round((this.now() - started) / 1000)}s; ${this.hold.waiting} held`);
@@ -525,7 +555,7 @@ export class TetherController {
     if (left !== null) {
       this.deps.log.warn(`tether: leaving the hotspot failed: ${left}`);
       this.state = "on-hotspot";
-      this.backOff(settings, "leaving the hotspot failed");
+      this.backOff("leaving the hotspot failed");
       return;
     }
     // Back on Wi-Fi only after two good probes through it (one could be a lucky blip).
@@ -548,7 +578,7 @@ export class TetherController {
     if (good >= 2) {
       this.network = "wifi";
       this.state = "watching";
-      this.returnIntervalMs = null;
+      this.landedOnHotspotAt = null;
       this.recordSwitch("wifi", true, "a known Wi-Fi with internet was in range");
       this.decide("back on Wi-Fi with internet");
       return;
@@ -565,14 +595,19 @@ export class TetherController {
     this.network = classifyNetwork(this.currentIp());
     this.state = this.network === "hotspot" ? "on-hotspot" : "join-failed";
     this.recordSwitch("wifi", false, reason);
-    this.backOff(settings, reason);
+    this.backOff(reason);
   }
 
-  private backOff(settings: TetherSettings, reason: string): void {
-    this.returnIntervalMs = Math.min(MAX_RETURN_INTERVAL_MS, Math.max(settings.returnEverySec * 1000, (this.returnIntervalMs ?? settings.returnEverySec * 1000) * 2));
-    this.nextReturnAt = this.now() + this.returnIntervalMs;
+  /**
+   * Stay on the hotspot until the next scheduled point (never doubling; see RETURN_SCHEDULE_MINUTES).
+   * A point already passed — a slow tick, a long gap attempt — is skipped for the next one at least
+   * MIN_SWITCH_INTERVAL_MS out, so a failed try never lands on top of the one just made.
+   */
+  private backOff(reason: string): void {
+    const landed = this.landedOnHotspotAt ?? this.now();
+    this.nextReturnAt = nextReturnPoint(landed, this.now());
     this.lastLogged = "";
-    this.decide(`staying on the hotspot (${reason}); next try in ${Math.round(this.returnIntervalMs / 1000)}s`);
+    this.decide(`staying on the hotspot (${reason}); next try in ${Math.round((this.nextReturnAt - this.now()) / 1000)}s`);
   }
 
   private recordSwitch(to: "hotspot" | "wifi", ok: boolean, reason: string): void {

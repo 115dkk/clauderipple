@@ -1580,7 +1580,7 @@ plan unless marked otherwise.
 | Google Antigravity answered `503` `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for model gemini-3.8-flash-high on the server") on its daily host. The adapter retried it ten times on the 250 ms ladder (41–103 s per turn, each refusal slow to arrive), then rested the only account for 10 s as an ordinary 5xx, so every concurrent and following turn got an instant `429 "every signed-in account is at its limit"` — 10 times in 3 minutes for one account that had done nothing wrong (2026-10-20 17:49:58–17:52:51, router.log) | Capacity is the model's on Google's side, not the credential's (same reasoning as the relay-403 row): it is charged **no** rest and moves to no other account. It leaves the shared ladder at once and is asked again at most twice, seconds apart, on the same account; then the turn ends unwritten and the proxy tries one configured route fallback, else answers `529 overloaded_error` that names the cause. Never "all accounts resting" for it, never a vanished turn; any other 503 keeps the ordinary ladder and short rest (§4d-ii). |
 | ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
 | After ~120 host↔relay reconnects no phone could connect for minutes — web and native sat at "connecting" while the host's control socket was open and answering pings, and a host restart did not help (the simulator's own log: every attempt 19:10–19:17 timed out waiting for the relay's `open`, then the next one worked with no change on the phone; 2026-10-15). Measured on the deployed relay with throwaway server ids: a replaced host control socket whose other end never answers the close stays in `getWebSockets("host")`, in acceptance order, for 8+ minutes, and the room sent every phone's `connect` to `sockets("host")[0]` — that dead socket — through any number of reconnects and a restart | The room routes a phone only to the **newest** host socket (each is tagged `at:<accepted ms>`), and only while it pinged within `HOST_SILENT_MS` (the runtime's auto-response timestamp); a silent newest socket is closed `4408` and the phone hears `4404 host offline` at once. The host walks the phone's path itself after every hello and every 5 min (a client socket to its own room must come back `open` within 10 s) and reconnects when it does not; a ping timer that ran late (sleep, blocked event loop) is not taken for a dead socket. Close codes, reasons and ISO timestamps are in `host.log`. In-process tests reproduce the sequence over a network that keeps dead sockets listed (`relay-reconnect.test.ts`). |
-| Return to Wi-Fi postponed forever while subagents keep working (2026-10-20): on the iPhone hotspot, the way back ran only with no model call in flight and none started in the last 20s; with Claude and subagents working back-to-back it logged "Wi-Fi return postponed" at 19:22:54 and never went back to the home Wi-Fi | A return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due makes the gap itself (§8 "Making the gap"): new model calls are **held** at a gate in the proxy and the OpenAI ingress (`hold.ts`) — they wait unread, nothing is written, nothing refused or 503'd, each at most 120s — the running ones get up to 60s to finish, then the usual leave → probe runs and the gate is released whatever the outcome; calls that do not finish in time → release, back off as before. The release is in a `finally` (a thrown error releases it), `stop()` releases it, the gate has its own failsafe timer, and a draining router closes it so a held call meets the retryable 503 instead of being cut. Tests: `tether.test.ts`, `hold.test.ts`. |
+| Return to Wi-Fi postponed forever while subagents keep working (2026-10-20): on the iPhone hotspot, the way back ran only with no model call in flight and none started in the last 20s; with Claude and subagents working back-to-back it logged "Wi-Fi return postponed" at 19:22:54 and never went back to the home Wi-Fi | A return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due makes the gap itself (§8 "Making the gap"): new model calls are **held** at a gate in the proxy and the OpenAI ingress (`hold.ts`) — they wait unread, nothing is written, nothing refused or 503'd, each at most 120s — the running ones get up to 60s to finish, then the usual leave → probe runs and the gate is released whatever the outcome; calls that do not finish in time → release, next scheduled point (the fixed 5/10/20/30/40/50/60-minute return schedule of §8, 2026-10-20). The release is in a `finally` (a thrown error releases it), `stop()` releases it, the gate has its own failsafe timer, and a draining router closes it so a held call meets the retryable 503 instead of being cut. Tests: `tether.test.ts`, `hold.test.ts`. |
 | An expired Claude login on the Mac wrote `[desktop state] …로그인이 만료되었습니다…` every few seconds per Claude app session and read the keychain (a synchronous child process) for every request, while phones learned of it only by a failed send (2026-10-15) | A login problem is one host state: logged when it starts and ends, sent to phones as `HostInfo.desktopProblem` (a banner), and the keychain is reread at most every 30 s while expired or after a 401. Per-session Remote Control errors log once per change. The host never refreshes the login itself. |
 
 ## 6. Blocked paths (measured, do not retry)
@@ -1685,11 +1685,16 @@ machine is offline (§5, health self-exit refined 2026-10-20). networksetup
 reports failure on stdout and may exit 0, so its text decides: "Could not find network" →
 `hotspot-not-visible` with a hint to open Personal Hotspot on the iPhone once (an idle iPhone stops
 advertising — Apple mchl7403f0ee; waking it needs entitlement-gated APIs). Return (on the hotspot):
-every `returnEverySec` (180), only with no call in flight and none started in the last 20s,
-disassociate via JXA as the console user (wifihop's exact call: `ObjC.import("CoreWLAN");
+on a fixed schedule counted from landing there — 5, 10, 20, 30, 40, 50 and 60 minutes, then every
+10 minutes for as long as it stays (owner's decision, 2026-10-20: at most ~10 minutes on the hotspot
+after reaching a known Wi-Fi, and only a brief drop every 10 minutes on the move — a doubling
+backoff held it for up to 15 minutes) — and only with no call in flight and none started in the
+last 20s, disassociate via JXA as the console user (wifihop's exact call: `ObjC.import("CoreWLAN");
 $.CWWiFiClient.sharedWiFiClient.interface.disassociate`) so macOS auto-joins the best known network;
-two good probes within 20s keep it; otherwise stay on (or rejoin) the hotspot and double the
-interval, up to 15 min. At most one switch per 60s. `tether.pin` (in memory, via the API) pauses all
+two good probes within 20s keep it; otherwise stay on (or rejoin) the hotspot and move to the next
+scheduled point (a point already passed — a slow tick, a long gap attempt — is skipped for the next
+one at least `MIN_SWITCH_INTERVAL` out). Leaving the hotspot resets the schedule; landing again
+starts it over. At most one switch per 60s. `tether.pin` (in memory, via the API) pauses all
 switching. Every decision is logged once, with its reason. "Ask to join hotspots: Automatic"
 (macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting lives in a root-only
 file (`com.apple.airport.preferences.plist`: permission denied, measured), so it is only hinted at.
@@ -1705,8 +1710,9 @@ refused, not 503 — until the gate is released or `HOLD_MAX_MS` (120s) has pass
 it proceeds normally (logged `HOLD POST /v1/messages waited N.Ns`). WEB/PASS and any non-model
 request is never held. (2) Wait up to `RETURN_DRAIN_WAIT_MS` (60s; with the switch it stays inside `HOLD_MAX_MS`, and far under the ~180s after which Claude Code gave up on an unanswered call on 2026-10-20) for the calls already running
 (held ones are not counted, so this can only fall, except for a call that hit its 120s). (3) They
-finished → the ordinary leave → probe → keep-or-rejoin sequence above; they did not → no switch, back
-off as before (interval doubles, 15 min cap). (4) Release the gate in a `finally`, whatever happened —
+finished → the ordinary leave → probe → keep-or-rejoin sequence above; they did not → no switch, move
+to the next scheduled point (the same fixed 5/10/20/30/40/50/60-minute schedule, no doubling).
+(4) Release the gate in a `finally`, whatever happened —
 a thrown error included; `stop()` releases it too, the gate releases itself after
 `RETURN_HOLD_FAILSAFE_MS` (4 min) if its owner never does, and `drain()` closes it (held calls go on,
 meet the retryable 503 and are waited for; a closed gate is never engaged again), as does the health
@@ -1721,7 +1727,8 @@ lastSwitch, lastProbe, hint } }` (`platform` so a client can say Mac or PC and w
 `PUT /api/power` `{ awake?: { mode?, until?: ISO|null }, tether?: { enabled?, pin? } }` (mode, until
 and enabled are saved to config.json; pin is not; unknown fields are refused; the same cross-site
 guard as every admin write). Config: `awake: { mode, until?, batteryFloorPercent }`, `tether:
-{ enabled, hotspotSsid, probeEverySec, returnEverySec }`. CLI: `awake setup [--ssid] [--remove]`,
+{ enabled, hotspotSsid, probeEverySec }` (a config still carrying the retired `returnEverySec` loads:
+unknown keys are not refused, and the key is ignored). CLI: `awake setup [--ssid] [--remove]`,
 `awake on|off|working [--until HH:MM]`, `tether on|off`, `power [--json]`.
 
 **Failure modes (designed against; not yet observed in this product).**
@@ -1808,7 +1815,7 @@ anyway netsh says so ("…need location permission… ms-settings:privacy-locati
 interface="<adapter>"` (Windows keeps the password in the profile; no profile → `no-hotspot-profile`,
 "join it once from the Wi-Fi menu"). netsh returns once the request is queued, so the address decides:
 none within 15s → `hotspot-not-visible`. Return: only if some other profile has
-`connectionMode=auto` (else no attempt, a hint, the same backoff); `netsh wlan disconnect` lets
+`connectionMode=auto` (else no attempt, a hint, the same return schedule); `netsh wlan disconnect` lets
 auto-config join the best automatic network; whether a netsh disconnect suppresses that on Vista+ is
 undocumented (WlanDisconnect's "on-demand profile" note is for XP), so with no address after 8s the
 first automatic profile is joined by name. Profile names come from `show profiles` (the text after

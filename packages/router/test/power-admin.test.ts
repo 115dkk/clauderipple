@@ -184,10 +184,10 @@ test("persistPowerChange writes only what changed and nothing for a pin", () => 
 
 test("config: off by default, validated when present", () => {
   assert.deepEqual(awakeSettings(DEFAULTS), { mode: "off", batteryFloorPercent: 20 });
-  assert.deepEqual(tetherSettings(DEFAULTS), { enabled: false, hotspotSsid: "", probeEverySec: 10, returnEverySec: 180 });
+  assert.deepEqual(tetherSettings(DEFAULTS), { enabled: false, hotspotSsid: "", probeEverySec: 10 });
   assert.deepEqual(validate({ ...DEFAULTS, awake: { mode: "working" }, tether: { enabled: true, hotspotSsid: "PBJ" } }), []);
-  const bad = validate({ ...DEFAULTS, awake: { mode: "always" as "on", until: "x", batteryFloorPercent: 120 }, tether: { enabled: 1 as unknown as boolean, hotspotSsid: "a,b", probeEverySec: 1, returnEverySec: 5 } });
-  assert.equal(bad.length, 7, bad.join("\n"));
+  const bad = validate({ ...DEFAULTS, awake: { mode: "always" as "on", until: "x", batteryFloorPercent: 120 }, tether: { enabled: 1 as unknown as boolean, hotspotSsid: "a,b", probeEverySec: 1 } });
+  assert.equal(bad.length, 6, bad.join("\n"));
 });
 
 test("hotspot names: what an iPhone uses passes, anything sudoers or a shell would read does not", () => {

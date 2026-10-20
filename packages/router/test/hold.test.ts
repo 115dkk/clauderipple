@@ -210,15 +210,15 @@ test("postponed → hold engaged after the grace period → the held call waits,
     // A long call is running (Claude, a subagent: there is always one).
     const a = await r.send("slow");
     await until(() => r.up.seen.length === 1, "the running call to reach the provider");
-    // 0..290s: the return is due at 180s and postponed; nothing is held yet.
-    for (let i = 0; i < 30; i++) {
+    // 0..410s: the return is due at the 5 min point (300s) and postponed; nothing is held yet.
+    for (let i = 0; i < 42; i++) {
       await c.tick();
       clock.t += 10_000;
     }
     assert.equal(hold.engaged, false);
     assert.ok(tlines.some((l) => /Wi-Fi return postponed: a model call is running/.test(l)));
 
-    // 300s, 120s past due: the controller makes the gap.
+    // 420s, 120s past due: the controller makes the gap.
     const forced = c.tick();
     await until(() => hold.engaged, "the hold");
     const b = await r.send("fast");

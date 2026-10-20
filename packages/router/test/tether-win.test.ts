@@ -226,7 +226,7 @@ test("Windows failover: connect accepted but no hotspot address reads as not bro
 
 test("Windows return: disconnect, and Windows' own auto-connect brings Wi-Fi back", async () => {
   const r = rig({ net: { ip: "172.20.10.3" } });
-  await r.ticks(20);
+  await r.ticks(31);
   assert.equal(r.count(/wlan disconnect/), 1);
   assert.equal(r.count(/wlan connect/), 0);
   assert.equal(r.c.status().state, "watching");
@@ -236,24 +236,25 @@ test("Windows return: disconnect, and Windows' own auto-connect brings Wi-Fi bac
 
 test("Windows return: nothing auto-joins after the disconnect, so the first automatic profile is asked for by name", async () => {
   const r = rig({ net: { ip: "172.20.10.3", autoJoin: null } });
-  await r.ticks(20);
+  await r.ticks(31);
   assert.equal(r.count(/wlan disconnect/), 1);
   assert.ok(r.calls.some((x) => x.line === 'netsh.exe wlan connect name="Home" interface="Wi-Fi"'));
   assert.equal(r.c.status().network, "wifi");
   assert.equal(r.c.status().state, "watching");
 });
 
-test("Windows return: no other automatic Wi-Fi means no attempt at all, and the interval still backs off", async () => {
+test("Windows return: no other automatic Wi-Fi means no attempt at all, and the next scheduled point is planned", async () => {
   const r = rig({ net: { ip: "172.20.10.3", profiles: [{ name: "PBJ’s iPhone", ssid: "PBJ’s iPhone", mode: "auto" }, { name: "Old", ssid: "Old", mode: "manual" }] } });
-  await r.ticks(20);
+  await r.ticks(31);
   assert.equal(r.count(/wlan disconnect/), 0);
   assert.equal(r.c.status().state, "on-hotspot");
-  assert.ok(r.lines.some((l) => /staying on the hotspot \(no other Wi-Fi on this PC is set to connect automatically\); next try in 360s/.test(l)), r.lines.join("\n"));
+  // 5 min point reached at 300s and refused; the next is the 10 min point, ~290s later.
+  assert.ok(r.lines.some((l) => /staying on the hotspot \(no other Wi-Fi on this PC is set to connect automatically\); next try in (29[0-9]|300)s/.test(l)), r.lines.join("\n"));
 });
 
 test("Windows return: Windows rejoins the hotspot by itself → stay, back off", async () => {
   const r = rig({ net: { ip: "172.20.10.3", autoJoin: "172.20.10.3" } });
-  await r.ticks(20);
+  await r.ticks(31);
   assert.equal(r.count(/wlan disconnect/), 1);
   assert.equal(r.c.status().state, "on-hotspot");
   assert.match(r.c.status().lastSwitch?.reason ?? "", /Windows rejoined the hotspot/);

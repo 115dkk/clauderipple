@@ -1,13 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type os from "node:os";
 import {
-  classifyJoin, classifyNetwork, DISASSOCIATE_JS, isHotspotAddress, MAX_RETURN_INTERVAL_MS, parseWifiDevice, ProbeWindow, probeRound,
+  classifyJoin, classifyNetwork, DISASSOCIATE_JS, isHotspotAddress, nextReturnPoint, parseWifiDevice, ProbeWindow, probeRound,
   RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, TetherController, wifiIPv4, type ProbeGet,
 } from "../src/tether.ts";
 import type { Activity, RunResult } from "../src/awake.ts";
 import { HoldGate } from "../src/hold.ts";
-import { TETHER_DEFAULTS, type TetherSettings } from "../src/config.ts";
+import { ConfigStore, DEFAULTS, TETHER_DEFAULTS, tetherSettings, validate, type TetherSettings } from "../src/config.ts";
 
 // `networksetup -listallhardwareports` measured on this project's Mac (2026-10-20), shortened.
 const PORTS = `
@@ -94,6 +97,23 @@ test("networksetup's join output decides the outcome, whatever its exit code", (
 
 test("the disassociate call is wifihop's exact JXA", () => {
   assert.equal(DISASSOCIATE_JS, 'ObjC.import("CoreWLAN"); $.CWWiFiClient.sharedWiFiClient.interface.disassociate; "ok";');
+});
+
+test("a config that still carries tether.returnEverySec loads without error and the key is ignored", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "cr-tether-cfg-"));
+  try {
+    const file = path.join(dir, "config.json");
+    fs.writeFileSync(file, JSON.stringify({ tether: { enabled: true, hotspotSsid: "PBJ", probeEverySec: 10, returnEverySec: 180 } }));
+    let errors: string[] = ["not called"];
+    const cfg = new ConfigStore(file, (_c, e) => { errors = e; }).get();
+    assert.deepEqual(errors, [], "an extra key is not refused");
+    assert.equal(cfg.tether?.enabled, true);
+    const s = tetherSettings(cfg);
+    assert.deepEqual(s, { enabled: true, hotspotSsid: "PBJ", probeEverySec: 10 });
+    assert.equal("returnEverySec" in s, false, "the key is dropped, not carried");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- Controller with a fake Mac and a fake network ----------------------------------------------
@@ -227,13 +247,31 @@ test("failover waits for a running call, but at most 30s", async () => {
   assert.ok(r.clock.t - before >= 30_000 && r.clock.t - before < 32_000, `waited ${r.clock.t - before}ms`);
 });
 
-test("the way back: after returnEverySec, idle, disassociate and keep the Wi-Fi macOS joins if it works", async () => {
+test("the schedule is 5, 10, 20, 30, 40, 50 and 60 minutes after landing, then every 10", () => {
+  const landed = 1_000_000;
+  const at = (minutes: number) => landed + minutes * 60_000;
+  const gap = 60_000;
+  assert.equal(nextReturnPoint(landed, landed, gap), at(5));
+  assert.equal(nextReturnPoint(landed, at(5), gap), at(10));
+  assert.equal(nextReturnPoint(landed, at(10), gap), at(20));
+  assert.equal(nextReturnPoint(landed, at(20), gap), at(30));
+  assert.equal(nextReturnPoint(landed, at(30), gap), at(40));
+  assert.equal(nextReturnPoint(landed, at(50), gap), at(60));
+  assert.equal(nextReturnPoint(landed, at(60), gap), at(70));
+  assert.equal(nextReturnPoint(landed, at(70), gap), at(80));
+  assert.equal(nextReturnPoint(landed, at(600), gap), at(610));
+  // A point at or past `now` is skipped: the next one, at least MIN_SWITCH_INTERVAL_MS out.
+  assert.equal(nextReturnPoint(landed, at(5) + 1, 0), at(10));
+  assert.equal(nextReturnPoint(landed, at(9) + 59_000, 60_000), at(20), "a 60s floor pushes past the 10 min point");
+});
+
+test("the way back: 5 minutes after landing, idle, disassociate and keep the Wi-Fi macOS joins if it works", async () => {
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4" } });
   await r.ticks(1);
   assert.equal(r.c.status().state, "on-hotspot");
-  await r.ticks(17); // 170s: not yet
+  await r.ticks(29); // 290s: not yet
   assert.equal(r.returns(), 0);
-  await r.ticks(2);
+  await r.ticks(1);
   assert.equal(r.returns(), 1);
   assert.ok(r.calls.includes(`/usr/bin/osascript -l JavaScript -e ${DISASSOCIATE_JS}`));
   const s = r.c.status();
@@ -247,7 +285,7 @@ test("the way back: after returnEverySec, idle, disassociate and keep the Wi-Fi 
 test("the way back waits while a model call runs or one started in the last 20s", async () => {
   let activity: Activity = { inFlight: 1 };
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4" }, activity: () => activity });
-  await r.ticks(25);
+  await r.ticks(31); // 300s: due, but a call is running
   assert.equal(r.returns(), 0);
   activity = { inFlight: 0, lastStartedAt: r.clock.t - 5_000 };
   await r.ticks(1);
@@ -257,28 +295,57 @@ test("the way back waits while a model call runs or one started in the last 20s"
   assert.equal(r.returns(), 1);
 });
 
-test("no better network: stay on the hotspot and back off 180s → 360s → 720s → 900s cap", async () => {
+test("no better network: stay on the hotspot and try at the fixed points 5, 10, 20, 30, 40, 50 and 60 min, then every 10", async () => {
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "172.20.10.2" } });
   await r.ticks(1);
+  const attempted = () => r.calls.filter((l) => l.startsWith("/usr/bin/osascript")).length;
   const attemptsAt: number[] = [];
-  for (let i = 0; i < 400 && attemptsAt.length < 5; i++) {
+  for (let i = 0; i < 1000 && attemptsAt.length < 9; i++) {
     const n = r.returns();
     await r.ticks(1);
     if (r.returns() > n) attemptsAt.push(r.clock.t);
   }
-  const gaps = attemptsAt.slice(1).map((t, i) => Math.round((t - attemptsAt[i]!) / 1000));
-  // Each gap is the interval plus the 20s spent probing and the 10s tick granularity.
-  assert.ok(gaps[0]! >= 360 && gaps[0]! < 400, `gaps ${gaps}`);
-  assert.ok(gaps[1]! >= 720 && gaps[1]! < 760, `gaps ${gaps}`);
-  assert.ok(gaps[2]! >= MAX_RETURN_INTERVAL_MS / 1000 && gaps[2]! < 940, `gaps ${gaps}`);
-  assert.ok(gaps[3]! >= MAX_RETURN_INTERVAL_MS / 1000 && gaps[3]! < 940, `capped: ${gaps}`);
+  assert.equal(attemptsAt.length, 9, `attempts ${attemptsAt.length}, returns ${attempted()}`);
+  const landed = 1_000_000;
+  // Each attempt lands on a tick at the scheduled point (or up to one tick after), plus the ~20s
+  // spent probing and the 10s tick step before the clock is read again.
+  const points = [5, 10, 20, 30, 40, 50, 60, 70, 80].map((m) => m * 60_000);
+  attemptsAt.forEach((t, i) => {
+    const late = t - landed - points[i]!;
+    assert.ok(late >= 0 && late < 31_000, `attempt ${i + 1} at +${(t - landed) / 1000}s, expected +${points[i]! / 1000}s (+0..30s)`);
+  });
   assert.equal(r.joins(), 0, "macOS put us back on the hotspot itself");
   assert.equal(r.c.status().state, "on-hotspot");
 });
 
+test("a failed try does not double: each failure moves to the next scheduled point", async () => {
+  const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "172.20.10.2" } });
+  await r.ticks(1);
+  // 5 min point: attempt fails, next is the 10 min point (300s away), not 600s.
+  await r.ticks(30);
+  assert.equal(r.returns(), 1);
+  assert.ok(r.lines.some((l) => /staying on the hotspot .*; next try in 2[0-9][0-9]s/.test(l)), r.lines.join("\n"));
+});
+
+test("leaving the hotspot for Wi-Fi resets the schedule: landing again starts at 5 min", async () => {
+  const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4" } });
+  await r.ticks(31); // first return at the 5 min point
+  assert.equal(r.returns(), 1);
+  assert.equal(r.c.status().network, "wifi");
+  // By hand (or another failover) back on the hotspot: the 5 min wait starts over.
+  await r.ticks(60); // 10 more minutes on Wi-Fi
+  assert.equal(r.returns(), 1);
+  r.net.ip = "172.20.10.2";
+  r.net.disassociateLandsOn = "192.168.1.4";
+  await r.ticks(29);
+  assert.equal(r.returns(), 1, "not yet: the schedule was reset by the landing");
+  await r.ticks(2);
+  assert.equal(r.returns(), 2);
+});
+
 test("the Wi-Fi macOS picks has no internet: rejoin the hotspot", async () => {
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.50.7", probeOk: (ip) => isHotspotAddress(ip) } });
-  await r.ticks(20);
+  await r.ticks(31);
   assert.equal(r.returns(), 1);
   assert.equal(r.joins(), 1);
   assert.equal(r.c.status().network, "hotspot");
@@ -289,7 +356,7 @@ test("the Wi-Fi macOS picks has no internet: rejoin the hotspot", async () => {
 test("never more than one switch per minute: a fresh return is not followed by an instant failover", async () => {
   let wifiDead = false;
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4", probeOk: (ip) => isHotspotAddress(ip) || !wifiDead } });
-  await r.ticks(20);
+  await r.ticks(31);
   assert.equal(r.returns(), 1);
   const back = r.clock.t;
   wifiDead = true;
@@ -341,15 +408,15 @@ function gapRig(o: { quietAfterMs: number; onLeave?: () => void; net?: Partial<N
 
 test("calls never stop: 2 min past due new calls are held, the running ones finish, the return runs, the hold is released", async () => {
   const r = gapRig({ quietAfterMs: 7_000 });
-  // First tick plans the return 180s out; 120s past that is 300s in.
-  await r.ticks(30); // ticks at 0..290s
+  // First tick plans the return at the 5 min point; 120s past that is 420s in.
+  await r.ticks(42); // ticks at 0..410s
   assert.equal(r.events.length, 0, "inside the grace period nothing is held");
   assert.equal(r.returns(), 0);
   assert.ok(r.lines.some((l) => /Wi-Fi return postponed: a model call is running/.test(l)));
-  await r.ticks(1); // 300s: 120s past due
+  await r.ticks(1); // 420s: 120s past due
   await r.held();
   assert.deepEqual(r.events, ["engaged", "leave (holding 1)", "held call goes ahead after release"]);
-  assert.equal(r.engagedAt()! - 1_000_000, 180_000 + RETURN_FORCE_AFTER_MS);
+  assert.equal(r.engagedAt()! - 1_000_000, 300_000 + RETURN_FORCE_AFTER_MS);
   assert.equal(r.returns(), 1);
   assert.equal(r.hold.engaged, false);
   assert.equal(r.hold.waiting, 0);
@@ -364,9 +431,9 @@ test("calls never stop: 2 min past due new calls are held, the running ones fini
   assert.ok(log.indexOf("back on Wi-Fi") < log.indexOf("hold released"), "released after the return, not before");
 });
 
-test("calls that do not finish within the drain wait: release, back off, no switch", async () => {
+test("calls that do not finish within the drain wait: release, back off to the next point, no switch", async () => {
   const r = gapRig({ quietAfterMs: Infinity });
-  await r.ticks(30);
+  await r.ticks(42); // the 5 min point is due at 300s; 120s past it at 420s
   const before = r.clock.t;
   await r.c.tick();
   await r.held();
@@ -377,13 +444,14 @@ test("calls that do not finish within the drain wait: release, back off, no swit
   assert.equal(r.hold.engaged, false);
   assert.equal(r.c.status().state, "on-hotspot");
   const log = r.lines.join("\n");
-  assert.match(log, /staying on the hotspot \(1 model call still running after 60s; held calls released\); next try in 360s/);
+  // The drain ends at 480s, past the 5 min point, so the next is the 10 min point: 120s away.
+  assert.match(log, /staying on the hotspot \(1 model call still running after 60s; held calls released\); next try in 120s/);
   assert.match(log, /hold released; 1 held model call going ahead/);
 });
 
 test("an error in the middle of the return still releases the hold", async () => {
   const r = gapRig({ quietAfterMs: 3_000, onLeave: () => { throw new Error("osascript exploded"); } });
-  await r.ticks(31);
+  await r.ticks(43);
   await r.held();
   assert.deepEqual(r.events, ["engaged", "leave (holding 1)", "held call goes ahead after release"]);
   assert.equal(r.hold.engaged, false);
@@ -403,7 +471,7 @@ test("stop() while waiting for running calls releases the hold at once and gives
       }
     },
   });
-  await r.ticks(31);
+  await r.ticks(43);
   await r.held();
   assert.equal(r.hold.engaged, false);
   assert.deepEqual(r.events, ["engaged", "held call goes ahead after release"]);
