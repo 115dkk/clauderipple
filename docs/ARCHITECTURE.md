@@ -1315,6 +1315,33 @@ They were not live-tested during the original implementation. Files are under `s
   aidev_client; auth_method=oauth)` — the IDE client family is required, the backend 404s
   CLI-shaped UAs (`adapters/client-fingerprint.ts:44-65`). Response frames nest the standard
   Gemini payload under `response` (`adapters/google.ts:1281,1591-1596`).
+- **Two hosts, different catalogues and separate quotas (measured 2026-10-20, user's account,
+  `fetchAvailableModels` on the same OAuth token).** `daily-cloudcode-pa.googleapis.com` and
+  `cloudcode-pa.googleapis.com` offer different models — prod lists the Gemini Pro family
+  (`gemini-3.1-pro-*`, `gemini-pro-agent`, `gemini-3.6/3.7-flash-*`) the daily host does not, while
+  both list `gemini-3.8-flash-*` and the 2.5/3-flash ids. Each host counts its quota separately
+  (`retrieveUserQuotaSummary` per host). The router is therefore two-hosted **for model coverage,
+  not for load-splitting**: there is no round-robin and no spreading of one model's turns across
+  hosts (asked for explicitly).
+  - Listing (`index.ts fetchModelsOnce`, `antigravity.ts fetchAvailableModels`) asks every host
+    (`GOOGLE_OAUTH.hosts`, daily first) unless the provider pins a `url`, merges the catalogues and
+    keeps a **host map** from each model id and each collapsed wire id to the hosts that list it,
+    in preference order. Daily wins ties (the user's pre-existing `gemini-3.8-flash` behaviour is
+    unchanged). The merged list and the map share the hour-long models cache; a host that fails
+    contributes nothing and its absence is logged — it never hides the other host's models.
+  - Generation (`index.ts hostFor` → `transport.build` `antigravityBaseUrl`) sends a model to the
+    first host in the map that offers its resolved wire id (or base id), else the default host. A
+    cold cache is filled once before a turn (and before quota), so a prod-only model is not sent to
+    daily on the first turn after a restart. An unknown model goes to the default host unchanged.
+  - Thought signatures are **scoped per host** (`thoughtSignatures.ts scope`): CCA's state is per
+    host, so a signature minted on one host is never replayed to the other. The conversation
+    `sessionId` stays derived from `conversationKey` alone — a per-conversation hint, not state.
+  - Quota (`usage.ts GoogleUsage`) reads `retrieveUserQuotaSummary` on every host a selected model
+    is actually sent to (`index.ts quotaHosts`: one host per configured model, all hosts when the
+    model list is empty, the pinned `url` alone when pinned). When both hosts are in use, one
+    window kind shows the **higher used percent** of the two (`mergeHostGroups`, lower remaining
+    fraction wins) — the quota closest to running out. `hasRemainingQuota` evidence is per host and
+    per account/project: it is true only for the host the model's request is sent to.
 - Model ids. CCA's wire ids carry the tier as a suffix (`gemini-3.8-flash-low`) or a
   `-tiered` rename (`gemini-3.7-flash-tiered`), while the picker shows a collapsed base id.
   Resolution, from `providers/antigravity-models.ts`: `gemini-3.8-flash` → its suffix per
@@ -1322,10 +1349,10 @@ They were not live-tested during the original implementation. Files are under `s
   `gemini-3.1-pro` → `gemini-3.1-pro-low` / `gemini-pro-agent` with `thinkingLevel`;
   `gemini-3.7-flash` → `gemini-3.7-flash-tiered` with `thinkingLevel`; a `claude-*` id takes a
   `thinkingLevel` only (`resolveAntigravityThinkingLevel` clamps `xhigh/max/ultra`→`high`).
-  CCA's own catalogue is `POST {dailyApi}/v1internal:fetchAvailableModels` with `{project}`,
-  body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
+  CCA's own catalogue is `POST {host}/v1internal:fetchAvailableModels` with `{project}`, per host
+  (see "Two hosts" below), body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
   tieredModelIds:{flash:[…]}}` (`providers/quota/antigravity.ts:166-168`,
-  `providers/antigravity-models.ts:489-560`); when it cannot be read we fall back to the
+  `providers/antigravity-models.ts:489-560`); when it cannot be read on any host we fall back to the
   static collapsed list (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.1-pro`,
   `gemini-3.1-flash-image`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`,
   `gpt-oss-120b-medium`, context windows from CCA `maxTokens`).

@@ -4,10 +4,11 @@
 //
 // Measured 2026-10-15 against a live Antigravity subscription:
 //   POST {host}/v1internal:retrieveUserQuotaSummary
-// The host must be the one the requests go to (the daily host by default, transport.ts). Each host
-// keeps its own count: after 144 gemini-3.8-flash requests on daily, the prod host still answered
+// The host must be one the requests go to (transport.ts antigravityBaseUrl). Each host keeps its own
+// count: after 144 gemini-3.8-flash requests on daily, the prod host still answered
 // remainingFraction 1 with a reset always five hours out, while daily answered 0.87 (5h) and 0.947
-// (weekly) — the limits row read prod and showed 0% for a day of use (2026-10-20).
+// (weekly) — the limits row read prod and showed 0% for a day of use (2026-10-20). So every host a
+// selected model is sent to is read, and the row shows each window kind at the higher used percent.
 //   headers: authorization: Bearer <accessToken>, content-type: application/json, user-agent
 //   body:    {"project": "<projectId>"}
 //   answer:  {"groups":[{"displayName":"Gemini Models","buckets":[
@@ -122,8 +123,31 @@ export function googleWindowsFromGroups(groups: readonly QuotaGroup[]): GoogleWi
   return ordered(out);
 }
 
-/** What the last successful lookup of one account said, kept only to answer hasRemainingQuota. */
-type QuotaEvidence = { projectId: string; observedAt: number; groups: QuotaGroup[] };
+/** What the last successful lookup of one account and host said, kept only to answer hasRemainingQuota. */
+type HostEvidence = { observedAt: number; groups: QuotaGroup[] };
+type QuotaEvidence = { projectId: string; hosts: Map<string, HostEvidence> };
+
+/**
+ * Merge the groups read from several hosts into one set for the limits row. Each host keeps its own
+ * count, so the same window kind can read differently on each; when both hosts are in use the row
+ * shows the **higher used percent** of the two (the lower remaining fraction), because that is the
+ * quota a person is closest to running out of. The preferred host's bucket wins a tie.
+ */
+export function mergeHostGroups(perHost: readonly QuotaGroup[][]): QuotaGroup[] {
+  const groups = new Map<string, Map<string, QuotaBucket>>();
+  for (const hostGroups of perHost) {
+    for (const group of hostGroups) {
+      let buckets = groups.get(group.displayName);
+      if (!buckets) groups.set(group.displayName, (buckets = new Map()));
+      for (const bucket of group.buckets) {
+        const key = `${bucket.window}\u0000${bucket.bucketId}`;
+        const existing = buckets.get(key);
+        if (!existing || bucket.remainingFraction < existing.remainingFraction) buckets.set(key, bucket);
+      }
+    }
+  }
+  return [...groups].map(([displayName, buckets]) => ({ displayName, buckets: [...buckets.values()] }));
+}
 
 /**
  * The whole body as groups, or null when ANY group or bucket is malformed. The display parser drops
@@ -175,8 +199,14 @@ function groupHasQuota(group: QuotaGroup, ids: Record<"5h" | "weekly", string>, 
 
 type UsageSource = { credentials(): Promise<GoogleCredential[]> };
 type UsageOptions = {
-  /** The Cloud Code Assist host the requests go to (transport.ts antigravityBaseUrl); its quota is the one they spend. */
+  /** The Cloud Code Assist host the requests go to by default (transport.ts antigravityBaseUrl). */
   baseUrl?: string;
+  /**
+   * Every host whose quota the limits row reads, in preference order: the hosts the selected models
+   * live on. Each host counts its own quota (measured 2026-10-20), so one host's numbers say nothing
+   * about the other's. Read fresh on each refresh; defaults to just `baseUrl`.
+   */
+  hosts?: () => readonly string[];
   fetch?: FetchLike;
   now?: () => number;
   ttlMs?: number;
@@ -185,12 +215,13 @@ type UsageOptions = {
 };
 
 /**
- * Per-account quota groups, fetched at most once per `ttlMs` per account. A failed lookup keeps the
- * last good groups rather than blanking them, and only the status code is logged.
+ * Per-account quota groups, fetched at most once per `ttlMs` per account and host. A failed lookup of
+ * one host keeps that host's last good groups rather than blanking them, and only the status code is
+ * logged.
  */
 export class GoogleUsage {
   private readonly last = new Map<string, QuotaGroup[]>();
-  /** Per account, only the last SUCCESSFUL lookup; dropped as soon as a refresh fails. */
+  /** Per account, only the last SUCCESSFUL lookup of each host; dropped as soon as that lookup fails. */
   private readonly evidence = new Map<string, QuotaEvidence>();
   private inFlight: Promise<Record<string, QuotaGroup[]>> | null = null;
   private fetchedAt = Number.NEGATIVE_INFINITY;
@@ -200,6 +231,12 @@ export class GoogleUsage {
   constructor(source: UsageSource, opts: UsageOptions) {
     this.source = source;
     this.opts = opts;
+  }
+
+  /** The hosts to read: those a selected model is sent to, else the default host alone. */
+  private hosts(): string[] {
+    const configured = this.opts.hosts?.() ?? [];
+    return configured.length ? [...configured] : [this.opts.baseUrl ?? GOOGLE_OAUTH.dailyApi];
   }
 
   /** Groups by account owner id, from the store's own account ids. */
@@ -214,19 +251,22 @@ export class GoogleUsage {
   }
 
   /**
-   * Whether the cached quota still shows room for `model` on this account and project. Reads the
-   * cache only (never fetches), and is true only when the last refresh of this account succeeded
-   * within the TTL, the model's group is recognized, and both its 5h and weekly buckets have a
-   * remaining fraction in (0, 1] and a reset time in the future. Everything else is false: this
-   * is positive evidence, not a guess, so "false" means "unknown or spent", not "refused".
+   * Whether the cached quota still shows room for `model` on this account and project, **on the host
+   * the model's requests are sent to**. Reads the cache only (never fetches), and is true only when
+   * the last refresh of that account and host succeeded within the TTL, the model's group is
+   * recognized, and both its 5h and weekly buckets have a remaining fraction in (0, 1] and a reset
+   * time in the future. Everything else is false: this is positive evidence, not a guess, so "false"
+   * means "unknown or spent", not "refused".
    */
-  hasRemainingQuota(credential: Pick<GoogleCredential, "ownerId" | "projectId">, model: string): boolean {
+  hasRemainingQuota(credential: Pick<GoogleCredential, "ownerId" | "projectId">, model: string, host?: string): boolean {
     const evidence = this.evidence.get(credential.ownerId);
     if (!evidence || evidence.projectId !== credential.projectId) return false;
+    const target = evidence.hosts.get(host ?? this.opts.baseUrl ?? GOOGLE_OAUTH.dailyApi);
+    if (!target) return false;
     const now = (this.opts.now ?? Date.now)();
-    const age = now - evidence.observedAt;
+    const age = now - target.observedAt;
     if (!(age >= 0 && age < (this.opts.ttlMs ?? 5 * 60_000))) return false;
-    const match = groupFor(evidence.groups, model);
+    const match = groupFor(target.groups, model);
     return !!match && groupHasQuota(match.group, match.ids, now);
   }
 
@@ -239,17 +279,22 @@ export class GoogleUsage {
       this.evidence.clear();
       return Object.fromEntries(this.last);
     }
+    const hosts = this.hosts();
+    // Each host keeps its own count, so every host is read; a host that fails leaves its last good
+    // numbers on screen but voids its own evidence.
     await Promise.all(credentials.map(async (credential) => {
-      const fetched = await this.fetchOne(credential);
-      if (fetched) {
-        this.last.set(credential.ownerId, fetched.groups);
-        // A body with any malformed group or bucket is shown as far as it parses, but proves nothing.
-        if (fetched.strict) this.evidence.set(credential.ownerId, { projectId: credential.projectId, observedAt: (this.opts.now ?? Date.now)(), groups: fetched.strict });
-        else this.evidence.delete(credential.ownerId);
-      } else {
-        // The displayed numbers stay, but they are no longer proof of anything.
-        this.evidence.delete(credential.ownerId);
+      const fetched = await Promise.all(hosts.map(async (host) => [host, await this.fetchOne(credential, host)] as const));
+      const shown = new Map<string, QuotaGroup[]>();
+      const proven = new Map<string, HostEvidence>();
+      for (const [host, answer] of fetched) {
+        if (!answer) continue;
+        shown.set(host, answer.groups);
+        if (answer.strict) proven.set(host, { observedAt: (this.opts.now ?? Date.now)(), groups: answer.strict });
       }
+      if (shown.size > 0) this.last.set(credential.ownerId, mergeHostGroups([...shown.values()]));
+      if (proven.size > 0) this.evidence.set(credential.ownerId, { projectId: credential.projectId, hosts: proven });
+      // The displayed numbers stay but prove nothing when no host answered.
+      else this.evidence.delete(credential.ownerId);
     }));
     // An account that was removed must not keep its old numbers on the screen.
     const owners = new Set(credentials.map((c) => c.ownerId));
@@ -258,10 +303,10 @@ export class GoogleUsage {
     return Object.fromEntries(this.last);
   }
 
-  private async fetchOne(credential: GoogleCredential): Promise<{ groups: QuotaGroup[]; strict: QuotaGroup[] | null } | null> {
+  private async fetchOne(credential: GoogleCredential, host: string): Promise<{ groups: QuotaGroup[]; strict: QuotaGroup[] | null } | null> {
     const owner = credential.ownerId.slice(0, 8);
     try {
-      const res = await (this.opts.fetch ?? fetch)(`${this.opts.baseUrl ?? GOOGLE_OAUTH.dailyApi}/${GOOGLE_OAUTH.apiVersion}:retrieveUserQuotaSummary`, {
+      const res = await (this.opts.fetch ?? fetch)(`${host}/${GOOGLE_OAUTH.apiVersion}:retrieveUserQuotaSummary`, {
         method: "POST",
         headers: { authorization: `Bearer ${credential.accessToken}`, "content-type": "application/json", accept: "*/*", "user-agent": antigravityUserAgent() },
         body: JSON.stringify({ project: credential.projectId }),
@@ -269,7 +314,7 @@ export class GoogleUsage {
       });
       if (!res.ok) {
         // The status alone: the body of an auth failure is not worth the risk of echoing.
-        this.opts.warn?.(`google usage ${owner}: HTTP ${res.status}`);
+        this.opts.warn?.(`google usage ${owner}: HTTP ${res.status} on ${new URL(host).host}`);
         return null;
       }
       const body: unknown = await res.json();

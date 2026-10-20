@@ -25,6 +25,11 @@ export type GoogleTransportBuildOptions = {
   effort?: string;
   /** Present only for the antigravity mode; the api-key mode ignores it. */
   antigravity?: AntigravityAuth;
+  /**
+   * The Cloud Code Assist host this turn goes to, when the adapter has resolved one (a model that
+   * only one of daily/prod offers). Absent means the transport's own base.
+   */
+  antigravityBaseUrl?: string;
 };
 
 export type GoogleTransport = {
@@ -101,7 +106,7 @@ export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?
           request,
         };
         return {
-          url: `${base}/${GOOGLE_OAUTH.apiVersion}:${method}${query}`,
+          url: `${(o.antigravityBaseUrl ? o.antigravityBaseUrl.replace(/\/+$/, "") : base)}/${GOOGLE_OAUTH.apiVersion}:${method}${query}`,
           headers: {
             "content-type": "application/json",
             accept: o.stream ? "text/event-stream" : "application/json",

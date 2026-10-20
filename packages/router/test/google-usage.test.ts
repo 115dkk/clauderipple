@@ -105,6 +105,57 @@ test("quota is read from the host the requests go to, the daily host unless conf
   ]);
 });
 
+test("every configured host is read, one failing host keeps the other's numbers and evidence", async () => {
+  const seen: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    seen.push(url);
+    if (url.startsWith("https://prod.test/")) return new Response("nope", { status: 500 });
+    return new Response(JSON.stringify(measured), { status: 200 });
+  }) as unknown as typeof fetch;
+  const source = { credentials: async () => [{ ownerId: "acct-1", accessToken: "tok", projectId: "proj" }] } as never;
+  const usage = new GoogleUsage(source, {
+    baseUrl: "https://daily.test",
+    hosts: () => ["https://daily.test", "https://prod.test"],
+    fetch: fetchImpl,
+    now: () => Date.parse("2026-10-15T00:00:00Z"),
+    warn: () => {},
+  });
+  const shown = await usage.snapshot();
+  assert.deepEqual(seen.sort(), [
+    "https://daily.test/v1internal:retrieveUserQuotaSummary",
+    "https://prod.test/v1internal:retrieveUserQuotaSummary",
+  ]);
+  assert.equal(shown["acct-1"]?.length, 2, "the reachable host's groups are shown");
+  assert.equal(usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj" }, GEMINI, "https://daily.test"), true);
+  assert.equal(usage.hasRemainingQuota({ ownerId: "acct-1", projectId: "proj" }, GEMINI, "https://prod.test"), false, "a failed host proves nothing");
+});
+
+test("hasRemainingQuota evidence belongs to one host: the same model on another host is unknown", async () => {
+  const fetchImpl = (async (url: string) => {
+    const fraction = url.startsWith("https://daily.test/") ? 0.9 : 0;
+    const body = summary([bucket("weekly", fraction), bucket("5h", fraction, FUTURE)], []);
+    return new Response(JSON.stringify(body), { status: 200 });
+  }) as unknown as typeof fetch;
+  const source = { credentials: async () => [{ ownerId: "acct-1", accessToken: "tok", projectId: "proj" }] } as never;
+  const usage = new GoogleUsage(source, {
+    baseUrl: "https://daily.test",
+    hosts: () => ["https://daily.test", "https://prod.test"],
+    fetch: fetchImpl,
+    now: () => NOW,
+    warn: () => {},
+  });
+  const shown = await usage.snapshot();
+  const a = { ownerId: "acct-1", projectId: "proj" };
+  // Both hosts answered; the row takes the higher used percent, so the exhausted prod windows win.
+  const fiveHour = shown["acct-1"]?.find((g) => /gemini/i.test(g.displayName))?.buckets.find((b) => b.window === "5h");
+  assert.equal(fiveHour?.remainingFraction, 0, "both hosts in use: the row shows the closer-to-spent window");
+  assert.equal(usage.hasRemainingQuota(a, GEMINI, "https://daily.test"), true, "the daily host has room");
+  assert.equal(usage.hasRemainingQuota(a, GEMINI, "https://prod.test"), false, "prod's windows are spent");
+  // The default host is the provider's, so an unspecified host means daily here.
+  assert.equal(usage.hasRemainingQuota(a, GEMINI), true);
+  assert.equal(usage.hasRemainingQuota(a, GEMINI, "https://unread.test"), false, "an unread host is not evidence");
+});
+
 test("hasRemainingQuota is false until a lookup has succeeded, never fetches, then is true on the ordinary positive path", async () => {
   const h = harness();
   assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);

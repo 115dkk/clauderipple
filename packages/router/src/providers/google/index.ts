@@ -25,10 +25,10 @@ import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { estimateTokens, formatSse, GoogleStreamMapper, toGeminiRequest, type GeminiRequest } from "./translate.ts";
 import { antigravityBaseUrl, createTransport, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
-import { ThoughtSignatureStore } from "./thoughtSignatures.ts";
+import { ThoughtSignatureStore, type ThoughtSignatureSink } from "./thoughtSignatures.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap, type AnthropicRequest } from "../chatgpt/translate.ts";
 import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, type FetchLike } from "./accounts.ts";
-import { fetchAvailableModels, staticAntigravityModels } from "./antigravity.ts";
+import { fetchAvailableModels, hostForModel, resolveAntigravityWireModel, staticAntigravityModels, GOOGLE_OAUTH, type HostMap, type MergedCatalogue } from "./antigravity.ts";
 import { GoogleUsage, type QuotaGroup } from "./usage.ts";
 import { ANTIGRAVITY_PROMPT_REFUSAL_MESSAGE, isAntigravityPromptRefusal } from "./prompt-refusal.ts";
 
@@ -155,17 +155,57 @@ export class GoogleAdapter {
   private activeOwner: string | null = null;
   /** Accounts Google wants checked, with its page for it; cleared when the account next answers. */
   private readonly verifyUrls = new Map<string, string>();
-  private modelsCache: { at: number; models: ProviderModel[] } | null = null;
+  private modelsCache: { at: number; models: ProviderModel[]; hosts: HostMap } | null = null;
   private modelsInFlight: Promise<ProviderModel[] | null> | null = null;
+  /** When the last listing attempt failed, so a turn does not retry an unreadable catalogue every time. */
+  private modelsFailedAt = Number.NEGATIVE_INFINITY;
+  /** The fetch the adapter's side calls use (model listing, and the account store); injectable for tests. */
+  private readonly fetchImpl: FetchLike | undefined;
 
   constructor(name: string, cfg: GoogleProvider, home: string, log: Logger, pool = new CredentialPool(), fetchImpl?: FetchLike) {
     this.name = name;
     this.cfg = cfg;
     this.log = log;
     this.pool = pool;
+    this.fetchImpl = fetchImpl;
     this.accounts = new GoogleAccountPool({ home, log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
-    // Quota is read from the host the requests go to: each Cloud Code Assist host counts its own.
-    this.usage = new GoogleUsage(this.accounts, { baseUrl: antigravityBaseUrl(cfg.url), warn: (message) => log.warn(message), ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+    // Quota: each Cloud Code Assist host counts its own, so the limits row reads every host a
+    // selected model lives on (resolved lazily from the cached model catalogue below).
+    this.usage = new GoogleUsage(this.accounts, {
+      baseUrl: antigravityBaseUrl(cfg.url),
+      hosts: () => this.quotaHosts(),
+      warn: (message) => log.warn(message),
+      ...(fetchImpl ? { fetch: fetchImpl } : {}),
+    });
+  }
+
+  /**
+   * The hosts whose quota the limits row must read: one per host that offers a model this provider
+   * routes (the configured model list, or the discovered catalogue when it lists none). A pinned
+   * `url` is the only host, because generation never leaves it.
+   */
+  private quotaHosts(): string[] {
+    if (this.cfg.url) return [antigravityBaseUrl(this.cfg.url)];
+    const hosts = this.modelsCache?.hosts;
+    // Without a catalogue we cannot tell which host the models go to; read the default one only,
+    // rather than showing an unused host's numbers.
+    if (!hosts) return [GOOGLE_OAUTH.dailyApi];
+    const models = this.cfg.models ?? [];
+    // No configured model list means the provider routes whatever the client asks for; both hosts
+    // are then in use in principle, so both quotas are read.
+    if (models.length === 0) return [...GOOGLE_OAUTH.hosts];
+    const fallback = antigravityBaseUrl(this.cfg.url);
+    const used: string[] = [];
+    for (const entry of models) {
+      // The host the model is actually sent to, not every host that lists it: a shared model goes
+      // to the preferred (daily) host, so only that host's quota is spent by this provider. The
+      // default effort stands in for the configured model because the config carries no per-turn
+      // effort; its tier's host is the representative one.
+      const wire = resolveAntigravityWireModel(entry.id, this.cfg.defaultEffort).wire;
+      const host = hostForModel(hosts, entry.id, wire, fallback);
+      if (!used.includes(host)) used.push(host);
+    }
+    return used.length ? used : [GOOGLE_OAUTH.dailyApi];
   }
 
   describeAuth(): string {
@@ -207,7 +247,9 @@ export class GoogleAdapter {
    * failed lookup keeps that account's last good groups.
    */
   usageSnapshot(): Promise<Record<string, QuotaGroup[]>> {
-    return this.usage.snapshot();
+    // Knowing which hosts hold the selected models needs the catalogue; a cold cache would read
+    // daily only and show the wrong host's numbers. The listing is cached for an hour.
+    return this.ensureHostMap().then(() => this.usage.snapshot());
   }
 
   /**
@@ -223,7 +265,7 @@ export class GoogleAdapter {
     const transport = createTransport("antigravity", this.cfg.url ? { url: this.cfg.url } : {});
     const built = transport.build(
       { contents: [{ role: "user", parts: [{ text: "ping" }] }], generationConfig: { maxOutputTokens: 16 } },
-      { model, stream: false, antigravity: { accessToken: credential.accessToken, projectId: credential.projectId, conversationKey: `recheck:${ownerId}` } },
+      { model, stream: false, antigravity: { accessToken: credential.accessToken, projectId: credential.projectId, conversationKey: `recheck:${ownerId}` }, antigravityBaseUrl: this.hostFor(model, undefined) },
     );
     try {
       const upstream = await fetch(built.url, { method: "POST", headers: built.headers, body: built.body, signal: AbortSignal.timeout(30_000) });
@@ -265,14 +307,50 @@ export class GoogleAdapter {
 
   private async fetchModelsOnce(): Promise<ProviderModel[] | null> {
     const credential = await this.anyCredential();
+    // No account is not a failed listing: a sign-in must take effect at once, not an hour later.
     if (credential instanceof Error) return null;
-    const models = await fetchAvailableModels(credential.accessToken, credential.projectId);
-    if (!models) {
+    // Both Cloud Code Assist hosts are asked; one host failing must not hide the other's models.
+    const hosts = this.cfg.url ? [antigravityBaseUrl(this.cfg.url)] : GOOGLE_OAUTH.hosts;
+    const catalogue: MergedCatalogue | null = await fetchAvailableModels(credential.accessToken, credential.projectId, {
+      hosts,
+      ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+    });
+    if (!catalogue) {
       this.log.warn(`google ${this.name}: fetchAvailableModels returned nothing; falling back to the static list`);
+      // A cold host is not asked again on every turn while it is unreadable.
+      this.modelsFailedAt = Date.now();
       return staticAntigravityModels();
     }
-    this.modelsCache = { at: Date.now(), models };
-    return models;
+    this.modelsCache = { at: Date.now(), models: catalogue.models, hosts: catalogue.hosts };
+    if (catalogue.byHost.size < hosts.length) {
+      const answered = [...catalogue.byHost.keys()].map((h) => new URL(h).host);
+      const missing = hosts.filter((h) => !catalogue.byHost.has(h)).map((h) => new URL(h).host);
+      this.log.warn(`google ${this.name}: fetchAvailableModels answered on ${answered.join(", ")}; ${missing.join(", ")} failed, its models are hidden`);
+    }
+    return catalogue.models;
+  }
+
+  /**
+   * Make sure the host map is loaded, within the same hour-long cache as `fetchModels`. A listing
+   * that just failed is not retried on every turn; the default host is used meanwhile.
+   */
+  private async ensureHostMap(): Promise<void> {
+    if (this.modelsCache || this.cfg.url) return;
+    if (!this.accounts.signedIn()) return;
+    if (Date.now() - this.modelsFailedAt < MODELS_CACHE_MS) return;
+    await this.fetchModels();
+  }
+
+  /**
+   * The host a turn for `model` must go to: the one that offers its resolved wire id, preferring
+   * daily when both do, else the provider's default. Unknown models and an unread catalogue fall
+   * back to the default, exactly as before the second host existed.
+   */
+  private hostFor(model: string, effort: string | undefined): string {
+    const fallback = antigravityBaseUrl(this.cfg.url);
+    if (this.cfg.url || !this.modelsCache) return fallback;
+    const wire = resolveAntigravityWireModel(model, effort).wire;
+    return hostForModel(this.modelsCache.hosts, model, wire, fallback);
   }
 
   /** For side calls (models, project refresh) with no conversation: a usable account, else any. */
@@ -306,13 +384,22 @@ export class GoogleAdapter {
     const caps = effortLevels ? { effortLevels } : {};
     // A request that names no effort gets the provider's configured one, as the ChatGPT one does.
     const useEffort = effort ?? this.cfg.defaultEffort;
+    // A model that only one CCA host offers must be sent there. The catalogue is the only source of
+    // that routing, so a cold cache (first turn after a restart) is filled before the turn is built.
+    // It is a no-op within the hour after that, and a failure silently keeps the default host.
+    if (this.cfg.auth === "antigravity") await this.ensureHostMap();
+    const host = this.cfg.auth === "antigravity" ? this.hostFor(model, useEffort) : undefined;
+    // Thought signatures are per host: CCA runs its state separately on each, and replaying one
+    // host's signature to the other is refused (see thoughtSignatures.ts). The API-key path keeps
+    // the unscoped store.
+    const signatures: ThoughtSignatureSink = host ? this.thoughtSignatures.scope(host) : this.thoughtSignatures;
     const upstreamRequest: GeminiRequest = toGeminiRequest(json, {
       model,
       ...(useEffort ? { effort: useEffort } : {}),
       caps,
       ...(this.cfg.identity === undefined ? {} : { identity: this.cfg.identity }),
       ...(this.cfg.instructionsAppend ? { instructionsAppend: this.cfg.instructionsAppend } : {}),
-      thoughtSignatures: this.thoughtSignatures,
+      thoughtSignatures: signatures,
       // The CCA path never adds the sentinel: the signature goes back on the exact functionCall the
       // model signed (or nothing at all), rather than a fabricated validator bypass.
       signatureSentinel: this.cfg.auth === "api-key",
@@ -327,7 +414,7 @@ export class GoogleAdapter {
     const transport = createTransport(this.cfg.auth, { ...(this.cfg.apiKey ? { apiKey: this.cfg.apiKey } : {}), ...(this.cfg.url ? { url: this.cfg.url } : {}) });
 
     if (this.cfg.auth === "antigravity") {
-      return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput);
+      return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures);
     }
 
     const apiKey = resolveApiKey(this.cfg.apiKey);
@@ -386,7 +473,7 @@ export class GoogleAdapter {
    * and its failure handling mirror the ChatGPT pool (accounts.ts), because the cache cost of moving
    * a conversation off its account is the same (§4).
    */
-  private async handleAntigravity(res: http.ServerResponse, json: AnthropicRequest, upstreamRequest: GeminiRequest, transport: GoogleTransport, model: string, effort: string | undefined, wantStream: boolean, key: string, startInput: number): Promise<GoogleOutcome> {
+  private async handleAntigravity(res: http.ServerResponse, json: AnthropicRequest, upstreamRequest: GeminiRequest, transport: GoogleTransport, model: string, effort: string | undefined, wantStream: boolean, key: string, startInput: number, host: string, signatures: ThoughtSignatureSink): Promise<GoogleOutcome> {
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
@@ -396,12 +483,14 @@ export class GoogleAdapter {
       signal: controller.signal,
       system: upstreamRequest.systemInstruction,
       model,
+      host,
       build: (credential) => {
         const built = transport.build(upstreamRequest, {
           model,
           stream: wantStream,
           ...(effort ? { effort } : {}),
           antigravity: { accessToken: credential.accessToken, projectId: credential.projectId, conversationKey: key },
+          antigravityBaseUrl: host,
         });
         return { built, secrets: [credential.accessToken, ...credentialHeaderValues(Object.entries(built.headers))] };
       },
@@ -449,13 +538,13 @@ export class GoogleAdapter {
       };
     }
 
-    return this.streamBack(res, sent.upstream, transport, json, model, wantStream, key, startInput, controller, onClose);
+    return this.streamBack(res, sent.upstream, transport, json, model, wantStream, key, startInput, controller, onClose, signatures);
   }
 
   /** Stream (or buffer) an already-ok upstream response back to the client as Anthropic SSE. */
-  private async streamBack(res: http.ServerResponse, upstream: Response, transport: GoogleTransport, json: AnthropicRequest, model: string, wantStream: boolean, key: string, startInput: number, controller: AbortController, onClose: () => void): Promise<GoogleOutcome> {
+  private async streamBack(res: http.ServerResponse, upstream: Response, transport: GoogleTransport, json: AnthropicRequest, model: string, wantStream: boolean, key: string, startInput: number, controller: AbortController, onClose: () => void, signatures: ThoughtSignatureSink = this.thoughtSignatures): Promise<GoogleOutcome> {
     const mapper = new GoogleStreamMapper(model, startInput, toolNameRestoreMap(json), (info) => {
-      if (info.signature) this.thoughtSignatures.set(info.id, info.signature);
+      if (info.signature) signatures.set(info.id, info.signature);
     });
     const parser = new SseParser();
     const reader = upstream.body!.getReader();
@@ -558,6 +647,8 @@ export class GoogleAdapter {
     signal: AbortSignal;
     system: GeminiRequest["systemInstruction"];
     model: string;
+    /** The CCA host this turn goes to; quota evidence is read from the same host. */
+    host: string;
     build: (credential: GoogleCredential) => { built: { url: string; headers: Record<string, string>; body: string }; secrets: string[] };
   }): Promise<SendResult> {
     const tried = new Set<string>();
@@ -610,7 +701,7 @@ export class GoogleAdapter {
       // account/model permits a request-specific refusal; otherwise keep ordinary
       // cooldown and account rotation. The proxy can still try a route fallback.
       if (isAntigravityPromptRefusal(spec.system, status, text, upstream.headers.get("retry-after")) &&
-          this.usage.hasRemainingQuota(credential, spec.model)) {
+          this.usage.hasRemainingQuota(credential, spec.model, spec.host)) {
         return { kind: "prompt-refused" };
       }
       // Not a rest and not a refresh: the account works again the moment its person finishes
