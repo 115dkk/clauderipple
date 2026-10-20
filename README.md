@@ -656,6 +656,10 @@ In daily use by the author, but young. Expect rough edges:
 - Claude Code and Codex change their wire protocols often; a client update can
   break a translation until ClaudeRipple catches up. Bugs and logs welcome.
 
+## Community
+
+Questions, bug reports and the Ripple Remote Android beta (a closed test on Google Play) are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). To join the Android beta, leave the Gmail address you use on Google Play there.
+
 ## Not affiliated
 
 ClaudeRipple is an independent open-source project. It is not affiliated with,

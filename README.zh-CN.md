@@ -381,6 +381,10 @@ Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Clau
 - 添加到模型选择器的模型从下一个会话起可用。
 - Claude Code 和 Codex 经常更改其通信协议；客户端更新后，某个格式转换可能会失效，直到 ClaudeRipple 跟进为止。欢迎提交 bug 和日志。
 
+## 社区
+
+提问、报告问题以及报名 Ripple Remote Android 测试版（Google Play 封闭测试）都在 Discord：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。想参加 Android 测试版，请在那里留下你在 Google Play 上使用的 Gmail 地址。
+
 ## 无关联声明
 
 ClaudeRipple 是一个独立的开源项目。它与 Anthropic 或 OpenAI 均无关联，也未获得二者的认可或赞助。Claude 和 Claude Code 是 Anthropic, PBC 的商标。ChatGPT 和 Codex 是 OpenAI 的商标。

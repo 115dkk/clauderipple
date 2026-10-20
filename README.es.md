@@ -663,6 +663,10 @@ El autor lo usa a diario, pero es un proyecto joven. Cuenta con algunas aspereza
   cliente puede romper una traducción hasta que ClaudeRipple se ponga al día. Se agradecen
   los informes de errores y los registros.
 
+## Comunidad
+
+Las preguntas, los informes de errores y la beta de Ripple Remote para Android (una prueba cerrada en Google Play) están en Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). Para unirte a la beta de Android, deja allí la dirección de Gmail que usas en Google Play.
+
 ## Sin afiliación
 
 ClaudeRipple es un proyecto independiente de código abierto. No está afiliado a Anthropic ni

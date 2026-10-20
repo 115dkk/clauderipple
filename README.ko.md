@@ -532,6 +532,10 @@ Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claud
 - Claude Code와 Codex는 통신 규약을 자주 바꿉니다. 클라이언트 업데이트가 번역을 깨뜨리면 ClaudeRipple이 따라잡을 때까지
   안 될 수 있습니다. 버그와 로그를 환영합니다.
 
+## 커뮤니티
+
+질문, 버그 제보, Ripple Remote 안드로이드 베타(Google Play 비공개 테스트) 신청은 디스코드에서 받습니다: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). 안드로이드 베타에 참여하려면 Google Play에서 쓰는 Gmail 주소를 남겨 주세요.
+
 ## 비제휴
 
 ClaudeRipple은 독립 오픈소스 프로젝트입니다. Anthropic이나 OpenAI와 제휴·보증·후원 관계가 없습니다. Claude와 Claude Code는

@@ -380,6 +380,10 @@ Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Clau
 - ピッカーに追加したモデルは、次のセッションから使えます。
 - Claude CodeとCodexは通信プロトコルを頻繁に変更します。クライアントのアップデートにより、ClaudeRippleが追従するまで変換が動かなくなることがあります。バグ報告やログを歓迎します。
 
+## コミュニティ
+
+質問、不具合の報告、Ripple Remote Android 版ベータ（Google Play のクローズドテスト）への参加受付は Discord で行っています：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。Android 版ベータに参加するには、Google Play で使っている Gmail アドレスを Discord に書き込んでください。
+
 ## 提携関係について
 
 ClaudeRippleは独立したオープンソースプロジェクトです。AnthropicおよびOpenAIとは提携関係になく、両社による承認や後援も受けていません。ClaudeおよびClaude Codeは、Anthropic, PBCの商標です。ChatGPTおよびCodexは、OpenAIの商標です。
