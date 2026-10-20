@@ -321,6 +321,13 @@ los modelos que asignas van a tu proveedor, y todo lo demás va a Anthropic byte
   imágenes de referencia y fondos transparentes. A los subagentes se les explica cómo
   hacerlo, así que un worker de GPT o DeepSeek puede crear una imagen y verla sin una
   herramienta de imágenes.
+- **Cierra el portátil y Claude sigue trabajando.** En macOS y Windows el portátil se
+  mantiene despierto con la tapa cerrada mientras Claude trabaja (y 10 minutos después),
+  así que una tarea que lanzaste desde el teléfono llega al final. Si el Wi-Fi se queda sin
+  internet, pasa al punto de acceso de tu teléfono (iPhone o Android) y más tarde vuelve a
+  un Wi-Fi conocido. Viene desactivado hasta que lo actives en la vista Portátil del panel;
+  consulta [Tapa cerrada y el punto de acceso del
+  teléfono](#tapa-cerrada-y-el-punto-de-acceso-del-teléfono).
 - **Workers ligeros, si los quieres.** Un solo interruptor da a los subagentes generados
   solo las herramientas que usa un worker, en lugar de todos los servidores MCP y plugins
   de la sesión: la primera solicitud de un worker bajó de 33k a 9k tokens.
@@ -545,6 +552,44 @@ compatible con Anthropic que hayas configurado está disponible de la misma form
 <p align="center">
   <img src="docs/media/add-provider.png" width="880" alt="Añadir proveedor: suscripción de ChatGPT, ajustes predefinidos, proveedores compatibles con OpenAI">
 </p>
+
+## Tapa cerrada y el punto de acceso del teléfono
+
+Para las sesiones que llevas desde el teléfono (Remote Control, Ripple Remote): el portátil
+sigue trabajando dentro de una mochila. Abre la vista **Portátil** del panel.
+
+**Seguir despierto con la tapa cerrada.** Hay tres modos: *No*; *Mientras trabaja* —
+despierto mientras corre una llamada al modelo y durante 10 minutos después de la última;
+*Siempre* — hasta que lo apagues o llegue una hora que fijes. Deja de mantenerse despierto
+por sí solo cuando la batería baja del 20 % o (en macOS) el Mac avisa de un problema térmico,
+y entonces pone en reposo un portátil con la tapa cerrada. Mientras está despierto, no lo
+lleves mucho tiempo en una mochila cerrada.
+
+- macOS: pulsa **Configurar** una vez. El propio cuadro de contraseña de macOS instala una
+  regla de sudoers para exactamente los comandos que se usan (`pmset disablesleep`,
+  `pmset sleepnow`, conectarse al punto de acceso que indicas); ClaudeRipple nunca ve la
+  contraseña. `clauderipple awake setup --remove` la quita. Si Insomnia está instalado, la
+  configuración lo elimina (hace el mismo trabajo).
+- Windows: no hacen falta permisos de administrador. Un proceso hijo del router mantiene
+  `SetThreadExecutionState`, y la acción de la tapa se pone en «no hacer nada» solo mientras
+  lo mantiene; tus propios ajustes de energía vuelven después, también si el router muere.
+
+**Wi-Fi sin internet → punto de acceso del teléfono.** Comprueba internet a través de la
+interfaz Wi-Fi (un router con el enlace caído o un portal cautivo sigue pareciendo
+«conectado» al sistema) y se une al punto de acceso que indicas cuando fallan 3 de 5
+intentos. En el punto de acceso prueba la vuelta a los 5, 10, 20, 30, 40, 50 y 60 minutos de
+llegar, y luego cada 10 minutos: sale del punto de acceso para que el sistema se una al mejor
+Wi-Fi conocido que haya en el alcance, y se queda solo si ese Wi-Fi tiene internet. Una
+llamada al modelo que empieza durante el cambio espera un momento en lugar de fallar.
+
+- Conéctate una vez a mano al punto de acceso del teléfono desde el portátil, para que el
+  sistema guarde su contraseña.
+- iPhone: mantén activado Ajustes › Punto de acceso personal ›
+  «Permitir a otros conectarse». En un Mac, la misma cuenta de Apple y el Bluetooth
+  activado ayudan a encontrar el teléfono.
+- Android: un punto de acceso inactivo se apaga solo al cabo de un rato; vuelve a encenderlo
+  si no aparece.
+- Linux: aún no es compatible.
 
 ## Proveedores
 

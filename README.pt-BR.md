@@ -316,6 +316,13 @@ que você mapeia vão para o seu provedor, e todo o resto vai para a Anthropic b
   de referência e fundos transparentes. Os subagentes recebem instruções de como fazer,
   então um worker GPT ou DeepSeek consegue criar uma imagem e olhar para ela sem uma
   ferramenta de imagem.
+- **Feche o notebook e o Claude continua trabalhando.** No macOS e no Windows o notebook
+  fica acordado com a tampa fechada enquanto o Claude trabalha (e por 10 minutos depois),
+  então uma tarefa que você começou pelo celular chega ao fim. Se o Wi-Fi ficar sem
+  internet, ele passa para o Acesso Pessoal do celular (iPhone ou Android) e mais tarde
+  volta para um Wi-Fi conhecido. Vem desligado até você ativá-lo na tela **Notebook** do
+  painel; veja [Tampa fechada e o Acesso Pessoal do
+  celular](#tampa-fechada-e-o-acesso-pessoal-do-celular).
 - **Workers enxutos, se você quiser.** Um único botão faz com que os subagentes gerados
   recebam só as ferramentas que um worker usa, em vez de todos os servidores MCP e plugins
   da sessão: a primeira requisição de um worker caiu de 33k para 9k tokens.
@@ -532,6 +539,44 @@ que você tenha configurado fica disponível da mesma forma.
 <p align="center">
   <img src="docs/media/add-provider.png" width="880" alt="Adicionar provedor: assinatura do ChatGPT, presets, provedores compatíveis com OpenAI">
 </p>
+
+## Tampa fechada e o Acesso Pessoal do celular
+
+Para as sessões que você conduz pelo celular (Remote Control, Ripple Remote): o notebook
+continua trabalhando dentro de uma mochila. Abra a tela **Notebook** do painel.
+
+**Continuar acordado com a tampa fechada.** São três modos: *Não*; *Enquanto trabalha* —
+acordado enquanto uma chamada ao modelo roda e por 10 minutos depois da última; *Sempre* —
+até você desligar ou chegar um horário que você definir. Ele se solta sozinho quando a
+bateria cai abaixo de 20% ou (no macOS) o Mac avisa de um problema térmico, e põe um
+notebook de tampa fechada em repouso. Enquanto estiver acordado, não o carregue por muito
+tempo numa mochila fechada.
+
+- macOS: clique em **Configurar** uma vez. A própria janela de senha do macOS instala uma
+  regra de sudoers para exatamente os comandos usados (`pmset disablesleep`,
+  `pmset sleepnow`, entrar no Acesso Pessoal que você indicar); o ClaudeRipple nunca vê a
+  senha. `clauderipple awake setup --remove` a remove. Se o Insomnia estiver instalado, a
+  configuração o remove (ele faz o mesmo trabalho).
+- Windows: não precisa de permissões de administrador. Um processo filho do roteador mantém
+  `SetThreadExecutionState`, e a ação da tampa fica em "não fazer nada" só enquanto ele a
+  mantém; suas próprias configurações de energia voltam depois, também se o roteador
+  morrer.
+
+**Wi-Fi sem internet → Acesso Pessoal do celular.** Ele testa a internet pela interface
+Wi-Fi (um roteador com o link caído ou um portal cativo ainda parece "conectado" para o
+sistema) e entra no Acesso Pessoal que você indicar quando 3 de 5 tentativas falham. No
+Acesso Pessoal ele tenta a volta 5, 10, 20, 30, 40, 50 e 60 minutos depois de chegar, e
+depois a cada 10 minutos: sai do Acesso Pessoal para o sistema entrar no melhor Wi-Fi
+conhecido ao alcance, e só fica se esse Wi-Fi tiver internet. Uma chamada ao modelo que
+começa durante a troca espera um momento em vez de falhar.
+
+- Conecte-se uma vez à mão ao Acesso Pessoal do celular a partir do notebook, para o sistema
+  guardar a senha.
+- iPhone: mantenha ativado Ajustes › Acesso Pessoal › «Permitir Outros». Num Mac, a mesma
+  Conta Apple e o Bluetooth ligado ajudam a encontrar o celular.
+- Android: um Acesso Pessoal ocioso se desliga sozinho depois de um tempo; ligue-o de novo
+  se ele não aparecer.
+- Linux: ainda não é compatível.
 
 ## Provedores
 
