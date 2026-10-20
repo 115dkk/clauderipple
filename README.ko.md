@@ -18,9 +18,14 @@
 </p>
 
 <p align="center">
+  <a href="https://apps.apple.com/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-%EC%A4%80%EB%B9%84%20%EC%A4%91-666666?style=for-the-badge&logo=googleplay&logoColor=white">
+  <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-%EC%B0%B8%EC%97%AC%ED%95%98%EA%B8%B0-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
+
+<p align="center">
   <a href="https://www.npmjs.com/package/clauderipple"><img alt="npm" src="https://img.shields.io/npm/v/clauderipple?label=npm"></a>
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
-  <a href="https://discord.gg/R8ZgGSNHjw"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white"></a>
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">

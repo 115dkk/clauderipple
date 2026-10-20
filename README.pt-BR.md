@@ -11,9 +11,14 @@
 </p>
 
 <p align="center">
+  <a href="https://apps.apple.com/app/id6823063731"><img height="40" alt="App Store" src="https://img.shields.io/badge/App%20Store-Baixar-0D96F6?style=for-the-badge&logo=apple&logoColor=white"></a>
+  <img height="40" alt="Google Play" src="https://img.shields.io/badge/Google%20Play-Em%20breve-666666?style=for-the-badge&logo=googleplay&logoColor=white">
+  <a href="https://discord.gg/R8ZgGSNHjw"><img height="40" alt="Discord" src="https://img.shields.io/badge/Discord-Entrar-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
+
+<p align="center">
   <a href="https://www.npmjs.com/package/clauderipple"><img alt="npm" src="https://img.shields.io/npm/v/clauderipple?label=npm"></a>
   <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-orange">
-  <a href="https://discord.gg/R8ZgGSNHjw"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white"></a>
   <a href="LICENSE"><img alt="GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-arm64%20%7C%20x64-black">
   <img alt="Windows" src="https://img.shields.io/badge/Windows-arm64%20%7C%20x64-0078D4">
