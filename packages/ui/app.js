@@ -1129,10 +1129,12 @@ async function loadPhone() { phoneGeneration++; hidePhoneQr(); await refreshPhon
 $("#phone-refresh").addEventListener("click", () => void loadPhone());
 setInterval(() => { if (!phoneBusy) void refreshPhone(); }, 5000);
 
-// ---- Mac: awake with the lid closed, and the iPhone hotspot when Wi-Fi fails --------------
+// ---- Laptop: awake with the lid closed, and the phone hotspot when Wi-Fi fails -------------
 // GET|PUT /api/power (router power.ts) and POST|GET /api/power/setup, which runs the CLI's
-// `awake setup` — macOS shows its own password dialog. Written for someone who has never heard of
-// pmset: the router's reasons and states are English codes, so each is turned into a sentence here.
+// `awake setup` — macOS shows its own password dialog, Windows needs none. Written for someone who
+// has never heard of pmset: the router's reasons and states are English codes, so each is turned
+// into a sentence here. The power status names its platform, so wording and setup follow it rather
+// than assuming a Mac and an iPhone (Windows: awake-win.ts, tether-win.ts).
 
 let macPower = null;
 /** null, "unavailable" (a router without the feature) or a load error. */
@@ -1146,6 +1148,9 @@ let macGeneration = 0;
 let macSsidDraft = null;
 const macOpen = { awake: false, tether: false, setup: false };
 
+/** The OS the router reports. A router too old to name it had macOS-only power features. */
+function macPlatform() { return (macPower && macPower.platform) || "darwin"; }
+function macIsMac() { return macPlatform() === "darwin"; }
 function macActive() { return $("#view-mac").classList.contains("active"); }
 async function loadMac() { macGeneration++; macDrawn = ""; await refreshMac(true); }
 async function refreshMac(force) {
@@ -1258,6 +1263,8 @@ function macAwakeWhy(a) {
   if (r.startsWith("error:")) return { text: t("mac.why.error"), warn: true };
   if (r.startsWith("needs setup")) return { text: t("mac.why.setup"), warn: true };
   if (r.startsWith("pmset failed")) return { text: t("mac.why.failed"), warn: true };
+  // Windows (awake-win.ts): the helper's own failures and a refused power-plan write.
+  if (/^(SetThreadExecutionState failed|Windows refused|could not restore the lid-close action)/.test(r)) return { text: t("mac.why.failed"), warn: true };
   if (r === "not started") return { text: t("mac.why.starting") };
   return { text: r };
 }
@@ -1289,8 +1296,11 @@ function macDetails(key, rows) {
 
 function macSetupNote() {
   if (macSetup.running) {
+    // macOS opens its own password window; Windows only checks (no password, no elevation).
+    const title = t(macIsMac() ? "mac.setup.waiting" : "mac.setup.waitingWin");
+    const sub = t(macIsMac() ? "mac.setup.waitingSub" : "mac.setup.waitingSubWin");
     return el("div", { class: "conn-note busy", role: "status" }, [el("span", { class: "spinner", "aria-hidden": "true" }),
-      el("div", { class: "conn-note-text" }, [el("strong", { text: t("mac.setup.waiting") }), el("span", { text: t("mac.setup.waitingSub") })])]);
+      el("div", { class: "conn-note-text" }, [el("strong", { text: title }), el("span", { text: sub })])]);
   }
   if (!macSetupWatched || macSetup.ok === undefined) return null;
   const cancelled = /cancel/i.test(macSetup.output || "");
@@ -1393,7 +1403,7 @@ function macAwakeCard(a) {
     el("p", { class: "group-footer", text: t("mac.awake.safety", { floor: macBatteryFloor(a) }) }),
     macDetails("awake", [
       [t("mac.d.reason"), a.reason || "—"],
-      [t("mac.d.applied"), a.applied ? "disablesleep 1" : "disablesleep 0"],
+      [t("mac.d.applied"), a.applied ? (macIsMac() ? "disablesleep 1" : "ES_SYSTEM_REQUIRED") : macIsMac() ? "disablesleep 0" : "—"],
       [t("mac.d.battery"), a.battery ? `${a.battery.percent ?? "?"}% · ${a.battery.onBattery ? "battery" : "AC"}` : "—"],
       [t("mac.d.thermal"), a.thermal || "—"],
       [t("mac.d.lid"), a.lidClosed === null || a.lidClosed === undefined ? "—" : a.lidClosed ? "closed" : "open"],
@@ -1407,7 +1417,7 @@ function macBatteryFloor(a) {
   return m ? m[1] : "20";
 }
 
-const MAC_HINT_STATES = new Set(["hotspot-not-visible", "join-failed", "no-wifi", "no-hotspot-ssid", "needs-setup"]);
+const MAC_HINT_STATES = new Set(["hotspot-not-visible", "join-failed", "no-wifi", "no-hotspot-ssid", "needs-setup", "no-hotspot-profile", "needs-location"]);
 function macTetherCard(tt, setupOk) {
   const network = tt.network === "hotspot" ? "hotspot" : tt.network === "wifi" ? "wifi" : "none";
   const tone = network === "wifi" ? "ok" : network === "hotspot" ? "on" : "bad";
@@ -1441,7 +1451,7 @@ function macTetherCard(tt, setupOk) {
     el("div", { class: "mod-card-head" }, [el("h2", { id: "mac-tether-title", text: t("mac.tether.title") }), hint(t("mac.tether.blurb"))]),
     notice,
     el("div", { class: "group" }, rows),
-    el("p", { class: "group-footer", text: t("mac.tether.help") }),
+    el("p", { class: "group-footer", text: t(macIsMac() ? "mac.tether.help" : "mac.tether.helpWin") }),
     macDetails("tether", [
       [t("mac.d.state"), tt.state],
       [t("mac.d.network"), tt.network],
@@ -1477,12 +1487,16 @@ function renderMac() {
     return;
   }
   const setupOk = a.setup === "ok";
-  const cards = el("div", { class: `mac-cards${setupOk ? "" : " mac-locked"}` }, [macAwakeCard(a), macTetherCard(macPower.tether, setupOk)]);
-  if (!setupOk) cards.setAttribute("inert", "");
+  // The password/setup card is macOS's alone: Windows holds sleep and edits the power plan as the
+  // signed-in user, so its setup() always answers "ok" and this card never appears there (a Linux
+  // power status has no backend at all and shows the unsupported state above).
+  const needsSetup = !setupOk && macIsMac();
+  const cards = el("div", { class: `mac-cards${needsSetup ? " mac-locked" : ""}` }, [macAwakeCard(a), macTetherCard(macPower.tether, setupOk)]);
+  if (needsSetup) cards.setAttribute("inert", "");
   // Once set up, a later run (a new hotspot name) reports here, above the cards.
   const note = setupOk && macSetupWatched ? macSetupNote() : null;
   modRedraw(root, [
-    setupOk ? null : macSetupCard(macPower),
+    needsSetup ? macSetupCard(macPower) : null,
     note ? el("div", { class: "mac-run" }, [note]) : null,
     cards,
   ]);
