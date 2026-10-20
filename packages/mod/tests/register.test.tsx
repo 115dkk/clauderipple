@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { MOD_SETTINGS_SCHEMA_VERSION, DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
-import type { ModSettingsSnapshot, Settings } from '../types'
+import type { AgentRec, ModSettingsSnapshot, Settings } from '../types'
 
 const NOW = 1000000
 const USAGE: ModelUsage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 40000, cache_creation_input_tokens: 0 }
@@ -34,7 +34,7 @@ const CONFIG = { admin: { port: 9992 }, providers: { deepseek: { models: [{ id: 
 const SPAWN: AgentSpawnInput = { tool_use_id: 'tool1', subagentType: 'ripple:auto', prompt: 'Rename one local variable and verify it.', description: 'Rename variable', parentModel: 'claude-opus-5-5', provider: { plugin: 'engine', tier: 'core' }, background: false, fork: false }
 const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specified change and verify it.', toolUses: [] }, { role: 'assistant', text: 'The implementation is ready.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[] } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[] } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
@@ -116,7 +116,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('command.list', () => ({ value: [{ name: 'clear', description: 'Clear', source: 'builtin' }, { name: 'compact', description: 'Compact', source: 'builtin' }, { name: 'model', description: 'Model', source: 'builtin' }] }))
   on('session.id', () => ({ value: 'session-test' }))
   on('session.model', () => ({ value: model }))
-  on('session.messages', () => ({ value: MESSAGES }))
+  on('session.messages', ($, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages(e.agentId) : MESSAGES }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { percent, tokens: 40000, window: 200000 }, rateLimits: options.limits ?? [] } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
@@ -1514,9 +1514,51 @@ test('known agents show waiting after an eight-second tool and finish with cost'
   await b.clock.advance(15000)
   await tool
   await complete($, 'worker-1')
-  await ui.press({ key: 'done' })
   expect(await ui.find({ type: 'Text', text: 'Rename variable' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /≈4/ })).toBeDefined()
+  // The API's own counts (100 + 40000 cached in, 10 out), not the weighted cost.
+  expect(await ui.find({ type: 'Text', text: 'in 40k · cache 100% · out 10 · tools 1' })).toBeDefined()
+})
+
+test('an agent keeps the API\'s token counts, its tools and the effort it was sent at; its card opens its conversation and goes back', async ($, on) => {
+  const reads: string[] = []
+  boundaries(on, {}, { agentMessages: id => {
+    reads.push(id)
+    return [{ role: 'user', text: 'Rename one local variable and verify it.', toolUses: [] }, { role: 'assistant', text: 'Renamed it.', toolUses: [{ tool_use_id: 't1', tool: 'Bash', input: { command: 'npm test' }, text: 'ok' }] }]
+  } })
+  http(on)
+  judgeStub(on)
+  spawnStub(on)
+  stepStub(on, { input_tokens: 300, output_tokens: 50, cache_read_input_tokens: 9000, cache_creation_input_tokens: 700 })
+  on('tool.call', () => ({ result: 'ok' }))
+  let written: AgentRec[] = []
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => {
+    const result = await next(e)
+    written = e.value as AgentRec[]
+    return result
+  })
+  await start($)
+  await $.agent.spawn(SPAWN)
+  // The routed id's @low is what the router sends, whatever the request's own effort says.
+  await step($, 'deepseek-v4.1-flash@low', 'high', 'worker-1')
+  await step($, 'deepseek-v4.1-flash@low', 'high', 'worker-1')
+  const input: ToolCallInput = { tool: 'Bash', command: 'npm test', agentId: 'worker-1', tool_use_id: 'tool-a' }
+  await $.tool.call(input)
+  const rec = written.find(a => a.id === 'worker-1')
+  expect(rec?.usage).toEqual({ input: 600, cached: 18_000, cacheWrite: 1400, output: 100 })
+  expect(rec?.tools).toBe(1)
+  expect(rec?.effort).toBe('low')
+  expect(rec?.answeredBy).toBe('deepseek-v4.1-flash@low')
+  expect(rec?.provider).toBe('deepseek')
+  const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  expect(await ui.find({ type: 'Text', text: /in 20k · cache 90% · out 100 · tools 1/ })).toBeDefined()
+  expect(reads).toEqual([])
+  await ui.press({ key: 'open-worker-1' })
+  expect(reads).toContain('worker-1')
+  expect(await ui.find({ type: 'Text', text: 'Renamed it.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'npm test' })).toBeDefined()
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Text', text: 'Renamed it.' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'open-worker-1' })).toBeDefined()
 })
 
 /** The claude:// link a handoff opened, and its query. */

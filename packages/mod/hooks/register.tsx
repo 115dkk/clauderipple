@@ -18,15 +18,15 @@ import { bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, hotAlert, 
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
-import { addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, weighted } from './stats'
+import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
 import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
-import { renderAgents } from './ui/agents'
+import { renderAgents, talkOf } from './ui/agents'
 import { renderLog } from './ui/log'
 import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
-import type { AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
+import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
 const last = atom({ plugin: 'ripple', key: 'last' } as const, null)
@@ -86,6 +86,9 @@ const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
+const agentOpen = atom({ plugin: 'ripple', key: 'agentOpen' } as const, null)
+const agentEarlier = atom({ plugin: 'ripple', key: 'agentEarlier' } as const, 0)
+const agentsTick = atom({ plugin: 'ripple', key: 'agentsTick' } as const, 0)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const ladderOptions = atom({ plugin: 'ripple', key: 'ladderOptions' } as const, null)
@@ -429,6 +432,18 @@ async function workerFiles($: EngineInterface): Promise<Map<string, string>> {
     if (file && agentModel(file)) files.set(name, file)
   }
   return files
+}
+/**
+ * The provider a started agent runs on, for its card's dot: its worker file's (`via <provider>.`),
+ * Anthropic for a Claude id, else the router's catalogue entry for the id.
+ */
+async function spawnProvider($: EngineInterface, subagentType: string, model: string): Promise<string | undefined> {
+  const file = (await workerFiles($)).get(subagentType)
+  const fromFile = file ? agentProvider(file) : undefined
+  if (fromFile) return fromFile
+  const id = model.replace(/@[^@]*$/, '')
+  if (/^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(id)) return 'anthropic'
+  return (await read($, routerModels)).find(m => m.value === id)?.provider
 }
 async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | null> {
   const text = await optionalFile($, `${await rippleHome($)}/generated-agents.json`)
@@ -1171,6 +1186,18 @@ function startTimers($: EngineInterface): void {
   $.clock.after(1, async () => { await refreshRouter($); await tick($) })
   $.clock.every(3000, async () => { await refreshRouter($) })
   $.clock.every(15000, async () => { await tick($) })
+  $.clock.every(1000, async () => { await agentsClock($) })
+}
+/**
+ * The Agents pane's clocks: each second an agent runs while the pane is open, one write that only
+ * the pane reads, so its elapsed times tick and nothing else redraws.
+ */
+async function agentsClock($: EngineInterface): Promise<void> {
+  try {
+    if (!(await read($, agents)).some(a => a.state === 'running' || a.state === 'waiting')) return
+    if (!(await $.ui.panes()).some(p => p.id === AGENTS_PANE)) return
+    await update($, agentsTick, n => n + 1)
+  } catch (error) { await report($, 'agents clock', error) }
 }
 
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
@@ -1284,6 +1311,24 @@ function setupActions($: EngineInterface): SetupActions {
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
   return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, handoff: () => openHandoff($), dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
     noteInput: text => update($, compactNote, () => text), setHandoffKind: kind => update($, handoffChoiceKind, () => kind), setHandoffAfter: after => update($, handoffChoiceAfter, () => after), go: () => queueHandoff($), copy: () => copyHandoff($), openNew: () => moveToNewSession($) }
+}
+function agentsActions($: EngineInterface): AgentsActions {
+  return {
+    toggleDone: () => update($, agentsShowDone, value => !value),
+    open: async id => { await update($, agentEarlier, () => 0); await update($, agentOpen, () => id) },
+    back: () => update($, agentOpen, () => null),
+    earlier: () => update($, agentEarlier, n => n + 1),
+  }
+}
+/**
+ * An agent's conversation for the Agents pane, read again at each draw: its steps and tool calls
+ * redraw the pane while it runs, so what it says shows as it says it.
+ */
+async function agentTalk($: EngineInterface, id: string): Promise<AgentTalk> {
+  try {
+    const found = await $.session.messages({ agentId: id })
+    return Array.isArray(found) ? { entries: talkOf(found) } : { deny: found.deny }
+  } catch (error) { return { deny: reason(error) } }
 }
 function toolLine(e: ToolCallInput): string {
   const fields = object(e)
@@ -1459,7 +1504,8 @@ export const register: Register = on => {
       if (epoch !== generation) return answer
       if (ownFork) { if (answer.usage) forkUsage = answer.usage; return answer }
       if (e.agentId && answer.usage) {
-        await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, cost: a.cost + weighted(answer.usage!) } : a))
+        const effort = sentEffort(request.model, request.effort)
+        await update($, agents, list => list.map(a => a.id === e.agentId ? addAgentStep(a, answer.usage!, effort) : a))
       } else if (!e.agentId && answer.usage) {
         const now = await $.clock.now()
         if (answer.usage.model === await $.session.model()) {
@@ -1557,7 +1603,9 @@ export const register: Register = on => {
     const result = await next(input)
     try {
       if (result.agentId) {
-        const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), state: 'running', startedAt: await $.clock.now(), cost: 0 }
+        const provider = await spawnProvider($, input.subagentType, result.model)
+        const effort = chosen?.effort ?? /@([a-z]+)$/.exec(result.model)?.[1]
+        const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: 'running', startedAt: await $.clock.now(), cost: 0 }
         await update($, agents, list => [...list.filter(a => a.id !== rec.id), rec].slice(-40))
       }
     } catch (error) { await report($, 'agent.spawn record', error) }
@@ -1567,7 +1615,7 @@ export const register: Register = on => {
     let started = 0
     try {
       started = await $.clock.now()
-      if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, now: toolLine(e), toolSince: started, state: 'running' } : a))
+      if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, now: toolLine(e), toolSince: started, state: 'running', tools: (a.tools ?? 0) + 1 } : a))
     } catch (error) { await report($, 'tool.call start', error) }
     try { return await next(e) }
     finally {
@@ -1636,7 +1684,11 @@ export const register: Register = on => {
     return next(e)
   })
   on('ui.close', { id: AGENTS_PANE }, async ($, e, next) => {
-    try { await update($, agentsOpen, () => false) } catch (error) { await report($, 'agents close', error) }
+    try {
+      await update($, agentsOpen, () => false)
+      // Opened again, the pane starts on the list.
+      if (await read($, agentOpen) !== null) await update($, agentOpen, () => null)
+    } catch (error) { await report($, 'agents close', error) }
     return next(e)
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1696,7 +1748,11 @@ export const register: Register = on => {
     try {
       startTimers($)
       const frame = await frameOf($, e)
-      return renderAgents($.ui.resolve(e), frame, { agents: await read($, agents), now: frame.now, showDone: await read($, agentsShowDone) }, { toggleDone: () => update($, agentsShowDone, value => !value) }) as RenderElement
+      // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
+      await read($, agentsTick)
+      const id = await read($, agentOpen)
+      const open = id === null ? undefined : { id, talk: await agentTalk($, id), earlier: await read($, agentEarlier) }
+      return renderAgents($.ui.resolve(e), frame, { agents: await read($, agents), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { await report($, 'agents render', error); return next(e) }
   })
 }

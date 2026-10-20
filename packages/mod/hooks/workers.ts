@@ -229,8 +229,13 @@ export function titleName(model: string, models: readonly RouterModel[] = []): s
  */
 export function spawnTitle(description: string, model: string, effort: string | undefined, models: readonly RouterModel[] = []): string {
   const tag = titleName(model, models) + (effort ? '·' + effort : '')
+  return `${tag} · ${bareTitle(description)}`
+}
+
+/** A title without the model tag spawnTitle put in front ("Sol·high · Port it" → "Port it"). */
+export function bareTitle(description: string): string {
   const bare = description.replace(TITLE_PREFIX, '')
-  return `${tag} · ${bare.trim() ? bare : description}`
+  return bare.trim() ? bare : description
 }
 
 export function takesOver(spawn: { subagentType: string; model?: string; fork: boolean }, settings: Settings): boolean {

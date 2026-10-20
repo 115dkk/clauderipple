@@ -4,7 +4,7 @@
 import { test } from 'claude-code/testing'
 import type { RenderElement, RenderPropsOf } from 'claude-code'
 
-import type { LimitItem, Settings, Skin } from '../types'
+import type { AgentRec, LimitItem, Settings, Skin } from '../types'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
@@ -12,7 +12,7 @@ import { renderBand } from '../hooks/ui/band'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
-import type { AlertView, DashboardView, Frame, SettingsView } from '../hooks/ui/view'
+import type { AgentEntry, AlertView, DashboardView, Frame, SettingsView } from '../hooks/ui/view'
 import type { Els } from '../hooks/ui/parts'
 
 const LANG = 'ko'
@@ -71,6 +71,70 @@ const LIMITS_ALL: LimitItem[] = [
   { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'window', label: '', windowMinutes: 43200, percent: 92, resetsAt: '2026-10-18T05:43:30Z' },
 ]
 const SETTINGS_VIEW: SettingsView = { settings: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }
+
+/** The Agents pane's width in a wide window, ~560 px, in cells; and a narrow one, ~360 px. */
+const PANE = 68
+const PANE_NARROW = 44
+
+/** Two running (a Sol·high GPT worker, a DeepSeek one in a long tool), three finished (an Explore on the session model, a failed Astra, a Sonnet). */
+const AGENTS: AgentRec[] = [
+  {
+    id: 'g1', description: 'Sol·high · 요청 로그 렌더러를 새 키트로 옮기기', type: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high', provider: 'chatgpt',
+    pick: { domain: 'frontend', level: 'standard', effort: 'high', sure: 0.82, why: '설계가 정해진 여러 파일 수정', target: { agent: 'gpt-6-1-sol' }, by: 'jev', rung: 'standard', ms: 640 },
+    state: 'running', now: 'Edit packages/mod/hooks/ui/log.tsx', toolSince: NOW - 6000, startedAt: NOW - 192_000, cost: 0,
+    effort: 'high', answeredBy: 'gpt-6.1-sol', usage: { input: 3200, cached: 182_000, cacheWrite: 9400, output: 14_200 }, tools: 23,
+  },
+  {
+    id: 'd1', description: 'deepseek-v4.1-flash·low · 테스트 실패 원인 조사', type: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@low', provider: 'deepseek',
+    pick: { domain: 'test', level: 'light', effort: 'low', why: '로그 한 군데만 보면 되는 조사', target: { agent: 'deepseek-v4-1-flash' }, by: 'marker', rung: 'light', ms: 0 },
+    state: 'waiting', now: 'Bash npm test -- --runInBand', toolSince: NOW - 41_000, startedAt: NOW - 95_000, cost: 0,
+    effort: 'low', answeredBy: 'deepseek-v4.1-flash', usage: { input: 900, cached: 41_000, cacheWrite: 2100, output: 3100 }, tools: 9,
+  },
+  {
+    id: 'e1', description: 'Opus5.5 · 라우터 설정 파일 위치 찾기', type: 'Explore', model: 'claude-opus-5-5', provider: 'anthropic',
+    state: 'done', startedAt: NOW - 700_000, endedAt: NOW - 640_000, cost: 0,
+    effort: 'medium', answeredBy: 'claude-opus-5-5', usage: { input: 1200, cached: 64_000, cacheWrite: 18_000, output: 2600 }, tools: 14,
+  },
+  {
+    id: 'a1', description: 'Astra·xhigh · 설정 마이그레이션 스크립트 작성', type: 'gpt-6-astra', model: 'gpt-6-astra@xhigh', provider: 'chatgpt',
+    pick: { domain: 'backend', level: 'deep', effort: 'xhigh', sure: 0.7, why: '데이터 이전이라 실수 비용이 큼', target: { agent: 'gpt-6-astra' }, by: 'haiku', rung: 'hard', ms: 900, fallbackReason: 'gpt-6-1-sol 한도 소진' },
+    state: 'failed', startedAt: NOW - 1_400_000, endedAt: NOW - 1_310_000, cost: 0,
+    effort: 'xhigh', answeredBy: 'gpt-6-astra', usage: { input: 2100, cached: 12_000, cacheWrite: 30_000, output: 900 }, tools: 4,
+  },
+  {
+    id: 's1', description: 'Sonnet5.5 · 변경 문서 요약', type: 'general-purpose', model: 'claude-sonnet-5-5', provider: 'anthropic',
+    pick: { domain: 'docs', level: 'light', effort: 'medium', why: '짧은 요약', target: { agent: 'general-purpose', model: 'claude-sonnet-5-5' }, by: 'session', ms: 0 },
+    state: 'done', startedAt: NOW - 2_000_000, endedAt: NOW - 1_950_000, cost: 0,
+    effort: 'medium', answeredBy: 'claude-sonnet-5-5', usage: { input: 400, cached: 22_000, cacheWrite: 3000, output: 1200 }, tools: 2,
+  },
+]
+
+/** One running agent and eight finished: the list shows the latest four and "more". */
+const MANY: AgentRec[] = [AGENTS[0]!, ...Array.from({ length: 8 }, (_, i): AgentRec => ({ ...AGENTS[i % 2 ? 2 : 4]!, id: 'm' + i, description: ['문서 링크 점검', '타입 오류 정리', 'i18n 키 대조', '빌드 로그 요약', '테스트 이름 정리', '캐시 적중률 확인', '라우터 로그 검색', '설정 스키마 비교'][i]!, endedAt: NOW - 60_000 * (i + 1), startedAt: NOW - 60_000 * (i + 2) }))]
+
+/** The Sol worker's conversation so far: its task, its words, its tools, one still running. */
+const TALK: AgentEntry[] = [
+  { kind: 'prompt', text: '요청 로그 렌더러(`hooks/ui/log.tsx`)를 새 키트로 옮겨 주세요.\n\n- 내용은 그대로 두고 그리는 방식만 바꿉니다\n- 터미널 표면은 손대지 않습니다\n- `claude plugin test packages/mod`로 확인합니다' },
+  { kind: 'text', text: '먼저 지금 렌더러와 키트의 **capsule**, `lift()` 쓰임새를 읽겠습니다.' },
+  { kind: 'tool', id: 't1', tool: 'Read', detail: 'packages/mod/hooks/ui/log.tsx', state: 'ok' },
+  { kind: 'tool', id: 't2', tool: 'Read', detail: 'packages/mod/hooks/ui/kit.tsx', state: 'ok' },
+  { kind: 'tool', id: 't3', tool: 'Grep', detail: 'renderLog', state: 'ok' },
+  { kind: 'text', text: '로그 항목은 한 줄 머리와 숫자 줄로 나뉩니다. 머리는 그대로 두고 숫자 줄만 타일 안으로 옮기겠습니다.' },
+  { kind: 'tool', id: 't4', tool: 'Edit', detail: 'packages/mod/hooks/ui/log.tsx', state: 'ok' },
+  { kind: 'tool', id: 't5', tool: 'Bash', detail: 'claude plugin test packages/mod', state: 'error' },
+  { kind: 'text', text: '테스트 하나가 `dimColor`를 기대해서 실패했습니다. 캡슐 위 글자는 명시 색을 쓰도록 테스트를 고칩니다.' },
+  { kind: 'tool', id: 't6', tool: 'Edit', detail: 'packages/mod/hooks/ui/log.tsx', state: 'running' },
+]
+
+/** The Explore agent's finished conversation, its answer last. */
+const TALK_DONE: AgentEntry[] = [
+  { kind: 'prompt', text: '라우터 설정 파일이 어디서 읽히는지 찾아 주세요.' },
+  { kind: 'tool', id: 'u1', tool: 'Grep', detail: 'config.json', state: 'ok' },
+  { kind: 'tool', id: 'u2', tool: 'Read', detail: 'packages/router/src/config.ts', state: 'ok' },
+  { kind: 'text', text: '설정은 `packages/router/src/config.ts`의 `loadConfig`가 읽습니다.\n\n- 경로: `~/.clauderipple/config.json`\n- 환경변수 `CLAUDERIPPLE_HOME`이 있으면 그 아래를 봅니다' },
+]
+
+const AGENT_ACTIONS = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined }
 
 /** The AbovePrompt site as register.tsx composes it on the desktop: the band, its × inside. */
 function site(el: Els, frame: Frame, view: DashboardView): RenderElement {
@@ -132,6 +196,17 @@ const SCENES: Scene[] = [
   { name: 'flat-alert-handoff', skin: 'flat', draw: (el, f) => renderAlert(el, f, { kind: 'handoffChoice', handoffKind: 'quick', after: 'continue' }, noop) },
   { name: 'flat-setup', skin: 'flat', draw: (el, f) => renderSetup(el, f, { step: 1, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, noop) },
   { name: 'agents', columns: 90, draw: (el, f) => renderAgents(el, f, { agents: [], now: NOW, showDone: false }, noop) },
+  { name: 'agents-empty', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: [], now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'agents-live', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'agents-live-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'agents-idle', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS.slice(2), now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'agents-many', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: MANY, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'agents-talk', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK }, earlier: 0 } }, AGENT_ACTIONS) },
+  { name: 'agents-talk-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK }, earlier: 0 } }, AGENT_ACTIONS) },
+  { name: 'agents-talk-done', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'e1', talk: { entries: TALK_DONE }, earlier: 0 } }, AGENT_ACTIONS) },
+  { name: 'agents-talk-deny', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { deny: 'agent g1 has no saved transcript' }, earlier: 0 } }, AGENT_ACTIONS) },
+  { name: 'flat-agents-live', columns: PANE, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'flat-agents-talk', columns: PANE, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK }, earlier: 0 } }, AGENT_ACTIONS) },
   { name: 'log', columns: 90, draw: (el, f) => renderLog(el, f, { rows: [], mineOnly: true }, noop) },
 ]
 

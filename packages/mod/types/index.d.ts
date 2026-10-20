@@ -258,6 +258,19 @@ export type AgentRec = {
   endedAt?: number
   /** Weighted tokens (spec §5 stats weights). */
   cost: number
+  /** The provider it runs on by config name (`anthropic` for Claude's own), for its card's dot. */
+  provider?: string
+  /**
+   * The effort its last step was sent at: the model id's `@effort` where it carries one (the router
+   * forces that, packages/router/src/routing.ts), else the request's own effort.
+   */
+  effort?: string | number
+  /** The model that answered its last step, by the id the API reported (TurnUsage `model`). */
+  answeredBy?: string
+  /** Its steps' token counts as the API reported them, summed; the shape of StatusRequest's usage. */
+  usage?: { input: number; cached: number; cacheWrite: number; output: number }
+  /** Tool calls it started. */
+  tools?: number
 }
 
 /** The main chat's prompt cache as far as its responses show it. */
@@ -385,6 +398,12 @@ declare module 'claude-code' {
       effortMenuOpen: boolean
       agentsOpen: boolean
       agentsShowDone: boolean
+      /** The agent whose conversation the Agents pane shows; null shows the list. */
+      agentOpen: string | null
+      /** Pages of earlier entries the open conversation shows beyond its latest. */
+      agentEarlier: number
+      /** Counts the Agents pane's seconds while an agent runs: a write redraws its clocks. */
+      agentsTick: number
       jev: JevState
       routerModels: RouterModel[]
       /** The router's rung choices and presets (GET /api/mod-options), for the quick settings. */

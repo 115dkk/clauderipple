@@ -205,14 +205,35 @@ export type SetupActions = {
 
 // ---- Panes -----------------------------------------------------------------------------------
 
+/** One entry of an agent's conversation as the pane draws it (agents.tsx `talkOf`). */
+export type AgentEntry =
+  /** What it was asked: its first prompt, or a later message sent to it. */
+  | { kind: 'prompt'; text: string }
+  /** Its own words. */
+  | { kind: 'text'; text: string }
+  /** A tool it called: the tool, a short line of its input, and how it stands. */
+  | { kind: 'tool'; id: string; tool: string; detail: string; state: 'running' | 'ok' | 'error' }
+
+/** An agent's conversation as read (`$.session.messages({ agentId })`), or why it could not be. */
+export type AgentTalk = { entries: readonly AgentEntry[] } | { deny: string }
+
 export type AgentsView = {
   agents: readonly AgentRec[]
   now: number
+  /** Every finished agent, not only the latest few. */
   showDone: boolean
+  /** The agent whose conversation is open, what of it was read, and how many earlier pages show. */
+  open?: { id: string; talk: AgentTalk; earlier: number }
 }
 
 export type AgentsActions = {
   toggleDone: () => void
+  /** Opens an agent's conversation in the pane. */
+  open: (id: string) => void
+  /** Back to the list. */
+  back: () => void
+  /** One more page of the open conversation's earlier entries. */
+  earlier: () => void
 }
 
 export type LogView = {

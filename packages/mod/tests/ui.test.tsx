@@ -12,7 +12,7 @@ import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 import type { AgentRec, Settings, Skin, StatusRequest } from '../types'
 import { STRINGS } from '../hooks/i18n'
 import { normalizeSettings } from '../hooks/settings'
-import { renderAgents } from '../hooks/ui/agents'
+import { renderAgents, talkOf } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
 import { rippleSource } from '../hooks/ui/parts'
@@ -20,7 +20,7 @@ import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
 import { countdown, elapsed, minutesLeft, modelName, nextMinuteChange, resetsLabel, routeOf, seconds, targetOf, targetValue } from '../hooks/ui/view'
-import type { AlertView, DashboardView, Frame, JevState, SettingsActions, Surface } from '../hooks/ui/view'
+import type { AgentEntry, AgentsActions, AlertView, DashboardView, Frame, JevState, SettingsActions, Surface } from '../hooks/ui/view'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const NOW = Date.parse('2026-10-10T13:20:00')
@@ -386,8 +386,8 @@ test('리플이 greets in setup and quick settings and waits in empty panes, nev
   drawPane(on, 'm-setup-1', (el, surface) => renderSetup(el, frameOf(surface), { step: 1, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, setupActions))
   drawPane(on, 'm-setup-4', (el, surface) => renderSetup(el, frameOf(surface), { step: 4, draft: SETTINGS, jev: { source: 'env', test: { state: 'idle' } } }, setupActions))
   drawPane(on, 'm-quick', (el, surface) => renderSettings(el, frameOf(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS))
-  drawPane(on, 'm-agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop }))
-  drawPane(on, 'm-agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { toggleDone: noop }))
+  drawPane(on, 'm-agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop }))
+  drawPane(on, 'm-agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { ...AGENT_NOOP, toggleDone: noop }))
   drawPane(on, 'm-log-empty', (el, surface) => renderLog(el, frameOf(surface, 64), { rows: [], mineOnly: true }, { toggleScope: noop }))
   // It greets and waits at 56 px, and heads the quick settings at 48.
   const expected: [string, number, string, number][] = [['m-setup-1', 1, 'var(--accent)', 56], ['m-setup-4', 1, 'var(--ok)', 56], ['m-quick', 1, 'var(--accent)', 48], ['m-agents', 0, '', 0], ['m-agents-empty', 1, 'var(--accent)', 56], ['m-log-empty', 1, 'var(--accent)', 56]]
@@ -575,13 +575,20 @@ const AGENTS: AgentRec[] = [
     toolSince: NOW - 14_000,
     startedAt: NOW - 192_000,
     cost: 38_400,
+    provider: 'chatgpt',
+    effort: 'high',
+    answeredBy: 'gpt-6.1-sol',
+    usage: { input: 1200, cached: 38_000, cacheWrite: 800, output: 5100 },
+    tools: 12,
   },
   { id: 'a2', description: 'Summarize the docs', type: 'deepseek-v4-1-flash', state: 'done', startedAt: NOW - 900_000, endedAt: NOW - 800_000, cost: 9000 },
 ]
 
+const AGENT_NOOP: AgentsActions = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined }
+
 test('the Agents pane draws a worker the session\'s own model runs', async ($, on) => {
   const onSession: AgentRec = { ...AGENTS[0]!, id: 's1', description: 'Review on the session model', pick: { ...AGENTS[0]!.pick!, target: { agent: 'general-purpose' }, by: 'session' } }
-  drawPane(on, 'agents-session', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [onSession], now: NOW, showDone: false }, { toggleDone: () => undefined }))
+  drawPane(on, 'agents-session', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [onSession], now: NOW, showDone: false }, { ...AGENT_NOOP, toggleDone: () => undefined }))
   for (const surface of SURFACES) {
     const ui = await mount($, 'agents-session', surface, 64)
     expect(await ui.find({ type: 'Text', text: 'Review on the session model' }), surface).toBeDefined()
@@ -591,24 +598,111 @@ test('the Agents pane draws a worker the session\'s own model runs', async ($, o
 
 test('the Agents pane draws live, finished and empty', async ($, on) => {
   const { calls, fn } = recorder()
-  drawPane(on, 'agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false }, { toggleDone: fn('done') }))
-  drawPane(on, 'agents-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: fn('done') }))
-  drawPane(on, 'agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { toggleDone: fn('done') }))
+  drawPane(on, 'agents', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false }, { ...AGENT_NOOP, toggleDone: fn('done') }))
+  drawPane(on, 'agents-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: fn('done') }))
+  drawPane(on, 'agents-empty', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [], now: NOW, showDone: false }, { ...AGENT_NOOP, toggleDone: fn('done') }))
   for (const surface of SURFACES) {
     const ui = await mount($, 'agents', surface, 64)
     expect(await ui.find({ type: 'Text', text: 'Port the request log renderer' }), "ui { type: 'Text', text: 'Port the request log renderer' } " + surface).toBeDefined()
-    // The desktop leaves what an agent is doing to the host's task list above the pane.
-    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), surface).toBeDefined()
-    else expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx/ }), surface).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: 'Summarize the docs' })).toBeUndefined()
+    // What it does now, on both surfaces: the pane stands in for the host's task list.
+    expect(await ui.find({ type: 'Text', text: /Edit hooks\/ui\/log.tsx · 14s/ }), surface).toBeDefined()
+    // A finished agent is a card too, not a line behind a fold.
+    expect(await ui.find({ type: 'Text', text: 'Summarize the docs' }), surface).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Frontend \/ Standard/ })).toBeDefined()
-    await ui.press({ key: 'done' })
-    const open = await mount($, 'agents-open', surface, 64)
-    expect(await open.find({ type: 'Text', text: 'Summarize the docs' }), "open { type: 'Text', text: 'Summarize the docs' } " + surface).toBeDefined()
+    // The API's own counts: 1200 + 38000 + 800 in, 95% of it from the cache, 5100 out, 12 tools.
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'in 40k · cache 95% · out 5.1k · tools 12' }), surface).toBeDefined()
+    else for (const value of ['40k', '95%', '5.1k', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
+    // Two agents finished: nothing hides behind "more".
+    expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeUndefined()
     const empty = await mount($, 'agents-empty', surface, 64)
     expect(await empty.find({ type: 'Text', text: 'No agents yet' }), "empty { type: 'Text', text: 'No agents yet' } " + surface).toBeDefined()
   }
-  expect(calls).toEqual(['done', 'done'])
+  expect(calls).toEqual([])
+})
+
+test('the Agents pane shows the latest finished agents and the rest behind more; a card opens its conversation', async ($, on) => {
+  const { calls, fn } = recorder()
+  const many: AgentRec[] = [AGENTS[0]!, ...Array.from({ length: 7 }, (_, i): AgentRec => ({ id: 'd' + i, description: 'Finished task ' + i, type: 'Explore', model: 'claude-haiku-5-5', state: i === 0 ? 'failed' : 'done', startedAt: NOW - 600_000, endedAt: NOW - 500_000 + i * 1000, cost: 0 }))]
+  const actions = { ...AGENT_NOOP, toggleDone: fn('done'), open: fn('open') }
+  drawPane(on, 'agents-many', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: many, now: NOW, showDone: false }, actions))
+  drawPane(on, 'agents-all', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: many, now: NOW, showDone: true }, actions))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'agents-many', surface, 64)
+    // Newest first: the four latest show, the oldest three wait behind "more".
+    for (const i of [6, 5, 4, 3]) expect(await ui.find({ type: 'Text', text: 'Finished task ' + i }), surface + ' ' + i).toBeDefined()
+    for (const i of [2, 1, 0]) expect(await ui.find({ type: 'Text', text: 'Finished task ' + i }), surface + ' ' + i).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeDefined()
+    await ui.press({ key: 'done' })
+    // The desktop presses a card anywhere on it (a blank press a row); the terminal has a button.
+    await ui.press({ key: surface === 'terminal' ? 'open-a1' : 'open-a1-0' })
+    const all = await mount($, 'agents-all', surface, 64)
+    expect(await all.find({ type: 'Text', text: 'Finished task 0' }), surface).toBeDefined()
+    expect(await all.find({ type: 'Text', text: 'failed' }) ?? await all.find({ type: 'Text', text: /^✕/ }), surface).toBeDefined()
+    if (surface === 'desktop') expect(await all.find({ type: 'Button', key: 'open-d0-2' }), surface).toBeDefined()
+  }
+  expect(calls).toEqual(['done', 'open:["a1"]', 'done', 'open:["a1"]'])
+})
+
+test('an agent\'s conversation reads in the pane: the task, its words, its tools, the answer, and a way back', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { ...AGENT_NOOP, back: fn('back'), earlier: fn('earlier') }
+  const talk: AgentEntry[] = [
+    { kind: 'prompt', text: 'Port the log renderer to the new kit.' },
+    { kind: 'text', text: 'Reading the **current** renderer first.' },
+    { kind: 'tool', id: 't1', tool: 'Read', detail: 'hooks/ui/log.tsx', state: 'ok' },
+    { kind: 'tool', id: 't2', tool: 'Bash', detail: 'npm test', state: 'error' },
+    { kind: 'tool', id: 't3', tool: 'Edit', detail: 'hooks/ui/log.tsx', state: 'running' },
+  ]
+  const done: AgentRec = { ...AGENTS[0]!, id: 'a9', state: 'done', endedAt: NOW - 1000, now: undefined, toolSince: undefined }
+  const long: AgentEntry[] = [talk[0]!, ...Array.from({ length: 45 }, (_, i): AgentEntry => ({ kind: 'tool', id: 'x' + i, tool: 'Grep', detail: 'pattern ' + i, state: 'ok' }))]
+  drawPane(on, 'talk-live', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-done', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: [...talk.slice(0, 3), { kind: 'text', text: 'Ported; tests pass.' }] }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-deny', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { deny: 'no saved transcript for a1' }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-gone', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'zz', talk: { entries: [] }, earlier: 0 } }, actions))
+  for (const surface of SURFACES) {
+    const live = await mount($, 'talk-live', surface, 64)
+    expect(await live.find({ type: 'Text', text: 'Port the request log renderer' }), surface).toBeDefined()
+    expect(await live.find({ type: 'Text', text: 'Task' }), surface).toBeDefined()
+    for (const tool of ['Read', 'Bash', 'Edit']) expect(await live.find({ type: 'Text', text: tool }), surface + ' ' + tool).toBeDefined()
+    // Its words as Markdown on the desktop, plain text on the terminal; no answer while it runs.
+    if (surface === 'desktop') expect((await live.findAll({ type: 'Markdown' })).some(m => m.props.text === 'Reading the **current** renderer first.'), surface).toBe(true)
+    else expect(await live.find({ type: 'Text', text: 'Reading the **current** renderer first.' }), surface).toBeDefined()
+    expect(await live.find({ type: 'Text', text: 'Final answer' }), surface).toBeUndefined()
+    await live.press({ key: 'back' })
+    const finished = await mount($, 'talk-done', surface, 64)
+    expect(await finished.find({ type: 'Text', text: 'Final answer' }), surface).toBeDefined()
+    const long_ = await mount($, 'talk-long', surface, 64)
+    // The task stays at the head; 30 of the 45 calls show, 15 wait behind "earlier".
+    expect(await long_.find({ type: 'Text', text: 'pattern 44' }), surface).toBeDefined()
+    expect(await long_.find({ type: 'Text', text: 'pattern 14' }), surface).toBeUndefined()
+    await long_.press({ key: 'earlier' })
+    const deny = await mount($, 'talk-deny', surface, 64)
+    expect(await deny.find({ type: 'Text', text: /can’t be read: no saved transcript for a1/ }), surface).toBeDefined()
+    const gone = await mount($, 'talk-gone', surface, 64)
+    expect(await gone.find({ type: 'Text', text: 'This agent is no longer in the list.' }), surface).toBeDefined()
+    await gone.press({ key: 'back' })
+  }
+  expect(calls).toEqual(['back', 'earlier', 'back', 'back', 'earlier', 'back'])
+})
+
+test('talkOf reads a conversation into prompts, words and tool calls that stand answered, failed or running', () => {
+  const entries = talkOf([
+    { role: 'user', text: ' Do the thing. ', toolUses: [] },
+    { role: 'assistant', text: 'On it.', toolUses: [
+      { tool_use_id: 'u1', tool: 'Bash', input: { command: 'npm test\nmore' }, text: 'ok' },
+      { tool_use_id: 'u2', tool: 'Read', input: { file_path: '/a.ts' }, text: 'nope', isError: true },
+      { tool_use_id: 'u3', tool: 'Grep', input: { pattern: 'x' } },
+    ] },
+    { role: 'user', text: '', toolUses: [] },
+  ])
+  expect(entries).toEqual([
+    { kind: 'prompt', text: 'Do the thing.' },
+    { kind: 'text', text: 'On it.' },
+    { kind: 'tool', id: 'u1', tool: 'Bash', detail: 'npm test', state: 'ok' },
+    { kind: 'tool', id: 'u2', tool: 'Read', detail: '/a.ts', state: 'error' },
+    { kind: 'tool', id: 'u3', tool: 'Grep', detail: 'x', state: 'running' },
+  ])
 })
 
 test('the log pane lists this session\'s verdicts among its requests, a fallback in plain words', async ($, on) => {
@@ -748,8 +842,8 @@ test('no drawing cuts its text: no truncating Text on any surface', async ($, on
   const settingsActions = QUICK_ACTIONS
   const cases: [string, Draw][] = [
     ['cut-quick', (el, surface) => renderSettings(el, frameOf(surface, 60, 30), { settings: SETTINGS, jev: { source: null, test: { state: 'fail', message: 'key rejected (401) '.repeat(4) } } }, settingsActions)],
-    ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { toggleDone: noop })],
-    ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { toggleDone: noop })],
+    ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
+    ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
     ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
     ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop })]),
   ]

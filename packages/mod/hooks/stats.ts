@@ -1,4 +1,4 @@
-import type { Effort, JudgeKind, Stats, Tier, Usage } from '../types'
+import type { AgentRec, Effort, JudgeKind, Stats, Tier, Usage } from '../types'
 import { t } from './i18n.ts'
 import type { Lang } from './i18n.ts'
 
@@ -11,6 +11,30 @@ export function emptyStats(): Stats {
 export function weighted(usage: Usage): number {
   return (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) * 1.25 +
     (usage.cache_read_input_tokens ?? 0) * 0.1 + (usage.output_tokens ?? 0) * 5
+}
+
+/**
+ * The effort a step was sent at: a routed id's `@effort` wins, since the router forces it over the
+ * request's own (packages/router/src/routing.ts: "gpt-5.6-sol@medium → effort forced to medium").
+ */
+export function sentEffort(model: string, effort: string | number | undefined): string | number | undefined {
+  return /@([a-z]+)$/.exec(model)?.[1] ?? effort
+}
+
+/**
+ * An agent after one of its steps: the raw counts the API reported added to its own (what the
+ * Agents pane shows, so it agrees with the host's), the weighted cost as before, the effort the step
+ * was sent at and the model that answered.
+ */
+export function addAgentStep(agent: AgentRec, usage: Usage & { model?: string }, effort: string | number | undefined): AgentRec {
+  const was = agent.usage ?? { input: 0, cached: 0, cacheWrite: 0, output: 0 }
+  return {
+    ...agent,
+    cost: agent.cost + weighted(usage),
+    usage: { input: was.input + (usage.input_tokens ?? 0), cached: was.cached + (usage.cache_read_input_tokens ?? 0), cacheWrite: was.cacheWrite + (usage.cache_creation_input_tokens ?? 0), output: was.output + (usage.output_tokens ?? 0) },
+    ...(effort !== undefined ? { effort } : {}),
+    ...(usage.model ? { answeredBy: usage.model } : {}),
+  }
 }
 
 export function addRequest(stats: Stats, usage: Usage, effort: Effort): Stats {

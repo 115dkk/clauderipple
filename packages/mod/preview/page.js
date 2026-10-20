@@ -210,6 +210,19 @@
         apply(s, { font: 'inherit', fontSize: '12px', color: t.ink, background: t.ghost, border: '1px solid ' + t.ghost, borderRadius: '6px', padding: '2px 6px' })
         return s
       }
+      case 'Markdown': {
+        // Close enough to read a layout by: paragraphs, bullets, **bold** and `code` in the host's ink.
+        const el = document.createElement('div')
+        apply(el, { color: p.dimColor ? t.dim : t.ink, minWidth: 0, overflowWrap: 'anywhere' })
+        const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b style="font-weight:580">$1</b>').replace(/`([^`]+)`/g, '<code style="font-family:ui-monospace,monospace;font-size:12px;padding:0 3px;border-radius:4px;background:' + t.ghost + '">$1</code>')
+        el.innerHTML = String(p.text ?? '').split(/\n{2,}/).map(par => {
+          const lines = par.split('\n')
+          if (lines.every(l => /^\s*[-*] /.test(l))) return '<ul style="margin:0 0 6px;padding-left:18px">' + lines.map(l => '<li>' + inline(l.replace(/^\s*[-*] /, '')) + '</li>').join('') + '</ul>'
+          return '<p style="margin:0 0 6px">' + lines.map(inline).join('<br>') + '</p>'
+        }).join('')
+        return el
+      }
       case 'Link': {
         const a = document.createElement('a')
         a.textContent = p.label ?? p.url
