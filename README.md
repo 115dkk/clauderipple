@@ -310,6 +310,11 @@ you map go to your provider, everything else goes to Anthropic byte for byte.
 - **Images from your ChatGPT subscription.** `clauderipple image "<prompt>"`, with
   reference images and transparent backgrounds. Subagents are told how, so a GPT or
   DeepSeek worker can make an image and look at it without an image tool.
+- **Close the laptop, Claude keeps working.** On macOS and Windows the laptop stays awake
+  with the lid shut while Claude works (and 10 minutes after), so a task you started from
+  your phone finishes. If the Wi-Fi loses its internet, it moves to your phone's hotspot
+  (iPhone or Android) and back to a known Wi-Fi later. Off until you turn it on in the
+  dashboard's Laptop view; see [Lid closed and the phone hotspot](#lid-closed-and-the-phone-hotspot).
 - **Lean workers, if you want them.** One switch gives generated subagents only the
   tools a worker uses instead of every MCP server and plugin of the session: one
   worker's first request fell from 33k to 9k tokens.
@@ -525,6 +530,40 @@ while this machine's Claude Desktop is connected to it anyway. The tunnel
 listens on the host's loopback only, but on a shared host every user there can
 reach that port, and through it your router. The status mod and image
 generation are not available on remote hosts yet.
+
+## Lid closed and the phone hotspot
+
+For sessions you drive from your phone (Remote Control, Ripple Remote): the laptop
+keeps working in a bag. Open the dashboard's **Laptop** view.
+
+**Stay awake with the lid closed.** Three modes: *Off*; *While working* — awake while a
+model call runs and for 10 minutes after the last one; *Always* — until you turn it off
+or a time you set. It lets go by itself when the battery drops below 20% or (on macOS) the
+Mac reports a thermal warning, and puts a closed laptop to sleep when it does. Don't carry
+it in a closed bag for long while it is awake.
+
+- macOS: press **Set up** once. macOS's own password dialog installs a sudoers rule for
+  exactly the commands used (`pmset disablesleep`, `pmset sleepnow`, joining the hotspot
+  you name); ClaudeRipple never sees the password. `clauderipple awake setup --remove`
+  takes it out. If Insomnia is installed, setup removes it (it does the same job).
+- Windows: no administrator rights. A child of the router holds
+  `SetThreadExecutionState`, and the lid action is set to "do nothing" only while it is
+  held; your own power settings come back afterwards, also if the router dies.
+
+**Wi-Fi without internet → phone hotspot.** It probes the internet through the Wi-Fi
+interface (a router with a dead uplink or a captive portal still looks "connected" to
+the OS) and joins the hotspot you name after 3 of 5 rounds fail. On the hotspot it tries
+the way back 5, 10, 20, 30, 40, 50 and 60 minutes after landing, then every 10 minutes:
+it leaves the hotspot so the OS joins the best known Wi-Fi in range, and stays there only
+if that Wi-Fi has internet. A model call that starts during the switch waits a moment
+instead of failing.
+
+- Join the phone's hotspot from the laptop once by hand, so the OS keeps its password.
+- iPhone: keep Settings › Personal Hotspot › "Allow Others to Join" on. On a Mac, the
+  same Apple Account and Bluetooth on help it find the phone.
+- Android: an idle hotspot turns itself off after a while; turn it on again if it is
+  not found.
+- Linux: not supported yet.
 
 ### Codex app and Codex CLI
 
