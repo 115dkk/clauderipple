@@ -101,7 +101,12 @@ export function openWindow(deps: WindowDeps, view?: string): void {
     // A tray app again once its window is gone.
     if (mac) app.dock?.hide();
   });
-  if (mac) void app.dock?.show();
+  if (mac) {
+    // The window's Dock icon is the running bundle's: installed from npm that is Electron.app, so the
+    // Dock showed Electron's atom (2026-10-20). Ours is set on it whatever bundle runs.
+    app.dock?.setIcon(path.join(__dirname, "..", "assets", "icon.png"));
+    void app.dock?.show();
+  }
   void win.loadURL(`${ORIGIN}/?lang=${encodeURIComponent(deps.lang)}${view ? `#${view}` : ""}`);
   deps.shown();
 }
