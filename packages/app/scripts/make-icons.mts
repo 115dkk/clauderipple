@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// Regenerates every icon the desktop app and its launchers use, from the brand masters in brand/
-// (리플이, brand/README.md). Run: npm --workspace @clauderipple/app run icons
+// Regenerates every icon the desktop app and its launchers use. The desktop app wears the Ripple
+// Remote phone app's icon (brand/remote-app-icon.svg, a copy of the phone app's assets/icon.svg:
+// the remote with Claude's asterisk and its signal arcs), so both apps read as one product.
+// Run: npm --workspace @clauderipple/app run icons
 //
 //   assets/tray*Template{,@2x}.png   macOS menu bar, 22pt template images (black + alpha; macOS tints them)
 //   assets/trayWin*{,@2x}.png        Windows tray, 32/64px, coloured (Windows does not tint)
@@ -15,13 +17,13 @@
 // committed renders are copied into build/ and nothing is redrawn. The .icns needs macOS iconutil;
 // elsewhere the committed one is kept.
 //
-// Tray states (menu bar and Windows alike), all on the mono mark's 56 grid:
-//   ok     : mark-mono.svg (ring, crest, ears, eyes)
-//   warn   : the ring broken at the lower right, with "!" in the break
-//   down   : the spec's sleeping face: thin ring, short crest, closed eyes, no ears
-//   direct : no ears (no ripple) and an arrow at the lower right: Claude goes straight out
-// Windows shows its tray at 16px, so it follows the 16px rules (no ears) and carries the state in
-// colour as well.
+// Tray states (menu bar and Windows alike): the remote as a one-colour glyph, drawn in the icon's
+// own coordinates (the asterisk and the dots are cut out of a solid pill):
+//   ok     : the remote and both signal arcs
+//   warn   : the same with a "!" badge at the lower right, cut out of the pill
+//   down   : switched off: a hollow pill, a dash for the asterisk, no arcs
+//   direct : no arcs (nothing goes through the router) and an arrow badge: Claude goes straight out
+// Windows does not tint its tray, so it carries the state in colour as well.
 import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -93,69 +95,91 @@ async function drain(width = 6): Promise<void> {
 // ids cannot collide.
 const img = (svg: string, size: number, style = "") => `<div class="i" style="width:${size}px;height:${size}px;${style}">${svg}</div>`;
 
-// ---- the mark, in pieces (brand/mark-mono.svg and the spec's state drawings, 56 grid) ---------
+// ---- the remote glyph, in pieces (brand/remote-app-icon.svg's coordinates) --------------------
+// The icon's artwork sits in the square 140,250 → 300,410: the pill is 196,302 48×90, the arcs are
+// centred on the pill's top (220,302). The tray glyph uses heavier strokes than the icon so it
+// survives 22pt, and its square viewBox (TRAY_VIEW) is centred on the pill.
 
 const C = "currentColor";
-const CREST = `<path d="M24.7 12.29C24.2 6.2 29.2 2.4 35 2.6C39.6 2.8 42.6 6.2 41.6 9.8C40.6 8 38.6 7 36.8 7.6C35 8.2 35 11 36.33 13.92Z" fill="${C}"/>`;
-const CREST_SHORT = `<path d="M24.7 12.29C25 8.4 28.4 6.4 32 6.6C34.8 6.8 36.8 8.4 36.8 10.2C36 9.6 35.2 9.8 34.9 10.6C34.7 11.6 35.4 12.8 36.33 13.92Z" fill="${C}"/>`;
-const RING = `<circle cx="28" cy="31" r="16.5" fill="none" stroke="${C}" stroke-width="6.4"/>`;
-const RING_THIN = `<circle cx="28" cy="31" r="17.7" fill="none" stroke="${C}" stroke-width="3.4"/>`;
-const EARS = `<path d="M50.02 20.26A24.5 24.5 0 0 1 50.02 41.74M5.98 41.74A24.5 24.5 0 0 1 5.98 20.26" fill="none" stroke="${C}" stroke-width="4" stroke-linecap="round"/>`;
-const EYES = `<rect x="19.9" y="25" width="5" height="8.4" rx="2.5" fill="${C}"/><rect x="31.1" y="25" width="5" height="8.4" rx="2.5" fill="${C}"/>`;
-const EYES_CLOSED = `<path d="M18.6 30.4h7.4M30 30.4h7.4" fill="none" stroke="${C}" stroke-width="3.6" stroke-linecap="round"/>`;
-/** A badge at the lower right: the mark is cut away around it so it reads as its own shape. */
-function badge(body: string, glyph: string, id: string): string {
-  return `<defs><mask id="${id}"><rect width="56" height="56" fill="#fff"/><circle cx="46" cy="46" r="11.5" fill="#000"/></mask></defs><g mask="url(#${id})">${body}</g>${glyph}`;
+const TRAY_VIEW = "150 258 140 140";
+const PILL = `<rect x="196" y="302" width="48" height="90" rx="24" fill="${C}"/>`;
+const PILL_HOLLOW = `<rect x="200.5" y="306.5" width="39" height="81" rx="19.5" fill="none" stroke="${C}" stroke-width="9"/>`;
+const ASTERISK_CUT = `<path d="M220 312V340M207.9 319L232.1 333M207.9 333L232.1 319" stroke="#000" stroke-width="8.5" stroke-linecap="round"/>`;
+const DOTS_CUT = `<circle cx="220" cy="358" r="6" fill="#000"/><circle cx="220" cy="375" r="6" fill="#000"/>`;
+const DOTS = `<circle cx="220" cy="358" r="5.5" fill="${C}"/><circle cx="220" cy="375" r="5.5" fill="${C}"/>`;
+const DASH = `<path d="M210 326H230" stroke="${C}" stroke-width="9" stroke-linecap="round"/>`;
+const ARCS = `<path d="M205.9 287.9A20 20 0 0 1 234.1 287.9" stroke="${C}" stroke-width="9.5" stroke-linecap="round" fill="none"/><path d="M194.5 276.5A36 36 0 0 1 245.5 276.5" stroke="${C}" stroke-opacity=".55" stroke-width="9.5" stroke-linecap="round" fill="none"/>`;
+/** The solid remote: a pill with the asterisk and the dots cut out, so the background shows through. */
+const REMOTE = `<mask id="p"><rect x="150" y="258" width="140" height="140" fill="#fff"/>${ASTERISK_CUT}${DOTS_CUT}</mask><g mask="url(#p)">${PILL}</g>`;
+/**
+ * A badge at the lower right, centred at x `cx`: the glyph is cut away around it so it reads as its
+ * own shape. The "!" stands clear of the pill (a cut that only nicks the pill's edge reads as a
+ * defect); the arrow cuts into it, as if leaving the remote.
+ */
+function badge(body: string, glyph: string, id: string, cx: number): string {
+  return `<defs><mask id="${id}"><rect x="150" y="258" width="140" height="140" fill="#fff"/><circle cx="${cx}" cy="371" r="24" fill="#000"/></mask></defs><g mask="url(#${id})">${body}</g>${glyph}`;
 }
-const BANG = `<path d="M46 38.6v6.2" stroke="${C}" stroke-width="4.6" stroke-linecap="round"/><circle cx="46" cy="51.6" r="2.6" fill="${C}"/>`;
-const ARROW = `<path d="M37.5 46h13M45.5 40.5l5.5 5.5-5.5 5.5" fill="none" stroke="${C}" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>`;
+const BANG = `<path d="M268 352v15" stroke="${C}" stroke-width="10" stroke-linecap="round"/><circle cx="268" cy="385" r="5.6" fill="${C}"/>`;
+const ARROW = `<path d="M243 371h31M262 359l12 12-12 12" fill="none" stroke="${C}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>`;
 
 type State = "ok" | "warn" | "down" | "direct";
 const STATES: State[] = ["ok", "warn", "down", "direct"];
-function trayMark(state: State, ears: boolean): string {
-  const e = ears ? EARS : "";
-  if (state === "ok") return CREST + RING + e + EYES;
-  if (state === "warn") return badge(CREST + RING + e + EYES, BANG, "w");
-  if (state === "down") return CREST_SHORT + RING_THIN + EYES_CLOSED;
-  return badge(CREST + RING + EYES, ARROW, "d");
+function trayMark(state: State): string {
+  if (state === "ok") return REMOTE + ARCS;
+  if (state === "warn") return badge(REMOTE + ARCS, BANG, "w", 268);
+  if (state === "down") return PILL_HOLLOW + DASH + DOTS;
+  return badge(REMOTE, ARROW, "d", 261);
 }
-const svg56 = (body: string, color: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56" style="color:${color}">${body}</svg>`;
+const traySvg = (body: string, color: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${TRAY_VIEW}" style="color:${color}">${body}</svg>`;
 
 // macOS menu bar: 22pt template images.
 const MAC_NAME: Record<State, string> = { ok: "trayTemplate", warn: "trayWarnTemplate", down: "trayDownTemplate", direct: "trayDirectTemplate" };
 for (const s of STATES) {
-  const svg = svg56(trayMark(s, true), "#000");
+  const svg = traySvg(trayMark(s), "#000");
   queue(img(svg, 22), 22, path.join(assets, `${MAC_NAME[s]}.png`));
   queue(img(svg, 44), 44, path.join(assets, `${MAC_NAME[s]}@2x.png`));
 }
 
-// Windows tray: coloured, the 16px rules (no ears). Tones sit between the brand's light and dark
-// tokens so they hold on both a light and a dark taskbar.
+// Windows tray: coloured, since Windows does not tint. ok is the icon's own orange; the alarms keep
+// tones that hold on both a light and a dark taskbar.
 const WIN_NAME: Record<State, string> = { ok: "trayWin", warn: "trayWinWarn", down: "trayWinDown", direct: "trayWinDirect" };
 const WIN_TONE: Record<State, string> = {
-  ok: "#7c69ef", // accent, between #6a56d6 and #a594f5
-  warn: "#d9a21c", // between warn #b5820a and #e0b436
+  ok: "#E2725B", // the remote's orange (asterisk and arcs on the app icon)
+  warn: "#d9a21c", // amber, between warn #b5820a and #e0b436
   down: "#e04848", // between bad #c73434 and #ef5a5a
   direct: "#8a96a6", // slate: off on purpose, not an alarm
 };
 for (const s of STATES) {
-  const svg = svg56(trayMark(s, false), WIN_TONE[s]);
+  const svg = traySvg(trayMark(s), WIN_TONE[s]);
   queue(img(svg, 32), 32, path.join(assets, `${WIN_NAME[s]}.png`));
   queue(img(svg, 64), 64, path.join(assets, `${WIN_NAME[s]}@2x.png`));
 }
 
-// ---- app icon (brand/app-icon.svg) ------------------------------------------------------------
+// ---- app icon (brand/remote-app-icon.svg) -----------------------------------------------------
 
-const TILE = fs.readFileSync(path.join(brand, "app-icon.svg"), "utf8");
+const ART = fs.readFileSync(path.join(brand, "remote-app-icon.svg"), "utf8").replace(/^\s*<svg[^>]*>|<\/svg>\s*$/g, "");
 /**
- * The tile for a given pixel size. From 48px up it is app-icon.svg as drawn; below that the faint
- * ripples and the mouth vanish and the 2.4-wide ears go to mush, so the mark switches to the mono
- * weights (mark-mono.svg), and at 16–24px to the 16px rules (no ears), as favicon.svg does.
+ * The square artwork cut to the icon's rounded tile (rx 22.4% of the side, as the macOS template
+ * and the previous tile). The phone icon is full-bleed because iOS masks it; the desktop draws the
+ * mask itself.
+ */
+const rounded = (body: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="140 250 160 160"><clipPath id="t"><rect x="140" y="250" width="160" height="160" rx="35.84"/></clipPath><g clip-path="url(#t)">${body}</g></svg>`;
+/**
+ * The tile for a given pixel size. From 48px up it is the phone icon as drawn. Below that the dots
+ * and 6-wide strokes go to mush, so the remote loses its dots, gets a shorter pill and heavier
+ * strokes and is drawn larger; at 16–24px the faint outer arc goes too.
  */
 function tile(px: number): string {
-  if (px >= 48) return TILE;
-  const mark = px > 24 ? CREST + RING + EARS + EYES : CREST + RING + EYES;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="22.4" fill="#6a56d6"/><g transform="translate(15 14.2) scale(1.25)" style="color:#fff">${mark}</g></svg>`;
+  if (px >= 48) return rounded(ART);
+  const outer = px > 24 ? `<path d="M194.5 276.5A36 36 0 0 1 245.5 276.5" stroke="#E2725B" stroke-opacity=".55" stroke-width="9" stroke-linecap="round" fill="none"/>` : "";
+  const cy = px > 24 ? 318 : 326; // centre of what is drawn, scaled about the tile's centre
+  const k = px > 24 ? 1.22 : 1.38;
+  const remote =
+    `<rect x="196" y="302" width="48" height="74" rx="24" fill="#FFFFFF"/>` +
+    `<path d="M220 323V349M208.7 329.5L231.3 342.5M208.7 342.5L231.3 329.5" stroke="#E2725B" stroke-width="8" stroke-linecap="round" fill="none"/>` +
+    `<path d="M205.9 287.9A20 20 0 0 1 234.1 287.9" stroke="#E2725B" stroke-width="9" stroke-linecap="round" fill="none"/>${outer}`;
+  return rounded(`<rect x="140" y="250" width="160" height="160" fill="#2A2420"/><g transform="translate(220 330) scale(${k}) translate(-220 -${cy})">${remote}</g>`);
 }
 /** macOS grid: the tile is 824/1024 of the canvas, centred, with Apple's soft drop shadow. */
 function macIcon(size: number): string {
