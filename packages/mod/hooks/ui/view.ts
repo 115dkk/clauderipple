@@ -310,8 +310,11 @@ export function cachePercent(usage: Usage | undefined): number | undefined {
 export function modelOf(record: StatusRequest): string {
   const at = record.source.lastIndexOf('@')
   const source = at < 0 ? record.source : record.source.slice(0, at)
+  // A hosted id's vendor path ("deepseek-ai/") goes, as on the agent cards: the slot is narrow and
+  // the provider is named beside it.
+  const bare = (id: string) => id.replace(/^.*\//, '')
   // A dated id of the same model (claude-haiku-5-5-20260815 for claude-haiku-5-5) says nothing new.
-  return source.startsWith(record.target) || record.target.startsWith(source) ? record.target : record.target + ' (' + source + ')'
+  return source.startsWith(record.target) || record.target.startsWith(source) ? bare(record.target) : bare(record.target) + ' (' + bare(source) + ')'
 }
 
 export function routeOf(record: StatusRequest): RouteView {

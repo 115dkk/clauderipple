@@ -131,6 +131,9 @@ test('view helpers', () => {
   expect(targetOf('gpt-6-1-sol')).toEqual({ agent: 'gpt-6-1-sol' })
   const record: StatusRequest = { at: '2026-10-10T13:19:10', source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, usage: { input: 3000, cached: 41_000, output: 900 } }
   expect(routeOf(record)).toMatchObject({ model: 'gpt-6.1-sol (gpt-6-1-sol)', cachePct: 93, seconds: 2.14 })
+  // A hosted id's vendor path is not drawn.
+  expect(routeOf({ ...record, source: 'deepseek-ai-deepseek-v4-1-flash-1017@high', target: 'deepseek-ai/deepseek-v4.1-flash-1017' }).model).toBe('deepseek-v4.1-flash-1017 (deepseek-ai-deepseek-v4-1-flash-1017)')
+  expect(routeOf({ ...record, source: 'deepseek-ai/deepseek-v4.1-flash-1017', target: 'deepseek-ai/deepseek-v4.1-flash-1017' }).model).toBe('deepseek-v4.1-flash-1017')
   expect(minutesLeft(41 * 60_000 + 1, 'en')).toBe('42m')
   expect(minutesLeft(41 * 60_000, 'en')).toBe('41m')
   expect(minutesLeft(30_000, 'ko')).toBe('1분')
