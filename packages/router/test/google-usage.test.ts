@@ -89,6 +89,22 @@ function harness(initial: unknown = healthy()) {
 }
 const GEMINI = "gemini-3.8-flash";
 
+test("quota is read from the host the requests go to, the daily host unless configured", async () => {
+  // Each host counts its own: prod answered 1.0 for a day of use on daily (2026-10-20).
+  const seen: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    seen.push(url);
+    return new Response(JSON.stringify(measured), { status: 200 });
+  }) as unknown as typeof fetch;
+  const source = { credentials: async () => [{ ownerId: "acct-1", accessToken: "tok", projectId: "proj" }] } as never;
+  await new GoogleUsage(source, { fetch: fetchImpl, warn: () => {} }).snapshot();
+  await new GoogleUsage(source, { baseUrl: "https://example.test", fetch: fetchImpl, warn: () => {} }).snapshot();
+  assert.deepEqual(seen, [
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+    "https://example.test/v1internal:retrieveUserQuotaSummary",
+  ]);
+});
+
 test("hasRemainingQuota is false until a lookup has succeeded, never fetches, then is true on the ordinary positive path", async () => {
   const h = harness();
   assert.equal(h.usage.hasRemainingQuota(h.acct(), GEMINI), false);

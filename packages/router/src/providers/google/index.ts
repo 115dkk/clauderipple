@@ -24,7 +24,7 @@ import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { estimateTokens, formatSse, GoogleStreamMapper, toGeminiRequest, type GeminiRequest } from "./translate.ts";
-import { createTransport, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
+import { antigravityBaseUrl, createTransport, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
 import { ThoughtSignatureStore } from "./thoughtSignatures.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap, type AnthropicRequest } from "../chatgpt/translate.ts";
 import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, type FetchLike } from "./accounts.ts";
@@ -164,7 +164,8 @@ export class GoogleAdapter {
     this.log = log;
     this.pool = pool;
     this.accounts = new GoogleAccountPool({ home, log, ...(fetchImpl ? { fetch: fetchImpl } : {}) });
-    this.usage = new GoogleUsage(this.accounts, { warn: (message) => log.warn(message), ...(fetchImpl ? { fetch: fetchImpl } : {}) });
+    // Quota is read from the host the requests go to: each Cloud Code Assist host counts its own.
+    this.usage = new GoogleUsage(this.accounts, { baseUrl: antigravityBaseUrl(cfg.url), warn: (message) => log.warn(message), ...(fetchImpl ? { fetch: fetchImpl } : {}) });
   }
 
   describeAuth(): string {

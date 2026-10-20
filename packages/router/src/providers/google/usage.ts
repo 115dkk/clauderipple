@@ -3,7 +3,11 @@
 // accounts store already refreshes the OAuth token, so this only reads.
 //
 // Measured 2026-10-15 against a live Antigravity subscription:
-//   POST {prodApi}/v1internal:retrieveUserQuotaSummary
+//   POST {host}/v1internal:retrieveUserQuotaSummary
+// The host must be the one the requests go to (the daily host by default, transport.ts). Each host
+// keeps its own count: after 144 gemini-3.8-flash requests on daily, the prod host still answered
+// remainingFraction 1 with a reset always five hours out, while daily answered 0.87 (5h) and 0.947
+// (weekly) — the limits row read prod and showed 0% for a day of use (2026-10-20).
 //   headers: authorization: Bearer <accessToken>, content-type: application/json, user-agent
 //   body:    {"project": "<projectId>"}
 //   answer:  {"groups":[{"displayName":"Gemini Models","buckets":[
@@ -171,6 +175,8 @@ function groupHasQuota(group: QuotaGroup, ids: Record<"5h" | "weekly", string>, 
 
 type UsageSource = { credentials(): Promise<GoogleCredential[]> };
 type UsageOptions = {
+  /** The Cloud Code Assist host the requests go to (transport.ts antigravityBaseUrl); its quota is the one they spend. */
+  baseUrl?: string;
   fetch?: FetchLike;
   now?: () => number;
   ttlMs?: number;
@@ -255,7 +261,7 @@ export class GoogleUsage {
   private async fetchOne(credential: GoogleCredential): Promise<{ groups: QuotaGroup[]; strict: QuotaGroup[] | null } | null> {
     const owner = credential.ownerId.slice(0, 8);
     try {
-      const res = await (this.opts.fetch ?? fetch)(`${GOOGLE_OAUTH.prodApi}/${GOOGLE_OAUTH.apiVersion}:retrieveUserQuotaSummary`, {
+      const res = await (this.opts.fetch ?? fetch)(`${this.opts.baseUrl ?? GOOGLE_OAUTH.dailyApi}/${GOOGLE_OAUTH.apiVersion}:retrieveUserQuotaSummary`, {
         method: "POST",
         headers: { authorization: `Bearer ${credential.accessToken}`, "content-type": "application/json", accept: "*/*", "user-agent": antigravityUserAgent() },
         body: JSON.stringify({ project: credential.projectId }),
