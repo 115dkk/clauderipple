@@ -43,9 +43,13 @@ const BY: Record<NonNullable<AgentRec['pick']>['by'] | 'tier', string> = { haiku
 
 /** Finished agents the list shows before "more". */
 export const DONE_SHOWN = 4
-/** Conversation entries a page shows; "earlier" adds a page. */
-export const TALK_PAGE = 30
-/** Characters of a text entry drawn: a tree draws 100,000 characters in all (the engine's cut). */
+/**
+ * Characters of the conversation drawn in all, about: a tree draws 100,000 characters (the engine's
+ * cut), and the card and the page's chrome take some. Only a conversation past it loses its oldest
+ * entries; any other shows whole, as the Claude app's chat does.
+ */
+export const TALK_CHARS = 80_000
+/** Characters of a text entry drawn. */
 const TEXT_MAX = 3000
 const PROMPT_MAX = 2400
 const ANSWER_MAX = 12000
@@ -162,21 +166,30 @@ function cut(text: string, max: number): string {
   return text.length > max ? text.slice(0, max).trimEnd() + ' …' : text
 }
 
-type Page = { first?: AgentEntry; hidden: number; shown: AgentEntry[]; answer?: string }
+type Page = { first?: AgentEntry; dropped: number; shown: AgentEntry[]; answer?: string }
+
+/** Characters an entry draws, about: its text as cut, or a tool call's line. */
+function weight(entry: AgentEntry): number {
+  if (entry.kind === 'tool') return (entry.detail?.length ?? 0) + 40
+  return Math.min(entry.text.length, entry.kind === 'prompt' ? PROMPT_MAX : TEXT_MAX) + 40
+}
 
 /**
- * What a page of the conversation shows: the first prompt always (what it was asked), the latest
- * entries, how many earlier ones wait behind "earlier", and a finished agent's last words as its
- * answer.
+ * What the page shows: the first prompt always (what it was asked), every entry after it, and a
+ * finished agent's last words as its answer. Every entry, with no "earlier" to press: the owner
+ * read the agent's words behind it as hidden (2026-10-20). Only past TALK_CHARS do the oldest go,
+ * counted in `dropped`.
  */
-function pageOf(entries: readonly AgentEntry[], earlier: number, finished: boolean): Page {
+function pageOf(entries: readonly AgentEntry[], finished: boolean): Page {
   const first = entries[0]?.kind === 'prompt' ? entries[0] : undefined
   let rest = first ? entries.slice(1) : [...entries]
   const last = rest.at(-1)
   const answer = finished && last?.kind === 'text' ? last.text : undefined
   if (answer !== undefined) rest = rest.slice(0, -1)
-  const shown = rest.slice(-TALK_PAGE * (earlier + 1))
-  return { ...(first ? { first } : {}), hidden: rest.length - shown.length, shown, ...(answer !== undefined ? { answer } : {}) }
+  let room = TALK_CHARS - (first ? weight(first) : 0) - Math.min(answer?.length ?? 0, ANSWER_MAX)
+  let from = rest.length
+  while (from > 0 && room - weight(rest[from - 1]!) >= 0) room -= weight(rest[--from]!)
+  return { ...(first ? { first } : {}), dropped: from, shown: rest.slice(from), ...(answer !== undefined ? { answer } : {}) }
 }
 
 // ---- Desktop: the cards ------------------------------------------------------------------------
@@ -651,7 +664,7 @@ function block(el: Els, frame: Frame, key: string, label: RenderNode, text: stri
 
 /** The conversation under the card: the task, the latest entries, the answer, what it does now. */
 function talkDrawn(el: Els, frame: Frame, view: AgentsView, agent: AgentRec, talk: AgentTalk, actions: AgentsActions): RenderNode {
-  const { Box, Button, Markdown, Text } = el
+  const { Box, Markdown, Text } = el
   const k = pageLook(frame)
   const L = frame.lang
   if ('deny' in talk) {
@@ -661,13 +674,13 @@ function talkDrawn(el: Els, frame: Frame, view: AgentsView, agent: AgentRec, tal
       </Box>
     )
   }
-  const page = pageOf(talk.entries, view.open?.earlier ?? 0, !live(agent))
+  const page = pageOf(talk.entries, !live(agent))
   const items: RenderNode[] = []
   if (page.first?.kind === 'prompt') items.push(block(el, frame, 'task', <Text key="task-label" bold {...k.sub}>{t(L, 'agents.task')}</Text>, cut(page.first.text, PROMPT_MAX)))
-  if (page.hidden > 0) {
+  if (page.dropped > 0) {
     items.push(
-      <Box key="earlier" flexDirection="row" justifyContent="center">
-        <Button key="earlier" plain dimColor label={t(L, 'agents.earlier', { count: Math.min(page.hidden, TALK_PAGE) })} onPress={() => actions.earlier()} />
+      <Box key="dropped" flexDirection="row" justifyContent="center">
+        <Text {...k.mute}>{t(L, 'agents.dropped', { count: page.dropped })}</Text>
       </Box>,
     )
   }
@@ -862,9 +875,9 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
   const lines: RenderNode[] = []
   if ('deny' in talk) lines.push(<Text key="deny" dimColor wrap="wrap">{t(L, 'agents.deny', { reason: talk.deny })}</Text>)
   else {
-    const page = pageOf(talk.entries, view.open?.earlier ?? 0, !live(agent))
+    const page = pageOf(talk.entries, !live(agent))
     if (page.first?.kind === 'prompt') lines.push(<Box key="task" flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(page.first.text, 600)}</Text></Box>)
-    if (page.hidden > 0) lines.push(<Box key="earlier">{textButton(el, 'earlier', t(L, 'agents.earlier', { count: Math.min(page.hidden, TALK_PAGE) }), actions.earlier, 'e')}</Box>)
+    if (page.dropped > 0) lines.push(<Box key="dropped"><Text dimColor>{t(L, 'agents.dropped', { count: page.dropped })}</Text></Box>)
     // A run of calls folds into one line here too; a single call, and the one in flight, stay lines.
     const inFlight = live(agent) ? page.shown.findLast(e => e.kind === 'tool' && e.state === 'running') : undefined
     const opened = view.open?.runsOpen ?? []

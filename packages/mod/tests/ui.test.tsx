@@ -586,7 +586,7 @@ const AGENTS: AgentRec[] = [
   { id: 'a2', description: 'Summarize the docs', type: 'deepseek-v4-1-flash', state: 'done', startedAt: NOW - 900_000, endedAt: NOW - 800_000, cost: 9000 },
 ]
 
-const AGENT_NOOP: AgentsActions = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined, toggleRun: () => undefined }
+const AGENT_NOOP: AgentsActions = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, toggleRun: () => undefined }
 
 test('the Agents pane draws a worker the session\'s own model runs', async ($, on) => {
   const onSession: AgentRec = { ...AGENTS[0]!, id: 's1', description: 'Review on the session model', pick: { ...AGENTS[0]!.pick!, target: { agent: 'general-purpose' }, by: 'session' } }
@@ -653,7 +653,7 @@ test('the Agents pane shows the latest finished agents and the rest behind more;
 
 test('an agent\'s conversation reads in the pane: the task, its words, its tools, the answer, and a way back', async ($, on) => {
   const { calls, fn } = recorder()
-  const actions = { ...AGENT_NOOP, back: fn('back'), earlier: fn('earlier') }
+  const actions = { ...AGENT_NOOP, back: fn('back') }
   const talk: AgentEntry[] = [
     { kind: 'prompt', text: 'Port the log renderer to the new kit.' },
     { kind: 'text', text: 'Reading the **current** renderer first.' },
@@ -663,11 +663,13 @@ test('an agent\'s conversation reads in the pane: the task, its words, its tools
   ]
   const done: AgentRec = { ...AGENTS[0]!, id: 'a9', state: 'done', endedAt: NOW - 1000, now: undefined, toolSince: undefined }
   const long: AgentEntry[] = [talk[0]!, ...Array.from({ length: 45 }, (_, i): AgentEntry => ({ kind: 'tool', id: 'x' + i, tool: 'Grep', detail: 'pattern ' + i, state: 'ok' }))]
-  drawPane(on, 'talk-live', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, earlier: 0 } }, actions))
-  drawPane(on, 'talk-done', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: [...talk.slice(0, 3), { kind: 'text', text: 'Ported; tests pass.' }] }, earlier: 0 } }, actions))
-  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, earlier: 0, runsOpen: ['x15'] } }, actions))
-  drawPane(on, 'talk-deny', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { deny: 'no saved transcript for a1' }, earlier: 0 } }, actions))
-  drawPane(on, 'talk-gone', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'zz', talk: { entries: [] }, earlier: 0 } }, actions))
+  drawPane(on, 'talk-live', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk } } }, actions))
+  drawPane(on, 'talk-done', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: [...talk.slice(0, 3), { kind: 'text', text: 'Ported; tests pass.' }] } } }, actions))
+  drawPane(on, 'talk-long', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: long }, runsOpen: ['x0'] } }, actions))
+  const huge: AgentEntry[] = [talk[0]!, ...Array.from({ length: 60 }, (_, i): AgentEntry => ({ kind: 'text', text: 'words ' + i + ' ' + 'x'.repeat(2000) }))]
+  drawPane(on, 'talk-huge', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: huge } } }, actions))
+  drawPane(on, 'talk-deny', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { deny: 'no saved transcript for a1' } } }, actions))
+  drawPane(on, 'talk-gone', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: AGENTS, now: NOW, showDone: false, open: { id: 'zz', talk: { entries: [] } } }, actions))
   for (const surface of SURFACES) {
     const live = await mount($, 'talk-live', surface, 64)
     expect(await live.find({ type: 'Text', text: 'Port the request log renderer' }), surface).toBeDefined()
@@ -685,17 +687,25 @@ test('an agent\'s conversation reads in the pane: the task, its words, its tools
     const finished = await mount($, 'talk-done', surface, 64)
     expect(await finished.find({ type: 'Text', text: 'Final answer' }), surface).toBeDefined()
     const long_ = await mount($, 'talk-long', surface, 64)
-    // The task stays at the head; 30 of the 45 calls show, 15 wait behind "earlier".
+    // Every entry shows, as in the Claude app's chat: no "earlier" to press.
     expect(await long_.find({ type: 'Text', text: 'pattern 44' }), surface).toBeDefined()
-    expect(await long_.find({ type: 'Text', text: 'pattern 14' }), surface).toBeUndefined()
-    await long_.press({ key: 'earlier' })
+    expect(await long_.find({ type: 'Text', text: 'pattern 0' }), surface).toBeDefined()
+    expect(await long_.find({ key: 'earlier' }), surface).toBeUndefined()
+    expect(await long_.find({ key: 'dropped' }), surface).toBeUndefined()
+    // Only a conversation past what a tree can draw loses its oldest entries, and says so.
+    const huge = await mount($, 'talk-huge', surface, 64)
+    expect(await huge.find({ key: 'dropped' }), surface).toBeDefined()
+    const latest = surface === 'desktop'
+      ? (await huge.findAll({ type: 'Markdown' })).some(m => String(m.props.text).startsWith('words 59'))
+      : (await huge.find({ type: 'Text', text: /^words 59/ })) !== undefined
+    expect(latest, surface).toBe(true)
     const deny = await mount($, 'talk-deny', surface, 64)
     expect(await deny.find({ type: 'Text', text: /can’t be read: no saved transcript for a1/ }), surface).toBeDefined()
     const gone = await mount($, 'talk-gone', surface, 64)
     expect(await gone.find({ type: 'Text', text: 'This agent is no longer in the list.' }), surface).toBeDefined()
     await gone.press({ key: 'back' })
   }
-  expect(calls).toEqual(['back', 'earlier', 'back', 'back', 'earlier', 'back'])
+  expect(calls).toEqual(['back', 'back', 'back', 'back'])
 })
 
 test('talkOf reads a conversation into prompts, words and tool calls that stand answered, failed or running', () => {
@@ -1189,8 +1199,8 @@ test('a run of calls folds into its head, unfolds call by call when pressed, and
     { kind: 'tool', id: 'solo', tool: 'Bash', detail: 'git status', state: 'ok' },
   ]
   const done: AgentRec = { ...AGENTS[0]!, id: 'a9', state: 'done', endedAt: NOW - 1000, now: undefined, toolSince: undefined }
-  drawPane(on, 'runs-folded', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0 } }, actions))
-  drawPane(on, 'runs-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, earlier: 0, runsOpen: ['b0'] } }, actions))
+  drawPane(on, 'runs-folded', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk } } }, actions))
+  drawPane(on, 'runs-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, runsOpen: ['b0'] } }, actions))
   for (const surface of SURFACES) {
     const folded = await mount($, 'runs-folded', surface, 64)
     expect(await folded.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Ran 8 commands, Edited 1 file/ }), surface).toBeDefined()

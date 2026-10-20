@@ -400,8 +400,6 @@ declare module 'claude-code' {
       agentsShowDone: boolean
       /** The agent whose conversation the Agents pane shows; null shows the list. */
       agentOpen: string | null
-      /** Pages of earlier entries the open conversation shows beyond its latest. */
-      agentEarlier: number
       /** The open conversation's tool runs shown call by call, by their first call's id. */
       agentRunsOpen: string[]
       /** Counts the Agents pane's seconds while an agent runs: a write redraws its clocks. */
