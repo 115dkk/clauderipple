@@ -1292,4 +1292,9 @@ test('a narrow card keeps its model on one line without the vendor path, and its
   expect(await narrow.find({ key: 'nums-1' })).toBeDefined()
   expect(await wide.find({ key: 'nums-1' })).toBeUndefined()
   expect(await narrow.find({ type: 'Text', text: '3m 12s' }) ?? await narrow.find({ type: 'Text', text: '3분 12초' })).toBeDefined()
+  // The time never takes a row of its own, and a long title is cut to two lines.
+  for (const ui of [narrow, wide]) expect(await ui.find({ key: 'time-row' })).toBeUndefined()
+  const title = (await narrow.find({ type: 'Text', text: /^Port the/ }))!.text
+  expect(title.endsWith('…')).toBe(true)
+  expect(chOf(title) <= 2 * 33).toBe(true)
 })

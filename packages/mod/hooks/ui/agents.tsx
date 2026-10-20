@@ -208,9 +208,23 @@ function timeCh(lang: Frame['lang']): number {
   return ch
 }
 
+/** Cells "failed" takes before the time when it failed. */
+function failedCells(frame: Frame, agent: AgentRec): number {
+  return agent.state === 'failed' ? Math.ceil(chOf(t(frame.lang, 'agents.failed'))) + 1 : 0
+}
+
 /** Cells of the time's column: the elapsed time's widest, and "failed" before it when it failed. */
 export function timeCells(frame: Frame, agent: AgentRec): number {
-  return Math.ceil(timeCh(frame.lang)) + (agent.state === 'failed' ? Math.ceil(chOf(t(frame.lang, 'agents.failed'))) + 1 : 0)
+  return Math.ceil(timeCh(frame.lang)) + failedCells(frame, agent)
+}
+
+/**
+ * Cells the time needs at the end of the numbers' last row: an hour's worth ("59분 59초"). It ends the
+ * row right-aligned, so a longer one only grows leftward into the row's slack; reserving 99 hours there
+ * left the time a row of its own on a narrow pane (2026-10-20).
+ */
+function tailCells(frame: Frame, agent: AgentRec): number {
+  return Math.ceil(chOf(elapsed(3_599_000, frame.lang))) + failedCells(frame, agent)
 }
 
 /** The widest each number shows, for its slot. */
@@ -245,17 +259,18 @@ const NARROW_CELLS = 44
 /**
  * How a card lays out, from the pane's width and its language alone, never a value that ticks.
  * Wide: the time and the chevron in a fixed column right of the title, the four numbers in a row.
- * Narrow (or when the four numbers would not fit a row): the title has the row to itself but for the
- * chevron, the numbers go in two fixed rows (in · cache / out · tools), and the time ends the second
- * of them, or takes a row of its own when it does not fit there.
+ * Narrow (or when the four numbers would not fit a row): the numbers go in two fixed rows (in · cache /
+ * out · tools) and the time ends the second of them; the title has its row to itself but for the
+ * chevron, or, when the time does not fit by the numbers, beside the time in the head. The time never
+ * takes a row of its own (2026-10-20: a whole row for one value was the owner's complaint).
  */
-type CardLayout = { width: number; narrow: boolean; time: number; timeOn: 'head' | 'nums' | 'own'; side: number; title: number }
+type CardLayout = { width: number; narrow: boolean; time: number; timeOn: 'head' | 'nums'; side: number; title: number }
 function layoutOf(frame: Frame, agent: AgentRec, pressable: boolean): CardLayout {
   const width = innerCells(frame)
   const figs = cardFigures(frame, agent)
   const narrow = width < NARROW_CELLS || figureCells(figs) > width - 2
   const time = timeCells(frame, agent)
-  const timeOn = !narrow ? 'head' : figs.length && figureCells(figs.slice(2)) + 2 + time <= width - 2 ? 'nums' : 'own'
+  const timeOn = narrow && figs.length && figureCells(figs.slice(2)) + 2 + tailCells(frame, agent) <= width - 2 ? 'nums' : 'head'
   const side = timeOn === 'head' ? time + (pressable ? 2 : 0) : pressable ? 1 : 0
   return { width, narrow, time, timeOn, side, title: width - 2 - (side ? side + 1 : 0) }
 }
@@ -285,14 +300,24 @@ function modelRow(frame: Frame, agent: AgentRec, model: string): { type: string;
   return { type, word, room: modelRoom(frame, agent, type, word) }
 }
 
+/** Lines a card's title takes at most; the rest is cut with an ellipsis. */
+const TITLE_LINES = 2
+
+/**
+ * The title cut to two lines of `cells`: a few cells short of two full ones, as wrapping at words
+ * leaves the end of a line empty.
+ */
+function cardTitle(agent: AgentRec, cells: number): string {
+  return clipCh(titleOf(agent), TITLE_LINES * Math.max(10, cells) - 4)
+}
+
 /** Rows a card draws, about: for the presses laid over it and the capsule's water. */
 export function cardRows(frame: Frame, agent: AgentRec, pressable = true): number {
   const layout = layoutOf(frame, agent, pressable)
-  const head = linesOf(titleOf(agent), layout.title)
+  const head = Math.min(TITLE_LINES, linesOf(cardTitle(agent, layout.title), layout.title))
   const nums = figureRows(cardFigures(frame, agent), layout.narrow).length
-  const own = layout.timeOn === 'own' ? 1 : 0
   const fall = agent.pick?.fallbackReason ? linesOf(t(frame.lang, 'agents.fallback', { reason: agent.pick.fallbackReason }), layout.width - 2) : 0
-  return head + 1.2 + nums + own + fall + 1.3
+  return head + 1.2 + nums + fall + 1.3
 }
 
 /** A state's mark and its colour: running in the accent, waiting amber, done green, failed red. */
@@ -338,8 +363,10 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
   const { type, word, room } = modelRow(frame, agent, model)
   const nums = figureRows(cardFigures(frame, agent), layout.narrow)
   const auto = agent.pick && ['haiku', 'jev', 'model'].includes(agent.pick.by)
+  // In the head a column as wide as its widest value; at the end of the numbers, right-aligned in
+  // the row's slack (layoutOf), as wide as it is.
   const time = (
-    <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.time}>
+    <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} {...(layout.timeOn === 'head' ? { width: layout.time } : {})}>
       {agent.state === 'failed' ? <Text key="failed" color={k.tone('red')}>{t(L, 'agents.failed')}</Text> : null}
       <Text key="elapsed" {...(live(agent) ? k.ink : k.sub)}>{ranFor(agent, now, L)}</Text>
     </Box>
@@ -350,7 +377,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
         <Text color={m.color} bold>{m.glyph}</Text>
       </Box>
       <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
-        <Text bold {...k.ink} wrap="wrap">{titleOf(agent)}</Text>
+        <Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text>
       </Box>
       {layout.side ? (
         <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.side}>
@@ -396,13 +423,6 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
       </Box>,
     )
   })
-  if (layout.timeOn === 'own') {
-    rows.push(
-      <Box key="time-row" flexDirection="row" justifyContent="flex-end" paddingLeft={2} minWidth={0}>
-        {time}
-      </Box>,
-    )
-  }
   if (agent.pick?.fallbackReason) {
     rows.push(
       <Box key="fallback" paddingLeft={2} minWidth={0}>
