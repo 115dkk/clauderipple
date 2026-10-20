@@ -146,7 +146,7 @@ test("a prod-only model is sent to prod, a shared model to daily, through the ad
       await send("gemini-3.8-flash", "high");
       assert.equal(calls.length, 1);
       assert.match(calls[0]!.url, /^https:\/\/daily-cloudcode-pa\.googleapis\.com\//, "a model both hosts offer stays on daily");
-      assert.equal(calls[0]!.body.model, "gemini-3.8-flash-high");
+      assert.equal(calls[0]!.body.model, "gemini-3.8-flash-medium");
       await send("gemini-3.1-pro", "low");
       assert.equal(calls.length, 2);
       assert.match(calls[1]!.url, /^https:\/\/cloudcode-pa\.googleapis\.com\//, "a prod-only model goes to prod");

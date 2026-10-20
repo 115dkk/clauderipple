@@ -347,7 +347,7 @@ test("a turn streams through the CCA envelope, carrying the account token and pr
     assert.match(sent.path, /v1internal:streamGenerateContent\?alt=sse/);
     assert.equal(sent.headers.authorization, "Bearer tok-a");
     assert.equal((sent.body as { project?: string }).project, "proj-1");
-    assert.equal((sent.body as { model?: string }).model, "gemini-3.8-flash-high", "the wire id carries the resolved tier");
+    assert.equal((sent.body as { model?: string }).model, "gemini-3.8-flash-medium", "high rides on the medium tier");
   } finally {
     upstream.close();
   }

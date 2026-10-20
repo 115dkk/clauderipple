@@ -103,8 +103,12 @@ export function resolveAntigravityThinkingLevel(effort: string | undefined): "lo
  * `ANTIGRAVITY_EFFORT_WIRE_MAP` / `ANTIGRAVITY_SUFFIX_TIER_MODELS`.
  */
 const SUFFIX_TIER_MODELS: Record<string, { wire: Record<string, string>; default: string }> = {
+  // High rides on the medium tier: `-high` thinks with no budget (the catalogue's thinkingBudget -1,
+  // against 4000 for medium), and on 2026-10-17 the requests past 4000 output tokens took 64% of all
+  // request time. The owner chose speed over the deeper tier (2026-10-20). `-high` named outright
+  // still goes through as it is.
   "gemini-3.8-flash": {
-    wire: { low: "gemini-3.8-flash-low", medium: "gemini-3.8-flash-medium", high: "gemini-3.8-flash-high" },
+    wire: { low: "gemini-3.8-flash-low", medium: "gemini-3.8-flash-medium", high: "gemini-3.8-flash-medium" },
     default: "medium",
   },
 };
