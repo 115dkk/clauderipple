@@ -275,6 +275,9 @@ export class AwakeController {
   /** A fresh evaluation after a settings change: one already running read the old settings. */
   async refresh(): Promise<void> {
     if (this.busy) await this.busy;
+    // A refresh follows `awake setup` or a settings change: a sudo refusal from before the setup
+    // must not keep saying "needs setup" while the mode is off and nothing calls pmset to retry.
+    this.sudoFailed = false;
     await this.tick();
   }
 
