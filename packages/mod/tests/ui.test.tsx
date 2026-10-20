@@ -711,6 +711,21 @@ test('an agent\'s conversation reads in the pane: the task, its words, its tools
   expect(calls).toEqual(['back', 'back', 'back', 'back'])
 })
 
+test('scrolled down an open conversation, the way back floats at the window\'s top', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { ...AGENT_NOOP, back: fn('back') }
+  const talk: AgentEntry[] = [{ kind: 'prompt', text: 'Do it.' }, ...Array.from({ length: 20 }, (_, i): AgentEntry => ({ kind: 'text', text: 'words ' + i }))]
+  const view = { agents: AGENTS, now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk } } }
+  drawPane(on, 'float-top', el => renderAgents(el, frameOf('desktop', 64), view, actions))
+  drawPane(on, 'float-down', el => renderAgents(el, { ...frameOf('desktop', 64), offset: 12 }, view, actions))
+  const top = await mount($, 'float-top', 'desktop', 64)
+  expect(await top.find({ key: 'float-back' })).toBeUndefined()
+  const down = await mount($, 'float-down', 'desktop', 64)
+  expect((await down.find({ key: 'float-back' }))?.props.top).toBe(12)
+  await down.press({ key: 'back-float' })
+  expect(calls).toEqual(['back'])
+})
+
 test('talkOf reads a conversation into prompts, words and tool calls that stand answered, failed or running', () => {
   const entries = talkOf([
     { role: 'user', text: ' Do the thing. ', toolUses: [] },

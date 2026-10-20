@@ -761,13 +761,25 @@ function openDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
       card(el, frame, agent, view.now),
     ],
   })
+  // Scrolled past the head, the way back floats at the window's top: the engine asks again with the
+  // new offset on each scroll, so a box placed at that row stays put while the conversation moves
+  // under it. Scrolling back up to leave was the owner's complaint (2026-10-20).
+  const offset = frame.offset ?? 0
   return (
-    <Box flexDirection="column" rowGap={1} width="100%" minWidth={0}>
+    <Box position="relative" flexDirection="column" rowGap={1} width="100%" minWidth={0}>
       {head}
       {talkDrawn(el, frame, view, agent, talk, actions)}
+      {offset >= FLOAT_AFTER ? (
+        <Box key="float-back" position="absolute" top={offset} left={0} flexDirection="row" paddingLeft={1}>
+          {pill(el, frame, 'back-float', t(L, 'agents.back'), 'primary', actions.back, 'violet', 'back')}
+        </Box>
+      ) : null}
     </Box>
   )
 }
+
+/** Rows scrolled before the way back floats: about where the head's own leaves the window. */
+const FLOAT_AFTER = 3
 
 // ---- Terminal ----------------------------------------------------------------------------------
 

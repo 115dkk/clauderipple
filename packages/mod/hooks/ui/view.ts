@@ -16,6 +16,8 @@ export type Frame = {
   columns: number
   /** Rows the band may take (`maxRows`); a pane passes its `scroll.bodyRows`. */
   maxRows: number
+  /** A pane's first row in view (`scroll.offset`); the engine asks again when the person scrolls. */
+  offset?: number
   /** Epoch ms when drawn; countdowns are computed from it. */
   now: number
   appearance: Appearance

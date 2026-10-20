@@ -1231,7 +1231,8 @@ async function frameOf($: EngineInterface, e: RenderInput): Promise<Frame> {
   const s = await currentSettings($)
   const columns = 'bodyColumns' in e.props ? e.props.bodyColumns : e.viewport?.columns ?? 100
   const maxRows = 'maxRows' in e.props ? e.props.maxRows : 'scroll' in e.props ? e.props.scroll.bodyRows : 1
-  return { surface: e.surface, columns, maxRows, now: await $.clock.now(), appearance: s.appearance, skin: s.skin, lang: await read($, lang) }
+  const offset = 'scroll' in e.props && !('maxRows' in e.props) ? e.props.scroll.offset : undefined
+  return { surface: e.surface, columns, maxRows, ...(offset ? { offset } : {}), now: await $.clock.now(), appearance: s.appearance, skin: s.skin, lang: await read($, lang) }
 }
 async function alertView($: EngineInterface, now: number): Promise<AlertView | null> {
   const language = await read($, lang)
