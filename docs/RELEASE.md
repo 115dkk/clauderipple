@@ -55,18 +55,23 @@ Node를 우리가 내려받은 경우에는 npm이 만든 `env node` 셔뱅 링�
    ```
 
 4. 아무 폴더에나 설치해 실제로 도는지 봅니다. **주 설치본과 겹치지 않도록 홈과 포트를 따로 줍니다.**
+   메뉴 막대 앱 실행기(`~/Applications/ClaudeRipple.app`)도 `CLAUDERIPPLE_LAUNCHER_DIR`로 따로 둡니다.
+   빠뜨리면 확인용 설치가 실제 실행기를 덮어쓰고, `uninstall --purge`가 그것을 지웁니다(2026-10-21).
+   그랬다면 `clauderipple app --install`로 되살립니다.
 
    ```sh
    npm install --prefix /tmp/cr-check ./clauderipple-<버전>.tgz
    CLAUDERIPPLE_HOME=/tmp/cr-check/home \
    CLAUDE_SETTINGS_PATH=/tmp/cr-check/settings.json \
    CLAUDERIPPLE_LAUNCHD_LABEL=com.clauderipple.check \
+   CLAUDERIPPLE_LAUNCHER_DIR=/tmp/cr-check/apps \
      /tmp/cr-check/node_modules/.bin/clauderipple install --port 8890
    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8891/
    # 확인이 끝나면
    CLAUDERIPPLE_HOME=/tmp/cr-check/home \
    CLAUDE_SETTINGS_PATH=/tmp/cr-check/settings.json \
    CLAUDERIPPLE_LAUNCHD_LABEL=com.clauderipple.check \
+   CLAUDERIPPLE_LAUNCHER_DIR=/tmp/cr-check/apps \
      /tmp/cr-check/node_modules/.bin/clauderipple uninstall --purge
    ```
 
