@@ -171,6 +171,20 @@ export function workerRule(domain: Domain, settings: Settings): { rule: WorkerPi
   return ladder ? { rule: key, ladder } : { rule: 'general', ladder: settings.rules.general }
 }
 
+/**
+ * Visual design depends on the model's taste, not on how hard the task is (2026-10-21: a store
+ * screenshot redesign judged "design, standard" ran on the light pair). Under the ui ladder a design
+ * verdict on the light or standard rung is raised to the hard rung; frontend, other ladders and
+ * verdicts already on hard or plan are untouched.
+ */
+export function domainVerdict(verdict: WorkerVerdict, rule: WorkerPick['rule']): { verdict: WorkerVerdict; raised?: 'design' } {
+  if (rule !== 'ui' || verdict.domain !== 'design') return { verdict }
+  const rung = rungOf(verdict)
+  if (rung !== 'light' && rung !== 'standard') return { verdict }
+  const { sure: _sure, ...rest } = verdict
+  return { verdict: { ...rest, ...TIER_MARKERS.hard! }, raised: 'design' }
+}
+
 export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; position?: number; skipped?: { rung: Rung; position: number; model: string; reason: string }[]; fallbackReason?: string }
 
 /** Claude Code's own agent with no model: the subagent runs on the session's model. */

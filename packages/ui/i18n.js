@@ -2514,6 +2514,7 @@ Object.assign(I18N.ko, {
   "mod.domainHint.ui.heavy": "레이아웃·상태 버그, 화면 설계, 디자인 판단",
   "mod.domainHint.backend.light": "설정·로그 확인, 명세대로 API·로직 구현, 테스트 추가",
   "mod.domainHint.backend.heavy": "동시성·정합성 디버깅, 성능·보안, 데이터 설계",
+  "mod.domainDesignNote": "디자인(시각·브랜드) 일은 난이도와 상관없이 무거운 작업으로 갑니다.",
 });
 Object.assign(I18N.en, {
   "mod.workerDomain": "Task domain", "mod.domain.general": "General", "mod.domain.ui": "Frontend & design", "mod.domain.backend": "Backend",
@@ -2523,6 +2524,7 @@ Object.assign(I18N.en, {
   "mod.domainHint.ui.heavy": "Layout and state bugs, screen design, design system, brand",
   "mod.domainHint.backend.light": "Config and log checks, specified APIs and logic, tests",
   "mod.domainHint.backend.heavy": "Concurrency and integrity bugs, performance, security, data models",
+  "mod.domainDesignNote": "Design work (visual, brand) always goes to heavy work, whatever its difficulty.",
 });
 Object.assign(I18N.zh, {
   "mod.workerDomain": "任务领域", "mod.domain.general": "全部", "mod.domain.ui": "前端与设计", "mod.domain.backend": "后端",
@@ -2532,6 +2534,7 @@ Object.assign(I18N.zh, {
   "mod.domainHint.ui.heavy": "布局与状态缺陷、页面设计、设计系统与品牌",
   "mod.domainHint.backend.light": "查看配置与日志、按规格实现接口、补充测试",
   "mod.domainHint.backend.heavy": "并发与一致性缺陷、性能安全、数据模型设计",
+  "mod.domainDesignNote": "设计（视觉、品牌）类任务无论难易，都交给重度任务。",
 });
 Object.assign(I18N.ja, {
   "mod.workerDomain": "作業分野", "mod.domain.general": "全体", "mod.domain.ui": "フロントエンド・デザイン", "mod.domain.backend": "バックエンド",
@@ -2541,6 +2544,7 @@ Object.assign(I18N.ja, {
   "mod.domainHint.ui.heavy": "レイアウトや状態バグ、画面設計、デザインシステム",
   "mod.domainHint.backend.light": "設定・ログ確認、仕様どおりのAPI実装、テスト追加",
   "mod.domainHint.backend.heavy": "並行処理・整合性デバッグ、性能・セキュリティ、DB設計",
+  "mod.domainDesignNote": "デザイン（ビジュアル・ブランド）の作業は、難易度に関係なく重い作業に回ります。",
 });
 Object.assign(I18N.es, {
   "mod.workerDomain": "Área de la tarea", "mod.domain.general": "General", "mod.domain.ui": "Frontend y diseño", "mod.domain.backend": "Backend",
@@ -2550,6 +2554,7 @@ Object.assign(I18N.es, {
   "mod.domainHint.ui.heavy": "Fallos de maquetación y estado, diseño de pantallas, sistemas de diseño",
   "mod.domainHint.backend.light": "Revisar configuración y logs, APIs especificadas, añadir pruebas",
   "mod.domainHint.backend.heavy": "Concurrencia e integridad, rendimiento y seguridad, modelos de datos",
+  "mod.domainDesignNote": "El diseño (visual, de marca) va siempre a trabajo pesado, sea cual sea su dificultad.",
 });
 Object.assign(I18N.pt, {
   "mod.workerDomain": "Área da tarefa", "mod.domain.general": "Geral", "mod.domain.ui": "Frontend e design", "mod.domain.backend": "Backend",
@@ -2559,6 +2564,7 @@ Object.assign(I18N.pt, {
   "mod.domainHint.ui.heavy": "Falhas de layout e estado, design de telas, design systems e marca",
   "mod.domainHint.backend.light": "Revisar configuração e logs, APIs especificadas, adicionar testes",
   "mod.domainHint.backend.heavy": "Concorrência e integridade, desempenho e segurança, modelos de dados",
+  "mod.domainDesignNote": "Trabalho de design (visual, de marca) vai sempre para trabalho pesado, seja qual for a dificuldade.",
 });
 
 // Phone control vocabulary stays together across the dashboard's six languages.

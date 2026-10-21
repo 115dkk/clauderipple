@@ -8,7 +8,7 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, domainVerdict, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -760,11 +760,15 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const providers = options && options.until > now ? Object.fromEntries(Object.entries(options.providers ?? {}).filter(([, p]) => p.exhaustedUntil === undefined || p.exhaustedUntil > now)) : {}
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model)?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
-  // An active mode replaces the whole set; an explicit marker still names its own model.
+  // An active mode replaces the whole set; an explicit marker still names its own model. Design under
+  // the ui ladder takes the heavy level even past a tier marker: the main chat tiers by difficulty,
+  // and a design task is "standard" by that measure while its result depends on the model's taste.
   const { rule, ladder } = workerRule(verdict.domain, routing)
-  const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
+  const explicitUsable = !!explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
+  const domained: ReturnType<typeof domainVerdict> = explicitUsable ? { verdict } : domainVerdict(verdict, rule)
+  const resolved = explicitUsable
     ? { target: target!, effort: verdict.effort }
-    : ladderPick(verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
+    : ladderPick(domained.verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -775,7 +779,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms, id, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rule: value.rule, ...(domained.raised ? { raised: domained.raised } : {}), rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
   await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
   // The brief itself is never logged (it can hold anything); its length is. To re-judge a pick,
   // its brief is in the session's own transcript under the same description.

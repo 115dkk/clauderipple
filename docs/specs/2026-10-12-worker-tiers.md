@@ -193,6 +193,8 @@ the design model — the mistake the domain ladder itself was meant to prevent. 
 choice the user actually makes ("this domain's cheap work" vs "this domain's hard work"), while
 the router still climbs rung by rung inside a level.
 
+**Design always takes the heavy level (2026-10-21).** Under the `ui` ladder a `design` verdict on the light or standard rung is raised to the hard rung (`domainVerdict` in `workers.ts`, logged as `raised: 'design'` beside `rule`); This holds past a tier marker too, the one exception to the marker owning the rung: the main chat tiers by difficulty, and by that measure design is `standard`. `frontend`, the `backend` ladder, the general ladder and explicit model markers keep their rung. Why: a store-screenshot redesign was judged `design`/`standard` and ran on the light pair; the main chat stopped it and resent it as `hard` (pick log, 2026-10-21). Visual design depends on the model's taste, not on difficulty.
+
 The dashboard shows the two levels instead of four rows: `가벼운 작업` edits the light pair
 (the same list is written to `light` and `standard`), `무거운 작업` edits the heavy pair (`hard`
 and `plan`). Each row shows the pair's upper rung. Switching `따로 정하기` on copies the set's

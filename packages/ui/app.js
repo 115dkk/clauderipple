@@ -3827,7 +3827,7 @@ function modWorkerRows(mode) {
   if (key !== "general") rows.push(cell(t("mod.domainSeparate"), modSwitch(`worker-separate:${id}:${key}`, !!rule, t("mod.domainSeparate"), (on) => {
     // Switching on copies the set's general rungs, folded the same way a domain ladder is.
     modSetDomainRule(mode, key, on ? { mode: "ladder", rungs: modTwoLevelRungs(mode ? mode.rungs : modRungs()) } : undefined);
-  }), rule ? null : t("mod.domainFollowsGeneral"), "wide"));
+  }), rule ? (key === "ui" ? t("mod.domainDesignNote") : null) : t("mod.domainFollowsGeneral"), "wide"));
   if (key === "general" || rule) rows.push(...modRungRows(mode, key));
   return rows;
 }

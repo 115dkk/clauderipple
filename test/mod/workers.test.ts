@@ -2,13 +2,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import { DEFAULTS, normalizeSettings } from '../../packages/mod/hooks/settings.ts'
+import { rungOf } from '../../packages/mod/hooks/ladder.ts'
 import type { Settings, WorkerCandidate, WorkerVerdict } from '../../packages/mod/types/index.d.ts'
 registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
-  ladderPick, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
+  ladderPick, domainVerdict, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -79,6 +80,35 @@ test('domain ladders select UI for design/frontend, backend separately, otherwis
   // Unavailable domain rungs climb only within that ladder, not into the general one.
   const blocked = ladderPick(verdict, s.domainRules!.backend!, s, candidates, false, 'en')
   assert.deepEqual(blocked.target, { agent: 'general-purpose' })
+})
+
+test('design under the ui ladder takes the heavy level whatever its difficulty; nothing else is raised', () => {
+  const s = normalizeSettings({ domainRules: {
+    ui: { mode: 'ladder', rungs: { standard: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'low' }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] } },
+  } })
+  const design: WorkerVerdict = { ...verdict, domain: 'design' }
+  const levels: [Partial<WorkerVerdict>, boolean][] = [
+    [{ level: 'light' }, true], [{ level: 'standard' }, true], [{ level: 'standard', kind: 'plan' }, false],
+    [{ level: 'deep' }, false], [{ level: 'deep', kind: 'plan' }, false],
+    // An unsure light verdict (standard rung) is raised too; an unsure standard one is already hard.
+    [{ level: 'light', sure: 0.2 }, true], [{ level: 'standard', sure: 0.2 }, false],
+  ]
+  for (const [change, raise] of levels) {
+    const given = { ...design, ...change }
+    const out = domainVerdict(given, 'ui')
+    if (!raise) { assert.equal(out.verdict, given); assert.equal(out.raised, undefined); continue }
+    const { sure: _sure, ...rest } = given
+    assert.deepEqual(out, { verdict: { ...rest, level: 'deep', kind: 'do' }, raised: 'design' })
+    assert.equal(rungOf(out.verdict), 'hard')
+    assert.equal(ladderPick(out.verdict, s.domainRules!.ui!, s, candidates, true, 'en').target?.agent, 'gpt-6-astra')
+  }
+  // The same light design verdict, unraised, would have run the light pair.
+  assert.equal(ladderPick(design, s.domainRules!.ui!, s, candidates, true, 'en').target?.agent, 'deepseek-v4-1-flash')
+  // frontend, backend and the general ladder keep the verdict's own level.
+  for (const [domain, rule] of [['frontend', 'ui'], ['backend', 'backend'], ['design', 'general'], ['docs', 'general']] as const) {
+    const given: WorkerVerdict = { ...verdict, domain, level: 'light' }
+    assert.deepEqual(domainVerdict(given, rule), { verdict: given })
+  }
 })
 
 test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {

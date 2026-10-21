@@ -654,7 +654,7 @@ for (const [tier, rung, agent, model] of [
 
 for (const domain of ['design', 'frontend', 'backend', 'docs'] as const) test(`auto selects the ${domain} task's domain ladder or its own general fallback`, async ($, on) => {
   const b = boundaries(on, { domainRules: {
-    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] } },
+    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' }] } },
     backend: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'medium' }] } },
   } })
   http(on)
@@ -663,8 +663,24 @@ for (const domain of ['design', 'frontend', 'backend', 'docs'] as const) test(`a
   await start($)
   await $.agent.spawn(SPAWN)
   const rule = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : 'general'
-  expect(sent[0]?.subagentType).toBe(rule === 'ui' ? 'gpt-6-astra' : rule === 'backend' ? 'gpt-6-1-sol' : 'deepseek-v4-1-flash')
-  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)).toMatchObject({ rule, domain, rung: 'light' })
+  // A light design verdict is raised to the heavy pair (visual taste, not difficulty); frontend keeps its level.
+  const raised = domain === 'design'
+  expect(sent[0]?.subagentType).toBe(rule === 'ui' ? (raised ? 'gpt-6-1-sol' : 'gpt-6-astra') : rule === 'backend' ? 'gpt-6-1-sol' : 'deepseek-v4-1-flash')
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(row).toMatchObject({ rule, domain, level: 'light', rung: raised ? 'hard' : 'light' })
+  expect(row.raised).toBe(raised ? 'design' : undefined)
+})
+
+test('a design task under the ui ladder takes the heavy level past a tier marker', async ($, on) => {
+  const b = boundaries(on, { domainRules: { ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' }] } } } })
+  http(on)
+  judgeStub(on, JSON.stringify({ domain: 'design', level: 'deep', kind: 'do', effort: 'high', sure: 0.9, why: 'domain' }))
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: light]]\nTweak a color.' })
+  expect(sent[0]?.subagentType).toBe('gpt-6-1-sol')
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').find(line => line.includes('"type":"pick"'))!)
+  expect(row).toMatchObject({ by: 'session', rule: 'ui', domain: 'design', rung: 'hard', raised: 'design' })
 })
 
 for (const domains of [false, true]) test(`tier marker ${domains ? 'awaits' : 'does not await'} one pending shadow judge with domain ladders ${domains ? 'on' : 'off'}`, async ($, on) => {
