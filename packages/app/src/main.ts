@@ -13,9 +13,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { reopenClaude } from "./claude-desktop";
+import { claudeStartedAt, reopenClaude } from "./claude-desktop";
 import { handleScheme, ORIGIN, registerScheme } from "./protocol";
-import { parseJsonOutput, repairDetails, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
+import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
 import { mainWindow, openWindow, sendToWindow, windowVisible, type Bounds } from "./window";
 
 type QuotaWindow = { used_percent?: number; window_minutes?: number };
@@ -683,6 +683,11 @@ async function poll(): Promise<void> {
   }
   // Up or down changed: what doctor said about the rest (direct, mixed) may have changed with it.
   if (before !== null && before !== answered && !rec.busy) void refreshDoctor();
+  // Claude quit or reopened by hand has applied the change as surely as the button would.
+  if (rec.restartClaude && !rec.busy && Date.now() - restartCheckedAt >= RESTART_CHECK_MS) {
+    restartCheckedAt = Date.now();
+    if (!restartStillOwed(restartOwedSince, await claudeStartedAt())) rec.restartClaude = false;
+  }
   render();
 }
 
@@ -902,6 +907,11 @@ const rec: { doctor: Doctor | null; doctorFailed: boolean; busy: Busy; result: A
   result: null,
   restartClaude: false,
 };
+/** When the connection last changed in a way Claude only picks up on its next start. */
+let restartOwedSince = 0;
+let restartCheckedAt = 0;
+/** How often a pending "reopen Claude" step asks whether Claude was reopened some other way. */
+const RESTART_CHECK_MS = 15_000;
 let doctorRun: Promise<void> | null = null;
 
 /** One `doctor` at a time; callers that arrive while one runs share it. */
@@ -1038,7 +1048,11 @@ async function runAction(action: "repair" | "direct-on" | "direct-off", args: st
       ? repairDetails(out, r.output)
       : [out?.detail ?? "", ...(ok ? [] : tailLines(out ? "" : r.output, 8))].filter(Boolean);
   rec.result = { action, ok, timedOut: r.timedOut, details, at: Date.now() };
-  if (ok && out?.restartClaude) rec.restartClaude = true;
+  if (ok && out?.restartClaude) {
+    // A Claude that is not running picks the change up when it next starts: nothing to ask for.
+    restartOwedSince = Date.now();
+    rec.restartClaude = restartStillOwed(restartOwedSince - 1, await claudeStartedAt());
+  }
   if (out?.doctor) {
     rec.doctor = out.doctor;
     rec.doctorFailed = false;
