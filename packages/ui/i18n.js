@@ -2493,6 +2493,32 @@ const I18N = {
   },
 };
 
+// Optional domain ladders use the same editor in Base and every saved mode.
+Object.assign(I18N.ko, {
+  "mod.workerDomain": "작업 분야", "mod.domain.general": "전체", "mod.domain.ui": "프론트엔드·디자인", "mod.domain.backend": "백엔드",
+  "mod.domainSeparate": "따로 정하기", "mod.domainFollowsGeneral": "전체 설정을 따릅니다.",
+});
+Object.assign(I18N.en, {
+  "mod.workerDomain": "Task domain", "mod.domain.general": "General", "mod.domain.ui": "Frontend & design", "mod.domain.backend": "Backend",
+  "mod.domainSeparate": "Set separately", "mod.domainFollowsGeneral": "Follows this set's general settings.",
+});
+Object.assign(I18N.zh, {
+  "mod.workerDomain": "任务领域", "mod.domain.general": "全部", "mod.domain.ui": "前端与设计", "mod.domain.backend": "后端",
+  "mod.domainSeparate": "单独设置", "mod.domainFollowsGeneral": "沿用此组的通用设置。",
+});
+Object.assign(I18N.ja, {
+  "mod.workerDomain": "作業分野", "mod.domain.general": "全体", "mod.domain.ui": "フロントエンド・デザイン", "mod.domain.backend": "バックエンド",
+  "mod.domainSeparate": "個別に設定", "mod.domainFollowsGeneral": "このセットの全体設定に従います。",
+});
+Object.assign(I18N.es, {
+  "mod.workerDomain": "Área de la tarea", "mod.domain.general": "General", "mod.domain.ui": "Frontend y diseño", "mod.domain.backend": "Backend",
+  "mod.domainSeparate": "Configurar por separado", "mod.domainFollowsGeneral": "Usa los ajustes generales de este conjunto.",
+});
+Object.assign(I18N.pt, {
+  "mod.workerDomain": "Área da tarefa", "mod.domain.general": "Geral", "mod.domain.ui": "Frontend e design", "mod.domain.backend": "Backend",
+  "mod.domainSeparate": "Configurar separadamente", "mod.domainFollowsGeneral": "Usa as configurações gerais deste conjunto.",
+});
+
 // Phone control vocabulary stays together across the dashboard's six languages.
 Object.assign(I18N.ko, {
   "nav.phone": "휴대폰", "phone.subtitle": "Ripple Remote 앱을 연결하고, 휴대폰 연결과 알림을 관리합니다.",

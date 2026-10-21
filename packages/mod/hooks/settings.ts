@@ -1,4 +1,4 @@
-import type { Calibration, Domain, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Skin, Step, TierTarget } from '../types/index.d.ts'
+import type { Calibration, Domain, DomainRules, Effort, Level, Mode, Rule, Rung, Settings, SettingsChange, Skin, Step, TierTarget } from '../types/index.d.ts'
 
 /** Bump whenever a writer's normalization can lose another format's fields. */
 export const MOD_SETTINGS_SCHEMA_VERSION = 1
@@ -152,6 +152,16 @@ function generalRule(raw: unknown): Rule {
   return copy(DEFAULTS.rules.general)
 }
 
+/** Only optional domain ladders, never the retired per-field pin/Auto rules. */
+function domainRules(raw: unknown): DomainRules | undefined {
+  const source = object(raw)
+  const out: DomainRules = {}
+  for (const key of ['ui', 'backend'] as const) {
+    if (object(source[key]).mode === 'ladder') out[key] = generalRule(source[key])
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
 type Worker = { name: string; provider: string }
 
 /**
@@ -242,7 +252,8 @@ export function normalizeModes(raw: unknown, base: Rule['rungs'] = DEFAULTS.rule
     const name = typeof v.name === 'string' ? v.name.trim().slice(0, MODE_NAME_MAX) : ''
     if (!id || !name || out.some(m => m.id === id)) continue
     const rungs = ladderRungs(v.rungs === undefined ? base : v.rungs)
-    out.push({ id, name, rungs, delegation: v.delegation === 'eager' ? 'eager' : 'normal', until: modeUntil(v.until, rungs) })
+    const domains = domainRules(v.domainRules)
+    out.push({ id, name, rungs, ...(domains ? { domainRules: domains } : {}), delegation: v.delegation === 'eager' ? 'eager' : 'normal', until: modeUntil(v.until, rungs) })
     if (out.length === MODES_MAX) break
   }
   return out
@@ -287,6 +298,8 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   if (typeof value.swampAt === 'number' && Number.isFinite(value.swampAt) && value.swampAt >= 0 && value.swampAt <= 100) result.swampAt = value.swampAt
   if (Array.isArray(value.hide)) result.hide = [...new Set(value.hide.filter((part): part is string => typeof part === 'string' && ['timer', 'reason', 'route', 'limits'].includes(part)))]
   result.fallback = target(value.fallback, DEFAULTS.fallback)!
+  const domains = domainRules(value.domainRules)
+  if (domains) result.domainRules = domains
   result.modes = normalizeModes(value.modes, rules.general.rungs)
   // An active mode must be one of the modes; its start time stays only with it.
   if (typeof value.activeMode === 'string' && result.modes.some(m => m.id === value.activeMode)) {

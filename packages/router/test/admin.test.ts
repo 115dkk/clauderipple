@@ -232,6 +232,34 @@ test("admin mod-settings reads Auto and field rules as the four workers, fills e
   });
 });
 
+test("admin fills Base and mode domain ladders even when every general rung is already full", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const kept = [{ target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'high' }];
+    const full = { light: kept, standard: kept, hard: kept, plan: kept };
+    const input = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: full } }, domainRules: {
+      ui: { mode: 'ladder', rungs: { light: kept } }, backend: { mode: 'ladder', rungs: {} },
+    }, modes: [
+      { id: 'own', name: 'Own', rungs: full, domainRules: { ui: { mode: 'ladder', rungs: {} }, backend: { mode: 'ladder', rungs: { hard: kept } } } },
+      { id: 'plain', name: 'Plain', rungs: full },
+    ] });
+    const saved = await (await putModSettings(port, { settings: input, revision: 0 })).json() as ModSettingsSnapshot;
+    assert.equal(saved.revision, 1);
+    assert.deepEqual(saved.settings.rules.general, input.rules.general);
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.light, kept);
+    assert.deepEqual(saved.settings.modes[0]!.domainRules!.backend!.rungs.hard, kept);
+    for (const set of [saved.settings, saved.settings.modes[0]!]) {
+      for (const rule of Object.values(set.domainRules!)) {
+        assert.deepEqual(Object.keys(rule.rungs).sort(), ['hard', 'light', 'plan', 'standard']);
+        assert.ok(Object.values(rule.rungs).every(steps => steps.length > 0));
+      }
+    }
+    assert.equal(Object.hasOwn(saved.settings.modes[1]!, 'domainRules'), false);
+    assert.equal(saved.legacy, undefined);
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), saved);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'mod-settings.json'), 'utf8')), saved);
+  });
+});
+
 test("admin mod-settings round-trips allowKnown, the keys the allow-list was last written with", async () => {
   await withAdmin(makeCfg(), async ({ port }) => {
     const known = ["deepseek-v4-1-flash", "gpt-6-1-sol", "gpt-6-astra", "general-purpose:haiku", "general-purpose:sonnet", "general-purpose:opus", "general-purpose:fable"];

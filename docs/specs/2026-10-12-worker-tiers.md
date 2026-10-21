@@ -153,6 +153,32 @@ individual workers are edited on the dashboard. Existing effort/judge/cache cont
 - Field overrides and "더 세밀하게" rules are dropped; the card shows a one-time line saying so.
 - Auto (experimental, AA floors) is removed; `ripple:auto` uses the judge + tiers above.
 
+## Optional domain ladders (2026-10-21)
+
+Each worker set (Base or a saved mode) may store `domainRules: { ui?: Rule; backend?: Rule }`
+next to its general ladder, never inside `settings.rules`. `design` and `frontend` verdicts use
+`ui`; `backend` uses `backend`; other domains use general. An absent override uses **that set's**
+general ladder. An active mode replaces both general and domain rules completely: a missing mode
+override never inherits Base's. New modes deep-copy Base's general and optional domain ladders;
+existing modes gain no overrides on load. Normalization keeps only valid optional ladders and
+reuses ordered-step validation. Retired per-field pin/Auto rules remain retired.
+
+A tier marker still owns the rung. **Only when the effective set has a domain override** does the
+spawn await its existing shadow judge, taking only its domain and reusing the same result for the
+shadow log. This conditional wait is necessary because the domain determines which ladder to
+consult; the judge cannot replace the marker's level/kind/confidence or promote its rung. Judge
+failure/timeout uses general. Without domain overrides, the shadow judge remains unawaited and
+does not affect dispatch or its latency. Explicit model markers keep their existing priority.
+Every `WorkerPick` and pick log records `rule: 'ui' | 'backend' | 'general'` beside the rung.
+Availability, ticked models, provider policy and within-ladder fallback are unchanged.
+
+The dashboard adds `전체 | 프론트엔드·디자인 | 백엔드` above the worker rows in every set tab.
+An optional domain has a `따로 정하기` switch: off shows that it follows general; on deep-copies
+that set's current general rungs and opens the same ordered-list editor. Turning it off deletes
+the override. The router fills empty rungs in existing Base and mode domain ladders using the
+same `fillLadder` as general, without creating absent overrides. All six UI languages cover the
+controls. The shared model checklist stays on Base.
+
 ## Acceptance
 
 Ten-task probe (as 2026-10-11) dispatched by the main chat to `ripple:auto` without hints: the

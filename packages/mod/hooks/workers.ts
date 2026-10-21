@@ -1,4 +1,4 @@
-import type { Billing, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerVerdict } from '../types'
+import type { Billing, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { CLAUDE_WORKERS, DOMAINS, EFFORTS, LEVELS, candidateKey, isAllowed } from './settings'
 import { MARKER } from './worker'
 import { t } from './i18n'
@@ -164,6 +164,13 @@ function sameTarget(a: TierTarget, b: TierTarget): boolean { return a.agent === 
 function candidateOf(target: TierTarget, candidates: readonly WorkerCandidate[]): WorkerCandidate | undefined {
   return candidates.find(c => sameTarget(c.target, target)) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: candidates.find(c => c.model === baseModel(target.model ?? 'sonnet'))?.provider ?? 'anthropic' } : undefined)
 }
+/** Domain overrides belong to the effective worker set; a missing override uses its general ladder. */
+export function workerRule(domain: Domain, settings: Settings): { rule: WorkerPick['rule']; ladder: Rule } {
+  const key = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : 'general'
+  const ladder = key === 'general' ? undefined : settings.domainRules?.[key]
+  return ladder ? { rule: key, ladder } : { rule: 'general', ladder: settings.rules.general }
+}
+
 export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; position?: number; skipped?: { rung: Rung; position: number; model: string; reason: string }[]; fallbackReason?: string }
 
 /** Claude Code's own agent with no model: the subagent runs on the session's model. */

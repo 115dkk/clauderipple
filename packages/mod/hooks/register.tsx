@@ -8,7 +8,7 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, zenJev } from './workers'
+import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, fixSpawn } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -722,6 +722,8 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   let rawVerdict: WorkerVerdict | null = null
   let judgeError: string | undefined
   let target: TierTarget | undefined
+  const mode = activeModeOf(s)
+  const routing = routingSettings(s)
   if (explicit) {
     // Agent names and their file-model ids are both valid explicit routing notes.
     const name = files.has(explicit.name) ? explicit.name : [...files].find(([, f]) => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === explicit.name)?.[0]
@@ -729,12 +731,21 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
     verdict = { domain: 'general', level: 'standard', effort: effortOf(explicit.level) ?? 'high', why: t(language, 'toasts.explicitMarker') }
     by = 'marker'
   } else if (tier) {
-    // The main chat named the tier. The judge still rates the same brief, unawaited, so the log
-    // can later say which of the two was right (see shadowJudge).
+    // A marker owns the tier. Only a set with domain ladders needs the shadow judge's domain
+    // before dispatch; otherwise leave the existing unawaited path (and latency) unchanged.
     const named = TIER_MARKERS[tier]!
     verdict = { domain: 'general', ...named, effort: RUNG_EFFORT[rungOf(named)], why: t(language, 'toasts.sessionTier', { tier }) }
     by = 'session'
-    void shadowJudge($, s, id, { description: e.description, prompt: e.prompt })
+    const shadow = shadowJudge($, s, id, { description: e.description, prompt: e.prompt })
+    if (routing.domainRules?.ui || routing.domainRules?.backend) {
+      const judged = await shadow
+      if (judged?.verdict && 'domain' in judged.verdict) {
+        rawVerdict = judged.verdict
+        verdict.domain = judged.verdict.domain
+      }
+      ms = judged?.ms ?? 0
+      judgeError = judged?.error
+    }
   } else {
     const judged = await judge($, s, { description: e.description, prompt: e.prompt }, true)
     if (judged.verdict && 'domain' in judged.verdict) { rawVerdict = judged.verdict; verdict = judged.verdict; by = judged.by }
@@ -749,12 +760,11 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const providers = options && options.until > now ? Object.fromEntries(Object.entries(options.providers ?? {}).filter(([, p]) => p.exhaustedUntil === undefined || p.exhaustedUntil > now)) : {}
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model)?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
-  // An active mode moves the tiers; an explicit marker still names its own model.
-  const mode = activeModeOf(s)
-  const routing = routingSettings(s)
+  // An active mode replaces the whole set; an explicit marker still names its own model.
+  const { rule, ladder } = workerRule(verdict.domain, routing)
   const resolved = explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
     ? { target: target!, effort: verdict.effort }
-    : ladderPick(verdict, routing.rules.general, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
+    : ladderPick(verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -762,10 +772,10 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
   let prompt = e.prompt
   if (marker) prompt = prompt.replace(MARKER, '').replace(/^\s*\n/, '')
-  const value: WorkerPick = { ...verdict, ...resolved, target: selected, by, ms, id, ...(fallbackReason ? { fallbackReason } : {}) }
+  const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms, id, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
   await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
   // The brief itself is never logged (it can hold anything); its length is. To re-judge a pick,
   // its brief is in the session's own transcript under the same description.
@@ -779,15 +789,16 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
 
 /**
  * What the judge would have said of a brief the main chat already tiered: logged beside the pick
- * (same `id`), never awaited by the spawn, never acted on. Together with each pick's outcome it is
- * what decides later whether the judge stays.
+ * (same `id`). With domain ladders the spawn awaits this same result for its domain only; without
+ * them it never waits or acts on it. The marker's tier always stands.
  */
-async function shadowJudge($: EngineInterface, s: Settings, id: string, input: { description: string; prompt: string }): Promise<void> {
+async function shadowJudge($: EngineInterface, s: Settings, id: string, input: { description: string; prompt: string }): Promise<Judged | undefined> {
   try {
     const judged = await judge($, s, input, true)
     const verdict = judged.verdict && 'domain' in judged.verdict ? judged.verdict : null
     await persistWorkerPick($, { type: 'shadow', pick: id, at: new Date(await $.clock.now()).toISOString(), verdict, rung: verdict ? rungOf(verdict) : null, judge: judged.by, ms: judged.ms, ...(judged.error ? { error: judged.error } : {}) })
-  } catch (error) { await report($, 'shadow judge', error) }
+    return judged
+  } catch (error) { await report($, 'shadow judge', error); return undefined }
 }
 
 async function toggleAuto($: EngineInterface): Promise<void> {

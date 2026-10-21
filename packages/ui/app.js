@@ -3752,20 +3752,59 @@ function modPickSelect(key, step, shown, label, onPick) {
     onPick(modTargetOf(value.slice(0, bar)), value.slice(bar + 1));
   }, "rung-model");
 }
-function modRungRows(mode) {
-  const rungs = mode ? mode.rungs : modRungs();
+/** @typedef {"general" | "ui" | "backend"} WorkerRuleKey */
+/** Domain selection is local UI state, independently retained for each saved worker set.
+ * @type {Map<string, WorkerRuleKey>}
+ */
+const modRuleTabs = new Map();
+/** Save only this set's optional rule; deleting it makes the set follow its own general ladder.
+ * @param {import("../mod/types").Mode | undefined} mode
+ * @param {"ui" | "backend"} key
+ * @param {import("../mod/types").Rule | undefined} rule
+ */
+function modSetDomainRule(mode, key, rule) {
+  const domainRules = { ...(mode || modState.settings).domainRules };
+  if (rule) domainRules[key] = rule;
+  else delete domainRules[key];
+  const change = { domainRules: Object.keys(domainRules).length ? domainRules : undefined };
+  if (mode) modUpdateMode(mode.id, change);
+  else modPatch(change);
+}
+/** @param {import("../mod/types").Mode} [mode] */
+function modWorkerRows(mode) {
+  const id = mode ? mode.id : "base";
+  const key = modRuleTabs.get(id) || "general";
+  const rule = key === "general" ? null : (mode || modState.settings).domainRules?.[key];
+  const rows = [cell(t("mod.workerDomain"), modSegmented(`worker-domain:${id}`, [
+    { value: "general", label: t("mod.domain.general") },
+    { value: "ui", label: t("mod.domain.ui") },
+    { value: "backend", label: t("mod.domain.backend") },
+  ], key, t("mod.workerDomain"), (value) => { modRuleTabs.set(id, value); modRefresh(); }), null, "wide")];
+  if (key !== "general") rows.push(cell(t("mod.domainSeparate"), modSwitch(`worker-separate:${id}:${key}`, !!rule, t("mod.domainSeparate"), (on) => {
+    modSetDomainRule(mode, key, on ? { mode: "ladder", rungs: clone(mode ? mode.rungs : modRungs()) } : undefined);
+  }), rule ? null : t("mod.domainFollowsGeneral"), "wide"));
+  if (key === "general" || rule) rows.push(...modRungRows(mode, key));
+  return rows;
+}
+/** The same ordered-rung editor for the selected rule in Base or a saved mode.
+ * @param {import("../mod/types").Mode | undefined} mode
+ * @param {WorkerRuleKey} [ruleKey]
+ */
+function modRungRows(mode, ruleKey = "general") {
+  const rungs = ruleKey === "general" ? (mode ? mode.rungs : modRungs()) : (mode || modState.settings).domainRules[ruleKey].rungs;
   return MOD_RUNGS.map((rung) => {
     const steps = rungs[rung] || [];
     const name = t(`mod.rung.${rung}`);
     const save = (next) => {
       const updated = { ...rungs, [rung]: next };
-      if (mode) modUpdateMode(mode.id, { rungs: updated });
+      if (ruleKey !== "general") modSetDomainRule(mode, ruleKey, { mode: "ladder", rungs: updated });
+      else if (mode) modUpdateMode(mode.id, { rungs: updated });
       else modSetRule("general", { mode: "ladder", rungs: updated });
     };
     const rows = steps.map((step, index) => {
       const choice = modChoiceOf(step.target);
       const shown = modNearest(step.effort, modLadderOf(choice));
-      const key = `worker:${mode ? mode.id : "base"}:${rung}:${index}`;
+      const key = `worker:${mode ? mode.id : "base"}:${ruleKey}:${rung}:${index}`;
       const select = modPickSelect(key, step, shown, `${name} ${index + 1}`, (target, effort) => save(steps.map((item, at) => at === index ? { target, effort } : item)));
       const move = (delta) => { const next = [...steps]; [next[index], next[index + delta]] = [next[index + delta], next[index]]; save(next); };
       const button = (suffix, text, label, disabled, onclick) => el("button", { type: "button", class: "btn secondary compact", "data-key": `${key}:${suffix}`, text, "aria-label": label, ...(disabled ? { disabled: "" } : {}), onclick });
@@ -3779,7 +3818,7 @@ function modRungRows(mode) {
         choice && !choice.usable ? el("small", { class: "warn-text", text: t("mod.rungUnusable") }) : null,
       ]);
     });
-    const add = el("button", { type: "button", class: "btn secondary compact", "data-key": `worker-add:${mode ? mode.id : "base"}:${rung}`, text: t("mod.modeAddModel"), onclick: () => {
+    const add = el("button", { type: "button", class: "btn secondary compact", "data-key": `worker-add:${mode ? mode.id : "base"}:${ruleKey}:${rung}`, text: t("mod.modeAddModel"), onclick: () => {
       const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item)) || modChoices().at(-1);
       save([...steps, { target: modTargetOf(choice.value), effort: modNearest("medium", modLadderOf(choice)) }]);
     } });
@@ -3864,7 +3903,7 @@ function modNewMode() {
   const add = () => {
     const name = input.value.trim();
     if (!name) { toast(t("mod.modeNameRequired"), true); input.focus(); return; }
-    const mode = { id: `mode-${crypto.randomUUID()}`, name, rungs: clone(modRungs()), delegation: "normal", until: "none" };
+    const mode = { id: `mode-${crypto.randomUUID()}`, name, rungs: clone(modRungs()), ...(modState.settings.domainRules ? { domainRules: clone(modState.settings.domainRules) } : {}), delegation: "normal", until: "none" };
     modModeTab = mode.id;
     modPatch({ modes: [...modState.settings.modes, mode] });
   };
@@ -3916,7 +3955,7 @@ function modModeSection(mode) {
   const endHelp = kind === "reset" ? t("mod.modeResetHelp", { provider: modResetLabel(mode.until.reset) }) : null;
   return modSection(null, [
     cell(t("mod.modeName"), name),
-    ...modRungRows(mode),
+    ...modWorkerRows(mode),
     cell(t("mod.modeDelegation"), modSegmented("mode-delegation", [{ value: "normal", label: t("mod.modeNormal") }, { value: "eager", label: t("mod.modeEager") }], mode.delegation, t("mod.modeDelegation"), (delegation) => modUpdateMode(mode.id, { delegation })), null, "wide"),
     cell(t("mod.modeUntil"), el("div", { class: "mode-until" }, endControls), endHelp, "wide"),
     cell(t("mod.modeActive"), [
@@ -3937,7 +3976,7 @@ function modWorkersCard() {
     modModeTabs(),
     el("div", { id: "worker-tab-panel", role: "tabpanel" }, modModeTab === "+" ? [modNewMode()] : modModeTab ? [modModeSection(s.modes.find((mode) => mode.id === modModeTab))] : [
       modSection(t("mod.models"), modTickRows(), [t("mod.modelsHelp")]),
-      modSection(t("mod.fourWorkers"), modRungRows(), [t("mod.modeOrderHelp")]),
+      modSection(t("mod.fourWorkers"), modWorkerRows(), [t("mod.modeOrderHelp")]),
       modSection(null, [
         cell(t("mod.modeDelegation"), modSegmented("base-delegation", [{ value: "normal", label: t("mod.modeNormal") }, { value: "eager", label: t("mod.modeEager") }], s.delegation || "normal", t("mod.modeDelegation"), (delegation) => modPatch({ delegation })), t("mod.baseDelegationHelp"), "wide"),
       ]),

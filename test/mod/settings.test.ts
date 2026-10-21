@@ -162,6 +162,27 @@ test('stored settings that still held Auto or a field rule say so, once; the des
   assert.equal(hadRetiredRouting(normalizeSettings({ rules: { general: { mode: 'auto', allow: [] }, backend: { mode: 'auto', allow: [] } } })), false)
 })
 
+test('optional domain ladders normalize independently, round-trip and never count as retired routing', () => {
+  const s = normalizeSettings({ domainRules: {
+    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: ' ui ' }, effort: 'bad' }, null, { effort: 'high' }], standard: { target: { agent: 'second' }, effort: 'high' } } },
+    backend: { mode: 'ladder', rungs: {} }, docs: { mode: 'ladder', rungs: {} },
+  } })
+  assert.deepEqual(s.domainRules, {
+    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'ui' }, effort: 'low' }], standard: [{ target: { agent: 'second' }, effort: 'high' }] } },
+    backend: { mode: 'ladder', rungs: {} },
+  })
+  assert.deepEqual(normalizeSettings(JSON.parse(JSON.stringify(s))), s)
+  assert.equal(hadRetiredRouting(s), false)
+  for (const raw of [null, [], 'bad', { ui: { mode: 'auto' }, backend: { mode: 'pin' } }, { ui: {}, backend: false }]) {
+    assert.equal(Object.hasOwn(normalizeSettings({ domainRules: raw }), 'domainRules'), false)
+  }
+  const removed = normalizeSettings({ ...s, domainRules: undefined })
+  assert.deepEqual(applySettingsChanges(s, settingsChanges(s, removed)), removed)
+  const copy = normalizeSettings(s)
+  copy.domainRules!.ui!.rungs.light![0]!.target.agent = 'changed'
+  assert.equal(s.domainRules!.ui!.rungs.light![0]!.target.agent, 'ui')
+})
+
 test('the heavy-context band and optional chips are off unless switched on', () => {
   assert.equal(DEFAULTS.swampAlert, false)
   assert.deepEqual(DEFAULTS.extras, [])

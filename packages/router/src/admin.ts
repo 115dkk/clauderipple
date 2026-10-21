@@ -37,7 +37,7 @@ import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { normalizeSettings } from "../../mod/hooks/settings.ts";
-import type { Billing, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
+import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
 import type { ProviderExhaustion } from "./health.ts";
@@ -708,12 +708,15 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
   const general = settings.rules.general;
-  if (![general, ...settings.modes].some(set => ladderNeedsFill(set.rungs))) return settings;
+  const sets = [settings, ...settings.modes];
+  const domains = sets.flatMap(set => Object.values(set.domainRules ?? {}));
+  if (![general, ...settings.modes, ...domains].some(set => ladderNeedsFill(set.rungs))) return settings;
   try {
     const choices = ladderChoices(await modOptions(deps, scores));
-    const { rungs } = fillLadder(general.rungs, settings.allow, choices, settings.allowKnown);
-    const modes = settings.modes.map(mode => ({ ...mode, rungs: fillLadder(mode.rungs, settings.allow, choices, settings.allowKnown).rungs }));
-    return { ...settings, rules: { general: { mode: "ladder", rungs } }, modes };
+    const fill = (rungs: Settings['rules']['general']['rungs']) => fillLadder(rungs, settings.allow, choices, settings.allowKnown).rungs;
+    const fillDomains = (rules: DomainRules): DomainRules => Object.fromEntries(Object.entries(rules).map(([key, rule]) => [key, { mode: "ladder", rungs: fill(rule.rungs) }]));
+    const modes = settings.modes.map(mode => ({ ...mode, rungs: fill(mode.rungs), ...(mode.domainRules ? { domainRules: fillDomains(mode.domainRules) } : {}) }));
+    return { ...settings, rules: { general: { mode: "ladder", rungs: fill(general.rungs) } }, ...(settings.domainRules ? { domainRules: fillDomains(settings.domainRules) } : {}), modes };
   } catch (error) {
     deps.log.warn(`admin: filling the worker ladder failed: ${(error as Error).message}`);
     return settings;

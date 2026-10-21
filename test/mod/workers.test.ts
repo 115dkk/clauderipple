@@ -8,7 +8,7 @@ registerHooks({ resolve(specifier, context, next) {
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
-  ladderPick, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
+  ladderPick, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -62,6 +62,25 @@ test('every field uses the general ladder and a missing level climbs', () => {
   assert.equal(pick(DEFAULTS, { ...verdict, domain: 'design', level: 'deep' }).target?.agent, 'gpt-6-astra')
   assert.equal(pick(DEFAULTS, { ...verdict, level: 'light' }, candidates.slice(1)).target?.agent, 'gpt-6-1-sol')
 })
+test('domain ladders select UI for design/frontend, backend separately, otherwise this set\'s general', () => {
+  const s = normalizeSettings({ domainRules: {
+    ui: { mode: 'ladder', rungs: { standard: { target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' } } },
+    backend: { mode: 'ladder', rungs: { standard: { target: { agent: 'gpt-6-astra' }, effort: 'high' } } },
+  } })
+  for (const domain of ['design', 'frontend', 'backend', 'general', 'docs', 'research', 'ops'] as const) {
+    const { rule, ladder } = workerRule(domain, s)
+    const expected = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : 'general'
+    assert.equal(rule, expected)
+    assert.equal(ladder, expected === 'general' ? s.rules.general : s.domainRules![expected])
+    const resolved = ladderPick({ ...verdict, domain }, ladder, s, candidates, true, 'en')
+    assert.equal(resolved.target?.agent, expected === 'ui' ? 'deepseek-v4-1-flash' : expected === 'backend' ? 'gpt-6-astra' : 'gpt-6-1-sol')
+  }
+  assert.deepEqual(workerRule('backend', { ...s, domainRules: { ui: s.domainRules!.ui } }), { rule: 'general', ladder: s.rules.general })
+  // Unavailable domain rungs climb only within that ladder, not into the general one.
+  const blocked = ladderPick(verdict, s.domainRules!.backend!, s, candidates, false, 'en')
+  assert.deepEqual(blocked.target, { agent: 'general-purpose' })
+})
+
 test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {
   // Standard (Sol) and the rung above (Astra) are both ChatGPT: out of quota, the session model runs.
   const out = pick(DEFAULTS, verdict, candidates, false)
