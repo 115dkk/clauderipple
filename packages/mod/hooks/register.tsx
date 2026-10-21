@@ -1,7 +1,7 @@
 // Engine wiring lives here: imported logic and drawings never receive the engine interface.
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
-import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, SessionCompactResult, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf } from './ladder'
@@ -86,6 +86,8 @@ const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
+/** Compactions of the main conversation that finished, for the Compact icon's count; /clear zeroes it. */
+const compactions = atom({ plugin: 'ripple', key: 'compactions' } as const, 0)
 const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const, false)
 const agentOpen = atom({ plugin: 'ripple', key: 'agentOpen' } as const, null)
 const agentRunsOpen = atom({ plugin: 'ripple', key: 'agentRunsOpen' } as const, [])
@@ -1236,6 +1238,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     limits: await read($, limits) ?? [],
     auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
     agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
+    compactions: await read($, compactions),
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
     swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
     ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
@@ -1451,6 +1454,7 @@ export const register: Register = on => {
           await update($, context, () => null)
           await update($, lastRealReplyAt, () => null)
           if (await read($, kept)) await update($, kept, () => null)
+          await update($, compactions, () => 0)
         }
         if (e.model) await update($, modelIs, () => e.model!)
         await update($, paused, () => e.model ? !isCacheSafeModel(e.model) : false)
@@ -1657,11 +1661,19 @@ export const register: Register = on => {
     }
   })
   on('session.compact', async ($, e, next) => {
+    // A finished compaction of the main conversation adds one to the Compact icon's count; a skipped
+    // one, a subagent's own and the ahead-of-time precompute do not.
+    const counted = async (result: SessionCompactResult): Promise<SessionCompactResult> => {
+      try {
+        if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) await update($, compactions, n => n + 1)
+      } catch (error) { await report($, 'session.compact count', error) }
+      return result
+    }
     try {
       const language = await read($, lang)
       // The summary drops the eager note: the first prompt after it carries it again.
       if (!e.agentId && e.trigger !== 'precompute' && await read($, modeNoted) !== null) await update($, modeNoted, () => null)
-      if (e.agentId || (await currentSettings($)).compactWith !== 'haiku') return next(e)
+      if (e.agentId || (await currentSettings($)).compactWith !== 'haiku') return next(e).then(counted)
       if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }
       const transcript = serializeTranscript(e.messages.length ? e.messages : await $.session.messages())
       if (!transcript) throw new Error(t(language, 'toasts.transcriptEmpty'))
@@ -1671,12 +1683,12 @@ export const register: Register = on => {
       await update($, context, () => null)
       if (await read($, kept)) await update($, kept, () => null)
       await update($, resultCard, () => ({ stage: 'compacted' }))
-      return compactResult(answer.text)
+      return counted(compactResult(answer.text))
     } catch (error) {
       await $.ui.toast(t(await read($, lang), 'toasts.compactFallback'))
       await report($, 'session.compact', error)
     }
-    return next(e)
+    return counted(await next(e))
   })
   on('command.run', { command: 'ripple' }, async ($, e, next) => {
     try {

@@ -8,7 +8,7 @@
 // laid over the pictures line up (kit.tsx). Pure: SVG only, so node tests can load it.
 
 import { AGENTS_W, CELL_PX, CLOSE_PX, CONTROL_PX, FLAME, GLYPH, ICON, ICON_PX, METER_H, METER_W, SWITCH_H, SWITCH_W, TILE_PX, esc, labelPx, r } from './art.ts'
-import type { Tone } from './art.ts'
+import type { Icon, Tone } from './art.ts'
 import type { Paint } from './look.ts'
 import { svgDoc } from './theme.ts'
 import type { Appearance } from './theme.ts'
@@ -55,6 +55,14 @@ export function flatPictures(appearance: Appearance): Paint {
   /** A rule for `sel` that follows the theme: `light` on a light app, `dark` on a dark one. */
   const themed = (sel: string, light: string, dark: string): string =>
     appearance === 'dark' ? sel + '{' + dark + '}' : appearance === 'light' ? sel + '{' + light + '}' : sel + '{' + light + '}@media (prefers-color-scheme:dark){' + sel + '{' + dark + '}}'
+  /** A control's icon with a count in an accent disc on its shoulder, one width whatever the count. */
+  const counted = (icon: Icon, count: number, on: boolean): string => {
+    const text = count > 9 ? '9+' : String(count)
+    const badge = count > 0
+      ? '<circle cx="20" cy="5.5" r="5.5" fill="' + ACCENT + '"/><text x="20" y="8.6" text-anchor="middle" font-size="' + (text.length > 1 ? 7 : 8.5) + '" font-weight="750"' + fillOf('#fff') + '>' + text + '</text>'
+      : ''
+    return doc(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge)
+  }
 
   return {
     // The capsule is the app's own surface, as its prompt box is: white on a light app, its dark
@@ -203,13 +211,8 @@ export function flatPictures(appearance: Appearance): Paint {
       return doc(ICON_PX, ICON_PX, '<g fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>')
     },
 
-    agents: (count, on) => {
-      const text = count > 9 ? '9+' : String(count)
-      const badge = count > 0
-        ? '<circle cx="20" cy="5.5" r="5.5" fill="' + ACCENT + '"/><text x="20" y="8.6" text-anchor="middle" font-size="' + (text.length > 1 ? 7 : 8.5) + '" font-weight="750"' + fillOf('#fff') + '>' + text + '</text>'
-        : ''
-      return doc(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON.agents + '</g>' + badge)
-    },
+    agents: (count, on) => counted('agents', count, on),
+    counted: (icon, count, on) => counted(icon, count, on),
 
     rule: () => doc(9, 16, '<rect x="4" y="1" width="1" height="14" rx=".5" fill="' + STROKE + '"/>'),
 

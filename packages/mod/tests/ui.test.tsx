@@ -57,6 +57,7 @@ const DASH: DashboardView = {
   auto: true,
   handoff: 'off',
   agents: { live: 0, total: 0 },
+  compactions: 0,
   logOpen: false,
   agentsOpen: false,
   effortMenu: false,

@@ -309,7 +309,7 @@ function controls(frame: Frame, view: DashboardView, actions: BandActions): Cont
     // The count has a slot of its own (desktop) or is always a number (terminal): no width change.
     { key: 'agents', label: t(L, 'band.agents') + (isRich(frame) ? '' : ' ' + (view.agents.live || '·')) + mark(view.agentsOpen), hotkey: 'g', onPress: actions.toggleAgents, on: view.agentsOpen, ...(isRich(frame) ? { count: view.agents.live > 0 ? String(view.agents.live) : '' } : {}) },
     // The desktop's Clear asks first (a card of its own, "clear" in bandPriority); Compact opens its note bar.
-    ...(isRich(frame) ? [{ key: 'compact', label: t(L, 'band.compact'), hotkey: 'c', onPress: actions.compact, on: false }, { key: 'clear', label: t(L, 'band.clear'), hotkey: 'x', onPress: actions.clear, on: false }] : []),
+    ...(isRich(frame) ? [{ key: 'compact', label: t(L, 'band.compact'), hotkey: 'c', onPress: actions.compact, on: false, count: view.compactions > 0 ? String(view.compactions) : '' }, { key: 'clear', label: t(L, 'band.clear'), hotkey: 'x', onPress: actions.clear, on: false }] : []),
     // A word on the desktop: the host's 14 px font draws ⚙ as a small ring that reads as "o".
     { key: 'settings', label: isRich(frame) ? t(L, 'band.settings') : '⚙', hotkey: 's', onPress: actions.openSettings, on: false },
   )
@@ -786,7 +786,11 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   // The live count sits on the icon's shoulder, in one picture of one width: no width change.
   out.push(iconControl(el, frame, 'agents', k.art.agents(live, view.agentsOpen || live > 0), AGENTS_W, live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? k.ink : k.sub))
   const compactLabel = t(L, 'band.compact')
-  out.push(iconControl(el, frame, 'compact', k.art.icon('compact', false), ICON_PX, compactLabel, t(L, 'band.compactAlt'), actions.compact, words.includes('compact') ? compactLabel : undefined))
+  // How many times the chat was compacted sits on the icon's shoulder, as the agents' live count
+  // does, in one picture of one width: the first compaction moves no neighbour.
+  const compactions = view.compactions
+  const compactTip = t(L, 'band.compactAlt') + (compactions > 0 ? ' · ' + t(L, 'band.compactedTimes', { count: compactions }) : '')
+  out.push(iconControl(el, frame, 'compact', k.art.counted('compact', compactions, false), AGENTS_W, compactions > 0 ? compactLabel + ' ' + compactions : compactLabel, compactTip, actions.compact, words.includes('compact') ? compactLabel : undefined))
   const clearLabel = t(L, 'band.clear')
   out.push(iconControl(el, frame, 'clear', k.art.icon('clear', false), ICON_PX, clearLabel, t(L, 'band.clearAlt'), actions.clear, words.includes('clear') ? clearLabel : undefined))
   const settingsLabel = t(L, 'band.settings')

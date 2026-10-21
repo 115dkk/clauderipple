@@ -82,6 +82,8 @@ export type DashboardView = {
   /** Compact turns into a lit Handoff when advice says so, or always with handoffButton 'always'. */
   handoff: 'off' | 'advised' | 'always'
   agents: { live: number; total: number }
+  /** Times this chat was compacted (manual, automatic or by the band), shown on the Compact icon. */
+  compactions: number
   logOpen: boolean
   agentsOpen: boolean
   /** The manual effort row is open. */

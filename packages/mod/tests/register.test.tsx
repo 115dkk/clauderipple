@@ -1120,6 +1120,32 @@ test('failed Haiku compaction falls back; precompute skips; subagent stays with 
   expect(b.toasts.some(t => t.includes('session compactor'))).toBe(true)
 })
 
+test('the Compact icon counts the main chat\'s finished compactions; /clear zeroes it', async ($, on) => {
+  boundaries(on, { compactWith: 'session' })
+  http(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  const alt = async (ui: Awaited<ReturnType<typeof band>>) => {
+    const box = await ui.find({ key: 'pic-compact' })
+    return (box?.children[0] as { props?: { alt?: unknown } } | undefined)?.props?.alt
+  }
+  let ui = await band($, 'desktop')
+  expect(await alt(ui)).toBe('Compact')
+  await ui.unmount()
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES })
+  // Neither a subagent's own compaction nor the ahead-of-time precompute is the chat's.
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'worker' })
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES })
+  ui = await band($, 'desktop')
+  expect(await alt(ui)).toBe('Compact 2')
+  await ui.unmount()
+  await $.classic.SessionStart({ source: 'clear' })
+  ui = await band($, 'desktop')
+  expect(await alt(ui)).toBe('Compact')
+  await ui.unmount()
+})
+
 // ---- Operating modes (docs/specs/2026-10-12-worker-tiers.md "Operating modes") -----------------
 
 const BURN = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { ...DEFAULTS.rules.general.rungs, light: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'low' }] }, delegation: 'eager' }])

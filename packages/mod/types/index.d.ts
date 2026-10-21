@@ -397,6 +397,8 @@ declare module 'claude-code' {
       compactNote: string
       effortMenuOpen: boolean
       agentsOpen: boolean
+      /** Finished compactions of the main conversation (the Compact icon's count). */
+      compactions: number
       agentsShowDone: boolean
       /** The agent whose conversation the Agents pane shows; null shows the list. */
       agentOpen: string | null

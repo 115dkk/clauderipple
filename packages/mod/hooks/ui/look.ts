@@ -41,6 +41,8 @@ export type Paint = {
   gauge: (kind: string) => string
   icon: (icon: Icon, on: boolean, tone?: Tone) => string
   agents: (count: number, on: boolean) => string
+  /** An icon with a count on its shoulder (the chat's compactions). */
+  counted: (icon: Icon, count: number, on: boolean) => string
   rule: () => string
   tile: (art: TileArt) => string
   beads: (step: number, total: number) => { source: string; width: number }
@@ -70,7 +72,7 @@ const DEEP_PAINT: Paint = {
   sea: deep.seaArt, plate: deep.plateArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
   pill: deep.pillArt, segmented: deep.segmentedArt, slider: deep.sliderArt, well: deep.wellArt, close: deep.closeArt,
   meter: deep.meterArt, ring: deep.ringArt, clock: deep.clockArt, gauge: deep.gaugeArt, icon: deep.iconArt,
-  agents: deep.agentsArt, rule: deep.ruleArt, tile: deep.tileArt, beads: deep.beadsArt,
+  agents: deep.agentsArt, counted: deep.countedArt, rule: deep.ruleArt, tile: deep.tileArt, beads: deep.beadsArt,
 }
 
 /** The deep: the capsule's edge a warm grey that reads on a light page and a dark one alike, lights white on the water. */
