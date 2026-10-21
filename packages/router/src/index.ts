@@ -262,7 +262,7 @@ proxy
       claudeModels: () => proxy.claudeModels.list(),
       opencodeUsage: (name: string) => proxy.opencodeLimits(name),
       grokUsage: (name: string) => proxy.grokLimits(name),
-      image: (req, signal) => proxy.generateImage(req, signal),
+      image: (req, signal, meta) => proxy.generateImage(req, signal, meta),
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
       remote: {

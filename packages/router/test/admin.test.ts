@@ -1191,6 +1191,30 @@ test("GET /api/requests filters newest records and returns a summary", async () 
   });
 });
 
+test("GET /api/requests takes a comma-separated kind list", async () => {
+  await withAdmin(makeCfg(), async ({ home }) => {
+    const requests = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    requests.add({ id: "turn", at: new Date(Date.now() - 20_000).toISOString(), ms: 150, status: 200, ok: true, kind: "messages", source: "claude", target: "gpt", provider: "chatgpt", stream: true, usage: { input: 20, cached: 0, output: 7 } });
+    requests.add({ id: "count", at: new Date(Date.now() - 10_000).toISOString(), ms: 5, status: 200, ok: true, kind: "count_tokens", source: "claude", target: "gpt", provider: "chatgpt", stream: false });
+    requests.add({ id: "image", at: new Date().toISOString(), ms: 30_000, status: 200, ok: true, kind: "image", source: "gpt-6-astra", target: "image", provider: "gpt", stream: false, usage: { input: 2249, cached: 0, output: 75 }, note: "1536x1024 low png, 1 reference(s)" });
+    const reloaded = new RequestLog(path.join(home, "logs", "requests.jsonl"));
+    const cfg = makeCfg({ admin: { port: 0 } });
+    const log = new Logger(null, 1_000_000, 1, false);
+    const extra = await startAdmin({ config: () => cfg, configFile: path.join(home, "extra-config.json"), log, stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test", requests: reloaded });
+    try {
+      const ids = async (query: string): Promise<string[]> =>
+        ((await (await fetch(`${base()}:${extra.port}/api/requests?n=10&${query}`)).json()) as { requests: { id: string }[] }).requests.map((r) => r.id);
+      assert.deepEqual(await ids("kind=messages,image"), ["image", "turn"]);
+      // An unknown entry is ignored, not an error; a list with nothing valid left means no filter.
+      assert.deepEqual(await ids("kind=messages,nonsense"), ["turn"]);
+      assert.deepEqual(await ids("kind=nonsense"), ["image", "count", "turn"]);
+      assert.deepEqual(await ids("kind="), ["image", "count", "turn"]);
+    } finally {
+      extra.close();
+    }
+  });
+});
+
 test("GET /api/requests/summary?from=&to= answers any period from hourly usage", async () => {
   await withAdmin(makeCfg(), async ({ home }) => {
     const records = new RequestLog(path.join(home, "logs", "requests.jsonl"));

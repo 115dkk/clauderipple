@@ -44,7 +44,7 @@ import { providerFor, searchProviderFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevelsForModel } from "./admin.ts";
-import { ResponseUsageTap, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
+import { ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
@@ -324,14 +324,53 @@ export class Proxy {
   /**
    * One image for `/api/image`, on the first chatgpt provider and the first model it declares. The
    * model only runs the tool call — the image comes from the backend's own image model — so which
-   * one it is barely matters.
+   * one it is barely matters. The call is recorded like a proxied request, success or failure, so
+   * the dashboard's usage and request list show the subscription's image traffic.
    */
-  generateImage(req: ImageRequest, signal?: AbortSignal): Promise<ImageResult> {
+  async generateImage(req: ImageRequest, signal?: AbortSignal, meta?: { session?: string }): Promise<ImageResult> {
     const first = Object.entries(this.deps.config().providers).find(([, p]) => p.type === "chatgpt");
-    if (!first || first[1].type !== "chatgpt") return Promise.reject(new Error("image generation needs a ChatGPT provider; add one in the dashboard"));
+    if (!first || first[1].type !== "chatgpt") throw new Error("image generation needs a ChatGPT provider; add one in the dashboard");
     const model = first[1].models?.[0]?.id;
-    if (!model) return Promise.reject(new Error(`provider ${first[0]} declares no models`));
-    return this.chatgpt(first[0], first[1]).generateImage(model, req, signal);
+    if (!model) throw new Error(`provider ${first[0]} declares no models`);
+    const at = new Date().toISOString();
+    const started = Date.now();
+    try {
+      const image = await this.chatgpt(first[0], first[1]).generateImage(model, req, signal);
+      const record: RequestRecord = {
+        kind: "image",
+        source: model,
+        target: "image",
+        provider: first[0],
+        stream: false,
+        id: requestId(),
+        at,
+        ms: Date.now() - started,
+        ok: true,
+        status: 200,
+        ...(image.usage ? { usage: image.usage } : {}),
+        note: `${image.size ?? "?"} ${image.quality ?? "?"} ${image.format}, ${req.images?.length ?? 0} reference(s)`,
+        ...(meta?.session ? { session: meta.session } : {}),
+      };
+      this.deps.requests.add(record);
+      return image;
+    } catch (e) {
+      const record: RequestRecord = {
+        kind: "image",
+        source: model,
+        target: "image",
+        provider: first[0],
+        stream: false,
+        id: requestId(),
+        at,
+        ms: Date.now() - started,
+        ok: false,
+        status: signal?.aborted ? "aborted" : 502,
+        note: (e as Error).message.slice(0, 300),
+        ...(meta?.session ? { session: meta.session } : {}),
+      };
+      this.deps.requests.add(record);
+      throw e;
+    }
   }
 
   /** Dashboard action: put one resting ChatGPT account back into rotation now. */

@@ -157,9 +157,13 @@ async function image(): Promise<void> {
     ...(images.length ? { images } : {}),
   };
   const port = adminPort(new ConfigStore(configPath()).get());
+  // Claude Code exports its session to Bash commands; the router logs it with the image so the
+  // request list shows which session spent the subscription.
+  const session = process.env.CLAUDE_CODE_SESSION_ID;
+  const headers = { "content-type": "application/json", ...(session && /^[\w-]{1,128}$/.test(session) ? { "x-claude-code-session-id": session } : {}) };
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${port}/api/image`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    res = await fetch(`http://127.0.0.1:${port}/api/image`, { method: "POST", headers, body: JSON.stringify(body) });
   } catch {
     throw new Error(`the router is not answering on 127.0.0.1:${port}; start it with: clauderipple start`);
   }

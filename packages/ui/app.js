@@ -4213,7 +4213,7 @@ async function refreshRequests() {
   $("#logs-range-caption").textContent = usageCaption(range, lastSummary && lastSummary.earliest);
   const summaryPath = range ? `/api/requests/summary?from=${range.from}&to=${range.to}` : "/api/requests/summary?since=3600";
   const suffix = provider ? `&provider=${encodeURIComponent(provider)}` : "";
-  const [records, summary] = await Promise.allSettled([api(`/api/requests?n=200${suffix}&kind=messages`), api(summaryPath), loadConfiguredProviders()]);
+  const [records, summary] = await Promise.allSettled([api(`/api/requests?n=200${suffix}&kind=messages,image`), api(summaryPath), loadConfiguredProviders()]);
   if (generation !== requestsGeneration) return;
   // Each half keeps its last good contents when its own call fails.
   if (summary.status === "fulfilled") {

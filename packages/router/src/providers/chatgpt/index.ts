@@ -58,7 +58,7 @@ export type ImageRequest = {
   images?: { mediaType: string; data: string }[];
 };
 
-export type ImageResult = { data: Buffer; format: string; size?: string; quality?: string; revisedPrompt?: string };
+export type ImageResult = { data: Buffer; format: string; size?: string; quality?: string; revisedPrompt?: string; usage?: RequestUsage };
 
 export type ChatGptOutcome ={ status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false; refusal?: "no-account"; exhaustion?: ProviderExhaustion | undefined };
 
@@ -532,6 +532,7 @@ export class ChatGptAdapter {
     const decoder = new TextDecoder();
     let image: Record<string, unknown> | undefined;
     let text = "";
+    let usage: RequestUsage | undefined;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -541,6 +542,15 @@ export class ChatGptAdapter {
           if (event.type === "response.output_item.done") {
             const item = event.item as Record<string, unknown> | undefined;
             if (item?.type === "image_generation_call" && typeof item.result === "string" && item.result) image = item;
+          }
+          if (event.type === "response.completed") {
+            // The same conversion the translated turns use: `input_tokens` is what the prompt read,
+            // `cached_tokens` the part the backend served from its cache.
+            const u = (event.response as { usage?: { input_tokens?: number; input_tokens_details?: { cached_tokens?: number }; output_tokens?: number } } | undefined)?.usage;
+            if (u) {
+              const cached = u.input_tokens_details?.cached_tokens ?? 0;
+              usage = { input: (u.input_tokens ?? 0) - cached, cached, output: u.output_tokens ?? 0 };
+            }
           }
           if (event.type === "error" || event.type === "response.failed") {
             const error = (event.error ?? (event.response as { error?: unknown } | undefined)?.error) as { message?: unknown } | undefined;
@@ -560,6 +570,7 @@ export class ChatGptAdapter {
       ...(str(image.size) ? { size: str(image.size)! } : {}),
       ...(str(image.quality) ? { quality: str(image.quality)! } : {}),
       ...(str(image.revised_prompt) ? { revisedPrompt: str(image.revised_prompt)! } : {}),
+      ...(usage ? { usage } : {}),
     };
   }
 

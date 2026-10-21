@@ -42,6 +42,37 @@ test("RequestLog keeps a bounded ring and reloads persisted JSONL", () => {
   }
 });
 
+test("an image record persists, reloads and counts under the image target", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-image-"));
+  try {
+    const file = path.join(dir, "requests.jsonl");
+    const log = new RequestLog(file);
+    log.add(record("image-1", {
+      at: "2026-10-21T10:00:00.000Z",
+      kind: "image",
+      source: "gpt-6-astra",
+      target: "image",
+      provider: "gpt",
+      stream: false,
+      usage: { input: 2249, cached: 0, output: 75 },
+      note: "1536x1024 low png, 1 reference(s)",
+    }));
+    log.add(record("turn"));
+    assert.deepEqual(log.list(10, { kind: "image" }).map((r) => r.id), ["image-1"]);
+    // A filter may name several kinds; a record matches any of them.
+    assert.deepEqual(log.list(10, { kind: ["messages", "image"] }).map((r) => r.id), ["turn", "image-1"]);
+    assert.deepEqual(log.list(10, { kind: ["count_tokens"] }), []);
+
+    const reloaded = new RequestLog(file);
+    assert.equal(reloaded.list(1, { kind: "image" })[0]!.kind, "image");
+    const usage = reloaded.usage(Date.parse("2026-10-21T10:00:00.000Z"), Date.parse("2026-10-21T11:00:00.000Z"));
+    assert.equal(usage.providers.gpt?.count, 1);
+    assert.deepEqual(usage.models.map((m) => [m.provider, m.model, m.input]), [["gpt", "image", 2249]]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("RequestLog computes success, usage, cache and latency summaries", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-summary-"));
   try {

@@ -173,7 +173,7 @@ export type AdminDeps = {
   /** Begin a graceful drain and exit. Supplied by the router; absent in tests. */
   shutdown?: () => void;
   /** One image through the ChatGPT subscription (`POST /api/image`). */
-  image?: (req: ImageRequest, signal: AbortSignal) => Promise<ImageResult>;
+  image?: (req: ImageRequest, signal: AbortSignal, meta?: { session?: string }) => Promise<ImageResult>;
   /**
    * Usage of each Claude subscription account, keyed by owner id ("current" for the Claude Code
    * login, otherwise the account id `/api/claude-accounts` lists). Absent in tests.
@@ -2586,9 +2586,12 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // A caller that gives up should not leave the generation running on the subscription.
         const abort = new AbortController();
         res.on("close", () => { if (!res.writableFinished) abort.abort(); });
+        // The CLI's own session, so the request log shows which session generated the image.
+        const session = req.headers["x-claude-code-session-id"];
+        const meta = typeof session === "string" && /^[\w-]{1,128}$/.test(session) ? { session } : undefined;
         const started = Date.now();
         try {
-          const image = await deps.image(parsed, abort.signal);
+          const image = await deps.image(parsed, abort.signal, meta);
           deps.log.info(`admin: image ${image.size ?? "?"} ${image.quality ?? "?"} ${image.format}, ${parsed.images?.length ?? 0} reference(s), ${image.data.length} bytes in ${Date.now() - started} ms`);
           res.writeHead(200, {
             "content-type": `image/${image.format}`,
@@ -2647,8 +2650,10 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const provider = query.get("provider") || undefined;
         const session = query.get("session") || undefined;
         const kindValue = query.get("kind");
-        const kind = kindValue === "messages" || kindValue === "count_tokens" || kindValue === "other" ? kindValue : undefined;
-        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kind ? { kind } : {}), ...(session ? { session } : {}) }) });
+        // A comma-separated list so one call can ask for several kinds; unknown entries are ignored
+        // and a list with nothing valid left means no filter.
+        const kinds = kindValue === null ? [] : kindValue.split(",").filter((k): k is "messages" | "count_tokens" | "other" | "image" => k === "messages" || k === "count_tokens" || k === "other" || k === "image");
+        sendJson(res, 200, { requests: deps.requests.list(n, { ...(provider ? { provider } : {}), ...(kinds.length ? { kind: kinds } : {}), ...(session ? { session } : {}) }) });
         return;
       }
       if (pathname === "/api/requests/summary" && method === "GET") {

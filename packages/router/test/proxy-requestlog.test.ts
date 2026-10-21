@@ -25,12 +25,26 @@ async function rig() {
   fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessToken: "test-token", accountId: "test-account", expiresAt: Date.now() + 3600_000, source: "own" }));
   const seen: Record<string, unknown>[] = [];
   let responseStatus = 200;
+  let imageStatus = 200;
   const respond = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       seen.push(body);
+      if ((body.tools as { type?: string }[] | undefined)?.some((tool) => tool.type === "image_generation")) {
+        if (imageStatus !== 200) {
+          res.writeHead(imageStatus, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "image backend failed" } }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end([
+          { type: "response.created", response: {} },
+          { type: "response.output_item.done", item: { id: "ig_1", type: "image_generation_call", output_format: "png", quality: "low", size: "1536x1024", result: Buffer.from("PNGDATA").toString("base64") } },
+          { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 2 } } },
+        ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+        return;
+      }
       const model = body.model ?? (req.url?.includes("gemini-test") ? "gemini-test" : undefined);
       const events = model === "gpt-test" || model === "responses-test"
         ? [{ type: "response.output_text.delta", delta: "answer" }, { type: "response.completed", response: { service_tier: "default", usage: { input_tokens: 10, output_tokens: 2 } } }]
@@ -100,7 +114,7 @@ async function rig() {
     secure.destroy();
     return { text, record: requests.list(1)[0]! };
   };
-  return { cfg, seen, home, requests, proxy, observed, send, failBackend: () => { responseStatus = 400; }, stop: async () => {
+  return { cfg, seen, home, requests, proxy, observed, send, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
     proxy.close(); agent.destroy();
     await Promise.all([backend, native].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     fs.rmSync(home, { recursive: true, force: true });
@@ -136,6 +150,42 @@ test("proxy finish correlates every translated message and records actual servic
     const count = await r.send("gpt-test", {}, "/v1/messages/count_tokens");
     assert.equal(count.record.messageId, undefined);
     assert.equal(count.record.requestedTier, undefined);
+  } finally { await r.stop(); }
+});
+
+test("proxy generateImage records the image traffic, with usage on success and a failure record", async () => {
+  const r = await rig();
+  try {
+    const image = await r.proxy.generateImage({ prompt: "a boat", aspect: "square", format: "png", images: [{ mediaType: "image/png", data: "QUJD" }] }, undefined, { session: "session-1" });
+    assert.equal(image.data.toString(), "PNGDATA");
+    assert.deepEqual(image.usage, { input: 10, cached: 0, output: 2 });
+    const record = r.requests.list(1, { kind: "image" })[0]!;
+    assert.deepEqual(
+      { kind: record.kind, source: record.source, target: record.target, provider: record.provider, stream: record.stream, ok: record.ok, status: record.status, session: record.session, note: record.note },
+      { kind: "image", source: "gpt-test", target: "image", provider: "gpt", stream: false, ok: true, status: 200, session: "session-1", note: "1536x1024 low png, 1 reference(s)" },
+    );
+    assert.deepEqual(record.usage, { input: 10, cached: 0, output: 2 });
+    assert.match(record.at, /^\d{4}-\d\d-\d\dT/);
+    assert.ok(record.ms >= 0);
+
+    r.failImage();
+    await assert.rejects(() => r.proxy.generateImage({ prompt: "x" }, undefined, { session: "session-1" }), /HTTP 500/);
+    const failed = r.requests.list(1, { kind: "image" })[0]!;
+    assert.equal(failed.ok, false);
+    assert.equal(failed.status, 502);
+    assert.equal(failed.session, "session-1");
+    assert.match(failed.note!, /HTTP 500/);
+    assert.equal(failed.usage, undefined);
+    assert.equal(r.requests.list(10).length, 2, "one record per call, nothing else");
+
+    // A caller that gives up is still recorded, as an abort rather than an upstream failure.
+    const aborted = new AbortController();
+    aborted.abort();
+    await assert.rejects(() => r.proxy.generateImage({ prompt: "x" }, aborted.signal));
+    const abortRecord = r.requests.list(1)[0]!;
+    assert.equal(abortRecord.kind, "image");
+    assert.equal(abortRecord.ok, false);
+    assert.equal(abortRecord.status, "aborted");
   } finally { await r.stop(); }
 });
 

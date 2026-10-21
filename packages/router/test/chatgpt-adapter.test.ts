@@ -264,6 +264,8 @@ test("image generation sends the hosted tool with references and returns the dec
     { type: "input_image", image_url: "data:image/png;base64,QUJD" },
   ]);
   assert.equal(image.data.toString(), "PNGDATA");
+  // The turn's usage comes from `response.completed`, converted like a translated turn's.
+  assert.deepEqual(image.usage, { input: 2249, cached: 0, output: 75 });
   assert.deepEqual({ format: image.format, size: image.size, quality: image.quality, revisedPrompt: image.revisedPrompt }, { format: "png", size: "1536x1024", quality: "low", revisedPrompt: "a boat" });
 });
 

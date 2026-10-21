@@ -20,7 +20,7 @@ export type RequestRecord = {
   ms: number;
   status: number | string;
   ok: boolean;
-  kind: "messages" | "count_tokens" | "other";
+  kind: "messages" | "count_tokens" | "other" | "image";
   source: string;
   target: string;
   provider: string;
@@ -50,7 +50,8 @@ export type RequestRecord = {
   resent?: true;
 };
 
-type RequestFilter = { provider?: string; kind?: RequestRecord["kind"]; session?: string };
+/** A kind or a set of kinds; a record matches any of them. */
+type RequestFilter = { provider?: string; kind?: RequestRecord["kind"] | RequestRecord["kind"][]; session?: string };
 
 export type RequestSummary = { total: SummaryBucket; providers: Record<string, SummaryBucket>; models: (SummaryBucket & { provider: string; model: string })[] };
 export type { SummaryBucket };
@@ -59,7 +60,7 @@ function isRecord(value: unknown): value is RequestRecord {
   if (!value || typeof value !== "object") return false;
   const r = value as Partial<RequestRecord>;
   return typeof r.id === "string" && typeof r.at === "string" && typeof r.ms === "number" && typeof r.ok === "boolean" &&
-    (r.kind === "messages" || r.kind === "count_tokens" || r.kind === "other") && typeof r.source === "string" &&
+    (r.kind === "messages" || r.kind === "count_tokens" || r.kind === "other" || r.kind === "image") && typeof r.source === "string" &&
     typeof r.target === "string" && typeof r.provider === "string" && typeof r.stream === "boolean";
 }
 
@@ -114,11 +115,12 @@ export class RequestLog {
 
   list(n: number, filter: RequestFilter = {}): RequestRecord[] {
     const limit = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+    const kind = filter.kind === undefined ? undefined : Array.isArray(filter.kind) ? filter.kind : [filter.kind];
     const out: RequestRecord[] = [];
     for (let i = this.records.length - 1; i >= 0 && out.length < limit; i--) {
       const record = this.records[i]!;
       if (filter.provider && record.provider !== filter.provider) continue;
-      if (filter.kind && record.kind !== filter.kind) continue;
+      if (kind && !kind.includes(record.kind)) continue;
       if (filter.session && record.session !== filter.session) continue;
       out.push(record);
     }
