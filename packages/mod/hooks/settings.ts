@@ -26,7 +26,7 @@ export const DEFAULTS: Settings = {
       hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], plan: [claude('opus', 'high')],
     } },
   },
-  allow: [], allowKnown: [], modes: [],
+  allow: [], allowKnown: [], modes: [], delegation: 'normal',
   providers: {},
   fallback: { agent: 'general-purpose', model: 'sonnet' },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
@@ -275,6 +275,7 @@ export function normalizeSettings(raw: unknown, workers?: readonly Worker[]): Se
   if (Array.isArray(value.extras)) result.extras = [...new Set(value.extras.filter((part): part is string => typeof part === 'string' && EXTRAS.includes(part)))]
   const choices = {
     judge: ['haiku', 'jev', 'model'], jevSource: ['typesafe', 'zen'], bias: [-2, -1, 0, 1, 2], floor: EFFORTS,
+    delegation: ['normal', 'eager'],
     ceiling: EFFORTS, agentAuto: ['off', 'auto', 'all'], keepWarmHours: [1, 2, 4, 8], compactWith: ['haiku', 'session'],
     handoffAfter: ['continue', 'confirm', 'copy'], handoffButton: ['advised', 'always'], layout: ['dashboard', 'minimal'],
     appearance: ['auto', 'dark', 'light'], skin: SKINS, language: ['auto', 'ko', 'en', 'zh', 'ja', 'es', 'pt'],

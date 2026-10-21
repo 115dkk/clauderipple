@@ -152,7 +152,7 @@ test('the eager note goes with the first prompt after the mode turns on and afte
   assert.equal(eagerNote(on, null).note, first.note)
   // Turned off and on again is a new turning-on.
   assert.equal(eagerNote({ ...on, activeSince: 9 }, first.noted).note, first.note)
-  // A normal mode, or none, adds nothing.
+  // A normal mode, or none, adds nothing and clears what was noted (Base's delegation is normal).
   assert.deepEqual(eagerNote({ modes, activeMode: 'calm', activeSince: 5 }, null), { noted: null })
-  assert.deepEqual(eagerNote({ modes }, 'burn@5'), { noted: 'burn@5' })
+  assert.deepEqual(eagerNote({ modes, delegation: 'normal' }, 'burn@5'), { noted: null })
 })

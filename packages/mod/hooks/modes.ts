@@ -1,5 +1,6 @@
 // Operating modes in the session (docs/specs/2026-10-12-worker-tiers.md "Operating modes"): which
-// mode is on, when it ends by itself, and the eager-delegation note. Pure; register.tsx wires them.
+// mode is on, when it ends by itself, and the eager-delegation note (Base's while no mode is on).
+// Pure; register.tsx wires them.
 
 import type { Hot, LimitItem, Mode, Settings } from '../types'
 
@@ -18,15 +19,21 @@ export function modeNote(name: string): string {
   return `ClaudeRipple mode ${name}: delegate everything except judgment and final review to ripple:auto.`
 }
 
+/** What it reads while no mode is on and Base is eager. */
+const BASE_NOTE = 'ClaudeRipple: delegate everything except judgment and final review to ripple:auto.'
+
 /**
- * The eager note for this prompt: sent on the first prompt after the mode turned on, and again on
- * the first after a compaction (which clears `noted`), never on the turns between.
+ * The eager note for this prompt: Base's while no mode is on, the active mode's otherwise. Sent on
+ * the first prompt after that turned eager (a mode turning on, or Base made eager), and again on
+ * the first after a compaction (which clears `noted`), never on the turns between. When the
+ * effective delegation is not eager, nothing is said and `noted` becomes null, so making it eager
+ * again later sends the note afresh.
  */
-export function eagerNote(s: Pick<Settings, 'modes' | 'activeMode' | 'activeSince'>, noted: string | null): { note?: string; noted: string | null } {
+export function eagerNote(s: Pick<Settings, 'modes' | 'activeMode' | 'activeSince' | 'delegation'>, noted: string | null): { note?: string; noted: string | null } {
   const mode = activeModeOf(s)
-  const key = modeKey(s)
-  if (!mode || mode.delegation !== 'eager') return { noted }
-  return noted === key ? { noted } : { note: modeNote(mode.name), noted: key }
+  if ((mode?.delegation ?? s.delegation) !== 'eager') return { noted: null }
+  const key = mode ? modeKey(s) : 'base'
+  return noted === key ? { noted } : { note: mode ? modeNote(mode.name) : BASE_NOTE, noted: key }
 }
 
 /** Modes replace the base worker set, without changing fallback, allow-list or provider policy. */

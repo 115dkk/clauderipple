@@ -167,6 +167,11 @@ export type Settings = {
    * the first reset after this.
    */
   activeSince?: number
+  /**
+   * Base's delegation, used while no mode is on: eager has the main chat delegate everything but
+   * judgment and final review to ripple:auto. A mode's own delegation replaces it while it is on.
+   */
+  delegation: 'normal' | 'eager'
   providers: Record<string, boolean>
   /**
    * What ran when a pinned tier's agent was unavailable, before the ladder (2026-10-11). Kept so a

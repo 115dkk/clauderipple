@@ -139,6 +139,7 @@ Time/reset expiration clears activation and displays one toast; the saved worker
    remove (minimum one), and `+ 모델 추가`.
 4. A saved-mode tab also has editable name, delegation, end, delete and an explicit
    `이 모드 켜기/끄기` control. Creating a mode asks for a name and copies Base's lists.
+5. Base also has Delegation (2026-10-21), used while no mode is on; a mode's own replaces it.
 
 **In-session quick settings:** active mode select (Base + saved modes) only for worker settings;
 individual workers are edited on the dashboard. Existing effort/judge/cache controls stay.

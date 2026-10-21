@@ -3274,7 +3274,7 @@ const MOD_DEFAULTS = {
       hard: [{ target: { agent: "gpt-6-astra" }, effort: "high" }], plan: [modClaude("opus", "high")],
     } },
   },
-  allow: [], allowKnown: [], modes: [], providers: {},
+  allow: [], allowKnown: [], modes: [], delegation: "normal", providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
   compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
@@ -3843,6 +3843,9 @@ function modWorkersCard() {
     el("div", { id: "worker-tab-panel", role: "tabpanel" }, modModeTab === "+" ? [modNewMode()] : modModeTab ? [modModeSection(s.modes.find((mode) => mode.id === modModeTab))] : [
       modSection(t("mod.models"), modTickRows(), [t("mod.modelsHelp")]),
       modSection(t("mod.fourWorkers"), modRungRows(), [t("mod.modeOrderHelp")]),
+      modSection(null, [
+        cell(t("mod.modeDelegation"), modSegmented("base-delegation", [{ value: "normal", label: t("mod.modeNormal") }, { value: "eager", label: t("mod.modeEager") }], s.delegation || "normal", t("mod.modeDelegation"), (delegation) => modPatch({ delegation })), t("mod.baseDelegationHelp"), "wide"),
+      ]),
       s.activeMode ? modSection(null, [cell(t("mod.modeActive"), el("button", { type: "button", class: "btn secondary compact", "data-key": "mode-base-on", text: t("mod.modeUseBase"), onclick: () => modSetActive("") }))]) : null,
     ].filter(Boolean)),
   ]);
