@@ -3851,7 +3851,7 @@ function modRungRows(mode, ruleKey = "general") {
       const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item)) || modChoices().at(-1);
       save([...steps, { target: modTargetOf(choice.value), effort: modNearest("medium", modLadderOf(choice)) }]);
     } });
-    return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), modCap(t(`mod.rungHint.${rung}`)), "wide rung-row");
+    return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), modCap(t(ruleKey === "general" ? `mod.rungHint.${rung}` : `mod.rungHint.${ruleKey}.${rung}`)), "wide rung-row");
   });
 }
 /** Said once after settings that still held Auto or field rules are read: they became the four workers. */
