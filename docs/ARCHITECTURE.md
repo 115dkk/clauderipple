@@ -856,7 +856,8 @@ text is added. Source: `requestlog.ts`, `proxy.ts`, provider adapter outcomes.
 - `upstreamCalled`: `false` only for a known pre-model-API exit; omitted when a search backend was attempted or the call state is unknown.
 - `refusal`: `thread-continue`, `drain`, `unroutable`, `no-account`, `unknown-provider`, `web-search-unsupported` or `prompt-incompatible`, from the actual exit branch. `prompt-incompatible` follows an upstream request; it does not set `upstreamCalled: false`.
 - `purpose`: `auto-mode-classifier` from the security-monitor request shape regardless of routing settings, or `web-search` for router-served searches.
-- `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent.
+- `requestedTier`: the service tier actually sent upstream, including ChatGPT's `speed: "fast"` → `priority`; omitted when no tier was sent. Claude Code never puts `speed` on a GPT request (its client gate allows fast only for model ids it knows, CLI 2.1.304), so a ChatGPT provider's `fast: {main, subagent}` switches (both off by default; issue #69, 2026-10-22) send `priority` themselves: `subagent` for requests carrying `x-claude-code-agent-id`, which the CLI adds only inside a subagent, `main` for the rest.
+- `subagent`: `true` when the request carried `x-claude-code-agent-id`, for every provider; omitted on a main session's own turns.
 - `servedTier`: the response-reported tier (Responses/Chat `service_tier` or Anthropic `usage.service_tier`); never inferred from the request.
 
 **Hourly usage history (`usage-hourly.jsonl`, 2026-10-20).** `requests.jsonl` is

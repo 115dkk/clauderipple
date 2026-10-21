@@ -92,6 +92,17 @@ export type TranslateOptions = {
    * another model, or on another account, is the one thing a 400 is reliably about (see reasoning.ts).
    */
   env?: { p: string; m: string };
+  /**
+   * The provider's Fast switches (config.json `fast`): `main` for the session's own turns,
+   * `subagent` for the turns a subagent makes. Claude Code never asks for `speed: "fast"` on a GPT
+   * request, so this is where the tier is chosen.
+   */
+  fast?: { main?: boolean; subagent?: boolean };
+  /**
+   * Whether this turn was made inside a subagent. Claude Code names the agent in the
+   * `x-claude-code-agent-id` header (CLI 2.1.304), and only a subagent's request carries it.
+   */
+  subagent?: boolean;
   /** Filled in as the input is built: how many items were replayed, and how many were unreadable. */
   carried?: { replayed: number; undecodable: number };
   /** Names the reason a carrier was dropped. Absent in tests, where the counts are enough. */
@@ -444,7 +455,11 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   if (tool_choice) out.tool_choice = tool_choice;
   // Claude Code's `/fast` arrives as `speed: "fast"` (Anthropic fast mode). The ChatGPT backend's
   // equivalent is the Codex CLI's Fast mode, which bills the plan at a higher rate (Codex docs, Speed).
-  if (req.speed === "fast") out.service_tier = "priority";
+  // The CLI never sends `speed` for a GPT model, so the provider's own switches choose the tier:
+  // `fast.subagent` for a turn made inside a subagent, `fast.main` for the session's own turns.
+  const fast = opts.fast;
+  const fastOn = fast ? (opts.subagent === true ? fast.subagent === true : fast.main === true) : false;
+  if (req.speed === "fast" || fastOn) out.service_tier = "priority";
   return out;
 }
 

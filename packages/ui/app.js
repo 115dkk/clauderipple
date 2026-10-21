@@ -3171,17 +3171,25 @@ function openProviderForm(options) {
     const identity = el("input", { type: "checkbox", checked: !(existing && existing.identity === false) });
     const limitsInput = el("input", { type: "checkbox", checked: !(existing && existing.limits === false) });
     const append = el("textarea", { rows: "2", value: (existing && existing.instructionsAppend) || "" });
+    // The Codex fast tier, one switch for the session's own turns and one for a subagent's.
+    const fastMain = el("input", { type: "checkbox", checked: Boolean(existing && existing.fast && existing.fast.main === true) });
+    const fastSubagent = el("input", { type: "checkbox", checked: Boolean(existing && existing.fast && existing.fast.subagent === true) });
     chatgptFields = [
       inputRow(t("providers.credentials"), auth, t("providers.credentialsHelp")),
       el("div", { class: "form-field" }, [el("span", { text: t("providers.login") }), login, loginHelp]),
       inputRow(t("providers.defaultEffort"), effort, t("providers.defaultEffortHelp")),
+      el("div", { class: "form-field" }, [
+        el("label", { class: "check" }, [fastMain, el("span", { text: t("providers.fastMain") })]),
+        el("label", { class: "check" }, [fastSubagent, el("span", { text: t("providers.fastSubagent") })]),
+        el("small", { text: t("providers.fastHelp") }),
+      ]),
     ];
     advancedContent.append(
       el("div", { class: "form-field" }, [el("label", { class: "check" }, [identity, el("span", { text: t("providers.identity") })]), el("small", { text: t("providers.identityHelp") })]),
       el("div", { class: "form-field" }, [el("label", { class: "check" }, [limitsInput, el("span", { text: t("providers.limits") })]), el("small", { text: t("providers.limitsHelp") })]),
       inputRow(t("providers.append"), append, t("providers.appendHelp")),
     );
-    advancedContent._chatgpt = { auth, effort, identity, limits: limitsInput, append };
+    advancedContent._chatgpt = { auth, effort, identity, limits: limitsInput, append, fastMain, fastSubagent };
   }
   advanced.appendChild(advancedContent);
   const customUrlRow = isCustom ? inputRow(t("providers.url"), urlInput, t("providers.urlHelp")) : null;
@@ -3223,7 +3231,7 @@ function openProviderForm(options) {
   function draftProvider() {
     if (isChatgpt) {
       const chat = advancedContent._chatgpt;
-      return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, limits: chat.limits.checked, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
+      return { type: "chatgpt", auth: chat.auth.value, defaultEffort: chat.effort.value, identity: chat.identity.checked, limits: chat.limits.checked, fast: { main: chat.fastMain.checked, subagent: chat.fastSubagent.checked }, ...(chat.append.value.trim() ? { instructionsAppend: chat.append.value.trim() } : {}) };
     }
     const prompt = advancedContent._prompt;
     return {
@@ -3331,7 +3339,7 @@ function openProviderForm(options) {
     // (debugDump, a hand-written setting) is carried over from the saved one rather than dropped.
     // A field the form owns is left to the draft, so clearing it in the form still clears it.
     const formKeys = new Set(isChatgpt
-      ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "models"]
+      ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "fast", "models"]
       : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = { ...kept, ...provider };

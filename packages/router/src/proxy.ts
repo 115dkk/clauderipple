@@ -738,6 +738,13 @@ export class Proxy {
     };
     const session = req.headers["x-claude-code-session-id"];
     if (typeof session === "string" && /^[\w-]{1,128}$/.test(session)) record.session = session;
+    // Claude Code names the agent a request was made inside, and only a subagent's request carries
+    // the name (CLI 2.1.304: `...Y?.agentId&&{"x-claude-code-agent-id":…}`). This one bit is what
+    // tells the main session from a subagent's turns, so it is recorded for every provider and read
+    // by the ChatGPT adapter to choose its tier.
+    const agentId = req.headers["x-claude-code-agent-id"];
+    const subagent = typeof agentId === "string" && agentId.length > 0;
+    if (subagent) record.subagent = true;
     let observedUsage: RequestUsage | undefined;
     let observedStopReason: string | undefined;
     // Set once a Google turn came back unwritten (a prompt refusal or no model capacity), which allows
@@ -1002,7 +1009,7 @@ export class Proxy {
             try {
               // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
               // here fails over once every account is out (chooseTarget asks the adapter).
-              const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json));
+              const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json), { subagent });
               if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {

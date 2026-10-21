@@ -88,7 +88,7 @@ async function rig() {
   const observed = new ObservedClaudeCodeAuth();
   const proxy = new Proxy({ config: () => cfg, home, requests, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health: new UpstreamHealth(() => 100, () => {}), upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
   await proxy.listen();
-  const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: () => void) => {
+  const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: () => void, headers: Record<string, string> = {}) => {
     const socket = net.connect(port, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -109,7 +109,8 @@ async function rig() {
       secure.once("error", reject);
     });
     beforeSend?.();
-    secure.write(`POST ${pathname} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    const headerLines = Object.entries(headers).map(([name, value]) => `${name}: ${value}`).join("\r\n");
+    secure.write(`POST ${pathname} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}${headerLines ? `\r\n${headerLines}` : ""}\r\n\r\n${body}`);
     const text = await result;
     secure.destroy();
     return { text, record: requests.list(1)[0]! };
@@ -150,6 +151,28 @@ test("proxy finish correlates every translated message and records actual servic
     const count = await r.send("gpt-test", {}, "/v1/messages/count_tokens");
     assert.equal(count.record.messageId, undefined);
     assert.equal(count.record.requestedTier, undefined);
+  } finally { await r.stop(); }
+});
+
+test("the agent header marks a subagent's turn, and the provider's Fast switch asks for the Codex tier", async () => {
+  const r = await rig();
+  try {
+    const gpt = r.cfg.providers.gpt as { type: "chatgpt"; auth: "own"; url: string; models: { id: string }[]; fast?: { main?: boolean; subagent?: boolean } };
+    r.cfg.providers.gpt = { ...gpt, fast: { subagent: true } };
+    // A main session's own turn: no agent header, so the subagent switch does not reach it.
+    const main = await r.send("gpt-test");
+    assert.equal(r.seen.at(-1)!.service_tier, undefined);
+    assert.equal(main.record.subagent, undefined);
+    assert.equal(main.record.requestedTier, undefined);
+    // A subagent's turn: the header is there, so the switch asks for the fast tier.
+    const subagent = await r.send("gpt-test", {}, "/v1/messages", undefined, { "x-claude-code-agent-id": "agent_1" });
+    assert.equal(r.seen.at(-1)!.service_tier, "priority");
+    assert.equal(subagent.record.subagent, true);
+    assert.equal(subagent.record.requestedTier, "priority", "the tier asked for is the tier recorded");
+    // The header is recorded for any provider, so its arrival can be measured.
+    const other = await r.send("chat-test", {}, "/v1/messages", undefined, { "x-claude-code-agent-id": "agent_2" });
+    assert.equal(other.record.provider, "chat");
+    assert.equal(other.record.subagent, true);
   } finally { await r.stop(); }
 });
 
