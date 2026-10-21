@@ -320,10 +320,9 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
 /**
  * The Anthropic endpoint a web search for `model` runs on, when the provider's preset measured that
  * its plan searches there although the model is spoken to on another wire (`anthropicSearch`).
- * OpenCode Go's DeepSeek models used to answer on Chat Completions, which has no search, while the
- * same key on the plan's Anthropic endpoint ran the server tool (measured 2026-10-07). The relay
- * stopped returning hits on 2026-10-21 and its preset now lists no models, so `searchProviderFor`
- * answers undefined for them and the search is refused rather than fabricated.
+ * No preset lists a model today: OpenCode Go's, once believed to search for DeepSeek on its
+ * Anthropic endpoint, never did (corrected 2026-10-21), so the search is refused there rather
+ * than fabricated. DeepSeek's search works only on DeepSeek's own API.
  */
 export function searchProviderFor(provider: Provider | undefined, model: string): AnthropicCompatibleProvider | undefined {
   const presetId = provider && "preset" in provider ? provider.preset : undefined;

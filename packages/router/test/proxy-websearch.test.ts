@@ -198,12 +198,11 @@ test("a search routed to a ChatGPT provider is served by its own search without 
   assertSearched(reply, "chatgpt/gpt-6-luna");
 });
 
-// OpenCode Go served its DeepSeek models on Chat Completions, which has no search, but the same key
-// on the plan's Anthropic endpoint used to run the server tool (measured 2026-10-07). On 2026-10-21
-// the relay started answering 200 with no `web_search_tool_result` hits and the user confirmed every
-// search fails, so the preset's `anthropicSearch` list is empty. A search routed there must now be
+// OpenCode Go serves its DeepSeek models on Chat Completions, which has no search, and its Anthropic
+// endpoint returns no `web_search_tool_result` hits either (2026-10-21; a 2026-10-07 claim that it
+// searched was wrong). The preset's `anthropicSearch` list is empty, so a search routed there must be
 // refused — never sent to a backend that answers with nothing.
-test("a search routed to OpenCode Go's DeepSeek is refused after the relay stopped returning hits", async (t) => {
+test("a search routed to OpenCode Go's DeepSeek is refused, since the plan does not search", async (t) => {
   const real = globalThis.fetch;
   let contacted = false;
   t.after(() => { globalThis.fetch = real; });
