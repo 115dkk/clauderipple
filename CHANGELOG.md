@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.3 — 2026-10-22
+
+### Added
+
+- **Fast for GPT, separately for the main session and for subagents.** The ChatGPT provider's
+  settings have two switches, both off: "Fast for the main session" and "Fast for subagents".
+  When on, those GPT requests go out on Codex's fast tier, which answers sooner and uses the
+  subscription faster. Claude Code's own Fast toggle does not reach GPT models, so these are the
+  way to turn it on. Each request in the log now says whether a subagent made it.
+
+### Fixed
+
+- **The phone host says when Claude Code has no login of its own.** On a computer that only ever
+  used the Claude app, every phone turn failed at once with "Not logged in". `clauderipple doctor`
+  and `clauderipple remote install` now warn about it and say how to log in, and the phone shows
+  that instead of the raw error.
+
 ## 0.12.2 — 2026-10-22
 
 ### Fixed
