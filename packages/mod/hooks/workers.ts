@@ -13,7 +13,9 @@ export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple picks the 
   'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning, design or architecture where the deliverable is the decision itself. ' +
   'Size, file count or the brief\'s warnings do not by themselves make a task hard. Leave the marker out when unsure, and ClaudeRipple judges it. ' +
   'To run one particular model instead (the user asked for it, or a comparison needs it), name it on the first line: [[ripple: opus@high]] for a Claude model (opus, sonnet, haiku), or [[ripple: <worker agent name>@<effort>]]. ' +
-  'It runs as named, past every ClaudeRipple rule, and still shows in the agents panel; never start a model another way, such as claude -p, to get around the rules.'
+  'It runs as named, past every ClaudeRipple rule, and still shows in the agents panel; never start a model another way, such as claude -p, to get around the rules. ' +
+  'A brief states the scope, what must not be touched, the done criteria and how to verify them. Read the report for whether it did what was asked before using it. ' +
+  'Continue a worker with SendMessage only within 5 minutes of its last reply; later its cache has lapsed, so start a new one with a summary of what is done and what is left.'
 
 /**
  * The tier markers the main chat may write on a ripple:auto prompt, as the judge's verdict they

@@ -77,7 +77,11 @@ Opus for a server review, where the backend ladder's hard rung is Sol, started s
 log. `[[ripple: opus@high]]` on `ripple:auto` already did this (`requestPick`'s `explicit` branch:
 no judge, no ladder, no mode, `by: "marker"`; measured 2026-10-22, `opus@low` ran on
 `claude-opus-5-5` at effort low and was logged), but nothing told the main chat. The description
-now does, and says not to start a model another way.
+now does, and says not to start a model another way. It also carries what any delegator wants and
+had kept in a personal CLAUDE.md: what a brief states, checking the report did what was asked, and
+continuing a worker only within 5 minutes (after an 8-minute wait, three resumes rewrote 300k,
+338k and 377k uncached tokens, 2026-09-28). Leftover files are the worker body's rule already
+(`router/src/agents.ts`).
 
 **The pick log decides whether the judge stays.** `~/.clauderipple/logs/worker-picks.jsonl`,
 3,000 lines, three line types joined by the pick's `id`:
