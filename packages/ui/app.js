@@ -1103,6 +1103,35 @@ async function showPhoneQr(button) {
   } catch { if (generation === phoneQrGeneration) toast(t("common.loadFailed"), true); }
   finally { button.disabled = false; }
 }
+// Ripple Remote in the stores. iPhone links to the storefront of the dashboard's language, as the
+// README headers do; Android is a closed test on Google Play, joined through Discord, so no Play link.
+const REMOTE_STOREFRONT = { ko: "kr", en: "us", zh: "us", ja: "jp", es: "es", pt: "br" };
+const REMOTE_APP_STORE_URL = `https://apps.apple.com/${REMOTE_STOREFRONT[CURRENT_LANG] || "us"}/app/id6823063731`;
+const COMMUNITY_URL = "https://discord.gg/R8ZgGSNHjw";
+function externalLink(href, cls, children) { return el("a", { class: cls, href, target: "_blank", rel: "noopener noreferrer" }, children); }
+function phonePaired(data) { return Boolean(data && data.hostRunning && data.phones && data.phones.length); }
+function remoteAndroidNote(cls) { return el("span", { class: `${cls} remote-android` }, [t("phone.promo.android"), " · ", externalLink(COMMUNITY_URL, "login-link", [t("phone.promo.androidLink")])]); }
+/** No phone paired yet: what the app does that nothing else does, the store, and how the QR below fits in. */
+function remotePromo(data) {
+  const points = ["models", "hours", "private"].map(key => el("li", {}, [el("strong", { text: t(`phone.promo.${key}`) }), " ", t(`phone.promo.${key}Body`)]));
+  const phoneGlyph = svgIcon("0 0 20 20", ["M7 2h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M8.5 14.8h3"]);
+  const download = svgIcon("0 0 20 20", ["M10 3.5v9", "M6.2 9l3.8 3.8L13.8 9", "M4.5 16.5h11"], "remote-store-icon");
+  // Its own lang, so Korean wraps between words in a browser too (the app sets it on <html>).
+  return el("section", { class: "conn-card remote-promo", lang: CURRENT_LANG }, [
+    el("div", { class: "conn-hero" }, [el("div", { class: "conn-icon" }, [phoneGlyph]), el("div", { class: "conn-hero-text" }, [
+      el("p", { class: "remote-eyebrow", text: t("phone.promo.eyebrow") }),
+      el("h2", { class: "conn-title", text: t("phone.promo.title") }),
+      el("p", { class: "conn-lead", text: t("phone.promo.lead") }),
+    ])]),
+    el("ul", { class: "remote-points" }, points),
+    el("div", { class: "remote-get" }, [externalLink(REMOTE_APP_STORE_URL, "btn large remote-store", [download, t("phone.promo.appStore")]), remoteAndroidNote("hint")]),
+    el("p", { class: "remote-next", text: t(data.hostRunning ? "phone.promo.nextQr" : "phone.promo.nextHost") }),
+  ]);
+}
+/** A phone is paired already: one quiet row for the next phone instead of the pitch. */
+function remoteGetApp() {
+  return section(null, [cell(t("phone.promo.compact"), externalLink(REMOTE_APP_STORE_URL, "btn secondary compact", [t("phone.promo.appStoreShort")]), [remoteAndroidNote("cell-sub")])]);
+}
 function renderPhoneStatus(data) {
   const rows = [cell(t("phone.host"), badge(data.hostRunning ? "ok" : "warn", t(data.hostRunning ? "phone.running" : "phone.stopped")))];
   if (data.hostRunning) rows.push(cell(t("phone.mode"), el("span", { text: t(data.mode === "relay" ? "phone.relayStatus" : data.mode === "direct" ? "phone.directStatus" : "phone.localStatus") }), `${data.bind}:${data.port} · ${data.version}`),
@@ -1170,8 +1199,8 @@ function phoneControls(data) {
   });
   const phones = section(t("phone.phones"), []);
   $(".group", phones).id = "phone-phones";
-  return [section(t("phone.pairing"), [cell(t("phone.scan"), qr), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
-    phoneSettings(data), phoneRestart(), phones, section(null, [rotate], t("phone.sharedKey"))];
+  return [section(t("phone.pairing"), [cell(t("phone.scan"), qr, t("phone.scanHelp")), el("div", { id: "phone-qr", class: "phone-qr" })], [t("phone.qrWarning"), !data.reachableFromPhone ? t("phone.unreachable") : null]),
+    phoneSettings(data), phoneRestart(), phones, phonePaired(data) ? remoteGetApp() : null, section(null, [rotate], t("phone.sharedKey"))].filter(Boolean);
 }
 async function refreshPhone(rebuild = false) {
   if (!phoneActive() || offline()) return;
@@ -1179,11 +1208,12 @@ async function refreshPhone(rebuild = false) {
   try {
     const data = await api("/api/phone/status");
     if (generation !== phoneGeneration || !phoneActive()) return;
-    if (rebuild || !phoneSnapshot || phoneSnapshot.hostRunning !== data.hostRunning) {
+    // Pairing the first phone (or unpairing the last) swaps the pitch for its one-row form, so it rebuilds too.
+    if (rebuild || !phoneSnapshot || phoneSnapshot.hostRunning !== data.hostRunning || phonePaired(phoneSnapshot) !== phonePaired(data)) {
       hidePhoneQr();
       const state = section(t("phone.status"), []);
       $(".group", state).id = "phone-status";
-      $("#phone-content").replaceChildren(state, ...(data.hostRunning ? phoneControls(data) : []));
+      $("#phone-content").replaceChildren(...(phonePaired(data) ? [] : [remotePromo(data)]), state, ...(data.hostRunning ? phoneControls(data) : []));
     }
     phoneSnapshot = data;
     renderPhoneStatus(data);
