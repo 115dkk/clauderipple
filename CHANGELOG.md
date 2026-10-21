@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.2 — 2026-10-22
+
+### Fixed
+
+- **Back on Wi-Fi only when a known Wi-Fi is in range.** After a hotspot failover, the way back
+  no longer drops the hotspot for a Wi-Fi that is not there, which cut the connection on the move.
+
+### Changed
+
+- **Naming a model on a delegation is now explained to the main chat.** `ripple:auto`'s
+  description says that `[[ripple: opus@high]]` (or a worker's name) on the first line runs that
+  model past every ClaudeRipple rule and still shows in the agents panel, so a session no longer
+  starts models outside it to get one. It also says what a brief should state, to check that the
+  report did what was asked, and to resume a worker only within 5 minutes of its last reply.
+
 ## 0.12.1 — 2026-10-21
 
 ### Changed
