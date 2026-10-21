@@ -10,6 +10,14 @@ import type { InputBlock } from "./images.ts";
 export const DESKTOP_BLOCKED = "Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
 export const LOGIN_EXPIRED = "이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.";
 export const LOGIN_REFUSED = "이 컴퓨터의 Claude 로그인이 거절되었습니다 (401). Claude 앱을 한 번 열어 주십시오.";
+// The Claude Code CLI has no login of its own. The host starts the CLI through the Agent SDK and
+// passes no credential, so the CLI's own "Not logged in · Please run /login" is the whole error a
+// phone sees; this says it in the host's words (issue #71).
+export const CLI_NOT_LOGGED_IN = "이 컴퓨터의 Claude Code에 로그인되어 있지 않습니다. 터미널에서 Claude Code를 한 번 실행해 /login 해 주십시오.";
+/** The CLI's own words for the same thing, tolerant of the spacing around them. */
+export function isCliNotLoggedIn(text: string): boolean {
+  return /^\s*not\s+logged\s+in\b/i.test(text);
+}
 export interface BridgeAuth { accessToken: string; organizationUuid: string; expiresAt: number }
 class BridgeNetworkError extends Error {}
 /**

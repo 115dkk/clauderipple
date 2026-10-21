@@ -9,7 +9,7 @@ import { PowerHold } from "../src/power.ts";
 import type { Held } from "../src/power.ts";
 import { Notifier, loadVapid, pushFor } from "../src/push.ts";
 import type { Sender } from "../src/push.ts";
-import { LABEL, agentPath, install, parseLaunchctlPrint, plist, specFor, uninstall } from "../src/service.ts";
+import { LABEL, agentPath, cliLoginWarning, install, parseLaunchctlPrint, plist, specFor, uninstall } from "../src/service.ts";
 import type { EventBody, PushSubscriptionJSON, SessionSummary } from "../src/protocol.ts";
 
 const tmp = (t: { after(fn: () => void): void }): string => {
@@ -93,6 +93,17 @@ test("launchctl print: state, pid and last exit are read from the first matching
   const out = "gui/501/x = {\n\tactive count = 1\n\tstate = running\n\n\tpid = 15580\n\tlast exit code = 75: EX_TEMPFAIL\n\tendpoints = {\n\t\tstate = active\n";
   assert.deepEqual(parseLaunchctlPrint(out), { state: "running", pid: 15580, lastExit: "75: EX_TEMPFAIL" });
   assert.deepEqual(parseLaunchctlPrint(""), { state: null, pid: null, lastExit: null });
+});
+
+// ---- the Claude Code login the host needs (issue #71) ---------------------------------------------
+
+test("the install warning names the binary to run, and a machine with a login says nothing", () => {
+  const warning = cliLoginWarning({ ok: false, where: "no Claude Code login" }, "/Applications/Claude/claude.app/Contents/MacOS/claude");
+  assert.ok(warning);
+  assert.match(warning, /\/login/);
+  assert.match(warning, /\/Applications\/Claude\/claude/);
+  assert.equal(warning.includes("\n"), false, "one line");
+  assert.equal(cliLoginWarning({ ok: true, where: "the macOS keychain" }, "/x/claude"), null);
 });
 
 // ---- power ---------------------------------------------------------------------------------------
