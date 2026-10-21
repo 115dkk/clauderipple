@@ -291,19 +291,48 @@ async function refreshHealth() {
   if (clientsLoaded) renderClients();
   if (modState.settings) renderModNotice();
   const details = $("#health-details");
-  details.replaceChildren(
+  modRedraw(details, [
     versionRow(),
+    autoUpdateRow(),
     // Which files answer, and since when: the only way to see that an update actually replaced the router.
     ...(status.runtime ? [cell(t("health.runtime"), null, [el("span", { class: "cell-sub mono", text: status.runtime.router || "?" }), new Date(status.runtime.startedAt).toLocaleString()])] : []),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.routes") }), el("span", { class: "v", text: String(status.routes) })]),
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.cli") }), el("span", { class: "v", text: status.cliVersion })]),
-  );
+  ]);
 }
 
 // The update check runs on a click, not with the 5-second refresh: it asks the npm registry. What an
 // update means depends on how this copy was installed, so the router's CLI decides and runs it; the
 // router restarts on the new version and the served-files check above reloads this page.
 let updateState = { busy: false, check: null };
+let autoUpdateSaving = false;
+function autoUpdateRow() {
+  const control = modSwitch("auto-update", status.autoUpdate?.enabled !== false, t("update.auto"), toggleAutoUpdate);
+  control.querySelector("input").disabled = autoUpdateSaving || !status.autoUpdate;
+  return cell(t("update.auto"), control, t("update.autoHelp"));
+}
+async function toggleAutoUpdate(enabled) {
+  if (autoUpdateSaving) return;
+  autoUpdateSaving = true;
+  const input = document.querySelector('[data-key="auto-update"]');
+  if (input) input.disabled = true;
+  try {
+    // Do not use latestConfig's stale fallback for an automatic-install preference.
+    const next = await api("/api/config");
+    next.autoUpdate = enabled;
+    await configRequest(next);
+    currentConfig = next;
+    if (status.autoUpdate) status.autoUpdate.enabled = enabled;
+    toast(t("common.saved"));
+  } catch (error) {
+    toast(t("common.saveFailed"), true, error.message);
+  } finally {
+    autoUpdateSaving = false;
+    await refreshHealth();
+    const current = document.querySelector('[data-key="auto-update"]');
+    if (current) { current.disabled = !status.autoUpdate; current.checked = status.autoUpdate?.enabled !== false; }
+  }
+}
 function versionRow() {
   const check = updateState.check;
   // The version reads as the row's label; what the update check found sits under it, the action on the right.

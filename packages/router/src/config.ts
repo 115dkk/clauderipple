@@ -374,6 +374,8 @@ export type CliModel = {
 };
 
 export type Config = {
+  /** Install new versions while idle. Omitted means enabled; hot-reloaded. */
+  autoUpdate?: boolean;
   listen: { host: string; port: number; /** OpenAI-compatible ingress port. Defaults to port + 2. */ openaiPort?: number };
   upstream: string;
   providers: Record<string, Provider>;
@@ -714,6 +716,7 @@ function foldSplitProviders(c: Config): Config {
 
 export function validate(c: Config): string[] {
   const errors: string[] = [];
+  if (c.autoUpdate !== undefined && typeof c.autoUpdate !== "boolean") errors.push("autoUpdate must be true or false");
   if (c.autoModeClassifier !== undefined) {
     const target = c.autoModeClassifier;
     if (!target || typeof target !== "object") errors.push("autoModeClassifier must be an object");

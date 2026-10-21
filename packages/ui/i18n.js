@@ -2,6 +2,8 @@
 
 const I18N = {
   ko: {
+    "update.auto": "자동 업데이트",
+    "update.autoHelp": "ClaudeRipple이 유휴 상태일 때 새 버전을 자동 설치합니다. 진행 중인 요청이 끝나면 다시 시작합니다.",
     "brand": "ClaudeRipple",
     "nav.health": "상태", "nav.slots": "모델 매핑", "nav.providers": "프로바이더", "nav.clients": "클라이언트", "nav.logs": "로그", "nav.about": "정보",
     "lang.label": "언어",
@@ -217,6 +219,8 @@ const I18N = {
     "mod.modeRemoveConfirm": "‘{name}’ 모드를 삭제할까요?",
   },
   en: {
+    "update.auto": "Automatic updates",
+    "update.autoHelp": "Automatically installs new versions while ClaudeRipple is idle, then restarts once requests in flight have finished.",
     "brand": "ClaudeRipple",
     "nav.health": "Status", "nav.slots": "Model mapping", "nav.providers": "Providers", "nav.clients": "Clients", "nav.logs": "Logs", "nav.about": "About",
     "lang.label": "Language",
@@ -432,6 +436,8 @@ const I18N = {
     "mod.modeRemoveConfirm": "Delete the mode “{name}”?",
   },
   zh: {
+    "update.auto": "自动更新",
+    "update.autoHelp": "在 ClaudeRipple 空闲时自动安装新版本，待进行中的请求完成后重启。",
     "brand": "ClaudeRipple",
     "nav.health": "状态",
     "nav.slots": "模型映射",
@@ -947,6 +953,8 @@ const I18N = {
     "mod.modeRemoveConfirm": "删除模式“{name}”？",
   },
   ja: {
+    "update.auto": "自動アップデート",
+    "update.autoHelp": "ClaudeRipple が待機中に新しいバージョンを自動でインストールし、処理中のリクエストが終わってから再起動します。",
     "brand": "ClaudeRipple",
     "nav.health": "ステータス",
     "nav.slots": "モデルマッピング",
@@ -1462,6 +1470,8 @@ const I18N = {
     "mod.modeRemoveConfirm": "モード「{name}」を削除しますか？",
   },
   es: {
+    "update.auto": "Actualizaciones automáticas",
+    "update.autoHelp": "Instala nuevas versiones automáticamente cuando ClaudeRipple está inactivo y se reinicia cuando terminan las solicitudes en curso.",
     "brand": "ClaudeRipple",
     "nav.health": "Estado",
     "nav.slots": "Asignación de modelos",
@@ -1977,6 +1987,8 @@ const I18N = {
     "mod.modeRemoveConfirm": "¿Eliminar el modo «{name}»?",
   },
   pt: {
+    "update.auto": "Atualizações automáticas",
+    "update.autoHelp": "Instala novas versões automaticamente enquanto o ClaudeRipple está ocioso e reinicia quando as requisições em andamento terminam.",
     "brand": "ClaudeRipple",
     "nav.health": "Status",
     "nav.slots": "Mapeamento de modelos",

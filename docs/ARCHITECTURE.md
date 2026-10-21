@@ -1599,6 +1599,41 @@ plan unless marked otherwise.
 | Android hotspot never recognised (2026-10-20, found by reading the code for an owner with Windows laptops and Android phones in mind): "on the hotspot" was the iPhone range 172.20.10.0/28 alone, on macOS and Windows. An Android hotspot hands out 192.168.43.x (≤ Android 10) or a random /24 (Android 11+; 192.168/16, 172.16/12, 10/8 by Android 14), so after our own failover `join()` saw no hotspot address and reported `join-failed`/`hotspot-not-visible`, while on the phone the controller read Wi-Fi and never planned the way back, and a by-hand join was never recognised | The product does not assume an iPhone. After our own join of the configured SSID is accepted by the OS, a new, non-link-local address within the settle time is the join, and its subnet (address + netmask from `os.networkInterfaces()`: no Location, no elevation) is kept in `<home>/tether.json` for that hotspot name; "on the hotspot" = iPhone range OR that network (§8). Only our own join replaces it, and a subnet equal to the Wi-Fi watched before is not remembered (logged as ambiguous) so home Wi-Fi is never read as the hotspot. Hints name both phones where the step differs. Not yet run with a real Android phone. |
 | An expired Claude login on the Mac wrote `[desktop state] …로그인이 만료되었습니다…` every few seconds per Claude app session and read the keychain (a synchronous child process) for every request, while phones learned of it only by a failed send (2026-10-15) | A login problem is one host state: logged when it starts and ends, sent to phones as `HostInfo.desktopProblem` (a banner), and the keychain is reread at most every 30 s while expired or after a 401. Per-session Remote Control errors log once per change. The host never refreshes the login itself. |
 
+### Router-owned automatic updates (2026-10-21)
+
+The always-running router owns the scheduler, not the optional tray. `autoupdate.ts` starts its
+first `update --check --json` after ten minutes and checks again every twelve hours with ±30 minutes
+of jitter. Only script and global npm installs are eligible; packaged apps, source checkouts and
+unknown layouts are checked but never automatically installed. The dashboard's **Automatic updates**
+switch saves `Config.autoUpdate`; omission means on, and changes are hot-reloaded without restarting.
+
+Installation waits for zero model calls in flight across both the proxy and OpenAI ingress, and ten
+minutes since the latest request start/end (or router startup). Busy routers are checked every five
+minutes; after twenty-four hours the wait is abandoned until the next cycle. A request arriving after
+the idle decision still follows the existing graceful drain rules above. The scheduler stops when
+that drain begins. Manual dashboard updates and automatic updates share one coordinator and the
+same detached CLI process-group path in `cli-control.ts`; the installer survives the router's exit.
+
+Before launch, `<home>/auto-update.json` is atomically written with from/to versions and attempt time.
+The CLI is pinned to that target through `CLAUDERIPPLE_PACKAGE`. The successor only records completion
+when its running version exactly matches the target; a CLI exit alone is not proof of completion.
+Failures retain the failed version, timestamp and error, suppressing automatic retries of that
+version for twenty-four hours, including across router restarts. A surviving installer PID blocks a
+second installation. Unreadable state disables installs rather than losing the retry record. Every
+scheduler decision is logged at info level. GET `/api/status` exposes `autoUpdate`, including enabled,
+install kind, available version, running state, lastUpdatedFrom/To/At and lastError.
+
+The tray consumes that status, deduplicates completed/available notifications in memory and
+`<home>/update-notifications.json`, and relaunches an outdated script/npm tray after confirmed
+completion, waiting for the installer PID to exit so its tray-runtime setup can finish first.
+Disabled automatic updates and unsupported install kinds get a click-to-update notice;
+packaged apps retain the releases-page flow. Existing versions **without this scheduler cannot be
+remotely updated into it**: their owner must first update manually through an existing supported path.
+No remotely pushed command or live installation test is part of this feature's validation.
+
+Sources: `packages/router/src/autoupdate.ts`, `cli-control.ts`, `index.ts`, `admin.ts`, `config.ts`;
+`packages/app/src/update-model.ts`, `main.ts`; scheduler and tray decision tests.
+
 ## 6. Blocked paths (measured, do not retry)
 
 - The app puts `ANTHROPIC_BASE_URL` in the CLI process env directly;
