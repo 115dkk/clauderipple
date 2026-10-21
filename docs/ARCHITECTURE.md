@@ -686,15 +686,17 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
         its hits arrive as Responses events (`web_search_call`, `url_citation`), a backend the router
         does not have. DeepSeek's own endpoint and the ChatGPT provider run Anthropic's server tool;
         OpenCode Go's chat endpoint, and every `openai-compatible` provider, do not.
-      - **OpenCode Go's Anthropic endpoint does, for DeepSeek only** (corrected 2026-10-07). The
-        line above once said it did not. Re-measured with the key in `x-api-key` (a bearer there
-        answers "Missing API key"), Claude Code's own side request to `/zen/go/v1/messages` came back
-        with ten real hits and `web_search_requests: 1` for deepseek-v4.1-flash, deepseek-v4-flash
-        and deepseek-v4-pro; Kimi K3, MiniMax M3 and Qwen3.8 Flash took the tool and never searched;
-        GLM and MiMo are not served there. The preset lists those three as `anthropicSearch`, and a
-        search routed to one of them (a `smallFast` slot on OpenCode Go's DeepSeek) is relayed there
-        by `anthropicServerToolBackend`, though the model's turns stay on Chat Completions. The
-        Clients screen reads `webSearchModels` from `/api/status` to stop calling them unsearchable.
+      - **OpenCode Go's Anthropic endpoint no longer searches** (corrected 2026-10-21). It did, for
+        DeepSeek only: remeasured with the key in `x-api-key` (a bearer there answers "Missing API
+        key"), Claude Code's own side request to `/zen/go/v1/messages` came back with ten real hits
+        and `web_search_requests: 1` for deepseek-v4.1-flash, deepseek-v4-flash and deepseek-v4-pro
+        (2026-10-07); Kimi K3, MiniMax M3 and Qwen3.8 Flash took the tool and never searched; GLM
+        and MiMo are not served there. On 2026-10-21 the same side request answered HTTP 200 with no
+        `web_search_tool_result` hits (`router.log`: "no results returned", twice, then a refusal),
+        and the user confirms every DeepSeek search fails. The preset's `anthropicSearch` list is
+        therefore empty — kept as the measured shape rather than deleted — so `searchProviderFor`
+        answers nothing for those models, `/api/status` drops them from `webSearchModels`, and a
+        search routed there is refused instead of answered with invented prose.
     - **A model that cannot search does not merely decline — it invents.** Measured 2026-09-21
       against OpenCode Go's chat endpoint: `plugins: [{id: "web"}]` is accepted and ignored (HTTP
       200, no `annotations`, cache reporting no lookup), and the model answers a search-shaped

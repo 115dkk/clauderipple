@@ -53,7 +53,7 @@ function decodeHttpResponse(raw: Buffer): { status: number; body: string } {
 }
 
 type SearchReply = {
-  message: { content: { type?: string; content?: { url?: string }[] }[]; usage: { server_tool_use: { web_search_requests: number } } };
+  message: { content: { type?: string; content?: unknown }[]; usage: { server_tool_use: { web_search_requests: number } } };
   seenTool: unknown;
   target: string | undefined;
   record: RequestRecord | undefined;
@@ -198,24 +198,18 @@ test("a search routed to a ChatGPT provider is served by its own search without 
   assertSearched(reply, "chatgpt/gpt-6-luna");
 });
 
-// OpenCode Go serves its DeepSeek models on Chat Completions, which has no search, but the same key
-// on the plan's Anthropic endpoint runs the server tool (measured 2026-10-07). A search routed to one
-// goes there, with the key moved to x-api-key and the session header the vendor requires.
-test("a search routed to OpenCode Go's DeepSeek runs on the plan's Anthropic endpoint", async (t) => {
+// OpenCode Go served its DeepSeek models on Chat Completions, which has no search, but the same key
+// on the plan's Anthropic endpoint used to run the server tool (measured 2026-10-07). On 2026-10-21
+// the relay started answering 200 with no `web_search_tool_result` hits and the user confirmed every
+// search fails, so the preset's `anthropicSearch` list is empty. A search routed there must now be
+// refused — never sent to a backend that answers with nothing.
+test("a search routed to OpenCode Go's DeepSeek is refused after the relay stopped returning hits", async (t) => {
   const real = globalThis.fetch;
-  let seen: { url: string; headers: Headers; body: { model?: string; tools?: { type?: string }[] } } | undefined;
+  let contacted = false;
   t.after(() => { globalThis.fetch = real; });
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = String(input);
-    if (!url.startsWith("https://opencode.ai/")) return real(input, init);
-    seen = { url, headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as never };
-    return new Response(JSON.stringify({
-      content: [
-        { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "latest Node.js 24 release" } },
-        { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [{ type: "web_search_result", title: "Node.js", url: "https://nodejs.org/en/download" }] },
-      ],
-      usage: { server_tool_use: { web_search_requests: 1 } },
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    if (String(input).startsWith("https://opencode.ai/")) contacted = true;
+    return real(input, init);
   }) as typeof fetch;
   const reply = await searchThrough("deepseek-v4.1-flash@high", () => ({
     providers: {
@@ -230,14 +224,9 @@ test("a search routed to OpenCode Go's DeepSeek runs on the plan's Anthropic end
       },
     },
   }));
-  assert.equal(seen?.url, "https://opencode.ai/zen/go/v1/messages");
-  assert.equal(seen?.headers.get("x-api-key"), "go-key");
-  assert.equal(seen?.headers.get("authorization"), null);
-  assert.ok(seen?.headers.get("x-opencode-session"), "the session header went out");
-  assert.equal(seen?.body.model, "deepseek-v4.1-flash");
-  assert.equal(seen?.body.tools?.[0]?.type, "web_search_20250305");
   const result = reply.message.content.find((block) => block.type === "web_search_tool_result");
-  assert.deepEqual(result?.content, [{ type: "web_search_result", title: "Node.js", url: "https://nodejs.org/en/download" }]);
-  assert.equal(reply.message.usage.server_tool_use.web_search_requests, 1);
-  assert.equal(reply.target, "opencode-go/deepseek-v4.1-flash");
+  assert.deepEqual(result?.content, { type: "web_search_tool_result_error", error_code: "unavailable" });
+  assert.equal(reply.message.usage.server_tool_use.web_search_requests, 0);
+  assert.equal(contacted, false, "nothing was sent to the relay");
+  assert.equal(reply.record?.refusal, "web-search-unsupported");
 });

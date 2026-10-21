@@ -66,6 +66,9 @@ test("OpenCode Go is one preset whose models carry the wire each one speaks", ()
   // Gone from the catalogue and from the docs: a preset row for a model the vendor no longer serves
   // is one the operator can tick and never use.
   assert.equal(byId.has("union-alpha"), false);
+  // 2026-10-21: the plan's Anthropic endpoint answers the search side request 200 with no
+  // `web_search_tool_result` hits, so the DeepSeek models must no longer be offered as searchable.
+  assert.deepEqual(preset.anthropicSearch?.models, []);
 
   // No model states an effort ladder. The blanket empty one was an assumption and measurably wrong
   // — deepseek-v4.1-flash takes all eight levels — and an empty ladder is never measured, so it

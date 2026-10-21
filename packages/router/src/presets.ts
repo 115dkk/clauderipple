@@ -331,12 +331,17 @@ export const PRESETS: ProviderPreset[] = [
     effortLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
     thinking: "none",
     // The DeepSeek models are served on Chat Completions, which ignores every search option, but
-    // the same key on the Anthropic endpoint runs `web_search_20250305` for them: Claude Code's own
-    // side request came back with a `web_search_tool_result` of ten real pages and
+    // the same key on the Anthropic endpoint used to run `web_search_20250305` for them: Claude
+    // Code's own side request came back with a `web_search_tool_result` of ten real pages and
     // `web_search_requests: 1` (measured 2026-10-07; a bearer header there answers "Missing API
     // key"). Kimi K3, MiniMax M3 and Qwen3.8 Flash take the tool on that endpoint and never search;
     // GLM and MiMo are not served there at all.
-    anthropicSearch: { url: "https://opencode.ai/zen/go", authHeader: "x-api-key", models: ["deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-pro"] },
+    //
+    // 2026-10-21: the relay now answers the same side request with HTTP 200 and no
+    // `web_search_tool_result` hits ("opencode-go web search: no results returned"), and the user
+    // confirms every DeepSeek search fails. The list is emptied so `/api/status` stops offering
+    // these models as searchable and a search routed there is refused instead of fabricated.
+    anthropicSearch: { url: "https://opencode.ai/zen/go", authHeader: "x-api-key", models: [] },
     verified: true,
     notes: "One subscription and key, three endpoints by wire. Measured 2026-09-18. Responses: Muse Spark answers, effort ladder tops out at xhigh, prompt cache reached 96% on a repeated turn. Chat: glm-5.3, glm-5.3-flash, kimi-k3, kimi-k2.7-code, deepseek-v4.1-flash, deepseek-v4-pro, longcat-2.0 and mimo-v2.5-pro all answered. Anthropic: minimax-m3, qwen3.8-max and qwen3.8-flash answered with the prompt cache at 99% on a repeated turn, while union-alpha, the free row, answered \"Model is unavailable\". The Muse Spark Contributor tier is ~90% cheaper because Meta states those interactions improve its products, and OpenCode refuses the model until the workspace opts in (403 DataPolicyError); it is also limited to some regions.",
     docsUrl: "https://opencode.ai/docs/go/",
