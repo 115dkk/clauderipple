@@ -149,6 +149,9 @@ test("domain editors copy, edit and remove only the selected set's rule; new mod
   };
   const click = (nodes: Node[], key: string) => find(nodes, key)!.events.click!();
   const toggle = (nodes: Node[], key: string, checked: boolean) => { const input = find(nodes, key)!; input.checked = checked; input.events.change!(); };
+  // The general tab keeps its four rungs.
+  const general = ui.rows();
+  for (const rung of ['light', 'standard', 'hard', 'plan']) assert.ok(find(general, `worker:base:general:${rung}:0`), rung);
   click(ui.rows(), 'worker-domain:base:ui');
   let rows = ui.rows();
   assert.equal(rows[1]!.attrs.help, 'mod.domainFollowsGeneral');
@@ -156,12 +159,19 @@ test("domain editors copy, edit and remove only the selected set's rule; new mod
   toggle(rows, 'worker-separate:base:ui', true);
   const original = ui.state.settings.rules.general.rungs;
   const copied = ui.state.settings.domainRules!.ui!.rungs;
-  assert.deepEqual(copied, original);
+  // A domain ladder is the general one folded into two levels: standard's list for the light pair, plan's for the heavy one.
+  assert.deepEqual(copied, { light: original.standard, standard: original.standard, hard: original.plan, plan: original.plan });
   assert.notEqual(copied.light![0]!.target, original.light![0]!.target);
   rows = ui.rows();
+  // Two rows only: the light level and the heavy one.
+  assert.equal(find(rows, 'worker:base:ui:light:0')!.attrs['aria-label'], 'mod.domainLevel.light 1');
+  assert.equal(find(rows, 'worker:base:ui:heavy:0')!.attrs['aria-label'], 'mod.domainLevel.heavy 1');
+  assert.equal(find(rows, 'worker:base:ui:standard:0'), undefined);
   const select = find(rows, 'worker:base:ui:light:0')!;
   select.value = 'general-purpose+sonnet|high'; select.events.change!();
+  // The light level edits the whole light pair.
   assert.equal(ui.state.settings.domainRules!.ui!.rungs.light![0]!.target.model, 'sonnet');
+  assert.equal(ui.state.settings.domainRules!.ui!.rungs.standard![0]!.target.model, 'sonnet');
   assert.equal(original.light![0]!.target.agent, 'deepseek-v4-1-flash');
   // New-mode creation is the actual form handler, not a reconstructed copy operation.
   const form = ui.create();
@@ -172,7 +182,10 @@ test("domain editors copy, edit and remove only the selected set's rule; new mod
   assert.notEqual(mode.domainRules!.ui!.rungs.light![0]!.target, ui.state.settings.domainRules!.ui!.rungs.light![0]!.target);
   click(ui.rows(mode), `worker-domain:${mode.id}:backend`);
   toggle(ui.rows(mode), `worker-separate:${mode.id}:backend`, true);
-  assert.deepEqual(ui.state.settings.modes[0]!.domainRules!.backend!.rungs, mode.rungs);
+  // The mode's own domain ladder is the mode's general rungs, folded the same way.
+  assert.deepEqual(ui.state.settings.modes[0]!.domainRules!.backend!.rungs, {
+    light: mode.rungs.standard, standard: mode.rungs.standard, hard: mode.rungs.plan, plan: mode.rungs.plan,
+  });
   assert.equal(ui.state.settings.domainRules!.backend, undefined);
   toggle(ui.rows(), 'worker-separate:base:ui', false);
   assert.equal(ui.state.settings.domainRules, undefined);

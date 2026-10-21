@@ -251,12 +251,35 @@ test("admin fills Base and mode domain ladders even when every general rung is a
       for (const rule of Object.values(set.domainRules!)) {
         assert.deepEqual(Object.keys(rule.rungs).sort(), ['hard', 'light', 'plan', 'standard']);
         assert.ok(Object.values(rule.rungs).every(steps => steps.length > 0));
+        // A domain ladder has two levels: the fill leaves each pair holding one list.
+        assert.deepEqual(rule.rungs.light, rule.rungs.standard);
+        assert.deepEqual(rule.rungs.hard, rule.rungs.plan);
       }
     }
     assert.equal(Object.hasOwn(saved.settings.modes[1]!, 'domainRules'), false);
     assert.equal(saved.legacy, undefined);
     assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), saved);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'mod-settings.json'), 'utf8')), saved);
+  });
+});
+
+test("admin folds a domain ladder into two levels and leaves the general ladder's four rungs", async () => {
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const light = [{ target: { agent: "general-purpose", model: "haiku" }, effort: "low" }];
+    const standard = [{ target: { agent: "general-purpose", model: "sonnet" }, effort: "medium" }];
+    const hard = [{ target: { agent: "general-purpose", model: "opus" }, effort: "high" }];
+    const plan = [{ target: { agent: "general-purpose", model: "opus" }, effort: "xhigh" }];
+    const input = normalizeSettings({ rules: { general: { mode: "ladder", rungs: { light, standard, hard, plan } } }, domainRules: {
+      ui: { mode: "ladder", rungs: { light, standard, hard, plan } },
+    } });
+    const saved = await (await putModSettings(port, { settings: input, revision: 0 })).json() as ModSettingsSnapshot;
+    // The general ladder keeps its four rungs.
+    assert.deepEqual(saved.settings.rules.general.rungs, { light, standard, hard, plan });
+    // The domain ladder's pairs hold one list each: standard's for the light pair, plan's for the heavy one.
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.light, standard);
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.standard, standard);
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.hard, plan);
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.plan, plan);
   });
 });
 

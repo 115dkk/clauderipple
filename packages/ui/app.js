@@ -3387,6 +3387,11 @@ const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus", "fable"];
 const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
 // The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
+// A domain ladder has two levels: the light pair (light+standard) and the heavy pair (hard+plan).
+const MOD_DOMAIN_LEVELS = [
+  { key: "light", rungs: ["light", "standard"] },
+  { key: "heavy", rungs: ["hard", "plan"] },
+];
 const modClaude = (model, effort) => ({ target: { agent: "general-purpose", model }, effort });
 /** The mod's defaults (packages/mod/hooks/settings.ts), for a router that has stored nothing yet. */
 const MOD_DEFAULTS = {
@@ -3761,6 +3766,16 @@ function modRungs() {
   const general = modState.settings.rules.general;
   return general && general.mode === "ladder" && general.rungs ? general.rungs : {};
 }
+/** A domain ladder folded into two levels: light+standard hold one list, hard+plan another.
+ * The upper rung of each pair wins; an empty upper rung falls back to the lower. */
+function modTwoLevelRungs(rungs) {
+  const out = {};
+  const light = rungs.standard && rungs.standard.length ? rungs.standard : rungs.light;
+  const heavy = rungs.plan && rungs.plan.length ? rungs.plan : rungs.hard;
+  if (light && light.length) { out.light = clone(light); out.standard = clone(light); }
+  if (heavy && heavy.length) { out.hard = clone(heavy); out.plan = clone(heavy); }
+  return out;
+}
 /** One menu of `model · effort` for the ticked models, effort limited to what each model takes; the session's model too. */
 function modPickSelect(key, step, shown, label, onPick) {
   const choices = modChoices().filter((choice) => choice.value === "general-purpose" || modTicked(choice));
@@ -3810,48 +3825,72 @@ function modWorkerRows(mode) {
     { value: "backend", label: t("mod.domain.backend") },
   ], key, t("mod.workerDomain"), (value) => { modRuleTabs.set(id, value); modRefresh(); }), null, "wide")];
   if (key !== "general") rows.push(cell(t("mod.domainSeparate"), modSwitch(`worker-separate:${id}:${key}`, !!rule, t("mod.domainSeparate"), (on) => {
-    modSetDomainRule(mode, key, on ? { mode: "ladder", rungs: clone(mode ? mode.rungs : modRungs()) } : undefined);
+    // Switching on copies the set's general rungs, folded the same way a domain ladder is.
+    modSetDomainRule(mode, key, on ? { mode: "ladder", rungs: modTwoLevelRungs(mode ? mode.rungs : modRungs()) } : undefined);
   }), rule ? null : t("mod.domainFollowsGeneral"), "wide"));
   if (key === "general" || rule) rows.push(...modRungRows(mode, key));
   return rows;
 }
-/** The same ordered-rung editor for the selected rule in Base or a saved mode.
+/** One rung row: the ordered model·effort list of a rung, with reorder, remove and add.
+ * @param {import("../mod/types").Mode | undefined} mode
+ * @param {WorkerRuleKey} ruleKey
+ * @param {string} rowKey the row's own key (its part in the data-keys)
+ * @param {string} name the row's label
+ * @param {string} hintKey the i18n key of the line under it
+ * @param {import("../mod/types").Step[]} steps the list it shows
+ * @param {(next: import("../mod/types").Step[]) => void} save writes the list back
+ */
+function modRungRow(mode, ruleKey, rowKey, name, hintKey, steps, save) {
+  const key = `worker:${mode ? mode.id : "base"}:${ruleKey}:${rowKey}`;
+  const rows = steps.map((step, index) => {
+    const choice = modChoiceOf(step.target);
+    const shown = modNearest(step.effort, modLadderOf(choice));
+    const select = modPickSelect(`${key}:${index}`, step, shown, `${name} ${index + 1}`, (target, effort) => save(steps.map((item, at) => at === index ? { target, effort } : item)));
+    const move = (delta) => { const next = [...steps]; [next[index], next[index + delta]] = [next[index + delta], next[index]]; save(next); };
+    const button = (suffix, text, label, disabled, onclick) => el("button", { type: "button", class: "btn secondary compact", "data-key": `${key}:${suffix}`, text, "aria-label": label, ...(disabled ? { disabled: "" } : {}), onclick });
+    return el("li", { class: "rung-item" }, [
+      select,
+      el("div", { class: "rung-actions" }, [
+        button("up", "↑", t("mod.modeMoveUp"), index === 0, () => move(-1)),
+        button("down", "↓", t("mod.modeMoveDown"), index === steps.length - 1, () => move(1)),
+        button("remove", "✕", t("common.remove"), steps.length <= 1, () => save(steps.filter((_, at) => at !== index))),
+      ]),
+      choice && !choice.usable ? el("small", { class: "warn-text", text: t("mod.rungUnusable") }) : null,
+    ]);
+  });
+  const add = el("button", { type: "button", class: "btn secondary compact", "data-key": `worker-add:${mode ? mode.id : "base"}:${ruleKey}:${rowKey}`, text: t("mod.modeAddModel"), onclick: () => {
+    const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item)) || modChoices().at(-1);
+    save([...steps, { target: modTargetOf(choice.value), effort: modNearest("medium", modLadderOf(choice)) }]);
+  } });
+  return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), modCap(t(hintKey)), "wide rung-row");
+}
+/** The same ordered-rung editor for the selected rule in Base or a saved mode: the general ladder
+ * keeps its four rungs, a domain ladder its two levels.
  * @param {import("../mod/types").Mode | undefined} mode
  * @param {WorkerRuleKey} [ruleKey]
  */
 function modRungRows(mode, ruleKey = "general") {
-  const rungs = ruleKey === "general" ? (mode ? mode.rungs : modRungs()) : (mode || modState.settings).domainRules[ruleKey].rungs;
+  if (ruleKey !== "general") {
+    const rungs = (mode || modState.settings).domainRules[ruleKey].rungs;
+    return MOD_DOMAIN_LEVELS.map((level) => {
+      // The pair's upper rung shows the list; an edit writes it to both rungs of the pair.
+      const upper = level.rungs[1];
+      const steps = rungs[upper] && rungs[upper].length ? rungs[upper] : (rungs[level.rungs[0]] || []);
+      const save = (next) => {
+        const updated = { ...rungs, [level.rungs[0]]: clone(next), [upper]: clone(next) };
+        modSetDomainRule(mode, ruleKey, { mode: "ladder", rungs: updated });
+      };
+      return modRungRow(mode, ruleKey, level.key, t(`mod.domainLevel.${level.key}`), `mod.domainHint.${ruleKey}.${level.key}`, steps, save);
+    });
+  }
+  const rungs = mode ? mode.rungs : modRungs();
   return MOD_RUNGS.map((rung) => {
-    const steps = rungs[rung] || [];
-    const name = t(`mod.rung.${rung}`);
     const save = (next) => {
       const updated = { ...rungs, [rung]: next };
-      if (ruleKey !== "general") modSetDomainRule(mode, ruleKey, { mode: "ladder", rungs: updated });
-      else if (mode) modUpdateMode(mode.id, { rungs: updated });
+      if (mode) modUpdateMode(mode.id, { rungs: updated });
       else modSetRule("general", { mode: "ladder", rungs: updated });
     };
-    const rows = steps.map((step, index) => {
-      const choice = modChoiceOf(step.target);
-      const shown = modNearest(step.effort, modLadderOf(choice));
-      const key = `worker:${mode ? mode.id : "base"}:${ruleKey}:${rung}:${index}`;
-      const select = modPickSelect(key, step, shown, `${name} ${index + 1}`, (target, effort) => save(steps.map((item, at) => at === index ? { target, effort } : item)));
-      const move = (delta) => { const next = [...steps]; [next[index], next[index + delta]] = [next[index + delta], next[index]]; save(next); };
-      const button = (suffix, text, label, disabled, onclick) => el("button", { type: "button", class: "btn secondary compact", "data-key": `${key}:${suffix}`, text, "aria-label": label, ...(disabled ? { disabled: "" } : {}), onclick });
-      return el("li", { class: "rung-item" }, [
-        select,
-        el("div", { class: "rung-actions" }, [
-          button("up", "↑", t("mod.modeMoveUp"), index === 0, () => move(-1)),
-          button("down", "↓", t("mod.modeMoveDown"), index === steps.length - 1, () => move(1)),
-          button("remove", "✕", t("common.remove"), steps.length <= 1, () => save(steps.filter((_, at) => at !== index))),
-        ]),
-        choice && !choice.usable ? el("small", { class: "warn-text", text: t("mod.rungUnusable") }) : null,
-      ]);
-    });
-    const add = el("button", { type: "button", class: "btn secondary compact", "data-key": `worker-add:${mode ? mode.id : "base"}:${ruleKey}:${rung}`, text: t("mod.modeAddModel"), onclick: () => {
-      const choice = modChoices().find((item) => item.value !== "general-purpose" && modTicked(item)) || modChoices().at(-1);
-      save([...steps, { target: modTargetOf(choice.value), effort: modNearest("medium", modLadderOf(choice)) }]);
-    } });
-    return cell(el("span", { class: "cell-label strong", text: name }), el("div", { class: "rung-list" }, [el("ol", {}, rows), add]), modCap(t(ruleKey === "general" ? `mod.rungHint.${rung}` : `mod.rungHint.${ruleKey}.${rung}`)), "wide rung-row");
+    return modRungRow(mode, ruleKey, rung, t(`mod.rung.${rung}`), `mod.rungHint.${rung}`, rungs[rung] || [], save);
   });
 }
 /** Said once after settings that still held Auto or field rules are read: they became the four workers. */

@@ -161,7 +161,8 @@ next to its general ladder, never inside `settings.rules`. `design` and `fronten
 general ladder. An active mode replaces both general and domain rules completely: a missing mode
 override never inherits Base's. New modes deep-copy Base's general and optional domain ladders;
 existing modes gain no overrides on load. Normalization keeps only valid optional ladders and
-reuses ordered-step validation. Retired per-field pin/Auto rules remain retired.
+reuses ordered-step validation, then folds them into two levels (below). Retired per-field
+pin/Auto rules remain retired.
 
 A tier marker still owns the rung. **Only when the effective set has a domain override** does the
 spawn await its existing shadow judge, taking only its domain and reusing the same result for the
@@ -178,6 +179,25 @@ that set's current general rungs and opens the same ordered-list editor. Turning
 the override. The router fills empty rungs in existing Base and mode domain ladders using the
 same `fillLadder` as general, without creating absent overrides. All six UI languages cover the
 controls. The shared model checklist stays on Base.
+
+**A domain ladder has two levels, not four (2026-10-21).** The stored shape keeps the four rungs,
+so `ladderPick` and `rungOf` are untouched, but the two pairs are equal: `light` and `standard`
+hold one list, `hard` and `plan` another. Normalization folds every domain ladder (`ui`,
+`backend`, in Base and in each saved mode) with `twoLevelRungs`: the upper rung of each pair wins
+— `standard`'s list for the light pair, `plan`'s for the heavy one — and an empty upper rung
+falls back to the lower. The general ladder is **not** folded: it keeps four distinct rungs.
+
+Why: in practice a domain does not have four different tiers. The four general rungs are four
+models of the same ladder, and a domain ladder with four lists mostly sent trivial CSS edits to
+the design model — the mistake the domain ladder itself was meant to prevent. Two levels keep the
+choice the user actually makes ("this domain's cheap work" vs "this domain's hard work"), while
+the router still climbs rung by rung inside a level.
+
+The dashboard shows the two levels instead of four rows: `가벼운 작업` edits the light pair
+(the same list is written to `light` and `standard`), `무거운 작업` edits the heavy pair (`hard`
+and `plan`). Each row shows the pair's upper rung. Switching `따로 정하기` on copies the set's
+general rungs folded the same way (light pair ← `general.standard`, heavy pair ← `general.plan`).
+The router fills a domain ladder and folds it again, so the pairs stay equal after the fill.
 
 ## Acceptance
 

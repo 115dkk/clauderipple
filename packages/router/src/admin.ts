@@ -38,7 +38,7 @@ import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
-import { normalizeSettings } from "../../mod/hooks/settings.ts";
+import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
@@ -700,7 +700,8 @@ async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, sett
   try {
     const choices = ladderChoices(await modOptions(deps, scores));
     const fill = (rungs: Settings['rules']['general']['rungs']) => fillLadder(rungs, settings.allow, choices, settings.allowKnown).rungs;
-    const fillDomains = (rules: DomainRules): DomainRules => Object.fromEntries(Object.entries(rules).map(([key, rule]) => [key, { mode: "ladder", rungs: fill(rule.rungs) }]));
+    // A domain ladder has two levels: the fold keeps each pair equal, before and after the fill.
+    const fillDomains = (rules: DomainRules): DomainRules => Object.fromEntries(Object.entries(rules).map(([key, rule]) => [key, { mode: "ladder", rungs: twoLevelRungs(fill(twoLevelRungs(rule.rungs))) }]));
     const modes = settings.modes.map(mode => ({ ...mode, rungs: fill(mode.rungs), ...(mode.domainRules ? { domainRules: fillDomains(mode.domainRules) } : {}) }));
     return { ...settings, rules: { general: { mode: "ladder", rungs: fill(general.rungs) } }, ...(settings.domainRules ? { domainRules: fillDomains(settings.domainRules) } : {}), modes };
   } catch (error) {

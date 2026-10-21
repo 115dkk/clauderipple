@@ -135,6 +135,19 @@ function ladderRungs(raw: unknown): Rule['rungs'] {
   return rungs
 }
 /**
+ * A domain ladder folded into two levels: light and standard hold one list, hard and plan another.
+ * The upper rung of each pair wins (standard's list for the light pair, plan's for the heavy one);
+ * an empty upper rung falls back to the lower. The general ladder keeps its four rungs.
+ */
+export function twoLevelRungs(rungs: Rule['rungs']): Rule['rungs'] {
+  const out: Rule['rungs'] = {}
+  const light = rungs.standard?.length ? rungs.standard : rungs.light
+  const heavy = rungs.plan?.length ? rungs.plan : rungs.hard
+  if (light?.length) { out.light = copy(light); out.standard = copy(light) }
+  if (heavy?.length) { out.hard = copy(heavy); out.plan = copy(heavy) }
+  return out
+}
+/**
  * The one rule left, the general ladder (the four workers). A ladder keeps its rungs; a pin from
  * before the ladder becomes one; Auto (experimental, removed 2026-10-12) becomes a ladder with no
  * rungs set, which the router fills from the ticked models (`fillLadder`). Field rules are gone.
@@ -157,7 +170,8 @@ function domainRules(raw: unknown): DomainRules | undefined {
   const source = object(raw)
   const out: DomainRules = {}
   for (const key of ['ui', 'backend'] as const) {
-    if (object(source[key]).mode === 'ladder') out[key] = generalRule(source[key])
+    // A domain ladder has two levels, so its four rungs are folded on the way in.
+    if (object(source[key]).mode === 'ladder') out[key] = { mode: 'ladder', rungs: twoLevelRungs(generalRule(source[key]).rungs) }
   }
   return Object.keys(out).length ? out : undefined
 }
