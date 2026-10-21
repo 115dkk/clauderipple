@@ -71,6 +71,14 @@ gave 18 (light 1, standard 43, max 0).
   (`shadowJudge`), only into the log.
 - No marker: the judge decides, as before.
 
+**Added 2026-10-22: the description also names the explicit-model marker.** A session that wanted
+Opus for a server review, where the backend ladder's hard rung is Sol, started seven `claude -p
+--model claude-opus-5-5` processes from Bash: they ran, but outside the agents panel and the pick
+log. `[[ripple: opus@high]]` on `ripple:auto` already did this (`requestPick`'s `explicit` branch:
+no judge, no ladder, no mode, `by: "marker"`; measured 2026-10-22, `opus@low` ran on
+`claude-opus-5-5` at effort low and was logged), but nothing told the main chat. The description
+now does, and says not to start a model another way.
+
 **The pick log decides whether the judge stays.** `~/.clauderipple/logs/worker-picks.jsonl`,
 3,000 lines, three line types joined by the pick's `id`:
 
