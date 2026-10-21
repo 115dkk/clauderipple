@@ -442,7 +442,12 @@ export class GoogleAdapter {
     const key = conversationKey(json);
     const startInput = Math.max(estimateTokens(json), this.lastInputByKey.get(key) ?? 0);
 
-    const transport = createTransport(this.cfg.auth, { ...(this.cfg.apiKey ? { apiKey: this.cfg.apiKey } : {}), ...(this.cfg.url ? { url: this.cfg.url } : {}) });
+    const transport = createTransport(this.cfg.auth, {
+      ...(this.cfg.apiKey ? { apiKey: this.cfg.apiKey } : {}),
+      ...(this.cfg.url ? { url: this.cfg.url } : {}),
+      ...(this.cfg.sessionHeader ? { sessionHeader: this.cfg.sessionHeader } : {}),
+      ...(this.cfg.headers ? { headers: this.cfg.headers } : {}),
+    });
 
     if (this.cfg.auth === "antigravity") {
       return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures);
@@ -457,7 +462,7 @@ export class GoogleAdapter {
 
     let built;
     try {
-      built = transport.build(upstreamRequest, { model, stream: wantStream });
+      built = transport.build(upstreamRequest, { model, stream: wantStream, conversationKey: key });
     } catch (error) {
       const out = anthropicError(400, "invalid_request_error", (error as Error).message);
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);

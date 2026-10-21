@@ -1111,10 +1111,14 @@ what we do not have yet — so that adding a provider does not start with readin
   lists them together (measured 2026-09-18). `wire` and `url` sat only on the provider,
   so that one account had to be configured as three providers — a split the user saw in
   the GUI and had to repeat in every `direct` rule. A model entry now overrides `wire`
-  (`chat`, `responses` or `anthropic`), `url` and `authHeader`, and `providerFor` in
+  (`chat`, `responses`, `anthropic` or `google`), `url` and `authHeader`, and `providerFor` in
   `config.ts` folds those into an ordinary provider at the moment a request's model is
   known, so every `provider.type` branch downstream works against one unchanged
-  contract. A provider with no override for that model is returned by identity.
+  contract. A `google` entry folds into a `google`/`api-key` provider (2026-10-21): the
+  provider's key moves from its headers to `apiKey`, the model's `url` becomes the base,
+  and the provider's `sessionHeader` and every non-auth header travel with it. The key is
+  never restated in the model entry. A provider with no override for that model is returned
+  by identity.
   `authHeader` names a convention rather than restating the key: the provider's own
   credential is re-sent under the header that model's wire expects, so there is one copy
   of the key to rotate. Each endpoint follows the API it imitates — an Anthropic-wire
@@ -1221,6 +1225,17 @@ including the 2026-10-16 Antigravity measurement in §4d-ii, are identified sepa
 - Stream endpoint `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`,
   the key on header `x-goog-api-key`, base default `https://generativelanguage.googleapis.com`
   (https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent).
+- **A gemini model on a relay (OpenCode Go, 2026-10-21).** `opencode-go` serves
+  `gemini-4-argon-contributor` at `https://opencode.ai/inference/go/google/v1beta/models/<id>`
+  (https://opencode.ai/docs/go/, read 2026-10-21), so the preset's entry carries
+  `wire: "google"` and that base. The transport still sends the key on `x-goog-api-key`, and
+  adds two things a relay asks for: the provider's `sessionHeader` with
+  `conversationKey(json)` — stable for one conversation, different between two, the same
+  derivation the OpenAI path uses (`providers/openai/index.ts`) — and, only when a session
+  header is set, `user-agent: clauderipple/<version>` instead of an SDK/library name. Without
+  the session header OpenCode answers `400 MissingSessionID`. Plain AI Studio providers set
+  neither and send no custom User-Agent. The provider's other headers are applied as given.
+  Not live-measured as of this date.
 - `systemInstruction` takes `{role:"user"|"model", parts:[…]}`; `contents` is the
   `user`/`model` turn list; a part is `{text}`, `{inlineData:{mimeType,data}}`,
   `{functionCall:{name,args}}` or `{functionResponse:{name,response}}`. The `role` of a

@@ -27,7 +27,7 @@ export type ProviderModel = {
    * account had to be configured as three providers — a split the user saw, did not ask for, and
    * had to repeat in every `direct` rule. It belongs to the model, which is what actually varies.
    */
-  wire?: "chat" | "responses" | "anthropic";
+  wire?: "chat" | "responses" | "anthropic" | "google";
   /** This model's endpoint base, when its wire is served on another path than the provider's. */
   url?: string;
   /**
@@ -153,6 +153,16 @@ export type GoogleProvider = {
   apiKey?: string;
   /** Override the API base (default https://generativelanguage.googleapis.com). */
   url?: string;
+  /**
+   * A header this vendor recognises a conversation by, filled with a value that is stable for one
+   * conversation and different between two. OpenCode Go's Gemini endpoint refuses a request without
+   * `x-opencode-session` outright (400 MissingSessionID). Absent, nothing extra is sent.
+   */
+  sessionHeader?: string;
+  /** Optional vendor headers to set on forwarded requests (never logged). The auth header is still `x-goog-api-key`. */
+  headers?: Record<string, string>;
+  /** Catalog preset used to populate this provider, if any (carried when a model folded into it). */
+  preset?: string;
   /** Models offered in the GUI (the probe fills this from `GET /v1beta/models`). */
   models?: ProviderModel[];
   /** Prefix the system prompt with a one-line identity so the model knows what it is. Default true. */
@@ -211,14 +221,12 @@ export type GrokProvider = {
 export type Provider = AnthropicCompatibleProvider | ChatGptProvider | OpenAiCompatibleProvider | GoogleProvider | AnthropicProvider | GrokProvider;
 
 /**
- * The provider's own key, re-sent under the header another wire on the same account expects.
+ * The provider's own key wherever its headers carry it, and every header that is not that one.
  *
- * The key is never restated in a model entry, so there is exactly one copy of it to rotate and one
- * to leak. Every other header the provider set is kept: only the auth one is replaced, because
- * sending both conventions at once would hand the endpoint a credential it did not ask for.
+ * Both auth conventions in use are recognised (`x-api-key` and `Authorization: Bearer`), because
+ * one account's headers may describe either depending on the endpoint it was configured for.
  */
-function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-key" | "authorization-bearer"): Record<string, string> | undefined {
-  if (!headers) return headers;
+function credentialIn(headers: Record<string, string>): { key?: string; kept: Record<string, string> } {
   const kept: Record<string, string> = {};
   let key: string | undefined;
   for (const [name, value] of Object.entries(headers)) {
@@ -227,6 +235,19 @@ function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-
     if (lower === "authorization") { key ??= value.replace(/^Bearer\s+/i, ""); continue; }
     kept[name] = value;
   }
+  return key === undefined ? { kept } : { key, kept };
+}
+
+/**
+ * The provider's own key, re-sent under the header another wire on the same account expects.
+ *
+ * The key is never restated in a model entry, so there is exactly one copy of it to rotate and one
+ * to leak. Every other header the provider set is kept: only the auth one is replaced, because
+ * sending both conventions at once would hand the endpoint a credential it did not ask for.
+ */
+function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-key" | "authorization-bearer"): Record<string, string> | undefined {
+  if (!headers) return headers;
+  const { key, kept } = credentialIn(headers);
   // Nothing recognisable to move: leave the headers exactly as they were rather than inventing an
   // empty credential, which would read to the endpoint as a missing key instead of a config error.
   if (key === undefined) return headers;
@@ -252,6 +273,30 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
   if (!entry || (entry.wire === undefined && entry.url === undefined && entry.authHeader === undefined)) return provider;
 
   const url = entry.url ?? ("url" in provider ? provider.url : undefined);
+
+  // A Gemini endpoint on the same key and the same provider. The Google adapter is an ordinary
+  // `google` provider now, so the model is folded into one here rather than growing a fourth
+  // adapter: the key moves from the provider's headers to `apiKey` (its convention on this wire is
+  // `x-goog-api-key`, never a bearer), and every header that is not the auth one travels along.
+  if (entry.wire === "google") {
+    const { key, kept } = credentialIn("headers" in provider && provider.headers ? provider.headers : {});
+    const apiKey = "apiKey" in provider && typeof provider.apiKey === "string" ? provider.apiKey : key;
+    const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
+    return {
+      type: "google",
+      auth: "api-key",
+      ...(apiKey !== undefined ? { apiKey } : {}),
+      url: url ?? "",
+      ...(sessionHeader ? { sessionHeader } : {}),
+      ...(Object.keys(kept).length > 0 ? { headers: kept } : {}),
+      ...("models" in provider && provider.models ? { models: provider.models } : {}),
+      ...("identity" in provider && provider.identity !== undefined ? { identity: provider.identity } : {}),
+      ...("instructionsAppend" in provider && provider.instructionsAppend ? { instructionsAppend: provider.instructionsAppend } : {}),
+      ...("limits" in provider && provider.limits !== undefined ? { limits: provider.limits } : {}),
+      ...("preset" in provider && provider.preset ? { preset: provider.preset } : {}),
+    };
+  }
+
   const headers = entry.authHeader
     ? reauthorized("headers" in provider ? provider.headers : undefined, entry.authHeader)
     : ("headers" in provider ? provider.headers : undefined);
@@ -558,7 +603,7 @@ export function headerValueProblem(value: string): string | null {
 }
 
 /** Named once because three provider kinds report it, and a drifting copy would describe the wrong shape. */
-const MODELS_SHAPE = 'models must be entries with a string id and optional name, effortLevels, url, wire ("chat" | "responses" | "anthropic") and authHeader ("x-api-key" | "authorization-bearer")';
+const MODELS_SHAPE = 'models must be entries with a string id and optional name, effortLevels, url, wire ("chat" | "responses" | "anthropic" | "google") and authHeader ("x-api-key" | "authorization-bearer")';
 
 function validModels(models: unknown): boolean {
   return Array.isArray(models) && models.every((model) => {
@@ -569,7 +614,7 @@ function validModels(models: unknown): boolean {
     if (m.effortLevels !== undefined && (!Array.isArray(m.effortLevels) || m.effortLevels.some((level) => typeof level !== "string"))) return false;
     // A model's own wire, endpoint and auth convention: wrong here and the request goes out in the
     // wrong shape to the wrong path, which reads as a provider that rejects a working key.
-    if (m.wire !== undefined && m.wire !== "chat" && m.wire !== "responses" && m.wire !== "anthropic") return false;
+    if (m.wire !== undefined && m.wire !== "chat" && m.wire !== "responses" && m.wire !== "anthropic" && m.wire !== "google") return false;
     if (m.url !== undefined && (typeof m.url !== "string" || !/^https?:\/\//.test(m.url))) return false;
     if (m.authHeader !== undefined && m.authHeader !== "x-api-key" && m.authHeader !== "authorization-bearer") return false;
     return true;
@@ -770,6 +815,11 @@ export function validate(c: Config): string[] {
       if (p.apiKey !== undefined && typeof p.apiKey !== "string") errors.push(`provider ${name}: apiKey must be a string`);
       if (p.url !== undefined && !/^https?:\/\//.test(p.url)) errors.push(`provider ${name}: url must start with http:// or https://`);
       if (p.defaultEffort !== undefined && typeof p.defaultEffort !== "string") errors.push(`provider ${name}: defaultEffort must be a string`);
+      if (p.sessionHeader !== undefined && (typeof p.sessionHeader !== "string" || !p.sessionHeader)) errors.push(`provider ${name}: sessionHeader must be a non-empty string`);
+      if (p.headers !== undefined && (!p.headers || typeof p.headers !== "object" || Array.isArray(p.headers) || Object.values(p.headers).some((value) => typeof value !== "string"))) {
+        errors.push(`provider ${name}: headers must be a string record`);
+      }
+      if (p.preset !== undefined && typeof p.preset !== "string") errors.push(`provider ${name}: preset must be a string`);
       if (p.models !== undefined && !validModels(p.models)) {
         errors.push(`provider ${name}: ${MODELS_SHAPE}`);
       }

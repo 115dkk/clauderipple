@@ -11,7 +11,7 @@
 export type PresetModel = {
   id: string;
   name: string;
-  wire?: "chat" | "responses" | "anthropic";
+  wire?: "chat" | "responses" | "anthropic" | "google";
   url?: string;
   authHeader?: "x-api-key" | "authorization-bearer";
   /** An empty array disables the provider fallback for this model, exactly as on a provider. */
@@ -236,13 +236,14 @@ export const PRESETS: ProviderPreset[] = [
   },
   // Docs: https://opencode.ai/docs/go/
   //
-  // One subscription, one key, one `/models` catalog, three endpoints by which wire each model
+  // One subscription, one key, one `/models` catalog, four endpoint shapes by which wire each model
   // speaks: `/responses` for Muse Spark, Grok and GPT; `/chat/completions` for GLM, Kimi, DeepSeek,
-  // LongCat and MiMo; `/messages` (Anthropic) for MiniMax and Qwen. This used to be three presets
-  // because a provider carried one url and one wire; now a model carries its own wire, url and auth
-  // header (`ProviderModel`), so the account is one preset and `providerFor` folds the override in
-  // when the model is known. The provider-level values below are the Responses base — which is where
-  // Muse Spark lives, and the wire a model with no override gets.
+  // LongCat and MiMo; `/messages` (Anthropic) for MiniMax and Qwen; and Gemini 4 Argon on Google's
+  // `generateContent` under `/inference/go/google`. This used to be three presets because a provider
+  // carried one url and one wire; now a model carries its own wire, url and auth header
+  // (`ProviderModel`), so the account is one preset and `providerFor` folds the override in when the
+  // model is known. The provider-level values below are the Responses base — which is where Muse
+  // Spark lives, and the wire a model with no override gets.
   //
   // `x-opencode-session` is not optional at all: the vendor answers 400 `MissingSessionID` without
   // it — "cannot be routed efficiently" — so it gates the request rather than just the cache.
@@ -315,6 +316,12 @@ export const PRESETS: ProviderPreset[] = [
       { id: "qwen3.7-max", name: "Qwen3.7 Max", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
       { id: "qwen3.7-plus", name: "Qwen3.7 Plus", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
       { id: "qwen3.6-plus", name: "Qwen3.6 Plus", wire: "anthropic", url: "https://opencode.ai/zen/go", authHeader: "x-api-key" },
+      // Gemini, on Google's own generateContent wire rather than either OpenAI one. Its endpoint is
+      // a different origin path and takes the key on `x-goog-api-key`; the docs give the model's
+      // full URL as https://opencode.ai/inference/go/google/v1beta/models/<id> (read 2026-10-21).
+      // `providerFor` folds it into an ordinary google provider, and the transport appends
+      // `/v1beta/models/<id>:generateContent` to this base (providers/google/transport.ts).
+      { id: "gemini-4-argon-contributor", name: "Gemini 4 Argon (Contributor)", wire: "google", url: "https://opencode.ai/inference/go/google" },
     ],
     // Measured 2026-09-18 against the live endpoint, one effort at a time: none, minimal, low,
     // medium, high and xhigh are accepted; **max and ultra are refused** with invalid_request_error.

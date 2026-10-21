@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ConfigStore, DEFAULTS, providerFor, validate } from "../src/config.ts";
-import type { AnthropicCompatibleProvider, OpenAiCompatibleProvider } from "../src/config.ts";
+import type { AnthropicCompatibleProvider, GoogleProvider, OpenAiCompatibleProvider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 
 test("validate rejects an unusable Auto mode classifier target", () => {
@@ -156,6 +156,66 @@ test("the three providers one OpenCode Go account needed are read as one", () =>
   assert.equal(native.type, "anthropic-compatible");
   assert.equal(native.url, "https://opencode.ai/zen/go");
   assert.deepEqual(native.headers, { "x-api-key": "sk-test" }, "one copy of the key, under the convention this wire wants");
+});
+
+// A model on Google's own wire needs the google adapter, which is an ordinary `google` provider.
+// The key lives in the provider's headers (one copy to rotate) and moves to `apiKey` on this wire,
+// whose credential header is `x-goog-api-key`; every other vendor header travels along.
+test("a google-wire model folds into a google api-key provider, key taken from the provider's headers", () => {
+  const provider: OpenAiCompatibleProvider = {
+    type: "openai-compatible",
+    url: "https://opencode.ai/zen/go/v1",
+    preset: "opencode-go",
+    sessionHeader: "x-opencode-session",
+    headers: { authorization: "Bearer sk-test", "x-extra": "kept" },
+    identity: false,
+    instructionsAppend: "be brief",
+    limits: true,
+    models: [
+      { id: "gemini-4-argon-contributor", wire: "google", url: "https://opencode.ai/inference/go/google" },
+      { id: "gpt-5.6-luna" },
+    ],
+  };
+  const folded = providerFor(provider, "gemini-4-argon-contributor") as GoogleProvider;
+  assert.equal(folded.type, "google");
+  assert.equal(folded.auth, "api-key");
+  assert.equal(folded.apiKey, "sk-test");
+  assert.equal(folded.url, "https://opencode.ai/inference/go/google");
+  assert.equal(folded.sessionHeader, "x-opencode-session");
+  assert.deepEqual(folded.headers, { "x-extra": "kept" }, "the key is not restated in the provider headers");
+  assert.equal(folded.identity, false);
+  assert.equal(folded.instructionsAppend, "be brief");
+  assert.equal(folded.limits, true);
+  assert.equal(folded.preset, "opencode-go");
+  assert.equal(folded.models, provider.models);
+
+  // The other convention in use is recognised too.
+  const xKey = providerFor({ ...provider, headers: { "x-api-key": "sk-x", "x-extra": "kept" } }, "gemini-4-argon-contributor") as GoogleProvider;
+  assert.equal(xKey.apiKey, "sk-x");
+  assert.equal(providerFor(provider, "gpt-5.6-luna"), provider, "a model with no override is still the provider itself");
+});
+
+test("validate accepts a google-wire model and a google provider's sessionHeader/headers", () => {
+  assert.deepEqual(validate({
+    ...DEFAULTS,
+    providers: {
+      go: {
+        type: "openai-compatible", url: "https://opencode.ai/zen/go/v1", sessionHeader: "x-opencode-session",
+        headers: { authorization: "Bearer k" },
+        models: [{ id: "gemini-4-argon-contributor", wire: "google", url: "https://opencode.ai/inference/go/google" }],
+      },
+      gem: { type: "google", auth: "api-key", apiKey: "g", url: "https://opencode.ai/inference/go/google", sessionHeader: "x-opencode-session", headers: { "x-extra": "y" } },
+    },
+  }), []);
+  const bad = validate({
+    ...DEFAULTS,
+    providers: {
+      gem: { type: "google", auth: "api-key", headers: { "x-extra": 1 as unknown as string } },
+      go: { type: "openai-compatible", url: "https://example.test", models: [{ id: "m", wire: "gemini" as "google" }] },
+    },
+  });
+  assert.ok(bad.some((error) => error.includes("headers must be a string record")));
+  assert.ok(bad.some((error) => error.includes("wire (\"chat\"")), "an unknown wire is refused by the models shape");
 });
 
 test("one OpenCode Go provider on its own is not a split, and is left alone", () => {

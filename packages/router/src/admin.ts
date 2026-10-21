@@ -1413,20 +1413,26 @@ function measureCandidates(p: Provider, modelId?: string, catalogWire?: WireCand
   const known = "preset" in p && p.preset
     ? PRESETS.find((entry) => entry.id === p.preset)?.fallbackModels?.find((m) => m.id === modelId)
     : undefined;
-  if (known?.wire) add({ wire: known.wire, url: known.url ?? ownUrl, ...(known.authHeader ? { authHeader: known.authHeader } : {}) });
+  // The Gemini wire is not one `capabilities.ts` speaks: it has its own endpoint shape and header,
+  // so a model the preset records on it is not tried on the other three (a request there would
+  // answer 404/protocol-error and read as a model the plan refuses). Its wire stays as declared.
+  if (known?.wire && known.wire !== "google") add({ wire: known.wire, url: known.url ?? ownUrl, ...(known.authHeader ? { authHeader: known.authHeader } : {}) });
   add(own);
   if (p.type === "openai-compatible" && p.preset) {
     // One plan can serve several wires on one catalog. The preset's fallback list is the only place
     // any of that mapping is written down, so it is what the remaining candidates are read from.
     const preset = PRESETS.find((entry) => entry.id === p.preset);
-    for (const model of preset?.fallbackModels ?? []) add({ wire: model.wire ?? defaultWire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
+    for (const model of preset?.fallbackModels ?? []) {
+      if (model.wire === "google") continue;
+      add({ wire: model.wire ?? defaultWire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
+    }
   } else if (p.type === "openai-compatible") {
     // No table to read: the two OpenAI wires this kind of provider could be serving.
     add({ wire: "responses", url: p.url });
     add({ wire: "chat", url: p.url });
   } else if (p.type === "anthropic-compatible" && p.preset) {
     const preset = PRESETS.find((entry) => entry.id === p.preset);
-    for (const model of preset?.fallbackModels ?? []) if (model.wire) add({ wire: model.wire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
+    for (const model of preset?.fallbackModels ?? []) if (model.wire && model.wire !== "google") add({ wire: model.wire, url: model.url ?? p.url, ...(model.authHeader ? { authHeader: model.authHeader } : {}) });
   }
   if (!known?.wire && catalogWire) {
     const at = candidates.findIndex((c) => c.wire === catalogWire);

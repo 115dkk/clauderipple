@@ -57,6 +57,12 @@ test("OpenCode Go is one preset whose models carry the wire each one speaks", ()
   // The two that reached a user as an unexplained 529 by inheriting the preset's Responses wire.
   assert.equal(wireOf("mimo-v2.6-pro"), "chat");
   assert.equal(wireOf("mimo-v2.6-flash"), "chat");
+  // Gemini is served on neither OpenAI wire: it is Google's own generateContent endpoint, under a
+  // different origin path (https://opencode.ai/docs/go/, read 2026-10-21). The transport appends
+  // `/v1beta/models/<id>:generateContent` to this base.
+  assert.equal(wireOf("gemini-4-argon-contributor"), "google");
+  assert.equal(byId.get("gemini-4-argon-contributor")?.url, "https://opencode.ai/inference/go/google");
+  assert.equal(byId.get("gemini-4-argon-contributor")?.authHeader, undefined, "the google transport moves the key to x-goog-api-key itself");
   // Gone from the catalogue and from the docs: a preset row for a model the vendor no longer serves
   // is one the operator can tick and never use.
   assert.equal(byId.has("union-alpha"), false);
