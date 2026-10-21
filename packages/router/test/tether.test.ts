@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type os from "node:os";
 import {
-  classifyJoin, classifyNetwork, DISASSOCIATE_JS, inNetwork, ipv4Network, isHotspotAddress, isLinkLocal, nextReturnPoint, parseWifiDevice, ProbeWindow,
+  classifyJoin, classifyNetwork, DISASSOCIATE_JS, SCAN_KNOWN_JS, inNetwork, ipv4Network, isHotspotAddress, isLinkLocal, nextReturnPoint, parsePreferredNetworks, parseWifiDevice, ProbeWindow,
   probeRound, readLearnedHotspot, RETURN_DRAIN_WAIT_MS, RETURN_FORCE_AFTER_MS, TetherController, wifiIPv4, wifiIPv4Network, writeLearnedHotspot,
   type ProbeGet,
 } from "../src/tether.ts";
@@ -119,9 +119,9 @@ test("a config that still carries tether.returnEverySec loads without error and 
 
 // ---- Controller with a fake Mac and a fake network ----------------------------------------------
 
-type Net = { ip: string | null; netmask: string; probeOk: (ip: string) => boolean; joinOutput: { code: number; stdout: string; stderr: string }; joinLandsOn: string | null; disassociateLandsOn: string | null };
+type Net = { ip: string | null; netmask: string; probeOk: (ip: string) => boolean; joinOutput: RunResult; joinLandsOn: string | null; disassociateLandsOn: string | null; preferred: RunResult; scan: RunResult | Error };
 
-function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; stateFile?: string } = {}) {
+function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activity?: () => Activity; platform?: NodeJS.Platform; hold?: HoldGate; onLeave?: () => void; onScan?: () => void; stateFile?: string } = {}) {
   const clock = { t: 1_000_000 };
   const calls: string[] = [];
   const lines: string[] = [];
@@ -132,6 +132,8 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     joinOutput: { code: 0, stdout: "", stderr: "" },
     joinLandsOn: "172.20.10.2",
     disassociateLandsOn: "172.20.10.2",
+    preferred: { code: 0, stdout: "Preferred networks on en0:\n\tPBJ\n\tHome\n", stderr: "" },
+    scan: { code: 0, stdout: "visible\n", stderr: "" },
     ...o.net,
   };
   let settings: TetherSettings = { ...TETHER_DEFAULTS, enabled: true, hotspotSsid: "PBJ", ...o.settings };
@@ -143,7 +145,16 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
       if (!classifyJoin(net.joinOutput)) net.ip = net.joinLandsOn;
       return net.joinOutput;
     }
-    if (line.startsWith("/usr/bin/osascript -l JavaScript -e ")) {
+    if (args[0] === "-listpreferredwirelessnetworks") return net.preferred;
+    if (file === "/usr/bin/osascript" && args[3] === SCAN_KNOWN_JS) {
+      assert.equal(args[4], "en0");
+      const names: string[] = JSON.parse(args[5]!);
+      assert.ok(!names.includes(settings.hotspotSsid), "the hotspot cannot make the scan positive");
+      o.onScan?.();
+      if (net.scan instanceof Error) throw net.scan;
+      return net.scan;
+    }
+    if (file === "/usr/bin/osascript" && args[3] === DISASSOCIATE_JS) {
       o.onLeave?.();
       net.ip = net.disassociateLandsOn;
       return { code: 0, stdout: "ok\n", stderr: "" };
@@ -172,7 +183,7 @@ function rig(o: { settings?: Partial<TetherSettings>; net?: Partial<Net>; activi
     }
   };
   const joins = () => calls.filter((l) => l.includes("-setairportnetwork")).length;
-  const returns = () => calls.filter((l) => l.startsWith("/usr/bin/osascript")).length;
+  const returns = () => calls.filter((l) => l === `/usr/bin/osascript -l JavaScript -e ${DISASSOCIATE_JS}`).length;
   return { c, clock, calls, lines, net, ticks, joins, returns, set: (s: Partial<TetherSettings>) => (settings = { ...settings, ...s }) };
 }
 
@@ -287,6 +298,70 @@ test("the way back: 5 minutes after landing, idle, disassociate and keep the Wi-
   assert.equal(r.joins(), 0);
 });
 
+for (const cancel of ["pin", "stop", "disable", "rename", "OS joined Wi-Fi", "new model call"] as const) {
+  test(`a scan that completes after ${cancel} cannot leave the hotspot`, async () => {
+    let activity: Activity = { inFlight: 0 };
+    const r = rig({
+      net: { ip: "172.20.10.2" },
+      activity: () => activity,
+      onScan: () => {
+        if (cancel === "pin") r.c.setPin(true);
+        if (cancel === "stop") r.c.stop();
+        if (cancel === "disable") r.set({ enabled: false });
+        if (cancel === "rename") r.set({ hotspotSsid: "Other phone" });
+        if (cancel === "OS joined Wi-Fi") r.net.ip = "192.168.1.4";
+        if (cancel === "new model call") activity = { inFlight: 1, lastStartedAt: r.clock.t };
+      },
+    });
+    await r.ticks(31);
+    assert.equal(r.returns(), 0);
+    assert.equal(r.joins(), 0);
+    assert.ok(!r.lines.some((line) => /holding new model calls/.test(line)));
+  });
+}
+
+test("preferred SSIDs preserve spaces and Unicode, with only the list indent removed", () => {
+  assert.deepEqual(parsePreferredNetworks("Preferred networks on en0:\r\n\tPBJ\r\n\t맘보 2층\r\n\t Home \r\n\tPBJ\r\n"), ["PBJ", "맘보 2층", " Home "]);
+  assert.deepEqual(parsePreferredNetworks("There are no preferred wireless networks on en0.\n"), []);
+});
+
+for (const busy of [false, true]) {
+  const cases: { name: string; net: Partial<Net>; reason: RegExp }[] = [
+    { name: "none visible", net: { scan: { code: 0, stdout: "none\n", stderr: "" } }, reason: /no known Wi-Fi in range/ },
+    { name: "scan nonzero", net: { scan: { code: 1, stdout: "", stderr: "Location denied" } }, reason: /scan failed.*Location denied/ },
+    { name: "scan crash", net: { scan: { code: 139, stdout: "", stderr: "" } }, reason: /scan failed.*exit 139/ },
+    { name: "runner error", net: { scan: new Error("scan timed out") }, reason: /scan failed.*scan timed out/ },
+    { name: "unsupported output", net: { scan: { code: 0, stdout: "unknown", stderr: "" } }, reason: /scan failed.*unsupported/ },
+    { name: "preferred list error", net: { preferred: { code: 1, stdout: "", stderr: "cannot read preferences" } }, reason: /scan failed.*cannot read preferences/ },
+    { name: "hotspot only", net: { preferred: { code: 0, stdout: "Preferred networks on en0:\n\tPBJ\n", stderr: "" } }, reason: /no known Wi-Fi in range/ },
+    { name: "no saved networks", net: { preferred: { code: 0, stdout: "There are no preferred wireless networks on en0.\n", stderr: "" } }, reason: /no known Wi-Fi in range/ },
+  ];
+  for (const scenario of cases) test(`${busy ? "gap" : "quiet"} return stays without leaving or holding: ${scenario.name}`, async () => {
+    const hold = new HoldGate();
+    const r = rig({ net: { ip: "172.20.10.2", ...scenario.net }, hold, activity: () => ({ inFlight: busy ? 1 : 0 }) });
+    await r.ticks(busy ? 43 : 31);
+    const stays = () => r.lines.filter((line) => line.startsWith("tether: staying on the hotspot:"));
+    assert.equal(r.returns(), 0);
+    assert.equal(r.joins(), 0);
+    assert.equal(hold.engaged, false);
+    assert.ok(!r.lines.some((line) => /holding new model calls|hold released/.test(line)), "the gate was never engaged");
+    assert.equal(r.c.status().lastSwitch, null);
+    assert.equal(r.c.status().network, "hotspot");
+    assert.equal(stays().length, 1);
+    assert.match(stays()[0]!, scenario.reason);
+    // Stay logs once per point, not per probe. Next point is still 10 min from landing.
+    r.clock.t = 1_000_000 + 599_000;
+    await r.c.tick();
+    assert.equal(stays().length, 1);
+    r.clock.t = 1_000_000 + 600_000 + (busy ? RETURN_FORCE_AFTER_MS : 0);
+    await r.c.tick();
+    assert.equal(stays().length, 2);
+    assert.equal(r.returns(), 0);
+    assert.equal(r.joins(), 0);
+    assert.ok(!r.lines.some((line) => /holding new model calls|hold released/.test(line)));
+  });
+}
+
 test("the way back waits while a model call runs or one started in the last 20s", async () => {
   let activity: Activity = { inFlight: 1 };
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "192.168.1.4" }, activity: () => activity });
@@ -303,7 +378,7 @@ test("the way back waits while a model call runs or one started in the last 20s"
 test("no better network: stay on the hotspot and try at the fixed points 5, 10, 20, 30, 40, 50 and 60 min, then every 10", async () => {
   const r = rig({ net: { ip: "172.20.10.2", disassociateLandsOn: "172.20.10.2" } });
   await r.ticks(1);
-  const attempted = () => r.calls.filter((l) => l.startsWith("/usr/bin/osascript")).length;
+  const attempted = () => r.returns();
   const attemptsAt: number[] = [];
   for (let i = 0; i < 1000 && attemptsAt.length < 9; i++) {
     const n = r.returns();
@@ -329,7 +404,7 @@ test("a failed try does not double: each failure moves to the next scheduled poi
   // 5 min point: attempt fails, next is the 10 min point (300s away), not 600s.
   await r.ticks(30);
   assert.equal(r.returns(), 1);
-  assert.ok(r.lines.some((l) => /staying on the hotspot .*; next try in 2[0-9][0-9]s/.test(l)), r.lines.join("\n"));
+  assert.ok(r.lines.some((l) => /staying on the hotspot: .*; next try in 2[0-9][0-9]s/.test(l)), r.lines.join("\n"));
 });
 
 test("leaving the hotspot for Wi-Fi resets the schedule: landing again starts at 5 min", async () => {
@@ -605,7 +680,7 @@ test("calls that do not finish within the drain wait: release, back off to the n
   assert.equal(r.c.status().state, "on-hotspot");
   const log = r.lines.join("\n");
   // The drain ends at 480s, past the 5 min point, so the next is the 10 min point: 120s away.
-  assert.match(log, /staying on the hotspot \(1 model call still running after 60s; held calls released\); next try in 120s/);
+  assert.match(log, /staying on the hotspot: 1 model call still running after 60s; held calls released; next try in 120s/);
   assert.match(log, /hold released; 1 held model call going ahead/);
 });
 

@@ -11,13 +11,14 @@
 //   failover  on Wi-Fi (or none), 3 of the last 5 probe rounds failed → `sudo -n networksetup
 //             -setairportnetwork <dev> <hotspot>`; macOS takes the password from the System keychain.
 //   return    on the hotspot, at 5, 10, 20, 30, 40, 50 and 60 min after landing and every 10 min
-//             after that, while no model call runs → disassociate (CoreWLAN through JXA, as the
+//             after that, only if another known Wi-Fi is visible, while no model call runs →
+//             disassociate (CoreWLAN through JXA, as the
 //             console user — the router is a launchd agent in the user's session) so macOS
 //             auto-joins the best known network in range; probe it; if that does not give working
 //             Wi-Fi within 20s, rejoin the hotspot and wait for the next point. The times are fixed
 //             from landing rather than a doubling backoff (owner's decision, 2026-10-20): at most
-//             ~10 min on the hotspot after arriving at a known Wi-Fi, and a brief drop every 10 min
-//             on the move, instead of a cap of 15 min.
+//             ~10 min on the hotspot after arriving at a known Wi-Fi. On the move, a read-only scan
+//             replaces the old blind drop (2026-10-21): no known Wi-Fi in range → no leave, no hold.
 //   gap       a return still postponed RETURN_FORCE_AFTER_MS past due (calls back-to-back, so never
 //             a quiet moment — 2026-10-20) makes the gap itself: new model calls are held (hold.ts:
 //             they wait, they are not refused), the running ones get up to RETURN_DRAIN_WAIT_MS to
@@ -46,6 +47,22 @@ export const NETWORKSETUP = "/usr/sbin/networksetup";
 export const OSASCRIPT = "/usr/bin/osascript";
 /** wifihop's exact call (verified in its source, `mac_disassociate_js`): a zero-argument ObjC method is invoked by reading it. */
 export const DISASSOCIATE_JS = 'ObjC.import("CoreWLAN"); $.CWWiFiClient.sharedWiFiClient.interface.disassociate; "ok";';
+/** Read-only directed scans: a non-empty set proves visibility even if CWNetwork.ssid is redacted. */
+export const SCAN_KNOWN_JS = `function run(argv) {
+  ObjC.import("CoreWLAN");
+  var wifi = $.CWWiFiClient.sharedWiFiClient.interfaceWithName(argv[0]);
+  var names = JSON.parse(argv[1]);
+  for (var n = 0; n < names.length; n++) {
+    var error = Ref();
+    var found = wifi.scanForNetworksWithNameError(names[n], error);
+    var count = Number(found.count);
+    if (!isFinite(count) || count < 0) {
+      throw new Error("CoreWLAN scan unavailable: " + (ObjC.unwrap(error[0].localizedDescription) || "no result set"));
+    }
+    if (count > 0) return "visible";
+  }
+  return "none";
+}`;
 
 export const PROBE_URLS = {
   apple: "http://captive.apple.com/hotspot-detect.html",
@@ -53,12 +70,14 @@ export const PROBE_URLS = {
 } as const;
 export const PROBE_TIMEOUT_MS = 4_000;
 export const MIN_SWITCH_INTERVAL_MS = 60_000;
+/** How long a scan that saw a known Wi-Fi stands for a return still waiting on busy calls. */
+export const KNOWN_VISIBLE_TRUST_MS = 60_000;
 export const RETURN_PROBE_MS = 20_000;
 /**
  * When to try the way back, counted from the moment the Mac landed on the hotspot: 5, 10, 20, 30,
  * 40, 50 and 60 min, then every 10 min for as long as it stays there (owner's decision, 2026-10-20 —
  * a fixed schedule rather than a doubling one: at most ~10 min on the hotspot after arriving at a
- * known Wi-Fi, and only a brief drop every 10 min on the move).
+ * known Wi-Fi). Each point scans first; without a visible known network it never drops the hotspot.
  */
 export const RETURN_SCHEDULE_MINUTES = [5, 10, 20, 30, 40, 50, 60] as const;
 /** After the last scheduled point, every this long. */
@@ -93,6 +112,11 @@ export function parseWifiDevice(text: string): string | null {
     if (dev && /^en\d+$/.test(dev)) return dev;
   }
   return null;
+}
+
+/** `networksetup -listpreferredwirelessnetworks`: preserve SSID spaces, discard only the indent. */
+export function parsePreferredNetworks(text: string): string[] {
+  return [...new Set(text.split(/\r?\n/).filter((line) => line.startsWith("\t")).map((line) => line.slice(1)).filter(Boolean))];
 }
 
 /** The interface's IPv4 address, or null when it has none (not associated, or no DHCP yet). */
@@ -279,8 +303,8 @@ export interface TetherBackend {
   leave(): Promise<string | null>;
   /** Once, when leave() gave no address after a few seconds: join a known network by name. */
   joinKnown?(ssid: string): Promise<void>;
-  /** Why a return cannot work at all (nothing would be joined), or null. */
-  returnBlocked?(ssid: string): Promise<string | null>;
+  /** Read-only check before holding calls or leaving: null ONLY if another known Wi-Fi is visible. */
+  returnBlocked(ssid: string): Promise<string | null>;
   readonly hints: Partial<Record<TetherState, string>>;
 }
 
@@ -352,6 +376,18 @@ class MacTetherBackend implements TetherBackend {
     return failed;
   }
 
+  async returnBlocked(ssid: string): Promise<string | null> {
+    const preferred = await this.run(NETWORKSETUP, ["-listpreferredwirelessnetworks", this.device!]);
+    if (preferred.code !== 0) throw new Error(`preferred Wi-Fi list failed: ${(preferred.stderr || preferred.stdout).trim().slice(0, 200) || `exit ${preferred.code}`}`);
+    const names = parsePreferredNetworks(preferred.stdout).filter((name) => name !== ssid);
+    if (!names.length) return "no known Wi-Fi in range";
+    const r = await this.run(OSASCRIPT, ["-l", "JavaScript", "-e", SCAN_KNOWN_JS, this.device!, JSON.stringify(names)], { timeoutMs: 30_000 });
+    if (r.code !== 0) throw new Error(`CoreWLAN scan failed: ${(r.stderr || r.stdout).trim().slice(0, 200) || `exit ${r.code}`}`);
+    if (r.stdout.trim() === "visible") return null;
+    if (r.stdout.trim() === "none") return "no known Wi-Fi in range";
+    throw new Error("CoreWLAN scan returned an unsupported result");
+  }
+
   async leave(): Promise<string | null> {
     const r = await this.run(OSASCRIPT, ["-l", "JavaScript", "-e", DISASSOCIATE_JS], { timeoutMs: 15_000 });
     return r.code === 0 ? null : (r.stderr || r.stdout).trim().slice(0, 200);
@@ -371,6 +407,8 @@ export class TetherController {
   private state: TetherState = "off";
   private pinned = false;
   private lastSwitchAt = 0;
+  /** When a scan last saw a known Wi-Fi other than the hotspot. */
+  private knownVisibleAt = -Infinity;
   private lastSwitch: TetherStatus["lastSwitch"] = null;
   private lastProbe: TetherStatus["lastProbe"] = null;
   /** When the Mac landed on the hotspot (ours or by hand); null off the hotspot. The schedule counts from here. */
@@ -637,14 +675,27 @@ export class TetherController {
 
   private async tryReturn(settings: TetherSettings): Promise<void> {
     if (this.now() - this.lastSwitchAt < MIN_SWITCH_INTERVAL_MS) return;
+    // A return postponed for busy calls comes back every tick; one scan that saw a known Wi-Fi is
+    // trusted for a minute rather than repeated each time (a scan takes seconds on the radio).
+    if (this.now() - this.knownVisibleAt >= KNOWN_VISIBLE_TRUST_MS) {
+      let blocked: string | null;
+      try {
+        blocked = await this.backend!.returnBlocked(settings.hotspotSsid);
+      } catch (e) {
+        blocked = `known Wi-Fi scan failed: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      if (blocked) {
+        this.backOff(blocked);
+        return;
+      }
+      this.knownVisibleAt = this.now();
+    }
+    // A scan is asynchronous: a pin/stop/settings change or an OS join meanwhile cancels the return.
+    const current = this.deps.settings();
+    if (this.stopped || this.pinned || !current.enabled || current.hotspotSsid !== settings.hotspotSsid || !this.onHotspot(this.currentIp())) return;
     const idle = this.idle();
     if (!idle && (this.now() - this.nextReturnAt < RETURN_FORCE_AFTER_MS || this.hold.closed)) {
       this.decide(`Wi-Fi return postponed: a model call is running or just started (after ${RETURN_FORCE_AFTER_MS / 1000}s of this, new calls are held to make a gap)`);
-      return;
-    }
-    const blocked = (await this.backend!.returnBlocked?.(settings.hotspotSsid)) ?? null;
-    if (blocked) {
-      this.backOff(blocked);
       return;
     }
     if (idle) await this.leaveHotspot(settings);
@@ -764,7 +815,7 @@ export class TetherController {
     const landed = this.landedOnHotspotAt ?? this.now();
     this.nextReturnAt = nextReturnPoint(landed, this.now());
     this.lastLogged = "";
-    this.decide(`staying on the hotspot (${reason}); next try in ${Math.round((this.nextReturnAt - this.now()) / 1000)}s`);
+    this.decide(`staying on the hotspot: ${reason}; next try in ${Math.round((this.nextReturnAt - this.now()) / 1000)}s`);
   }
 
   private recordSwitch(to: "hotspot" | "wifi", ok: boolean, reason: string): void {

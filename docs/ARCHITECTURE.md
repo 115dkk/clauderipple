@@ -1643,6 +1643,7 @@ plan unless marked otherwise.
 | ChatGPT accounts that had bought Codex credits were rested by the router the moment a window read 100%, though OpenAI serves them from credits past the window | `exhaustedForMs` ignores a full window while `credits.has_credits` or `unlimited` holds (and `overage_limit_reached` does not); an actual 429 still rests the account until the window resets. |
 | After ~120 host↔relay reconnects no phone could connect for minutes — web and native sat at "connecting" while the host's control socket was open and answering pings, and a host restart did not help (the simulator's own log: every attempt 19:10–19:17 timed out waiting for the relay's `open`, then the next one worked with no change on the phone; 2026-10-15). Measured on the deployed relay with throwaway server ids: a replaced host control socket whose other end never answers the close stays in `getWebSockets("host")`, in acceptance order, for 8+ minutes, and the room sent every phone's `connect` to `sockets("host")[0]` — that dead socket — through any number of reconnects and a restart | The room routes a phone only to the **newest** host socket (each is tagged `at:<accepted ms>`), and only while it pinged within `HOST_SILENT_MS` (the runtime's auto-response timestamp); a silent newest socket is closed `4408` and the phone hears `4404 host offline` at once. The host walks the phone's path itself after every hello and every 5 min (a client socket to its own room must come back `open` within 10 s) and reconnects when it does not; a ping timer that ran late (sleep, blocked event loop) is not taken for a dead socket. Close codes, reasons and ISO timestamps are in `host.log`. In-process tests reproduce the sequence over a network that keeps dead sockets listed (`relay-reconnect.test.ts`). |
 | Return to Wi-Fi postponed forever while subagents keep working (2026-10-20): on the iPhone hotspot, the way back ran only with no model call in flight and none started in the last 20s; with Claude and subagents working back-to-back it logged "Wi-Fi return postponed" at 19:22:54 and never went back to the home Wi-Fi | A return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due makes the gap itself (§8 "Making the gap"): new model calls are **held** at a gate in the proxy and the OpenAI ingress (`hold.ts`) — they wait unread, nothing is written, nothing refused or 503'd, each at most 120s — the running ones get up to 60s to finish, then the usual leave → probe runs and the gate is released whatever the outcome; calls that do not finish in time → release, next scheduled point (the fixed 5/10/20/30/40/50/60-minute return schedule of §8, 2026-10-20). The release is in a `finally` (a thrown error releases it), `stop()` releases it, the gate has its own failsafe timer, and a draining router closes it so a held call meets the retryable 503 instead of being cut. Tests: `tether.test.ts`, `hold.test.ts`. |
+| Blind returns repeatedly cut the only connection while travelling with the lid closed (2026-10-21 18:40–19:08 KST, owner-reported router.log): at each point, "trying to go back to Wi-Fi: leaving the hotspot so macOS joins the best known network", then "no network was joined", "networksetup said: Failed to join network PBJ" → `join-failed`. No known Wi-Fi was in range, and an idle iPhone stops advertising; with the lid closed macOS did not reliably rejoin it. The owner pinned the network as a stopgap. | Never leave the hotspot speculatively. Before either quiet return or the hold gate, a read-only backend check must prove another saved Wi-Fi is visible (on Windows, also an automatic profile). No match → "staying on the hotspot: no known Wi-Fi in range", once per point, then the next point on the unchanged schedule. Scan/list failure, unsupported response or Location refusal → stay and log why; never hold calls or disconnect on unknown visibility. macOS: preferred SSIDs + directed CoreWLAN JXA scans, Windows: saved profile SSIDs intersected with `netsh wlan show networks` (§8, measurements 2026-10-21). |
 | Android hotspot never recognised (2026-10-20, found by reading the code for an owner with Windows laptops and Android phones in mind): "on the hotspot" was the iPhone range 172.20.10.0/28 alone, on macOS and Windows. An Android hotspot hands out 192.168.43.x (≤ Android 10) or a random /24 (Android 11+; 192.168/16, 172.16/12, 10/8 by Android 14), so after our own failover `join()` saw no hotspot address and reported `join-failed`/`hotspot-not-visible`, while on the phone the controller read Wi-Fi and never planned the way back, and a by-hand join was never recognised | The product does not assume an iPhone. After our own join of the configured SSID is accepted by the OS, a new, non-link-local address within the settle time is the join, and its subnet (address + netmask from `os.networkInterfaces()`: no Location, no elevation) is kept in `<home>/tether.json` for that hotspot name; "on the hotspot" = iPhone range OR that network (§8). Only our own join replaces it, and a subnet equal to the Wi-Fi watched before is not remembered (logged as ambiguous) so home Wi-Fi is never read as the hotspot. Hints name both phones where the step differs. Not yet run with a real Android phone. |
 | An expired Claude login on the Mac wrote `[desktop state] …로그인이 만료되었습니다…` every few seconds per Claude app session and read the keychain (a synchronous child process) for every request, while phones learned of it only by a failed send (2026-10-15) | A login problem is one host state: logged when it starts and ends, sent to phones as `HostInfo.desktopProblem` (a banner), and the keychain is reread at most every 30 s while expired or after a 401. Per-session Remote Control errors log once per change. The host never refreshes the login itself. |
 
@@ -1796,9 +1797,9 @@ join) is **not** remembered — the two could not be told apart — and is logge
 as Wi-Fi before; not remembering it"); that join reads as Wi-Fi and no way back is planned. The
 default gateway was not used: it needs a process per OS (`route -n get default`, `Get-NetRoute`) and
 says nothing the subnet does not. Limits: a by-hand join is recognised only on a network learned
-before; a Wi-Fi elsewhere that happens to use the learned /24 reads as the hotspot, so the way back
-drops it for a few seconds at each scheduled point and the OS rejoins it (no harm beyond those drops;
-`tether.pin` stops them). Failover (on Wi-Fi or no
+before; a Wi-Fi elsewhere that happens to use the learned /24 reads as the hotspot. The way back
+can drop it only when another saved SSID is visible (visibility guard, 2026-10-21, below);
+`tether.pin` stops switching entirely. Failover (on Wi-Fi or no
 address, outage): wait at most 30s for an in-flight call, then `sudo -n networksetup
 -setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). The probe window
 lives in the process, so it only works if the router is not restarted every few seconds while the
@@ -1811,8 +1812,9 @@ to it for the timeout duration" unless auto shutdown is off — AOSP `SoftApConf
 android-11.0.0_r1, `isAutoShutdownEnabled`). Return (on the hotspot):
 on a fixed schedule counted from landing there — 5, 10, 20, 30, 40, 50 and 60 minutes, then every
 10 minutes for as long as it stays (owner's decision, 2026-10-20: at most ~10 minutes on the hotspot
-after reaching a known Wi-Fi, and only a brief drop every 10 minutes on the move — a doubling
-backoff held it for up to 15 minutes) — and only with no call in flight and none started in the
+after reaching a known Wi-Fi — a doubling backoff held it for up to 15 minutes). **Since
+2026-10-21 each point first checks whether another saved Wi-Fi is actually in range, without
+leaving the hotspot** (below). Only with a positive check, no call in flight and none started in the
 last 20s, disassociate via JXA as the console user (wifihop's exact call: `ObjC.import("CoreWLAN");
 $.CWWiFiClient.sharedWiFiClient.interface.disassociate`) so macOS auto-joins the best known network;
 two good probes within 20s keep it; otherwise stay on (or rejoin) the hotspot and move to the next
@@ -1823,11 +1825,57 @@ switching. Every decision is logged once, with its reason. "Ask to join hotspots
 (macOS 26+, Apple 109321) covers the no-Wi-Fi-at-all case by itself; its setting lives in a root-only
 file (`com.apple.airport.preferences.plist`: permission denied, measured), so it is only hinted at.
 
+**Visibility before return (2026-10-21).** The blind drop was not brief: while travelling with
+the lid closed and no known Wi-Fi, the owner reported this sequence in router.log, 18:40–19:08 KST:
+"trying to go back to Wi-Fi: leaving the hotspot so macOS joins the best known network" → "no
+network was joined" → "networksetup said: Failed to join network PBJ" → `join-failed`. An idle iPhone
+stops advertising (above), and closed-lid macOS did not reliably rejoin; the owner pinned the
+network via the API as a stopgap. Both return paths now share a read-only check **before any hold
+is engaged or network is left** (`TetherBackend.returnBlocked`). No other known SSID visible →
+"staying on the hotspot: no known Wi-Fi in range", once per scheduled point, then the next fixed
+point; no disconnect, join or hold. Failed/unsupported scans (including Location refusal) are
+unknown visibility, never permission to disconnect: the reason is logged and the point is skipped.
+The schedule and `MIN_SWITCH_INTERVAL_MS` are unchanged. Activity, pin, stop, current network and
+settings are checked after the asynchronous scan, so a new call or a cancellation is not overlooked.
+
+Read-only measurements on the owner's Mac (2026-10-21, `sw_vers`: macOS **27.0.1**, build **26A434**;
+`stat /dev/console` and `id`: console and executing user **pbj, uid 501**; Wi-Fi **en0**, IPv4
+**172.20.10.10** before/after scanning, no join/disassociate/permission change):
+- `networksetup -listpreferredwirelessnetworks en0` returned "Preferred networks on en0:" followed
+  by **48** tab-indented SSIDs, including the configured hotspot **PBJ**. **47** remain after excluding it.
+- CoreWLAN through `/usr/bin/osascript -l JavaScript`, the same user/session path as disassociate:
+  `scanForNetworksWithNameError($(), null)` returned **12** CWNetworks with **unredacted SSIDs**,
+  including PBJ; none of the other preferred SSIDs matched. JXA's ObjC nil is `$()`: passing plain
+  JavaScript `null` as the name gave no usable count (`undefined`), not an empty scan. An early
+  diagnostic attempting to serialize the ObjC error/result also exited **139**; nonzero exit or
+  missing/invalid output must therefore stay safe, not mean visibility.
+- Directed `scanForNetworksWithNameError(name, null)` for all **48** preferred names returned
+  **PBJ: count 1, SSIDs ["PBJ"]** and **each other name: count 0, SSIDs []**. The absent control
+  `__ClaudeRipple_absent_20261021__` also returned **0**. No SSID was redacted in these successful
+  scans; **redacted directed results have not been measured**. The implementation uses directed
+  set counts, not the returned SSID, so a non-empty set can prove the named SSID's visibility even
+  if a different OS/permission context redacts that field. The returned set's `count` bridges to a JXA string
+  here (`"1"`/`"0"`), so it is converted to Number; unavailable/non-finite results fail closed.
+- The actual `SCAN_KNOWN_JS` implementation was executed read-only with those lists: **47 preferred
+  SSIDs except PBJ → `none`; [PBJ] → `visible`; [absent control] → `none`**. It passes names as a JSON
+  argv value, never interpolated code, selects en0 explicitly, and has a 30s runner timeout.
+- `system_profiler SPAirPortDataType -json` returned **24** entries in
+  `spairport_airport_other_local_wireless_networks`; **every `_name` was `<redacted>`**, as was the
+  current network. These were successive snapshots while travelling, not simultaneous counts.
+  This path cannot identify a saved SSID here and is not used.
+
+Windows uses `netsh wlan show networks mode=ssid interface="<adapter>"` and saved profiles from
+`show profiles` plus exported XML (SSID and auto/manual mode), excluding the hotspot. Only a visible
+SSID with an automatic profile permits return; names of profiles alone are not SSID evidence.
+Location denial, command errors and an empty/redacted/unsupported listing all stay on the hotspot,
+with a reason. Unit tests use injected runners only. **Unverified:** Windows live behaviour and
+an actual return with another known Wi-Fi in range; no real switch was made for this change.
+
 **Making the gap (2026-10-20).** "No call in flight and none in the last 20s" never came while Claude
 and subagents worked back-to-back: the return was postponed from 19:22:54 on and the Mac stayed on
 the hotspot (§5). So a return still postponed `RETURN_FORCE_AFTER_MS` (120s) past due stops waiting
 for a quiet moment and makes one (`returnWithGap`, tether.ts), after the same `MIN_SWITCH_INTERVAL`
-and `returnBlocked` checks: (1) engage the hold gate (`hold.ts`), shared by the proxy (`/v1/messages*`)
+and positive visibility/`returnBlocked` checks (2026-10-21): (1) engage the hold gate (`hold.ts`), shared by the proxy (`/v1/messages*`)
 and the OpenAI ingress (Responses/Chat calls). A new model call that arrives while it is engaged
 waits before its body is read and before it is counted in `messagesInFlight` — no bytes written, not
 refused, not 503 — until the gate is released or `HOLD_MAX_MS` (120s) has passed for that call, then
@@ -1941,7 +1989,9 @@ anyway netsh says so ("…need location permission… ms-settings:privacy-locati
 interface="<adapter>"` (Windows keeps the password in the profile; no profile → `no-hotspot-profile`,
 "join it once from the Wi-Fi menu"). netsh returns once the request is queued, so the address decides:
 none within 15s → `hotspot-not-visible`. Return: only if some other profile has
-`connectionMode=auto` (else no attempt, a hint, the same return schedule); `netsh wlan disconnect` lets
+`connectionMode=auto` **and its SSID is visible in `netsh wlan show networks`** (2026-10-21, visibility
+check above; unknown visibility never disconnects or holds calls). Otherwise no attempt, a logged
+reason, the same return schedule; `netsh wlan disconnect` lets
 auto-config join the best automatic network; whether a netsh disconnect suppresses that on Vista+ is
 undocumented (WlanDisconnect's "on-demand profile" note is for XP), so with no address after 8s the
 first automatic profile is joined by name. Profile names come from `show profiles` (the text after
