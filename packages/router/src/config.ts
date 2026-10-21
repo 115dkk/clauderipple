@@ -431,7 +431,12 @@ export type Config = {
    * hosted search answers instead. Absent, nothing is intercepted and the search behaves as before.
    */
   webSearch?: {
-    /** A key of `providers`, speaking an OpenAI-compatible Chat Completions API with a web plugin. */
+    /**
+     * A key of `providers`. The backend follows how that provider is spoken to: an
+     * `anthropic-compatible` one is handed Anthropic's `web_search` server tool (only where its
+     * preset or caps measured support), an `openai-compatible` one is asked through its Chat
+     * Completions web plugin, and a `chatgpt` provider uses its own hosted search.
+     */
     provider: string;
     /** The model that runs the search. Its hosted search does the work, so a small one is enough. */
     model: string;
@@ -719,6 +724,19 @@ export function validate(c: Config): string[] {
       else if (provider.type === "anthropic" && !provider.accountPool) errors.push("autoModeClassifier: provider is ingress-only");
       if (typeof target.model !== "string" || !target.model.trim()) errors.push("autoModeClassifier: missing model");
       if (target.effort !== undefined && typeof target.effort !== "string") errors.push("autoModeClassifier: effort must be a string");
+    }
+  }
+  if (c.webSearch !== undefined) {
+    // Hand-edited config.json reaches here as whatever JSON held, not the declared type.
+    const target = c.webSearch as { provider?: unknown; model?: unknown; maxResults?: unknown } | null;
+    if (!target || typeof target !== "object" || Array.isArray(target)) errors.push("webSearch must be an object");
+    else {
+      if (typeof target.provider !== "string" || !target.provider.trim()) errors.push("webSearch: missing provider");
+      else if (!c.providers[target.provider]) errors.push(`webSearch: unknown provider "${target.provider}"`);
+      if (typeof target.model !== "string" || !target.model.trim()) errors.push("webSearch: missing model");
+      if (target.maxResults !== undefined && (!Number.isInteger(target.maxResults) || (target.maxResults as number) <= 0)) {
+        errors.push("webSearch: maxResults must be a positive integer");
+      }
     }
   }
   for (const [alias, r] of Object.entries(c.routes)) {

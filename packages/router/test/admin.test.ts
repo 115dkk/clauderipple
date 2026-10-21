@@ -752,6 +752,22 @@ test("PUT /api/config accepts a valid config and saves it atomically", async () 
   });
 });
 
+test("PUT /api/config carries a webSearch backend through to the file and GET returns it", async () => {
+  await withAdmin(makeCfg(), async ({ port, configFile, setCfg }) => {
+    const next = makeCfg({
+      providers: { gpt: { type: "chatgpt", auth: "own" } },
+      webSearch: { provider: "gpt", model: "gpt-5.6-terra", maxResults: 4 },
+    });
+    const res = await fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+    assert.equal(res.status, 200);
+    const onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    assert.deepEqual(onDisk.webSearch, next.webSearch);
+    setCfg(next);
+    const read = (await (await fetch(`${base()}:${port}/api/config`)).json()) as Config;
+    assert.deepEqual(read.webSearch, next.webSearch);
+  });
+});
+
 test("PUT /api/config rejects an invalid config with 400 and does not touch the file", async () => {
   const cfg = makeCfg();
   await withAdmin(cfg, async ({ port, configFile }) => {

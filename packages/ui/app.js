@@ -867,11 +867,25 @@ function providerCannotSearch(name, model) {
   return !(Array.isArray(entry.webSearchModels) && entry.webSearchModels.includes(id));
 }
 
+// The web search row names a provider as well as a model: one id can be offered by two providers
+// and only one of them may be able to run a search. JSON keeps the two apart whatever they contain.
+function webSearchChoice(provider, model) { return JSON.stringify([provider, model]); }
+function parseWebSearchChoice(value) {
+  if (!value) return null;
+  try {
+    const [provider, model] = JSON.parse(value);
+    return typeof provider === "string" && typeof model === "string" ? { provider, model } : null;
+  } catch { return null; }
+}
+
 function renderModelSlots() {
   const rows = $("#client-model-slots");
   if (!rows) return;
   const chosen = (currentConfig.cli && currentConfig.cli.models) || {};
-  rows.replaceChildren(...MODEL_SLOTS.map((slot) => {
+  // With a web search backend set, the search is intercepted before routing and never reaches
+  // `smallFast`, so the "no web search here" label there would be false.
+  const searchIntercepted = Boolean(currentConfig.webSearch);
+  const nodes = MODEL_SLOTS.map((slot) => {
     const select = el("select", {});
     select.appendChild(el("option", { value: "", text: t("slots.slotDefault") }));
     for (const group of groupedModels(currentConfig)) for (const model of group.models) {
@@ -879,7 +893,7 @@ function renderModelSlots() {
       if (chosen[slot] === model.id) option.selected = true;
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
       // merely worth knowing everywhere else.
-      if (slot === "smallFast" && providerCannotSearch(group.name, model.id)) {
+      if (slot === "smallFast" && !searchIntercepted && providerCannotSearch(group.name, model.id)) {
         option.textContent += ` — ${t("slots.noWebSearch")}`;
       }
       select.appendChild(option);
@@ -894,7 +908,55 @@ function renderModelSlots() {
     select.dataset.slot = slot;
     select.setAttribute("aria-label", t(`slots.slot.${slot}`));
     return cell(t(`slots.slot.${slot}`), select, t(`slots.slotHelp.${slot}`), "slot-row");
-  }));
+  });
+  nodes.push(renderWebSearchSlot());
+  rows.replaceChildren(...nodes);
+}
+
+// The backend `cfg.webSearch` names answers the search instead of the `smallFast` slot. Only the
+// router knows which models it can actually search with — that comes from `/api/status`, never
+// from a model's name — so an unsearchable model is not offered here at all.
+function renderWebSearchSlot() {
+  const saved = currentConfig.webSearch || null;
+  const select = el("select", {});
+  select.appendChild(el("option", { value: "", text: t("slots.webSearchFollow") }));
+  let found = false;
+  for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+    if (providerCannotSearch(group.name, model.id)) continue;
+    // A Claude account searches on its own when routed to, but `serveWebSearch` has no backend for
+    // that provider kind: named here, the search would quietly fall back to `smallFast`.
+    if (currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic") continue;
+    const option = el("option", { value: webSearchChoice(group.name, model.id), text: `${labelOf(model)} · ${group.name}` });
+    if (saved && saved.provider === group.name && saved.model === model.id) { option.selected = true; found = true; }
+    select.appendChild(option);
+  }
+  // A backend the config names but no provider can run any more must not read as "follows the
+  // small, fast model" — that would silently change where the search goes.
+  if (saved && !found) {
+    const orphan = el("option", { value: webSearchChoice(saved.provider, saved.model), text: `${saved.provider} / ${saved.model} (?)` });
+    orphan.selected = true;
+    select.appendChild(orphan);
+  }
+  select.onchange = () => void saveWebSearch(select.value);
+  select.dataset.webSearch = "true";
+  select.setAttribute("aria-label", t("slots.webSearch"));
+  return cell(t("slots.webSearch"), select, t("slots.webSearchHelp"), "slot-row");
+}
+
+async function saveWebSearch(value) {
+  if (!currentConfig) return;
+  const next = clone(await latestConfig());
+  const picked = parseWebSearchChoice(value);
+  // `webSearch` is the only setting this row owns; an existing `maxResults` survives the change.
+  const maxResults = (next.webSearch && next.webSearch.maxResults) ?? (currentConfig.webSearch && currentConfig.webSearch.maxResults);
+  if (picked) next.webSearch = { provider: picked.provider, model: picked.model, ...(maxResults !== undefined ? { maxResults } : {}) };
+  else delete next.webSearch;
+  try {
+    await configRequest(next);
+    currentConfig = next;
+    renderModelSlots();
+    toast(t("slots.webSearchSaved"));
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 
 async function saveModelSlots() {
@@ -904,15 +966,17 @@ async function saveModelSlots() {
   // remove the env key, and the router tells "clear this" from "leave this alone" by whether the
   // slot is present at all — so dropping empty values here would make the choice a silent no-op.
   const models = {};
-  for (const select of $all("#client-model-slots select")) models[select.dataset.slot] = select.value;
+  // Only the three slot rows: the web search row below them writes `webSearch`, not a slot.
+  for (const select of $all("#client-model-slots select[data-slot]")) models[select.dataset.slot] = select.value;
   next.cli = { ...(next.cli || {}), models };
   try {
     await configRequest(next);
     currentConfig = next;
     // Saying "saved" over a choice that will make every search fail is the same silent no-op this
     // screen was already guilty of once. The label on the option warns before the fact; this catches
-    // a session that already had it selected.
-    const owners = models.smallFast ? providersOffering(next, models.smallFast) : [];
+    // a session that already had it selected. With a web search backend set the search never
+    // reaches `smallFast`, so there is nothing to warn about.
+    const owners = models.smallFast && !next.webSearch ? providersOffering(next, models.smallFast) : [];
     if (owners.length && providerCannotSearch(owners[0], models.smallFast)) toast(t("slots.noWebSearchWarn"), true);
     else toast(t("slots.slotSaved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }

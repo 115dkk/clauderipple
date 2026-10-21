@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ConfigStore, DEFAULTS, providerFor, validate } from "../src/config.ts";
-import type { AnthropicCompatibleProvider, GoogleProvider, OpenAiCompatibleProvider } from "../src/config.ts";
+import type { AnthropicCompatibleProvider, Config, GoogleProvider, OpenAiCompatibleProvider } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
 
 test("validate rejects an unusable Auto mode classifier target", () => {
@@ -13,6 +13,19 @@ test("validate rejects an unusable Auto mode classifier target", () => {
   assert.ok(validate({ ...DEFAULTS, providers, autoModeClassifier: { provider: "missing", model: "gpt-6-luna" } }).some((e) => e.includes("unknown provider")));
   assert.ok(validate({ ...DEFAULTS, providers, autoModeClassifier: { provider: "p", model: "" } }).some((e) => e.includes("missing model")));
   assert.ok(validate({ ...DEFAULTS, providers: { p: { type: "anthropic", auth: "claude-code" } }, autoModeClassifier: { provider: "p", model: "claude-sonnet-5" } }).some((e) => e.includes("ingress-only")));
+});
+
+test("validate accepts a web search backend and rejects an unusable one", () => {
+  const providers = { p: { type: "chatgpt" as const } };
+  assert.deepEqual(validate({ ...DEFAULTS, providers, webSearch: { provider: "p", model: "gpt-5.6-terra" } }), []);
+  assert.deepEqual(validate({ ...DEFAULTS, providers, webSearch: { provider: "p", model: "gpt-5.6-terra", maxResults: 3 } }), []);
+  const bad = (webSearch: unknown) => validate({ ...DEFAULTS, providers, webSearch: webSearch as NonNullable<Config["webSearch"]> }).join();
+  assert.match(bad({ provider: "missing", model: "m" }), /unknown provider/);
+  assert.match(bad({ provider: "", model: "m" }), /missing provider/);
+  assert.match(bad({ provider: "p", model: " " }), /missing model/);
+  assert.match(bad({ provider: "p", model: "m", maxResults: 0 }), /maxResults must be a positive integer/);
+  assert.match(bad({ provider: "p", model: "m", maxResults: 2.5 }), /maxResults must be a positive integer/);
+  assert.match(bad("p"), /webSearch must be an object/);
 });
 
 test("validate reports unknown providers and bad urls", () => {
