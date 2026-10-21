@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.12.1 — 2026-10-21
+
+### Changed
+
+- **One web setting covers page reading too.** WebFetch downloads a page and has the small, fast
+  model answer from it; that answer now comes from the model picked for web search, as WebSearch
+  already did, instead of Haiku on Claude quota. The Clients row is "Web search & page reading". If
+  that model fails before answering, the request goes where it went before.
+- **Design work takes the heavy level of the frontend + design ladder**, whatever tier it was
+  given: a task judged design runs on the heavy workers, since its result depends on the model's
+  taste rather than on difficulty. Frontend tasks still pick by tier.
+
 ## 0.12.0 — 2026-10-21
 
 ### Added
