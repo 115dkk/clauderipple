@@ -5,7 +5,7 @@ import os from "node:os";
 import fs from "node:fs";
 import http from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
-import { listProcesses } from "../src/processes.ts";
+import { listProcesses, ProcessSnapshot } from "../src/processes.ts";
 import { processHasSession, liveDesktopProcesses } from "../src/desktop.ts";
 import { findClaude, specFor } from "../src/service.ts";
 import { renderService, TASK, UNIT, controlShutdown } from "../src/host-service.ts";
@@ -39,8 +39,14 @@ for (const platform of ["darwin", "linux"] as const) test(`${platform} snapshot 
     return ` PID COMMAND\n 42 claude --resume=${id}\n garbage\n`;
   }), [{ pid: 42, command: `claude --resume=${id}` }]);
 });
-test("desktop registry liveness is off before filesystem/process access on Windows and Linux", () => {
-  for (const platform of ["win32", "linux"] as const) assert.equal(liveDesktopProcesses("/not/a/registry", 0, platform).size, 0);
+test("desktop registry liveness is off on Linux and reads the Windows registry", t => {
+  assert.equal(liveDesktopProcesses("/not/a/registry", 0, "linux").size, 0);
+  // Windows reads the registry now: the process snapshot behind it decides who is live.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-win-registry-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, "42.json"), JSON.stringify({ sessionId: id, pid: 42, entrypoint: "claude-desktop", status: "idle", procStart: "134370764816580794" }));
+  const snapshot = new ProcessSnapshot({ platform: "win32", exec: () => JSON.stringify([{ ProcessId: 42, CommandLine: "claude.exe", CreationDate: "2026-10-21T17:14:41.6580790Z" }]) });
+  assert.equal(liveDesktopProcesses(dir, 0, "win32", snapshot).get(id)?.pid, 42);
 });
 test("findClaude discovers each Windows name on PATH and honors an explicit binary", () => {
   for (const name of ["claude.exe", "claude.cmd", "claude.bat"]) {
