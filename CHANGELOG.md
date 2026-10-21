@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.4 — 2026-10-22
+
+### Added
+
+- **On Windows, the phone can send to a session open in the Claude app.** Before, such a session
+  could be read but not written to. It needs Remote Control turned on in the Claude app, the same
+  as on macOS; with only the Claude app in use, the login ClaudeRipple saw the app use carries it.
+  Handing a phone session over to the Claude app is still macOS only.
+
 ## 0.12.3 — 2026-10-22
 
 ### Added
