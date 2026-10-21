@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.0 — 2026-10-21
+
+### Added
+
+- **ClaudeRipple updates itself.** The router checks for a new version 10 minutes after it starts
+  and every 12 hours, and installs it once nothing has been in flight for 10 minutes; requests in
+  flight finish before the restart. A version that fails to come up is not retried for 24 hours.
+  The tray shows a desktop notification when an update has landed, or when one is available where
+  nothing installs by itself. Off with the switch in the dashboard's About view. Versions before
+  this one need one manual update to get here.
+- **Frontend + design and backend can have workers of their own.** Each worker set (Base and every
+  mode) can give those two domains their own ladder of two levels, light work and heavy work; every
+  other task keeps the four general workers. When the main chat names a task's tier, the judge is
+  asked for its domain only while such a ladder is set.
+- **Base has its own delegation strength.** Eager delegation no longer needs a mode to be on.
+- **Web search gets its own model.** The Clients view picks the model that answers `WebSearch`
+  apart from the small, fast one, from the models ClaudeRipple can actually search with. It applies
+  at once, without a new session.
+- **OpenCode Go's Gemini model works** (#68). A model can speak Google's `generateContent` wire
+  inside one provider; `gemini-4-argon-contributor` is listed on it, sent with OpenCode's session
+  header.
+- **The Phone view introduces Ripple Remote**, with an App Store button for your language's store,
+  until a phone is paired.
+- **Image generations appear in the request log and the usage counts.**
+- **The Compact icon shows how many times the chat has been compacted.**
+
+### Fixed
+
+- **A routed model's compaction window falls back to the one its provider declared**, not the
+  global default: a 1M-token subagent was compacting at about 240K.
+- **"Reopen Claude" goes away once Claude has restarted**, however it was restarted.
+- **OpenCode Go's DeepSeek is no longer offered as a search model**; it never ran a search.
+- **A router that briefly lost its settings no longer sends every chat back to setup.**
+
 ## 0.11.1 — 2026-10-20
 
 ### Fixed
