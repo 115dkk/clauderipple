@@ -25,8 +25,8 @@
    무관한 기존 경로라 따로 시험하지 않았다. 원하시면 VM에 원격 호스트를 깔고 휴대폰을 페어링해 끝까지 본다.
 5. **의도 불명 미커밋 파일** — `scripts/install.sh`·`scripts/install.ps1` 수정, 루트 `HANDOFF.md`(10-19), `design-drafts/`,
    `.claude/`는 이 세션 작업이 아니어서 손대지 않았다.
-6. **전역 CLAUDE.md 워커 절 축소** — 공통 내용은 `ripple:auto` 설명문으로 옮기고 주군 개인 규칙만 남겼다. 백업은 세션 임시 폴더
-   (`/private/tmp/claude-501/.../scratchpad/CLAUDE.md.bak`)에 있어 재부팅하면 사라진다. 이상하면 그 전에 말씀하실 것.
+6. **전역 CLAUDE.md 워커 절 축소** — 공통 내용은 `ripple:auto` 설명문으로 옮기고 주군 개인 규칙만 남겼다. 고치기 전 원본은
+   `~/.claude/CLAUDE.md.bak-20261022`. 괜찮으면 지우셔도 된다.
 7. **Parallels VM "Windows 11"은 켜 둔 채** — 주군이 Claude 앱에 로그인해 Remote Control을 켠 상태 그대로다. 필요 없으면 끄셔도 된다.
 
 ### 이 세션에서 한 일
