@@ -9,6 +9,7 @@ import { transcriptEvents } from "../src/desktop.ts";
 import { summarize } from "../src/sessions.ts";
 import { ATTACHMENT_CAP } from "../src/protocol.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
+import { needsPosixModes } from "../../../test/capabilities.ts";
 
 const data = Buffer.from("synthetic image bytes").toString("base64");
 const image = { type: "image", source: { type: "base64", media_type: "image/png", data } };
@@ -69,7 +70,7 @@ test("referenced tmp image caches load, missing or unapproved references remain 
   assert.ok(missing.images.every(part => !part.blob));
 });
 
-test("the attachment folder is created 0700, not 0755", t => {
+test("the attachment folder is created 0700, not 0755", { skip: needsPosixModes }, t => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-attach-"));
   t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
   attachmentContent(cwd, "see attached", [{ blob: "b1", name: "note.txt", mediaType: "text/plain" }], () => Buffer.from("hello").toString("base64"));
