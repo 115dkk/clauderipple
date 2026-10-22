@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The phone says when the Mac is asking for folder access.** Opening a folder macOS guards
+  (Desktop, Documents, Downloads, iCloud Drive, another volume) for the first time puts up the
+  Mac's "would like to access" dialog, and the phone waited in silence, then said the computer did
+  not answer. It now says the dialog is up within two seconds, and where to allow access if it was
+  refused.
+- **The band's limits row comes back at the next check after a failed read**, not a minute later.
+
 ## 0.12.5 — 2026-10-22
 
 ### Changed

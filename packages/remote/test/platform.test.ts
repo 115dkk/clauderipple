@@ -10,7 +10,7 @@ import { processHasSession, liveDesktopProcesses } from "../src/desktop.ts";
 import { findClaude, specFor } from "../src/service.ts";
 import { renderService, TASK, UNIT, controlShutdown, refreshPlan } from "../src/host-service.ts";
 import { keepAwakeCommand, PowerHold, nodeSpawner } from "../src/power.ts";
-import { noisyFolder } from "../src/folders.ts";
+import { MAC_CONSENT_DENIED, MAC_CONSENT_PENDING, macConsent, macProtected, noisyFolder } from "../src/folders.ts";
 import { batchCommand, launcherOptions } from "../src/sdk-launcher.ts";
 import { HostServer } from "../src/server.ts";
 import { LocalControl, localSecret } from "../src/local-control.ts";
@@ -171,4 +171,18 @@ test("an update restarts only the phone host this installation registered, and n
   const odd = "/Users/a&b/cr's/main.js";
   assert.equal(refreshPlan({ installed: true, definition: "<string>/Users/a&amp;b/cr's/main.js</string>", script: odd, busy: false }), "restart");
   assert.equal(refreshPlan({ installed: true, definition: "'\"/Users/a&b/cr''s/main.js\"'", script: odd, busy: false }), "restart");
+});
+
+test("a read of a folder macOS guards reports the Mac's access dialog instead of hanging", async () => {
+  const home = "/Users/me";
+  for (const p of ["/Users/me/Documents", "/Users/me/Desktop/app", "/Users/me/Downloads/x", "/Users/me/Library/Mobile Documents/com~apple~CloudDocs/a", "/Volumes/USB/work"]) assert.equal(macProtected(p, home), true, p);
+  for (const p of ["/Users/me", "/Users/me/code/app", "/Users/me/DocumentsOld", "/opt/work"]) assert.equal(macProtected(p, home), false, p);
+  const never = (): Promise<string> => new Promise(() => {});
+  await assert.rejects(macConsent("/Users/me/Documents/new", never, { platform: "darwin", home, wait: 20 }), { message: MAC_CONSENT_PENDING });
+  const refused = (): Promise<string> => Promise.reject(Object.assign(new Error("operation not permitted"), { code: "EPERM" }));
+  await assert.rejects(macConsent("/Users/me/Documents/new", refused, { platform: "darwin", home, wait: 20 }), { message: MAC_CONSENT_DENIED });
+  assert.equal(await macConsent("/Users/me/Documents/new", async () => "listed", { platform: "darwin", home, wait: 20 }), "listed");
+  // Elsewhere, and on other systems, the read is left to answer or fail on its own.
+  await assert.rejects(macConsent("/Users/me/code", refused, { platform: "darwin", home, wait: 20 }), { code: "EPERM" });
+  await assert.rejects(macConsent("/Users/me/Documents/new", refused, { platform: "win32", home, wait: 20 }), { code: "EPERM" });
 });

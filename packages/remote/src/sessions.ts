@@ -15,7 +15,7 @@ import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeAuthError, BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, isCliNotLoggedIn, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
-import { isDirectory } from "./folders.ts";
+import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { createWorktree } from "./worktree.ts";
 import { MessageReceipts, OutcomeUnknownError } from "./receipts.ts";
@@ -745,6 +745,8 @@ export class Sessions {
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const isolation = req.isolation ?? "local";
     if (isolation !== "local" && isolation !== "worktree") throw new Error("invalid isolation");
+    // Read first, so a folder macOS guards says so now rather than holding the session at "starting".
+    await macConsent(path.resolve(req.cwd), () => readableFolder(path.resolve(req.cwd)));
     // A worktree session runs in a fresh branch under the repo's parent; the picked folder itself is
     // never modified. The host validates everything (worktree.ts), refusing a folder that is not a repo.
     const cwd = isolation === "worktree"
