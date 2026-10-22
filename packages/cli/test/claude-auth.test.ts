@@ -68,6 +68,8 @@ test("claude-login invokes PATH claude setup-token and saves only a 0600 credent
   const token = "sk-ant-oat01-1234567890abcdefghijklmnopqrstuvwxyz";
   fs.writeFileSync(fake, `#!/bin/sh\n[ "$1" = "setup-token" ] || exit 64\nprintf 'CLAUDE_CODE_OAUTH_TOKEN=%s\\n' '${token}'\n`);
   fs.chmodSync(fake, 0o755);
+  // PATH launchers use PATHEXT on Windows; the extensionless shell fake remains the POSIX launcher.
+  fs.writeFileSync(path.join(bin, "claude.cmd"), `@echo off\r\nif not "%~1"=="setup-token" exit /b 64\r\necho CLAUDE_CODE_OAUTH_TOKEN=${token}\r\n`);
   const cli = path.resolve(import.meta.dirname, "..", "src", "index.ts");
   // The Desktop cache roots point into the scratch dir too. Where the fake is not a launcher (an
   // extensionless file on Windows), the lookup falls back to the Desktop-cached CLI, and a real one

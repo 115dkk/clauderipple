@@ -13,6 +13,7 @@ import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
 import { CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
+import { posixPaths } from "../../../test/capabilities.ts";
 
 const router = {
   status: async () => ({ ok: true, proxyEnv: { HTTPS_PROXY: "http://127.0.0.1:1" } }),
@@ -589,7 +590,13 @@ test("summarize uses Bash's first line, cwd-relative Read paths and Grep pattern
   const cwd = path.resolve(os.tmpdir(), "summary-project");
   assert.equal(summarize("Bash", { command: "ls -la\npwd" }, cwd), "ls -la");
   assert.equal(summarize("Bash", { command: "\n\nls\npwd" }, cwd), "ls");
-  assert.equal(summarize("Read", { file_path: path.join(cwd, "src", "index.ts") }, cwd), "src/index.ts");
+  assert.equal(summarize("Read", { file_path: path.join(cwd, "src", "index.ts") }, cwd), path.join("src", "index.ts"));
+  if (!posixPaths) {
+    const forward = path.join(cwd, "src", "index.ts").replaceAll("\\", "/");
+    const drive = forward[0]!;
+    const otherDriveCase = (drive === drive.toUpperCase() ? drive.toLowerCase() : drive.toUpperCase()) + forward.slice(1);
+    assert.equal(summarize("Read", { file_path: otherDriveCase }, cwd), path.join("src", "index.ts"));
+  }
   assert.equal(summarize("Read", { file_path: cwd }, cwd), ".");
   const outside = `${cwd}-other/file.ts`;
   assert.equal(summarize("Read", { file_path: outside }, cwd), outside);

@@ -48,6 +48,7 @@ import { isWebFetchRequest } from "./webfetch.ts";
 import { ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
+import type { ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage } from "./providers/anthropic-usage.ts";
@@ -203,6 +204,8 @@ export type ProxyDeps = {
   requests: RequestLog;
   /** Process-memory only; captures a real passthrough Claude Code OAuth header set. */
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+  /** Test seam for Claude Code's keychain and credential-file readers. */
+  claudeCodeCredentialReaders?: ClaudeCodeCredentialReaders;
   /** Where agent definitions are read from. Defaults to `~/.claude/agents`; tests inject a tmp dir. */
   agentDir?: string;
   /** TLS dialer for absolute-form proxy requests. Production uses node:tls; integration tests inject a local CA. */
@@ -480,6 +483,7 @@ export class Proxy {
       home: deps.home,
       log: deps.log,
       ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
+      ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
     });
     this.claudeUsage = new ClaudeUsage(this.claudeAccounts, {
       upstream: () => this.deps.config().upstream,

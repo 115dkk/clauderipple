@@ -9,7 +9,7 @@ import { transcriptEvents } from "../src/desktop.ts";
 import { summarize } from "../src/sessions.ts";
 import { ATTACHMENT_CAP } from "../src/protocol.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
-import { needsPosixModes } from "../../../test/capabilities.ts";
+import { fileSymlinks, needsPosixModes } from "../../../test/capabilities.ts";
 
 const data = Buffer.from("synthetic image bytes").toString("base64");
 const image = { type: "image", source: { type: "base64", media_type: "image/png", data } };
@@ -41,16 +41,16 @@ test("cache paths reject outside roots, traversal and symlink escapes", t => {
   fs.mkdirSync(root, { recursive: true });
   const safe = path.join(root, "1.png"), outside = path.join(home, "outside.png");
   fs.writeFileSync(safe, "safe"); fs.writeFileSync(outside, "outside");
-  fs.symlinkSync(outside, path.join(root, "escape.png"));
+  if (fileSymlinks) fs.symlinkSync(outside, path.join(root, "escape.png"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   assert.equal(imageCachePath(safe, home), fs.realpathSync(safe));
   assert.equal(imageCachePath(outside, home), null);
   assert.equal(imageCachePath(path.join(root, "..", "..", "outside.png"), home), null);
-  assert.equal(imageCachePath(path.join(root, "escape.png"), home), null);
+  if (fileSymlinks) assert.equal(imageCachePath(path.join(root, "escape.png"), home), null);
   assert.equal(imageCachePath(path.join(root, "missing.png"), home), null);
   assert.equal(imageCachePath("relative.png", home), null);
   fs.rmSync(path.join(home, ".claude"), { recursive: true });
-  fs.symlinkSync(home, path.join(home, ".claude"));
+  fs.symlinkSync(home, path.join(home, ".claude"), "junction");
   assert.equal(imageCachePath(path.join(home, ".claude", "outside.png"), home), null);
 });
 

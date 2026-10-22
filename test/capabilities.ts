@@ -30,8 +30,35 @@ function probePosixModes(): boolean {
   return supported;
 }
 
+function probeFileSymlinks(): boolean {
+  let dir: string | undefined;
+  let supported = false;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "clauderipple-file-symlinks-"));
+    const target = path.join(dir, "target");
+    const link = path.join(dir, "link");
+    fs.writeFileSync(target, "probe");
+    fs.symlinkSync(target, link, "file");
+    supported = fs.readFileSync(link, "utf8") === "probe";
+  } catch {
+    supported = false;
+  } finally {
+    if (dir) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        supported = false;
+      }
+    }
+  }
+  return supported;
+}
+
 /** POSIX file and directory permission bits are both preserved only when this probe succeeds. */
 export const posixModes = probePosixModes();
+/** File symlinks can be created by this account only when this probe succeeds. */
+export const fileSymlinks = probeFileSymlinks();
 
 export const needsPosixPaths = posixPaths ? false : "needs POSIX path separators";
 export const needsPosixModes = posixModes ? false : "needs POSIX permission bits";
+export const needsFileSymlinks = fileSymlinks ? false : "needs permission to create file symlinks";

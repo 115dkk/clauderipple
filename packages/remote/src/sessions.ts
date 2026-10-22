@@ -139,9 +139,16 @@ export function modelArg(model: string, effort: Effort | null): { model: string;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const oneLine = (s: string, n = 200): string => { const l = s.split("\n").find((x) => x.trim()) ?? ""; return l.length > n ? l.slice(0, n - 1) + "…" : l; };
 
+function relativeToCwd(file: string, cwd: string): string {
+  if (!file || !path.isAbsolute(file)) return file;
+  const relative = path.relative(cwd, file);
+  if (!relative) return ".";
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) ? relative : file;
+}
+
 /** One line a person reads to know what a tool call does. */
 export function summarize(tool: string, input: Record<string, unknown>, cwd: string): string {
-  const rel = (p: string): string => (p && path.isAbsolute(p) && (p === cwd || p.startsWith(cwd + "/")) ? path.relative(cwd, p) || "." : p);
+  const rel = (file: string): string => relativeToCwd(file, cwd);
   switch (tool) {
     case "Bash": return oneLine(str(input.command));
     case "Read": case "Write": case "Edit": case "MultiEdit": return rel(str(input.file_path));

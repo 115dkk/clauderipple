@@ -52,7 +52,7 @@ import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
-import { ClaudeCodeAuthStore, nativeAnthropicHeaders } from "./providers/anthropic.ts";
+import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import { fetchClaudeModels, newClaudeReleases, type ClaudeModel } from "./providers/anthropic-models.ts";
 import { codexEnabled, codexHome } from "../../cli/src/codex.ts";
@@ -152,6 +152,8 @@ export type AdminDeps = {
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
   /** Optional: observed CLI credentials held by the live proxy, never serialized directly. */
   observedClaudeCodeAuth?: ObservedClaudeCodeAuth;
+  /** Test seam for Claude Code's keychain and credential-file readers. */
+  claudeCodeCredentialReaders?: ClaudeCodeCredentialReaders;
   /** Test seam for the local CLI side effects. Production uses the installed CLI runtime. */
   runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
   /** Test seam for a CLI run that must outlive this router (the update). */
@@ -975,7 +977,11 @@ function codexState(): { enabled: boolean; codexHome: string; configPath: string
 }
 
 function claudeAuthStore(deps: AdminDeps): ClaudeCodeAuthStore {
-  return new ClaudeCodeAuthStore(undefined, { home: homeDir(), ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}) });
+  return new ClaudeCodeAuthStore(undefined, {
+    home: homeDir(),
+    ...(deps.observedClaudeCodeAuth ? { observed: deps.observedClaudeCodeAuth } : {}),
+    ...(deps.claudeCodeCredentialReaders ? { credentialReaders: deps.claudeCodeCredentialReaders } : {}),
+  });
 }
 
 async function probeAnthropicApiKey(apiKey: string, probeFetch: (url: string, init: RequestInit) => Promise<Response> = fetchWithTimeout): Promise<{ ok: boolean; auth: ProbeAuth; models: ModelEntry[]; error?: string }> {
