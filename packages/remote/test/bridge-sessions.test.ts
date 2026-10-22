@@ -278,3 +278,38 @@ test("attach replays approvals requested before the stream connected, skipping a
   assert.equal(f.posts.length, 1);
   assert.equal(await f.sessions.decide(id, pending[0]!.id, "deny"), false, "the second answer resolves nothing again");
 });
+
+// The queue for a Claude app session goes over Remote Control when the app says the turn ended,
+// and the next only after the turn the last one started has answered and ended.
+test("a queued message for a Mac session goes when its turn ends, the next after that turn's answer", async t => {
+  const f = fixture(t);
+  f.status("running");
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.list()[0]!.state, "running");
+  f.sessions.enqueue(id, "q-mac-1", "after this turn");
+  f.sessions.enqueue(id, "q-mac-2", "then this");
+  await tick();
+  assert.equal(f.posts.length, 0, "nothing goes while the Mac turn runs");
+  assert.equal(f.sessions.list()[0]!.queue?.length, 2);
+  f.advance(); f.status("idle");
+  await f.sessions.pollDesktop();
+  await tick(); await tick();
+  assert.equal(f.posts.length, 1, "the turn ended: the head went");
+  assert.match(JSON.stringify(f.posts[0]), /after this turn/);
+  // Remote Control can still read idle before the new turn starts: the second waits for an answer.
+  f.advance();
+  await f.sessions.pollDesktop();
+  await tick(); await tick();
+  assert.equal(f.posts.length, 1);
+  assert.deepEqual(f.sessions.summaryOf(id)!.queue?.map(item => item.id), ["q-mac-2"]);
+  fs.appendFileSync(f.file, line({ type: "user", uuid: "q-mac-1", message: { content: "after this turn" } }) + line({ type: "assistant", uuid: "reply-1", message: { model: "model", content: [{ type: "text", text: "done" }] } }));
+  f.advance(); f.status("running");
+  await f.sessions.pollDesktop();
+  f.advance(); f.status("idle");
+  await f.sessions.pollDesktop();
+  await tick(); await tick();
+  assert.equal(f.posts.length, 2);
+  assert.match(JSON.stringify(f.posts[1]), /then this/);
+  assert.equal(f.sessions.summaryOf(id)!.queue, undefined);
+  assert.equal(f.queries(), 0, "never an SDK query of the host's own");
+});

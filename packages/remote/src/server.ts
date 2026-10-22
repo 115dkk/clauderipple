@@ -139,7 +139,7 @@ export class HostServer {
   constructor(opts: ServerOptions) {
     this.opts = opts;
     const desktopProblem = opts.sessions.desktopProblem?.();
-    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, ...(desktopProblem ? { desktopProblem } : {}) };
+    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
     this.http.on("upgrade", (req, socket, head) => {
@@ -398,6 +398,8 @@ export class HostServer {
         try {
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
           const id = await s.send(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
+          // A message the person sends after a Stop is them carrying on: the queue goes on after it.
+          s.resumeQueue(msg.session);
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
           if (desktop && id === msg.session) this.attach(c, id, undefined, undefined);
         } catch (e) {
@@ -429,7 +431,8 @@ export class HostServer {
       case "interrupt":
       case "set_model":
         try {
-          if (msg.t === "interrupt") await s.interrupt(msg.session);
+          // Stop from the phone also pauses what it queued: the person decides what goes next.
+          if (msg.t === "interrupt") { await s.interrupt(msg.session); s.holdQueue(msg.session); }
           else await s.setModel(msg.session, msg.model, msg.effort);
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
         } catch (e) {
@@ -477,6 +480,10 @@ export class HostServer {
       case "mkdir": return { path: await makeFolder(op.parent, op.name) };
       case "git": return macConsent(op.path, () => gitInfo(op.path));
       case "commands": return s.commands(op.session);
+      case "enqueue": s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
+      case "queue_remove": return s.removeQueued(op.session, op.id);
+      case "queue_send": return { session: await s.sendQueued(op.session, op.id) };
+      case "queue_resume": s.resumeQueue(op.session); return null;
       case "blob": {
         if (!s.has(op.session)) throw new Error("no such session");
         const text = s.log(op.session).blob(op.id);

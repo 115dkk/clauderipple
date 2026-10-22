@@ -19,6 +19,7 @@ import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
 import { createWorktree } from "./worktree.ts";
 import { MessageReceipts, OutcomeUnknownError } from "./receipts.ts";
+import { SendQueue, type QueueItem } from "./queue.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
 import { PERMISSION_MODES, type AlertBody, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
@@ -225,6 +226,8 @@ export function nextAttention(current: Attention | null, from: SessionState, to:
 
 /** Mac sessions the host asks the router about for the first time in one desktop poll. */
 const FIRST_SIGHTS_PER_POLL = 4;
+/** A turn is under way: a queued message waits. */
+const BUSY = new Set<SessionState>(["starting", "running", "waiting"]);
 /** The SDK's model key without the `@effort` a routed model carries. */
 const windowKey = (model: string): string => model.replace(/@[^@]*$/, "");
 
@@ -256,6 +259,7 @@ export class Sessions {
   private listFile: string;
   private now: () => number;
   private receipts: MessageReceipts;
+  private sendQueue: SendQueue;
   /** In-flight turns keyed by receipt key, so a concurrent resend rides the first attempt. */
   private sending = new Map<string, Promise<string>>();
   private desktop: DesktopSessions | null;
@@ -363,6 +367,7 @@ export class Sessions {
       for (const [model, window] of Object.entries(readJson<Record<string, unknown>>(this.windowsFile) ?? {})) if (typeof window === "number" && window > 0) this.windows.set(model, window);
     } catch { /* a damaged file only means the windows are learned again */ }
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
+    this.sendQueue = SendQueue.open(opts.dir);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
@@ -399,7 +404,7 @@ export class Sessions {
     const hostCliIds = new Set([...this.records.values()].flatMap(r => r.sdkSessionId ? [r.sdkSessionId] : []));
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
-      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null };
+      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...this.sendQueue.summary(s.id) };
     })];
     return this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
   }
@@ -453,6 +458,7 @@ export class Sessions {
       this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
     }
     this.pollMacFigures(sessions);
+    this.drainQueues();
   }
 
   /**
@@ -645,7 +651,7 @@ export class Sessions {
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
     // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
     const mode = r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto");
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -715,6 +721,107 @@ export class Sessions {
     this.append(r.id, { kind: "state", state, ...(detail ? { detail } : {}) }, touch);
     this.save();
     this.opts.onSessions();
+    if (!BUSY.has(state) && this.sendQueue.items(r.id).length) setImmediate(() => void this.drainQueue(r.id));
+  }
+
+  // ---- the queue: messages a phone left for when the turn ends (queue.ts) ---------------------
+
+  /** Queue a message; a session that is not busy takes it at once. */
+  enqueue(id: string, clientMsgId: string, text: string, attachments: Attachment[] = []): void {
+    if (!this.has(id)) throw new Error("no such session");
+    if (!/^[\w-]{1,100}$/.test(clientMsgId)) throw new Error("Invalid message id.");
+    if (typeof text !== "string" || (!text.trim() && !attachments.length)) throw new Error("Nothing to queue.");
+    if (!Array.isArray(attachments) || attachments.length > ATTACHMENT_COUNT) throw new Error(`At most ${ATTACHMENT_COUNT} attachments.`);
+    // The bytes are copied out of the session's blobs now: a desktop rebase deletes those.
+    const files = attachments.map(a => {
+      const data = a && typeof a.blob === "string" ? this.log(id).blob(a.blob) : null;
+      if (!data || typeof a.name !== "string" || typeof a.mediaType !== "string") throw new Error("Attachment missing or too large (8 MB limit).");
+      return { name: a.name, mediaType: a.mediaType, data };
+    });
+    if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
+    this.opts.onSessions();
+    void this.drainQueue(id);
+  }
+
+  /** Take a queued message out; its text, for a phone that puts it back in the field. */
+  removeQueued(id: string, itemId: string): { text: string } | null {
+    const item = this.sendQueue.remove(id, itemId);
+    if (item) this.opts.onSessions();
+    return item ? { text: item.text } : null;
+  }
+
+  /** Send one queued message now, into the running turn like a steer. */
+  async sendQueued(id: string, itemId: string): Promise<string> {
+    const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
+    if (!item) throw new Error("That message is no longer queued.");
+    this.sendQueue.resume(id);
+    return this.dispatchQueued(id, item, false);
+  }
+
+  resumeQueue(id: string): void {
+    if (this.sendQueue.resume(id)) { this.opts.onSessions(); void this.drainQueue(id); }
+  }
+
+  /** The phone's Stop: what is queued waits for the person instead of going on its own. */
+  holdQueue(id: string): void {
+    if (this.sendQueue.hold(id)) this.opts.onSessions();
+  }
+
+  private draining = new Set<string>();
+  /** Every session with something queued, from the desktop poll: Mac sessions change state without a record. */
+  drainQueues(): void {
+    for (const id of this.sendQueue.sessions()) void this.drainQueue(id);
+  }
+
+  private async drainQueue(id: string): Promise<void> {
+    if (this.draining.has(id) || this.sendQueue.held(id)) return;
+    const head = this.sendQueue.items(id)[0];
+    if (!head) return;
+    const summary = this.has(id) ? this.summaryOf(id) : undefined;
+    if (!summary || BUSY.has(summary.state)) return;
+    const awaiting = this.sendQueue.awaiting(id);
+    if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now())) return;
+    this.draining.add(id);
+    try { await this.dispatchQueued(id, head, true); }
+    catch { /* recorded on the item by dispatchQueued */ }
+    finally { this.draining.delete(id); }
+  }
+
+  private eventsAfter(id: string, seq: number): SessionEvent[] {
+    const out: SessionEvent[] = [];
+    try {
+      const log = this.log(id);
+      for (let after = seq; after < log.lastSeq;) {
+        const page = log.readAfter(after);
+        out.push(...page.events);
+        if (!page.more || !page.events.length) break;
+        after = page.events[page.events.length - 1]!.seq;
+      }
+    } catch { /* a session with no log yet has nothing after */ }
+    return out;
+  }
+
+  private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean): Promise<string> {
+    const attachments: Attachment[] = [];
+    for (const a of item.attachments) {
+      const data = this.sendQueue.data(a);
+      if (!data) { this.sendQueue.fail(id, item.id, "Attachment missing."); this.opts.onSessions(); throw new Error("Attachment missing."); }
+      attachments.push({ blob: this.log(id).image(data), name: a.name, mediaType: a.mediaType });
+    }
+    let before = 0;
+    try { before = this.log(id).lastSeq; } catch { /* the send below creates it */ }
+    try {
+      const sent = await this.send(id, item.id, item.text, attachments, "steer");
+      this.sendQueue.remove(id, item.id);
+      // Only a message sent from here waits for its own turn; one sent now rides the running turn.
+      if (fromQueue) this.sendQueue.sent(id, before, this.now());
+      this.opts.onSessions();
+      return sent;
+    } catch (error) {
+      this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
+      this.opts.onSessions();
+      throw error;
+    }
   }
 
   // ---- what the phone asks for --------------------------------------------------------------

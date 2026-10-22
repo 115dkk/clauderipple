@@ -655,3 +655,89 @@ test("a create resend orphaned by a restart answers outcome_unknown", { timeout:
   assert.equal(recovered.list().length, 1, "no duplicate session was started");
   void id;
 });
+
+// 2026-10-22: a message queued on the phone during a 25-minute turn was still on the phone three
+// minutes after the turn ended — the app was asleep in a pocket. The host holds the queue now.
+test("a queued message waits for the turn, then goes one at a time with no phone attached", { timeout: 4500 }, async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.enqueue(id, "q-1", "first queued");
+  f.sessions.enqueue(id, "q-2", "second queued");
+  f.sessions.enqueue(id, "q-1", "first queued");
+  assert.equal(f.fake.users.length, 1, "nothing goes while the turn waits on a permission");
+  assert.deepEqual(f.sessions.summaryOf(id)?.queue?.map(item => [item.id, item.text]), [["q-1", "first queued"], ["q-2", "second queued"]], "a resent id is queued once");
+  assert.equal(f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow"), true);
+  await waitFor(() => f.fake.users.length === 2);
+  assert.equal(f.fake.users[1]!.message.content, "first queued");
+  // The second waits for the turn the first started, which is now waiting on its own permission.
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  await delay(30);
+  assert.equal(f.fake.users.length, 2);
+  assert.deepEqual(f.sessions.summaryOf(id)?.queue?.map(item => item.id), ["q-2"]);
+  assert.equal(f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow"), true);
+  await waitFor(() => f.fake.users.length === 3);
+  assert.equal(f.fake.users[2]!.message.content, "second queued");
+  assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  // The queue's sends are ordinary user messages in the log, under the phone's ids.
+  const users = f.sessions.log(id).readAfter(0).events.filter(e => e.kind === "user").map(e => e.kind === "user" ? e.clientMsgId : "");
+  assert.deepEqual(users.slice(-2), ["q-1", "q-2"]);
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "deny");
+});
+
+test("an idle session takes a queued message at once; Stop holds the queue until a send or resume", { timeout: 4500 }, async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.enqueue(id, "held-1", "after the stop");
+  await f.sessions.interrupt(id);
+  f.sessions.holdQueue(id);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await delay(30);
+  assert.equal(f.fake.users.length, 1, "a held queue does not go when the turn ends");
+  assert.equal(f.sessions.summaryOf(id)?.queueHeld, true);
+  // Edit: the text comes back and the item is gone.
+  assert.deepEqual(f.sessions.removeQueued(id, "held-1"), { text: "after the stop" });
+  assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
+  f.sessions.enqueue(id, "held-2", "again");
+  f.sessions.holdQueue(id);
+  await delay(30);
+  assert.equal(f.fake.users.length, 2, "an idle, unheld session took held-2 at once");
+  assert.equal(f.fake.users[1]!.message.content, "again");
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.enqueue(id, "held-3", "resumed");
+  f.sessions.holdQueue(id);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await delay(30);
+  assert.equal(f.fake.users.length, 2);
+  f.sessions.resumeQueue(id);
+  await waitFor(() => f.fake.users.length === 3);
+  assert.equal(f.fake.users[2]!.message.content, "resumed");
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "deny");
+});
+
+test("send-now puts a queued message into the running turn; the queue survives a host restart", { timeout: 4500 }, async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.enqueue(id, "now-1", "steer this in");
+  f.sessions.enqueue(id, "later-1", "kept on disk");
+  await f.sessions.sendQueued(id, "now-1");
+  // Sent at once into the running query (the scripted one reads it when its turn ends).
+  assert.ok(f.sessions.log(id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "now-1"));
+  assert.deepEqual(f.sessions.summaryOf(id)?.queue?.map(item => item.id), ["later-1"]);
+  await assert.rejects(f.sessions.sendQueued(id, "gone"), /no longer queued/);
+  // A new host over the same directory still holds what was queued.
+  const reopened = JSON.parse(fs.readFileSync(path.join(f.dir, "queue.json"), "utf8"));
+  assert.deepEqual(reopened[id].items.map((item: { id: string }) => item.id), ["later-1"]);
+  assert.throws(() => f.sessions.enqueue("missing", "x-1", "text"), /no such session/);
+  assert.throws(() => f.sessions.enqueue(id, "bad id!", "text"), /Invalid message id/);
+  assert.throws(() => f.sessions.enqueue(id, "x-2", "  "), /Nothing to queue/);
+  f.sessions.removeQueued(id, "later-1");
+  await waitFor(() => f.permissions.pending(id).length >= 1);
+  for (const p of f.permissions.pending(id)) f.sessions.decide(id, p.id, "deny");
+});

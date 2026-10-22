@@ -184,6 +184,11 @@ export interface SessionSummary {
   background?: boolean;
   /** open permission requests */
   pending: number;
+  /** Messages the phone queued, oldest first; the host sends each when the turn before it ends.
+   * Absent when empty and on older hosts (HostInfo.queue says the host keeps them). */
+  queue?: QueuedMessage[];
+  /** The phone's Stop paused the queue (or its head failed): nothing goes until a send or resume. */
+  queueHeld?: boolean;
   /** The host's archive flag: an archived session leaves the default list but is never deleted
    * (transcripts and files stay). Absent on older hosts. */
   archived?: boolean;
@@ -198,6 +203,9 @@ export interface SessionSummary {
 
 export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null }
 
+/** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
+export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** why sending it failed; the queue is held */ error?: string }
+
 export interface ModelOption { model: string; name: string; provider: string; efforts: Effort[]; usable: boolean }
 export interface ProviderGroup { provider: string; label: string; usable: boolean; models: ModelOption[] }
 
@@ -208,6 +216,8 @@ export interface FolderEntry { path: string; name: string; lastUsed?: number; mo
  * right now — this Mac's Claude login, in the host's words — absent when they can.
  */
 export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string;
+  /** The host keeps queued messages (ReqOp enqueue/queue_*); an older host leaves the queue to the phone. */
+  queue?: boolean;
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 
@@ -250,6 +260,15 @@ export type ReqOp =
   | { op: "sub"; session: string; sub: string; afterSeq?: number }
   /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
   | { op: "commands"; session: string }
+  /** Queue a message for when the running turn ends; attachments are uploads, as for `send`. A
+   * session that is not busy takes it at once. Answers `{ queued: true }`; a resent id is a no-op. */
+  | { op: "enqueue"; session: string; clientMsgId: string; text: string; attachments?: Attachment[] }
+  /** Take a queued message out (delete, or edit: the phone puts the returned text in its field). */
+  | { op: "queue_remove"; session: string; id: string }
+  /** Send a queued message now, into the running turn like a steer; un-holds the queue. */
+  | { op: "queue_send"; session: string; id: string }
+  /** Let a held queue go on by itself again. */
+  | { op: "queue_resume"; session: string }
   /** The host's VAPID public key (base64url), for PushManager.subscribe's applicationServerKey. */
   | { op: "push_key" }
   | { op: "push_subscribe"; subscription: PushSubscriptionJSON; lang: "ko" | "en" }
