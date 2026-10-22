@@ -7,7 +7,11 @@ import { kindOf, parseEffortVerdict, verdictObject } from './judge'
 import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 
 /** The one agent the main chat delegates to; the judge picks the worker (docs/specs/2026-10-12-worker-tiers.md). */
+// The description line: a chat that had seen other workers' "Sol·high · " titles wrote one here
+// too, and the app's running-agent row showed "Sol·high" while Sonnet ran (2026-10-22). The row
+// shows the call as written; only the task list gets the mod's corrected title.
 export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple picks the model. If a worker fails or returns nothing usable, delegate again here once and say the earlier attempt failed. ' +
+  'Write the Agent description as the task alone, with no model or effort in front: ClaudeRipple puts the model it picks there. ' +
   'If you know how hard the task is, put [[ripple: light]], [[ripple: standard]], [[ripple: hard]] or [[ripple: max]] on the prompt\'s first line: ' +
   'light = lookups, mechanical edits, one small fix; standard = carry out a designed change (even across several files), research, summarize, read-only review; ' +
   'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning, design or architecture where the deliverable is the decision itself. ' +
