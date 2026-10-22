@@ -229,17 +229,18 @@ test("Windows failover without a saved hotspot profile, or without Location: the
   assert.match(b.c.status().hint ?? "", /Privacy & security → Location/);
 });
 
-test("Windows failover: connect accepted but no hotspot address reads as not broadcasting, retried after a minute", async () => {
+test("Windows failover: connect accepted but no hotspot address reads as not broadcasting, retried within seconds", async () => {
   const r = rig({ net: { probeOk: () => false, lands: {} } });
   await r.ticks(3);
   assert.equal(r.c.status().state, "hotspot-not-visible");
   assert.match(r.c.status().hint ?? "", /phone's hotspot\. On an iPhone, open Settings → Personal Hotspot/);
   assert.match(r.c.status().hint ?? "", /On Android, turn Wi-Fi hotspot on/);
   const n = r.count(/wlan connect/);
-  await r.ticks(4);
-  assert.equal(r.count(/wlan connect/), n);
-  await r.ticks(3);
-  assert.equal(r.count(/wlan connect/), n + 1);
+  // The join's own wait for an address moves this clock too, so only the first retry's timing is exact.
+  await r.ticks(1);
+  assert.equal(r.count(/wlan connect/), n + 1, "10 s later, not a minute");
+  await r.ticks(6);
+  assert.ok(r.count(/wlan connect/) < n + 1 + 6, "the gap grows: not one join per tick");
 });
 
 test("Windows return: disconnect, and Windows' own auto-connect brings Wi-Fi back", async () => {

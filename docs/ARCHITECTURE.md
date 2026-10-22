@@ -1803,7 +1803,11 @@ before; a Wi-Fi elsewhere that happens to use the learned /24 reads as the hotsp
 can drop it only when another saved SSID is visible (visibility guard, 2026-10-21, below);
 `tether.pin` stops switching entirely. Failover (on Wi-Fi or no
 address, outage): wait at most 30s for an in-flight call, then `sudo -n networksetup
--setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). The probe window
+-setairportnetwork <dev> <NAME>` (macOS takes the password from the System keychain). Switches are at
+least a minute apart, but a join that failed ("Failed to join network", or not visible) switched
+nothing, so it is tried again 10 s, 20 s, 30 s … later up to that minute: walking out of the office
+the first join came as the hotspot was only just in range, failed, and the Mac stayed offline for the
+rest of the minute (2026-10-22). Setup failures (sudo, profile, Location) still wait the minute. The probe window
 lives in the process, so it only works if the router is not restarted every few seconds while the
 machine is offline (§5, health self-exit refined 2026-10-20). networksetup
 reports failure on stdout and may exit 0, so its text decides: "Could not find network" →

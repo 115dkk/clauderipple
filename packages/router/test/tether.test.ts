@@ -223,7 +223,7 @@ test("Wi-Fi up without internet: the third failure joins the hotspot by name thr
   assert.ok(r.lines.some((l) => /no internet .*joining hotspot "PBJ"/.test(l)), "the decision is logged with its reason");
 });
 
-test("a hotspot that is not broadcasting says so, with the hint, and retries at most once a minute", async () => {
+test("a hotspot that is not broadcasting says so, with the hint, and retries 10 s, then 20 s later", async () => {
   const r = rig({ net: { probeOk: () => false, joinOutput: { code: 0, stdout: "Could not find network PBJ.\n", stderr: "" } } });
   await r.ticks(3);
   assert.equal(r.joins(), 1);
@@ -232,12 +232,14 @@ test("a hotspot that is not broadcasting says so, with the hint, and retries at 
   assert.match(s.hint ?? "", /On an iPhone, open Settings → Personal Hotspot/);
   assert.match(s.hint ?? "", /On Android, turn Wi-Fi hotspot on/);
   assert.doesNotMatch(s.hint ?? "", /^The iPhone/, "the phone is not assumed to be an iPhone");
-  await r.ticks(5); // 50s more: still inside the minute
-  assert.equal(r.joins(), 1);
+  await r.ticks(1); // 10 s after the first failure
+  assert.equal(r.joins(), 2);
+  await r.ticks(1); // the second failure waits 20 s
+  assert.equal(r.joins(), 2);
   s = r.c.status();
   assert.equal(s.state, "hotspot-not-visible", "the reason and hint stay until the next attempt");
-  await r.ticks(2);
-  assert.equal(r.joins(), 2);
+  await r.ticks(1);
+  assert.equal(r.joins(), 3);
 });
 
 test("sudo refusing the join reads as needs-setup", async () => {
@@ -721,4 +723,18 @@ test("a draining router (closed gate) holds nothing: the return just stays postp
   assert.deepEqual(r.events, []);
   assert.equal(r.returns(), 0);
   assert.equal(r.c.status().state, "on-hotspot");
+});
+
+// Walking out of the office the first join failed while the hotspot was only just in range, and the
+// once-a-minute rule kept the Mac offline for the rest of the minute (2026-10-22). A failed join
+// switched nothing: try again after 10 s, then 20 s, then 30 s.
+test("a failed hotspot join is tried again within seconds, not after a minute", async () => {
+  const r = rig({ net: { ip: "", probeOk: () => false, joinOutput: { code: 0, stdout: "Failed to join network PBJ.", stderr: "" } } });
+  await r.ticks(3); // outage, then the first join
+  assert.equal(r.joins(), 1);
+  assert.equal(r.c.status().state, "join-failed");
+  r.net.joinOutput = { code: 0, stdout: "", stderr: "" };
+  await r.ticks(1); // 10 s later, not a minute
+  assert.equal(r.joins(), 2, r.lines.join("\n"));
+  assert.equal(r.c.status().network, "hotspot");
 });

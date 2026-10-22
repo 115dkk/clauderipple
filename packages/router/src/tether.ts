@@ -70,6 +70,13 @@ export const PROBE_URLS = {
 } as const;
 export const PROBE_TIMEOUT_MS = 4_000;
 export const MIN_SWITCH_INTERVAL_MS = 60_000;
+/**
+ * After a join that failed, the next try comes this much later per failure in a row (10, 20, 30 s…)
+ * up to MIN_SWITCH_INTERVAL_MS. A failed join switched nothing, so the once-a-minute rule against
+ * flapping does not apply: walking out of the office, the first join failed as the hotspot was only
+ * just coming into range, and the Mac sat offline for the rest of the minute (2026-10-22).
+ */
+export const JOIN_RETRY_MS = 10_000;
 /** How long a scan that saw a known Wi-Fi stands for a return still waiting on busy calls. */
 export const KNOWN_VISIBLE_TRUST_MS = 60_000;
 export const RETURN_PROBE_MS = 20_000;
@@ -100,6 +107,8 @@ export const RETURN_HOLD_FAILSAFE_MS = RETURN_DRAIN_WAIT_MS + 3 * 60_000;
 const JOIN_SETTLE_MS = 15_000;
 /** States that say why the last join failed; they stay (with their hint) until the next attempt. */
 const JOIN_FAILURES: ReadonlySet<string> = new Set(["hotspot-not-visible", "join-failed", "needs-setup", "no-hotspot-profile", "needs-location"]);
+/** Failures a moment later can cure (the phone coming into range); setup problems wait the full minute. */
+const RETRIABLE_JOIN: ReadonlySet<string> = new Set(["hotspot-not-visible", "join-failed"]);
 
 // ---- Pure helpers -------------------------------------------------------------------------------
 
@@ -407,6 +416,8 @@ export class TetherController {
   private state: TetherState = "off";
   private pinned = false;
   private lastSwitchAt = 0;
+  /** Hotspot joins that failed in a row; the retry gap grows with it (JOIN_RETRY_MS). */
+  private joinFailures = 0;
   /** When a scan last saw a known Wi-Fi other than the hotspot. */
   private knownVisibleAt = -Infinity;
   private lastSwitch: TetherStatus["lastSwitch"] = null;
@@ -561,6 +572,7 @@ export class TetherController {
     }
     if (this.network === "hotspot") {
       // Landed here by our own failover or by hand: either way, plan the way back from here.
+      this.joinFailures = 0;
       if (this.landedOnHotspotAt === null) {
         this.landedOnHotspotAt = this.now();
         this.nextReturnAt = nextReturnPoint(this.landedOnHotspotAt, this.now());
@@ -573,6 +585,7 @@ export class TetherController {
     // On Wi-Fi (or none): the way back is no longer pending, and landing again starts the schedule over.
     this.landedOnHotspotAt = null;
     if (!this.window.outage()) {
+      if (this.network === "wifi") this.joinFailures = 0;
       this.state = this.network === "wifi" ? "watching" : "no-wifi";
       if (this.network === "wifi") this.decide(`watching Wi-Fi (${5 - this.window.failures()}/5 recent probes ok)`);
       else this.decide("Wi-Fi has no address");
@@ -589,10 +602,12 @@ export class TetherController {
       return;
     }
     const since = this.now() - this.lastSwitchAt;
-    if (since < MIN_SWITCH_INTERVAL_MS) {
+    const retrying = this.joinFailures > 0 && RETRIABLE_JOIN.has(this.state);
+    const gap = retrying ? Math.min(MIN_SWITCH_INTERVAL_MS, JOIN_RETRY_MS * this.joinFailures) : MIN_SWITCH_INTERVAL_MS;
+    if (since < gap) {
       // A failed join keeps saying why (and its hint) until the next attempt.
       if (!JOIN_FAILURES.has(this.state)) this.state = "outage";
-      this.decide(`${why}; waiting ${Math.ceil((MIN_SWITCH_INTERVAL_MS - since) / 1000)}s (at most one switch per minute)`);
+      this.decide(`${why}; waiting ${Math.ceil((gap - since) / 1000)}s (${retrying ? "trying the hotspot again" : "at most one switch per minute"})`);
       return;
     }
     // A call in flight on a dead network cannot finish anyway; give it a short chance, no more.
@@ -603,6 +618,7 @@ export class TetherController {
     this.decide(`${why}: joining hotspot "${settings.hotspotSsid}"`);
     const outcome = await this.join(settings.hotspotSsid);
     this.recordSwitch("hotspot", outcome === "joined", outcome === "joined" ? why : outcome);
+    this.joinFailures = outcome === "joined" ? 0 : this.joinFailures + 1;
     if (outcome === "joined" && !this.onHotspot(this.currentIp())) {
       // Joined, but on a network that could not be remembered (see learn()): it reads as Wi-Fi.
       this.window.reset();
