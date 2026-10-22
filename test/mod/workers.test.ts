@@ -9,7 +9,8 @@ registerHooks({ resolve(specifier, context, next) {
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
-  ladderPick, domainVerdict, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
+  ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
+const { userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -82,33 +83,46 @@ test('domain ladders select UI for design/frontend, backend separately, otherwis
   assert.deepEqual(blocked.target, { agent: 'general-purpose' })
 })
 
-test('design under the ui ladder takes the heavy level whatever its difficulty; nothing else is raised', () => {
+test('under a domain ladder only light work takes the light row; ordinary work takes the heavy one', () => {
   const s = normalizeSettings({ domainRules: {
-    ui: { mode: 'ladder', rungs: { standard: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'low' }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] } },
+    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'low' }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] } },
   } })
-  const design: WorkerVerdict = { ...verdict, domain: 'design' }
-  const levels: [Partial<WorkerVerdict>, boolean][] = [
-    [{ level: 'light' }, true], [{ level: 'standard' }, true], [{ level: 'standard', kind: 'plan' }, false],
-    [{ level: 'deep' }, false], [{ level: 'deep', kind: 'plan' }, false],
-    // An unsure light verdict (standard rung) is raised too; an unsure standard one is already hard.
-    [{ level: 'light', sure: 0.2 }, true], [{ level: 'standard', sure: 0.2 }, false],
-  ]
-  for (const [change, raise] of levels) {
-    const given = { ...design, ...change }
-    const out = domainVerdict(given, 'ui')
-    if (!raise) { assert.equal(out.verdict, given); assert.equal(out.raised, undefined); continue }
-    const { sure: _sure, ...rest } = given
-    assert.deepEqual(out, { verdict: { ...rest, level: 'deep', kind: 'do' }, raised: 'design' })
-    assert.equal(rungOf(out.verdict), 'hard')
-    assert.equal(ladderPick(out.verdict, s.domainRules!.ui!, s, candidates, true, 'en').target?.agent, 'gpt-6-astra')
+  for (const domain of ['design', 'frontend'] as const) {
+    const at = (change: Partial<WorkerVerdict>) => ladderPick({ ...verdict, domain, ...change }, s.domainRules!.ui!, s, candidates, true, 'en').target?.agent
+    assert.equal(at({ level: 'light' }), 'deepseek-v4-1-flash')
+    for (const change of [{ level: 'standard' }, { level: 'deep' }, { level: 'deep', kind: 'plan' }] as const) assert.equal(at(change), 'gpt-6-astra')
   }
-  // The same light design verdict, unraised, would have run the light pair.
-  assert.equal(ladderPick(design, s.domainRules!.ui!, s, candidates, true, 'en').target?.agent, 'deepseek-v4-1-flash')
-  // frontend, backend and the general ladder keep the verdict's own level.
-  for (const [domain, rule] of [['frontend', 'ui'], ['backend', 'backend'], ['design', 'general'], ['docs', 'general']] as const) {
-    const given: WorkerVerdict = { ...verdict, domain, level: 'light' }
-    assert.deepEqual(domainVerdict(given, rule), { verdict: given })
+})
+
+test('a tier marker\'s domain word picks the ladder; no word is general', () => {
+  assert.deepEqual(readMarker('[[ripple: standard ui]]\nWork.'), { name: 'standard', domain: 'ui' })
+  assert.deepEqual(readMarker('[[ripple: hard  backend ]]\nWork.'), { name: 'hard', domain: 'backend' })
+  assert.deepEqual(readMarker('[[ripple: gemini-3-8-flash@high]]'), { name: 'gemini-3-8-flash', level: 'high' })
+  for (const [word, domain] of [['ui', 'frontend'], ['frontend', 'frontend'], ['design', 'design'], ['backend', 'backend'], ['server', 'backend'], [undefined, 'general'], ['docs', 'general']] as const) {
+    assert.equal(markerDomain(word), domain)
+    assert.equal(workerRule(markerDomain(word), normalizeSettings({ domainRules: { ui: DEFAULTS.rules.general, backend: DEFAULTS.rules.general } })).rule, domain === 'frontend' || domain === 'design' ? 'ui' : domain)
   }
+})
+
+test('a model counts as named only when the user said it lately, in English or Korean', () => {
+  const user = (text: string) => ({ role: 'user' as const, text })
+  const said = (...texts: string[]) => texts.map(user)
+  assert.equal(userNamed('gemini-3-8-flash', said('제미나이한테 교정안 받아 와')), true)
+  assert.equal(userNamed('gemini-3-8-flash', said('ask Gemini for a review')), true)
+  assert.equal(userNamed('gpt-6-1-sol', said('솔한테 맡겨')), true)
+  assert.equal(userNamed('gpt-6-1-sol', said('솔직히 이건 어려운 일이야')), false, 'a word that only starts with the name')
+  assert.equal(userNamed('gpt-6-1-sol', said('GPT로 돌려')), true)
+  assert.equal(userNamed('sonnet', said('소넷이 낫겠다')), true)
+  assert.equal(userNamed('claude-opus-5-5', said('오푸스로 해')), true)
+  assert.equal(userNamed('deepseek-v4.1-flash', said('flash 모델로')), false, 'a generic word names nothing')
+  // Only the last two messages from the user: an older request does not cover later work.
+  assert.equal(userNamed('gemini-3-8-flash', said('제미나이한테 시켜', '반영해', '이제 서버 고쳐')), false)
+  // Tool results, notices and summaries are not the user.
+  assert.equal(userNamed('gemini-3-8-flash', [user('일 해'), { role: 'user', text: 'gemini output', toolResults: [{}] }, user('<task-notification>gemini done</task-notification>')]), false)
+  // A short "go" approves the answer it replies to.
+  const proposal = [user('정리해'), { role: 'assistant' as const, text: '제미나이에게 맡기겠습니다. 진행할까요?' }, user('ㄱㄱ')]
+  assert.equal(userNamed('gemini-3-8-flash', proposal), true)
+  assert.equal(userNamed('gemini-3-8-flash', [...proposal.slice(0, 2), user('아니 다른 걸로 해 줘 이번엔')]), false)
 })
 
 test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {

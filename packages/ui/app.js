@@ -3395,10 +3395,10 @@ const MOD_CLAUDE_MODELS = ["haiku", "sonnet", "opus", "fable"];
 const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5", opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
 // The four workers, low to max (the mod's rung ids: light, standard, hard, plan).
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
-// A domain ladder has two levels: the light pair (light+standard) and the heavy pair (hard+plan).
+// A domain ladder has two levels: light work (the light rung) and heavy work (standard, hard, plan).
 const MOD_DOMAIN_LEVELS = [
-  { key: "light", rungs: ["light", "standard"] },
-  { key: "heavy", rungs: ["hard", "plan"] },
+  { key: "light", rungs: ["light"] },
+  { key: "heavy", rungs: ["standard", "hard", "plan"] },
 ];
 const modClaude = (model, effort) => ({ target: { agent: "general-purpose", model }, effort });
 /** The mod's defaults (packages/mod/hooks/settings.ts), for a router that has stored nothing yet. */
@@ -3774,14 +3774,15 @@ function modRungs() {
   const general = modState.settings.rules.general;
   return general && general.mode === "ladder" && general.rungs ? general.rungs : {};
 }
-/** A domain ladder folded into two levels: light+standard hold one list, hard+plan another.
- * The upper rung of each pair wins; an empty upper rung falls back to the lower. */
+/** A domain ladder folded into two levels, as the mod folds it (settings.ts twoLevelRungs): light
+ * work is the light rung, heavy work standard+hard+plan. */
 function modTwoLevelRungs(rungs) {
   const out = {};
-  const light = rungs.standard && rungs.standard.length ? rungs.standard : rungs.light;
-  const heavy = rungs.plan && rungs.plan.length ? rungs.plan : rungs.hard;
-  if (light && light.length) { out.light = clone(light); out.standard = clone(light); }
-  if (heavy && heavy.length) { out.hard = clone(heavy); out.plan = clone(heavy); }
+  const filled = (list) => list && list.length;
+  const light = filled(rungs.light) ? rungs.light : rungs.standard;
+  const heavy = [rungs.plan, rungs.hard, rungs.standard, rungs.light].find(filled);
+  if (filled(light)) out.light = clone(light);
+  if (heavy) { out.standard = clone(heavy); out.hard = clone(heavy); out.plan = clone(heavy); }
   return out;
 }
 /** One menu of `model · effort` for the ticked models, effort limited to what each model takes; the session's model too. */
@@ -3835,7 +3836,7 @@ function modWorkerRows(mode) {
   if (key !== "general") rows.push(cell(t("mod.domainSeparate"), modSwitch(`worker-separate:${id}:${key}`, !!rule, t("mod.domainSeparate"), (on) => {
     // Switching on copies the set's general rungs, folded the same way a domain ladder is.
     modSetDomainRule(mode, key, on ? { mode: "ladder", rungs: modTwoLevelRungs(mode ? mode.rungs : modRungs()) } : undefined);
-  }), rule ? (key === "ui" ? t("mod.domainDesignNote") : null) : t("mod.domainFollowsGeneral"), "wide"));
+  }), rule ? t("mod.domainLevelNote") : t("mod.domainFollowsGeneral"), "wide"));
   if (key === "general" || rule) rows.push(...modRungRows(mode, key));
   return rows;
 }
@@ -3881,11 +3882,11 @@ function modRungRows(mode, ruleKey = "general") {
   if (ruleKey !== "general") {
     const rungs = (mode || modState.settings).domainRules[ruleKey].rungs;
     return MOD_DOMAIN_LEVELS.map((level) => {
-      // The pair's upper rung shows the list; an edit writes it to both rungs of the pair.
-      const upper = level.rungs[1];
-      const steps = rungs[upper] && rungs[upper].length ? rungs[upper] : (rungs[level.rungs[0]] || []);
+      // The level's top rung shows the list; an edit writes it to every rung of the level.
+      const shown = [...level.rungs].reverse().find((rung) => rungs[rung] && rungs[rung].length);
+      const steps = shown ? rungs[shown] : [];
       const save = (next) => {
-        const updated = { ...rungs, [level.rungs[0]]: clone(next), [upper]: clone(next) };
+        const updated = { ...rungs, ...Object.fromEntries(level.rungs.map((rung) => [rung, clone(next)])) };
         modSetDomainRule(mode, ruleKey, { mode: "ladder", rungs: updated });
       };
       return modRungRow(mode, ruleKey, level.key, t(`mod.domainLevel.${level.key}`), `mod.domainHint.${ruleKey}.${level.key}`, steps, save);

@@ -10,8 +10,53 @@
 // Measured on CLI 2.1.286 (2026-10-05): an `agent.spawn` hook that sets `model` to
 // `deepseek-v4.1-flash@low` runs the worker on that id, and the router records effort low.
 
-/** The router's marker, found anywhere in the prompt rather than only at its top. */
-export const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/
+/**
+ * The router's marker, found anywhere in the prompt rather than only at its top. A tier marker may
+ * add a domain word, `[[ripple: standard ui]]`; the router's own pattern stops at the name, so a
+ * marker with a domain never reaches it as a model.
+ */
+export const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?(?:\s+([A-Za-z]+))?\s*\]\]/
+
+// A model the main chat picks by name runs past every ladder, so it must be one the user named. On
+// 2026-10-22 a session that had been asked for Gemini twice (Korean proofreading) went on to give it
+// an implementation task on its own, by marker; 22 such picks in the two days after the explicit
+// marker was described, nearly none before.
+/** The words in a model id that name it: `gemini-3.8-flash` → gemini; `gpt-6.1-sol` → gpt, sol. */
+const GENERIC = new Set(['flash', 'free', 'pro', 'mini', 'max', 'lite', 'preview', 'latest', 'contributor', 'spark', 'code', 'chat', 'instruct', 'claude', 'turbo', 'high', 'low', 'medium', 'xhigh'])
+/** How the user says them in Korean. */
+const SPOKEN: Record<string, readonly string[]> = {
+  gemini: ['제미나이', '제미니'], deepseek: ['딥시크'], minimax: ['미니맥스'], gpt: ['지피티'], sol: ['솔'], astra: ['아스트라'],
+  luna: ['루나'], terra: ['테라'], opus: ['오푸스', '오퍼스'], sonnet: ['소넷'], haiku: ['하이쿠'], fable: ['페이블'], mythos: ['미토스'],
+  muse: ['뮤즈'], kimi: ['키미'], qwen: ['큐웬'], mimo: ['미모'], longcat: ['롱캣'],
+}
+// A Korean name counts when a particle or nothing Korean follows it: "솔한테" names Sol, "솔직히" does not.
+const PARTICLE = '(?:이한테|이랑|이가|이는|이를|이도|이로|이나|한테|에게|으로|께|로|이|가|은|는|을|를|도|만|랑|와|과|의|님|에)'
+export function modelWords(id: string): string[] {
+  return [...new Set(id.toLowerCase().split(/[^a-z]+/).filter(word => word.length >= 3 && !GENERIC.has(word)))]
+}
+function says(text: string, word: string): boolean {
+  if (new RegExp(`(?<![a-z])${word}(?![a-z])`, 'i').test(text)) return true
+  return (SPOKEN[word] ?? []).some(name => new RegExp(`${name}(?:${PARTICLE}|(?![가-힣]))`).test(text))
+}
+type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
+/**
+ * Whether the user named this model (an id, agent name or Claude alias) in what they last wrote:
+ * their last two messages, and the answer they replied to when the last one is a short "go".
+ * Tool results, notices and compaction summaries are not the user.
+ */
+export function userNamed(model: string, messages: readonly Said[]): boolean {
+  const words = modelWords(model)
+  if (!words.length) return false
+  const human = (m: Said): boolean => m.role === 'user' && !m.toolResults?.length && /^\s*[^<\s]/.test(m.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')) && !m.text.startsWith('This session is being continued')
+  const at = messages.flatMap((m, index) => human(m) ? [index] : []).slice(-2)
+  const last = at.at(-1)
+  const heard = at.map(index => messages[index]!.text)
+  if (last !== undefined && messages[last]!.text.trim().length <= 12) {
+    const answer = messages.slice(0, last).findLast(m => m.role === 'assistant' && m.text.trim())
+    if (answer) heard.push(answer.text.slice(-2000))
+  }
+  return heard.some(text => words.some(word => says(text, word)))
+}
 
 export type Spawn = { subagentType: string; prompt: string; model?: string }
 export type WorkerFix = { prompt: string; model: string; dropped?: string }

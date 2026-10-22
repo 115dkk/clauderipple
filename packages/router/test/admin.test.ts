@@ -254,8 +254,8 @@ test("admin fills Base and mode domain ladders even when every general rung is a
       for (const rule of Object.values(set.domainRules!)) {
         assert.deepEqual(Object.keys(rule.rungs).sort(), ['hard', 'light', 'plan', 'standard']);
         assert.ok(Object.values(rule.rungs).every(steps => steps.length > 0));
-        // A domain ladder has two levels: the fill leaves each pair holding one list.
-        assert.deepEqual(rule.rungs.light, rule.rungs.standard);
+        // A domain ladder has two levels: the fill leaves heavy work (standard to plan) one list.
+        assert.deepEqual(rule.rungs.standard, rule.rungs.hard);
         assert.deepEqual(rule.rungs.hard, rule.rungs.plan);
       }
     }
@@ -278,9 +278,9 @@ test("admin folds a domain ladder into two levels and leaves the general ladder'
     const saved = await (await putModSettings(port, { settings: input, revision: 0 })).json() as ModSettingsSnapshot;
     // The general ladder keeps its four rungs.
     assert.deepEqual(saved.settings.rules.general.rungs, { light, standard, hard, plan });
-    // The domain ladder's pairs hold one list each: standard's for the light pair, plan's for the heavy one.
-    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.light, standard);
-    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.standard, standard);
+    // Light work keeps light's list; plan's runs everything from standard up.
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.light, light);
+    assert.deepEqual(saved.settings.domainRules!.ui!.rungs.standard, plan);
     assert.deepEqual(saved.settings.domainRules!.ui!.rungs.hard, plan);
     assert.deepEqual(saved.settings.domainRules!.ui!.rungs.plan, plan);
   });

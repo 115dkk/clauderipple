@@ -8,8 +8,8 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, domainVerdict, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
-import { MARKER, agentModel, fixSpawn } from './worker'
+import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
+import { MARKER, agentModel, fixSpawn, userNamed } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -465,6 +465,18 @@ async function spawnProvider($: EngineInterface, subagentType: string, model: st
   if (/^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(id)) return 'anthropic'
   return (await read($, routerModels)).find(m => m.value === id)?.provider
 }
+/**
+ * The model the main chat chose by name outside ripple:auto, or null: a worker agent called
+ * directly, general-purpose given a model, or a model marker on any other agent (the router obeys
+ * it wherever it sits at the top). ripple:auto's own marker is checked in requestPick.
+ */
+async function sessionPickedModel($: EngineInterface, e: AgentSpawnInput): Promise<string | null> {
+  if (['ripple:auto', 'auto'].includes(e.subagentType)) return null
+  if ((await workerFiles($)).has(e.subagentType)) return e.subagentType
+  if (e.subagentType === 'general-purpose' && e.model && e.model !== 'inherit') return e.model
+  const marker = readMarker(e.prompt)
+  return marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) ? marker.name : null
+}
 async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | null> {
   const text = await optionalFile($, `${await rippleHome($)}/generated-agents.json`)
   if (!text || !strings(object(JSON.parse(text)).agents).includes(spawn.subagentType)) return null
@@ -714,7 +726,14 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
   const pinnedCandidates = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
-  const marker = readMarker(e.prompt)
+  let marker = readMarker(e.prompt)
+  // A model the user did not name is not the main chat's to pick: the marker goes, and the tier
+  // decides as if it had never been written (worker.ts userNamed).
+  if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !userNamed(marker.name, await $.session.messages())) {
+    await $.ui.toast(t(language, 'toasts.unnamedModel', { model: marker.name }))
+    e = { ...e, prompt: e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
+    marker = readMarker(e.prompt)
+  }
   const tier = tierOf(marker)
   const explicit = marker && !tier && !['auto', 'ripple'].includes(marker.name) ? marker : null
   const id = (await $.clock.now()).toString(36) + Math.random().toString(36).slice(2, 8)
@@ -733,21 +752,13 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
     verdict = { domain: 'general', level: 'standard', effort: effortOf(explicit.level) ?? 'high', why: t(language, 'toasts.explicitMarker') }
     by = 'marker'
   } else if (tier) {
-    // A marker owns the tier. Only a set with domain ladders needs the shadow judge's domain
-    // before dispatch; otherwise leave the existing unawaited path (and latency) unchanged.
+    // The marker owns the tier and its domain word the ladder; the judge is not asked. It used to
+    // rate the brief beside the pick (the "shadow" log rows): over 362 delegations (2026-10-15..22)
+    // it agreed on the rung 76% of the time, the disagreements went both ways and failed no more,
+    // and with domain ladders on, every spawn waited ~0.6 s for its domain guess.
     const named = TIER_MARKERS[tier]!
-    verdict = { domain: 'general', ...named, effort: RUNG_EFFORT[rungOf(named)], why: t(language, 'toasts.sessionTier', { tier }) }
+    verdict = { domain: markerDomain(marker!.domain), ...named, effort: RUNG_EFFORT[rungOf(named)], why: t(language, 'toasts.sessionTier', { tier }) }
     by = 'session'
-    const shadow = shadowJudge($, s, id, { description: e.description, prompt: e.prompt })
-    if (routing.domainRules?.ui || routing.domainRules?.backend) {
-      const judged = await shadow
-      if (judged?.verdict && 'domain' in judged.verdict) {
-        rawVerdict = judged.verdict
-        verdict.domain = judged.verdict.domain
-      }
-      ms = judged?.ms ?? 0
-      judgeError = judged?.error
-    }
   } else {
     const judged = await judge($, s, { description: e.description, prompt: e.prompt }, true)
     if (judged.verdict && 'domain' in judged.verdict) { rawVerdict = judged.verdict; verdict = judged.verdict; by = judged.by }
@@ -762,15 +773,12 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const providers = options && options.until > now ? Object.fromEntries(Object.entries(options.providers ?? {}).filter(([, p]) => p.exhaustedUntil === undefined || p.exhaustedUntil > now)) : {}
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model)?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
-  // An active mode replaces the whole set; an explicit marker still names its own model. Design under
-  // the ui ladder takes the heavy level even past a tier marker: the main chat tiers by difficulty,
-  // and a design task is "standard" by that measure while its result depends on the model's taste.
+  // An active mode replaces the whole set; an explicit marker still names its own model.
   const { rule, ladder } = workerRule(verdict.domain, routing)
   const explicitUsable = !!explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
-  const domained: ReturnType<typeof domainVerdict> = explicitUsable ? { verdict } : domainVerdict(verdict, rule)
   const resolved = explicitUsable
     ? { target: target!, effort: verdict.effort }
-    : ladderPick(domained.verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
+    : ladderPick(verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
   const selected = resolved.target
   if (!selected) return { deny: t(language, 'workers.none') }
   const fallbackReason = resolved.fallbackReason
@@ -781,7 +789,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms, id, ...(fallbackReason ? { fallbackReason } : {}) }
   // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: what the judge said, the rung it landed on and what ran.
-  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rule: value.rule, ...(domained.raised ? { raised: domained.raised } : {}), rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
   await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
   // The brief itself is never logged (it can hold anything); its length is. To re-judge a pick,
   // its brief is in the session's own transcript under the same description.
@@ -791,20 +799,6 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
   return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
-}
-
-/**
- * What the judge would have said of a brief the main chat already tiered: logged beside the pick
- * (same `id`). With domain ladders the spawn awaits this same result for its domain only; without
- * them it never waits or acts on it. The marker's tier always stands.
- */
-async function shadowJudge($: EngineInterface, s: Settings, id: string, input: { description: string; prompt: string }): Promise<Judged | undefined> {
-  try {
-    const judged = await judge($, s, input, true)
-    const verdict = judged.verdict && 'domain' in judged.verdict ? judged.verdict : null
-    await persistWorkerPick($, { type: 'shadow', pick: id, at: new Date(await $.clock.now()).toISOString(), verdict, rung: verdict ? rungOf(verdict) : null, judge: judged.by, ms: judged.ms, ...(judged.error ? { error: judged.error } : {}) })
-    return judged
-  } catch (error) { await report($, 'shadow judge', error); return undefined }
 }
 
 async function toggleAuto($: EngineInterface): Promise<void> {
@@ -1618,7 +1612,19 @@ export const register: Register = on => {
       const teammate = 'isTeammate' in e && !!e.isTeammate
       if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
-      if (!workflow && !teammate && takesOver(e, s)) {
+      const picked = !workflow && !teammate && !e.fork && s.agentAuto !== 'off' ? await sessionPickedModel($, e) : null
+      if (picked && !userNamed(picked, await $.session.messages())) {
+        // A worker or model the main chat picked by name, the user never having named it, goes
+        // through the ladder like any delegation (userNamed in worker.ts says why).
+        await $.ui.toast(t(await read($, lang), 'toasts.unnamedModel', { model: picked }))
+        const marker = readMarker(e.prompt)
+        const { model: _model, ...rest } = e
+        const prompt = marker && !tierOf(marker) ? e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') : e.prompt
+        const routed = await requestPick($, { ...rest, subagentType: 'ripple:auto', prompt }, s)
+        if ('deny' in routed) return routed
+        input = routed.input
+        chosen = routed.pick
+      } else if (!workflow && !teammate && takesOver(e, s)) {
         const routed = await requestPick($, e, s)
         if ('deny' in routed) return routed
         input = routed.input
