@@ -127,6 +127,14 @@ test("tool_choice and images map; string content works", () => {
   assert.ok(estimateTokens(turn1) > 10);
 });
 
+test("the image hint follows the addendum on the session's own turns, never a subagent's", () => {
+  const req = { model: "m", messages: [{ role: "user" as const, content: "draw a cat" }] };
+  const main = toResponsesRequest(req, { ...opts, identity: false, instructionsAppend: "Be brief.", imageHint: "IMG" });
+  assert.equal(main.instructions, "Be brief.\n\nIMG");
+  const sub = toResponsesRequest(req, { ...opts, identity: false, instructionsAppend: "Be brief.", imageHint: "IMG", subagent: true });
+  assert.equal(sub.instructions, "Be brief.");
+});
+
 test("stream mapper: text + tool call + completed → Anthropic events with usage and stop_reason", () => {
   const m = new StreamMapper("gpt-5.6-terra");
   const evs = [

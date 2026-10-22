@@ -427,7 +427,10 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
   reason. With a chatgpt provider configured the body also tells a worker how to
   make an image: `POST /api/image` on the admin port, which runs one Codex
   Responses turn with the hosted `image_generation` tool required and answers
-  with the image bytes (`clauderipple image` is the same call). Measured
+  with the image bytes (`clauderipple image` is the same call). A GPT main session
+  gets the same lines at the end of its instructions (not a subagent's turns, whose
+  agent file has them): without them a GPT session told the operator it could not
+  make images and drew an SVG (2026-10-22). Measured
   2026-09-29 on a subscription: the image is the `image_generation_call` output
   item's base64 `result`, about 30 s; `output_format` and `background` are
   honoured, `size` and `quality` are accepted and ignored (even "999x1" and

@@ -81,6 +81,12 @@ export type TranslateOptions = {
   identity: boolean;
   instructionsAppend?: string;
   /**
+   * How to make an image through `/api/image`, for the session's own turns. A generated worker has
+   * this in its agent file; the main session had nothing, so a GPT session told the operator it could
+   * not make images and drew an SVG instead (2026-10-22). Not added to a subagent's turns.
+   */
+  imageHint?: string;
+  /**
    * Carry the conversation's reasoning back to the backend (see reasoning.ts). Default true — this is
    * the native shape. A false value is the retry after a backend refused the carrier: no replayed
    * items and no `include`, which is exactly the request this adapter sent before they existed.
@@ -330,6 +336,7 @@ export function toResponsesRequest(req: AnthropicRequest, opts: TranslateOptions
   const sys = systemWithDroppedToolNote(req);
   if (sys) parts.push(sys);
   if (opts.instructionsAppend) parts.push(opts.instructionsAppend);
+  if (opts.imageHint && opts.subagent !== true) parts.push(opts.imageHint);
 
   const input: ResponsesInputItem[] = [];
   // Claude Code sends side queries whose history starts with a bare tool_result (e.g. summarising a
