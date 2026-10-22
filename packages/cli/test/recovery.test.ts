@@ -16,6 +16,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { posixModes, posixPaths } from "../../../test/capabilities.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-recovery-"));
 const label = `com.clauderipple.check-${crypto.randomBytes(4).toString("hex")}`;
@@ -151,7 +152,7 @@ test("registration mirrors install: packaged/Windows/Linux run node + router, a 
   const linux = registration(rt, "/h", "1.0.0", "linux", null);
   assert.deepEqual(linux, { program: rt.node, args: [rt.router], bundleId: "com.clauderipple.app", env: { A: "1" }, bundle: null });
   const mac = registration(rt, "/h", "1.0.0", "darwin", "/s.json");
-  assert.equal(mac.program, "/h/ClaudeRipple.app/Contents/MacOS/ClaudeRipple");
+  if (posixPaths) assert.equal(mac.program, "/h/ClaudeRipple.app/Contents/MacOS/ClaudeRipple");
   assert.deepEqual(mac.env, { CLAUDE_SETTINGS_PATH: "/s.json" });
   assert.deepEqual(mac.bundle, { node: rt.node, script: rt.router, version: "1.0.0" });
 });
@@ -442,7 +443,7 @@ test("macOS launcher: a minimal bundle in the overridden Applications dir that r
   assert.match(plist, new RegExp(`<key>CFBundleIdentifier</key><string>${LAUNCHER_BUNDLE_ID.replace(/\./g, "\\.")}</string>`));
   assert.doesNotMatch(plist, /com\.clauderipple\.router/);
   const exe = path.join(app, "Contents", "MacOS", "ClaudeRipple");
-  assert.equal(fs.statSync(exe).mode & 0o111, 0o111);
+  if (posixModes) assert.equal(fs.statSync(exe).mode & 0o111, 0o111);
   const script = fs.readFileSync(exe, "utf8");
   assert.match(script, /^#!\/bin\/sh/);
   assert.ok(script.includes(`export CLAUDERIPPLE_HOME='${home}'`));

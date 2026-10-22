@@ -11,6 +11,7 @@ import { Notifier, loadVapid, pushFor } from "../src/push.ts";
 import type { Sender } from "../src/push.ts";
 import { LABEL, agentPath, cliLoginWarning, install, parseLaunchctlPrint, plist, specFor, uninstall } from "../src/service.ts";
 import type { EventBody, PushSubscriptionJSON, SessionSummary } from "../src/protocol.ts";
+import { posixModes, posixPaths } from "../../../test/capabilities.ts";
 
 const tmp = (t: { after(fn: () => void): void }): string => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-host-"));
@@ -33,15 +34,17 @@ test("the plist runs this checkout's main.ts with an absolute node, KeepAlive, a
   assert.match(xml, /<key>KeepAlive<\/key>\s*<true\/>/);
   assert.match(xml, /<key>ThrottleInterval<\/key>\s*<integer>10<\/integer>/);
   assert.match(xml, /<key>ProcessType<\/key>\s*<string>Interactive<\/string>/);
-  assert.match(xml, /<key>StandardOutPath<\/key>\s*<string>\/Users\/me\/\.clauderipple\/logs\/host\.log<\/string>/);
-  assert.match(xml, /<key>StandardErrorPath<\/key>\s*<string>\/Users\/me\/\.clauderipple\/logs\/host\.log<\/string>/);
   assert.match(xml, /<key>HOME<\/key>\s*<string>\/Users\/me<\/string>/);
-  assert.match(xml, /<key>WorkingDirectory<\/key>\s*<string>\/Users\/me\/Ripple &amp; Co<\/string>/);
-  // `claude` and node are found without a login shell's PATH.
-  const pathValue = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(xml)![1]!.split(":");
-  assert.equal(pathValue[0], "/Users/me/.local/bin");
-  assert.equal(pathValue[1], "/opt/node/bin");
-  assert.ok(pathValue.includes("/usr/bin") && pathValue.includes("/bin"));
+  if (posixPaths) {
+    assert.match(xml, /<key>StandardOutPath<\/key>\s*<string>\/Users\/me\/\.clauderipple\/logs\/host\.log<\/string>/);
+    assert.match(xml, /<key>StandardErrorPath<\/key>\s*<string>\/Users\/me\/\.clauderipple\/logs\/host\.log<\/string>/);
+    assert.match(xml, /<key>WorkingDirectory<\/key>\s*<string>\/Users\/me\/Ripple &amp; Co<\/string>/);
+    // `claude` and node are found without a login shell's PATH.
+    const pathValue = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(xml)![1]!.split(":");
+    assert.equal(pathValue[0], "/Users/me/.local/bin");
+    assert.equal(pathValue[1], "/opt/node/bin");
+    assert.ok(pathValue.includes("/usr/bin") && pathValue.includes("/bin"));
+  }
 });
 
 // The launchd agent's PATH: other platforms pass the inherited PATH through.
@@ -228,6 +231,6 @@ test("VAPID keys are made once, kept 0600, and survive a reload", (t) => {
   const b = loadVapid(dir, "https://relay.example");
   assert.equal(a.publicKey, b.publicKey);
   assert.equal(b.subject, "https://relay.example");
-  assert.equal(fs.statSync(path.join(dir, "vapid.json")).mode & 0o777, 0o600);
+  if (posixModes) assert.equal(fs.statSync(path.join(dir, "vapid.json")).mode & 0o777, 0o600);
   assert.equal(Buffer.from(a.publicKey, "base64url").length, 65, "an uncompressed P-256 point");
 });
