@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.5 — 2026-10-22
 
 ### Changed
 
@@ -16,6 +16,10 @@
   not arrive. `install` (which every update ends with) now restarts a phone host this
   installation registered, unless a turn is in progress; then it says to run
   `clauderipple remote install` afterwards. A host run from a source checkout is left alone.
+- **Windows with a non-ASCII account name no longer re-registers the router on every install.**
+  The scheduled task was read back in the console's code page, so it never matched (#74, #75 by
+  @115dkk). Tests that assumed "/" paths or POSIX permission bits now run only where those hold
+  (#76).
 
 ## 0.12.4 — 2026-10-22
 
