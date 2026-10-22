@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.7 — 2026-10-22
+
+### Fixed
+
+- **A GPT main session knows it can make images.** How to call `/api/image` was written only into
+  generated worker files, so a session running GPT as its own model said it had no image tool and
+  drew an SVG. The same lines now end its instructions; subagent turns are unchanged.
+- **A relay's 402 for a downed model no longer parks the whole account.** OpenCode Go answered 402
+  while one model's endpoint was down, which read as billing exhaustion and rested the account for
+  30 minutes, DeepSeek included. A refusal whose body says the upstream failed is now transient.
+- **A failed hotspot join is tried again within seconds** (10 s, 20 s, 30 s … up to a minute)
+  instead of waiting out the once-a-minute switch rule.
+- **`ripple:auto` asks for a bare task description,** so the Claude app's running-agent row no
+  longer shows another worker's model name copied into the title.
+
 ## 0.12.6 — 2026-10-22
 
 ### Fixed
