@@ -368,3 +368,17 @@ test("a marker counts only at the top of a user message; a quoted one is prose",
   assert.equal(markerOverride(body("  \n[[ripple: luna@low]]\n\ntask"), cfg.aliases)?.model, "gpt-5.6-luna", "leading whitespace is fine");
   assert.equal(markerOverride(body("<system-reminder>x</system-reminder>[[ripple: luna]] task"), cfg.aliases)?.model, "gpt-5.6-luna", "a stripped reminder does not push it off the top");
 });
+
+// The frame as CLI 2.1.308 sent it to a Workflow agent on 2026-10-22 (relayed request shortened).
+test("a Workflow agent's marker is the top of the script's text, under the harness frame", () => {
+  const request = "[Workflow harness — user request] The harness relays, verbatim and indented below, the user request that triggered this workflow run. …\n  병렬로 여러개 돌려서 나눠서 시켜";
+  const task = "[Workflow harness — computed task] The task text below was computed at runtime by a workflow script. … The computed task text follows:\n  [[ripple: luna@high]]\n  역할: 한국어 교정자.";
+  const two = { messages: [{ role: "user", content: request }, { role: "user", content: task }] };
+  assert.deepEqual(markerOverride(two, cfg.aliases), { model: "gpt-5.6-luna", effort: "high" });
+  const merged = { messages: [{ role: "user", content: [{ type: "text", text: request }, { type: "text", text: task }] }] };
+  assert.deepEqual(markerOverride(merged, cfg.aliases), { model: "gpt-5.6-luna", effort: "high" }, "the two turns sent as one message");
+  assert.equal(resolve("claude-opus-5-5", two, declared)?.model, "gpt-5.6-luna");
+  const quoted = task.replace("[[ripple: luna@high]]\n  역할", "역할: [[ripple: luna@high]]");
+  assert.equal(markerOverride(body(quoted), cfg.aliases), null, "inside the script's text, below its top, it is prose");
+  assert.equal(markerOverride(body(`Summary: …\n${task}`), cfg.aliases), null, "a frame quoted below the top is not a frame");
+});

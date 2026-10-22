@@ -27,6 +27,12 @@ const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 // with it; a compaction summary that *quotes* one does not, and on 2026-09-20 such a quote in a
 // GPT-6 Astra session's summary re-routed the whole session to `muse` on ChatGPT (400 on every turn).
 const MARKER = /^\s*\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/;
+// A Workflow script's agent gets its prompt inside the harness's frame (CLI 2.1.308, 2026-10-22): a
+// relayed user request, then one header line ending "The computed task text follows:" and the
+// script's text with every line indented. The script's first line is that prompt's top, as a spawned
+// subagent's is; read from above the header, a `[[ripple: gemini-3-8-flash@high]]` there was missed
+// and eight workers ran on the session's Opus.
+const WORKFLOW_TASK = /^\s*\[Workflow harness — computed task\][^\n]*\n/;
 
 type MessageBlock = { type?: string; text?: string };
 type Message = { role?: string; content?: string | MessageBlock[] };
@@ -40,12 +46,14 @@ function scanMarker(body: unknown): { name: string; effort?: string } | null {
     if (m?.role !== "user") continue;
     if (++seen > 5) break; // the task prompt is always near the top
     const c = m.content;
-    const text = typeof c === "string"
-      ? c
+    const parts = typeof c === "string"
+      ? [c]
       : Array.isArray(c)
-        ? c.filter((b) => b && b.type === "text").map((b) => b.text ?? "").join(" ")
-        : "";
-    const hit = MARKER.exec(text.replace(REMINDER, ""));
+        ? c.filter((b) => b && b.type === "text").map((b) => b.text ?? "")
+        : [];
+    // Claude Code may merge the frame's two turns into one message, so each block is looked at alone.
+    const framed = parts.map((p) => p.replace(REMINDER, "")).find((p) => WORKFLOW_TASK.test(p));
+    const hit = MARKER.exec(parts.join(" ").replace(REMINDER, "")) ?? (framed ? MARKER.exec(framed.replace(WORKFLOW_TASK, "")) : null);
     if (hit) {
       const name = hit[1]!.toLowerCase();
       const effort = hit[2]?.toLowerCase();
