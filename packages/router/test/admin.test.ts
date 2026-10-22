@@ -24,6 +24,8 @@ function makeCfg(overrides: Partial<Config> = {}): Config {
   return { ...DEFAULTS, admin: { port: 0 }, ...overrides };
 }
 
+const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
+
 async function withAdmin(
   cfgInit: Config,
   fn: (ctx: { port: number; configFile: string; home: string; setCfg: (c: Config) => void }) => Promise<void>,
@@ -72,6 +74,7 @@ async function withAdmin(
       health: () => 0,
       version: "0.0.0-test",
       requests: new RequestLog(path.join(home, "logs", "requests.jsonl")),
+      claudeCodeCredentialReaders: noClaudeCodeCredentialReaders,
       ...extraDeps,
     });
     await fn({ port: admin.port, configFile, home, setCfg: (c) => (cfg = c) });

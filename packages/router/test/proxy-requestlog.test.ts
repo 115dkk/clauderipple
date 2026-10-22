@@ -16,6 +16,8 @@ import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { createCa, createLeaf } from "../src/x509.ts";
 
+const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
+
 async function rig() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-log-metadata-"));
   const ca = createCa({ cn: "request log test" });
@@ -86,7 +88,7 @@ async function rig() {
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const agent = new https.Agent({ ca: ca.certPem, lookup: (_host, _options, callback) => callback(null, [{ address: "127.0.0.1", family: 4 }]) });
   const observed = new ObservedClaudeCodeAuth();
-  const proxy = new Proxy({ config: () => cfg, home, requests, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health: new UpstreamHealth(() => 100, () => {}), upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
+  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health: new UpstreamHealth(() => 100, () => {}), upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
   await proxy.listen();
   const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: () => void, headers: Record<string, string> = {}) => {
     const socket = net.connect(port, "127.0.0.1");
