@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.10 — 2026-10-23
+
+### Added
+
+- **The phone's queue lives on your computer.** A message queued on the phone while a turn runs is
+  handed to the host, which sends it when the turn ends, even with the phone locked in a pocket.
+  Before, the app held it and sent nothing until it was opened again. Needs Ripple Remote 1.0.3.
+- **The Claude app shows what the phone queued.** While a chat has queued messages, a slim strip
+  over the ClaudeRipple band shows how many, the first one, and that they go when the turn ends.
+
+### Fixed
+
+- **A model named in a quoted reply counts.** The Claude app sends a reply that quotes a message
+  with a `<!-- reply -->` comment first; that message was read as a notice, so a model named in it
+  was ignored.
+
 ## 0.12.9 — 2026-10-22
 
 ### Fixed
