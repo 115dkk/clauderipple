@@ -432,15 +432,17 @@ clauderipple ui
 
 **Proveedores** → añade ChatGPT o pega una clave de API → **Asignación de modelos**.
 
-**La app de la barra de menús / bandeja** es opcional. Muestra el estado del router y abre
-el panel con un clic:
+**La app de la barra de menús / bandeja** muestra el estado del router, abre el panel con un
+clic y ofrece una pantalla de reparación que funciona aunque el router esté caído:
 
 ```sh
 clauderipple tray
 ```
 
-Funciona con Electron, que ocupa unos 270 MB y por eso no se instala por defecto.
-`clauderipple tray --install` lo descarga una sola vez; todo lo demás funciona sin él.
+En macOS y Windows el script de instalación la añade por defecto. Funciona con Electron, unos
+270 MB que se descargan una sola vez; define `CLAUDERIPPLE_NO_TRAY=1` antes del comando de
+instalación para omitirla. En Linux, o tras instalar solo con npm, `clauderipple tray --install`
+la añade. Todo lo demás funciona sin ella.
 
 **Actualización.** La bandeja ofrece la nueva versión cuando la hay (**Buscar actualizaciones…**), o bien:
 

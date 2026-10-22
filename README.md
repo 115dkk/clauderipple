@@ -413,15 +413,16 @@ clauderipple ui
 
 **Providers** → add ChatGPT or paste an API key → **Model mapping**.
 
-**The menu-bar / tray app** is optional. It shows the router's state and opens the
-dashboard in a click:
+**The menu-bar / tray app** shows the router's state, opens the dashboard in a click, and
+keeps a repair screen that works while the router is down:
 
 ```sh
 clauderipple tray
 ```
 
-It runs on Electron, which is about 270MB and is therefore not installed by default.
-`clauderipple tray --install` fetches it once; everything else works without it.
+On macOS and Windows the install script adds it by default. It runs on Electron, about 270MB,
+fetched once; set `CLAUDERIPPLE_NO_TRAY=1` before the install command to skip it. On Linux, or
+after an npm-only install, `clauderipple tray --install` adds it. Everything else works without it.
 
 **Updating.** The tray offers a new version when there is one (**Check for Updates…**), or:
 

@@ -424,15 +424,17 @@ clauderipple ui
 
 **Provedores** → adicione o ChatGPT ou cole uma chave de API → **Mapeamento de modelos**.
 
-**O app da barra de menus / bandeja** é opcional. Ele mostra o estado do roteador e abre o
-painel com um clique:
+**O app da barra de menus / bandeja** mostra o estado do roteador, abre o painel com um
+clique e traz uma tela de reparo que funciona mesmo com o roteador fora do ar:
 
 ```sh
 clauderipple tray
 ```
 
-Ele roda em Electron, que tem cerca de 270 MB e, por isso, não é instalado por padrão.
-`clauderipple tray --install` baixa o Electron uma única vez; todo o resto funciona sem ele.
+No macOS e no Windows o script de instalação o adiciona por padrão. Ele roda em Electron, cerca
+de 270 MB baixados uma única vez; defina `CLAUDERIPPLE_NO_TRAY=1` antes do comando de instalação
+para pular. No Linux, ou depois de instalar só pelo npm, `clauderipple tray --install` o adiciona.
+Todo o resto funciona sem ele.
 
 **Atualização.** A bandeja oferece a nova versão quando houver uma (**Verificar atualizações…**), ou:
 

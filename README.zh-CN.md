@@ -257,13 +257,13 @@ clauderipple ui
 
 **供应商** → 添加 ChatGPT 或粘贴 API 密钥 → **模型映射**。
 
-**菜单栏 / 托盘应用**是可选的。它显示路由服务的状态，点一下就能打开控制面板：
+**菜单栏 / 托盘应用**显示路由服务的状态，点一下就能打开控制面板，并带有路由服务停止时也能打开的修复界面：
 
 ```sh
 clauderipple tray
 ```
 
-它基于 Electron，体积约 270MB，因此默认不安装。`clauderipple tray --install` 会下载一次；除此之外的一切不需要它也能正常工作。
+在 macOS 和 Windows 上，安装脚本默认会一并安装它。它基于 Electron，约 270MB，只下载一次；如不需要，在安装命令前加上 `CLAUDERIPPLE_NO_TRAY=1` 即可跳过。在 Linux 上或仅通过 npm 安装时，用 `clauderipple tray --install` 添加。除此之外的一切不需要它也能正常工作。
 
 **更新。** 有新版本时，托盘应用会提示（**检查更新…**），也可以运行：
 

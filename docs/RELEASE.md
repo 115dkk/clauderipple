@@ -9,7 +9,8 @@
 - 서명·공증이 사라집니다. Apple Developer 인증서도, Windows 코드 서명 인증서(연 219~685달러, 하드웨어 토큰)도
   필요 없습니다. SmartScreen 경고도 없습니다.
 - 트레이에 필요한 Electron은 npm이 플랫폼에 맞는 바이너리를 받아 옵니다. 우리가 굽지 않습니다. 다만 270MB라
-  의존성에 넣지 않았습니다. 기본 설치는 828KB이고, `clauderipple tray --install`을 눌렀을 때만 받습니다(실측).
+  의존성에 넣지 않았습니다. npm 패키지는 828KB이고(실측), Electron은 `clauderipple tray --install`이 따로 받습니다.
+  macOS·Windows 설치 스크립트는 이 단계를 기본으로 돌리고, `CLAUDERIPPLE_NO_TRAY=1`이면 건너뜁니다.
 
 사용자에게 Node 24가 필요하지만, 설치 스크립트가 없으면 대신 깔아 줍니다.
 

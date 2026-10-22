@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The install script adds the menu-bar app on macOS and Windows.** It carries the repair
+  screen that opens while the router is down, which someone who does not use a terminal needs.
+  Electron is about 270MB and fetched once; `CLAUDERIPPLE_NO_TRAY=1` skips it, and a failed
+  fetch leaves the router installed with a hint to add the app later. Linux keeps it opt-in.
+
 ## 0.12.4 — 2026-10-22
 
 ### Added
