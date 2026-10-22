@@ -13,6 +13,7 @@ import { fileSymlinks } from "../../../test/capabilities.ts";
 
 const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const other = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+const linked = "dddddddd-dddd-dddd-dddd-dddddddddddd";
 const line = (value: unknown): string => JSON.stringify(value) + "\n";
 const user = { type: "user", uuid: "u1", cwd: "/synthetic/project", timestamp: "2026-10-12T01:00:00Z", message: { content: "First prompt" } };
 const assistant = { type: "assistant", uuid: "a1", message: { id: "m1", model: "test-model", content: [{ type: "text", text: "Answer" }, { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/synthetic/project/file.ts" } }] } };
@@ -213,7 +214,10 @@ test("only recent top-level UUID files, no symlinks, host transcripts or travers
   const outside = path.join(f.root, "outside.jsonl");
   fs.writeFileSync(outside, line(user));
   if (fileSymlinks) fs.symlinkSync(outside, path.join(f.project, "cccccccc-cccc-cccc-cccc-cccccccccccc.jsonl"));
-  fs.symlinkSync(f.project, path.join(f.projects, "linked-project"), "junction");
+  const linkedProject = path.join(f.root, "linked-project-target");
+  fs.mkdirSync(linkedProject);
+  fs.writeFileSync(path.join(linkedProject, `${linked}.jsonl`), line(user));
+  fs.symlinkSync(linkedProject, path.join(f.projects, "linked-project"), "junction");
   assert.deepEqual(f.desktop.list().map(s => s.id), [id]);
   assert.equal(f.desktop.has("../../outside"), false);
   assert.throws(() => f.desktop.log("../../outside"), /no such session/);
