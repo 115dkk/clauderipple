@@ -17,6 +17,7 @@ import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
+import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
@@ -972,6 +973,18 @@ function layoutOf(tree: unknown): Record<string, unknown> {
   })
   return out
 }
+
+// The host sends what the phone queued when the turn ends; the Claude app never sees it, so a strip
+// over the band says it is there, on both surfaces, its first message on one line (2026-10-22).
+test('the phone queue strip draws on both surfaces with its count, first message and when', async ($, on) => {
+  for (const surface of SURFACES) drawPane(on, 'queue-' + surface, el => renderPhoneQueue(el, frameOf(surface), { count: 2, first: 'fix the\nheader' }))
+  for (const surface of SURFACES) {
+    const drawn = JSON.stringify(await (await mount($, 'queue-' + surface, surface)).drawn())
+    expect(drawn).toContain('Phone queue 2')
+    expect(drawn).toContain('fix the header')
+    expect(drawn).toContain('goes when this turn ends')
+  }
+})
 
 test('no value moves a neighbour: every slot keeps its width whatever it shows', async ($, on) => {
   const levels: DashboardView['effort'][] = [

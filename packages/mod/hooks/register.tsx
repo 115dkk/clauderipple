@@ -1,7 +1,7 @@
 // Engine wiring lives here: imported logic and drawings never receive the engine interface.
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
-import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, SessionCompactResult, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf } from './ladder'
@@ -21,6 +21,7 @@ import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parse
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
+import { PHONE_QUEUE_ROWS, renderPhoneQueue } from './ui/queue'
 import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
 import { renderAgents, talkOf } from './ui/agents'
@@ -30,6 +31,7 @@ import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui
 import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
+const phoneQueue = atom({ plugin: 'ripple', key: 'phoneQueue' } as const, null)
 const last = atom({ plugin: 'ripple', key: 'last' } as const, null)
 const requests = atom({ plugin: 'ripple', key: 'requests' } as const, [])
 const logOpen = atom({ plugin: 'ripple', key: 'logOpen' } as const, false)
@@ -172,6 +174,26 @@ async function persistWorkerPick($: EngineInterface, entry: Record<string, unkno
   // A reporting failure must not poison the queue or undo the selected spawn either.
   workerLogWork = work.catch(() => undefined)
   await workerLogWork
+}
+/**
+ * What the phone queued for this chat. The host keeps the queue (packages/remote/src/queue.ts) and
+ * sends it when the turn ends; the Claude app never sees it, so the band says it is there. Keyed by
+ * the phone's session id, which for a Claude app session is this one, or by `desktopId`.
+ */
+export function phoneQueueOf(text: string | undefined, session: string): { count: number; first: string } | null {
+  if (!text) return null
+  for (const [key, value] of Object.entries(object(JSON.parse(text)))) {
+    const entry = object(value)
+    if (key !== session && entry.desktopId !== session) continue
+    const items = Array.isArray(entry.items) ? entry.items.map(object) : []
+    return items.length ? { count: items.length, first: typeof items[0]!.text === 'string' ? items[0]!.text : '' } : null
+  }
+  return null
+}
+async function refreshPhoneQueue($: EngineInterface, session: string): Promise<void> {
+  const path = `${await rippleHome($)}/remote/queue.json`
+  const next = await $.fs.exists(path) ? phoneQueueOf(await optionalFile($, path), session) : null
+  if (JSON.stringify(next) !== JSON.stringify(await read($, phoneQueue))) await update($, phoneQueue, () => next)
 }
 async function claudeHome($: EngineInterface): Promise<string> {
   return (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await userHome($)}/.claude`
@@ -414,9 +436,11 @@ async function refreshRouter($: EngineInterface): Promise<void> {
     const admin = await adminUrl($)
     await settingsTask(() => syncSettings($, admin))
     await endModeIfOver($)
+    const session = await $.session.id()
+    // Read even with the band hidden: the strip shows over whatever is above the prompt.
+    await refreshPhoneQueue($, session)
     const open = await isLogUp($)
     if (!open && await read($, bandHidden)) { await update($, line, () => null); return }
-    const session = await $.session.id()
     const own = await $.http.fetch(`${admin}/api/requests?kind=messages&n=${open ? 60 : 1}&session=${encodeURIComponent(session)}`)
     if (!own.ok) throw new Error(t(language, 'commands.routerHttp', { status: own.status }))
     const mine = (object(JSON.parse(own.text)).requests ?? []) as StatusRequest[]
@@ -1777,21 +1801,27 @@ export const register: Register = on => {
       if (which === 'setup') {
         return renderSetup(el, frame, { draft: normalizeSettings(await read($, settingsDraft) ?? await read($, settings)), jev: await read($, jev), step: await read($, setupStep) }, setupActions($)) as RenderElement
       }
-      if (await read($, bandHidden)) return next(e)
-      const alert = await alertView($, frame.now)
-      if (alert) return renderAlert(el, frame, alert, alertActions($, alert)) as RenderElement
-      const s = await currentSettings($)
-      if (s.layout === 'minimal') return next(e)
       const { Box, Button, Text } = el
+      // What the phone queued floats over whatever is here, only while something waits (ui/queue.tsx).
+      const queued = await read($, phoneQueue)
+      const over = (node: RenderNode): RenderElement => (queued
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{renderPhoneQueue(el, frame, queued)}{node}</Box>
+        : node) as RenderElement
+      const below = queued ? { ...frame, maxRows: Math.max(1, frame.maxRows - PHONE_QUEUE_ROWS) } : frame
+      if (await read($, bandHidden)) return over(await next(e))
+      const alert = await alertView($, frame.now)
+      if (alert) return over(renderAlert(el, below, alert, alertActions($, alert)))
+      const s = await currentSettings($)
+      if (s.layout === 'minimal') return over(await next(e))
       const actions = bandActions($, e.surface)
       // The desktop draws the band as one surface with its × inside; the terminal keeps the row
       // of facts and controls with the close control (and its effort button) after it.
       if ((e.surface === 'desktop' || e.surface === 'vscode') && 'Svg' in el) {
-        return renderBand(el, frame, await dashboard($, e.props.isWorking), { ...actions, hide: () => { void toggleBar($) } }) as RenderElement
+        return over(renderBand(el, below, await dashboard($, e.props.isWorking), { ...actions, hide: () => { void toggleBar($) } }))
       }
-      return (
+      return over(
         <Box flexDirection="row" alignItems={e.surface === 'terminal' || e.surface === 'mobile' ? 'flex-start' : 'center'} columnGap={2}>
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>{renderBand(el, { ...frame, columns: frame.columns - besideBand(frame) }, await dashboard($, e.props.isWorking), actions)}</Box>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>{renderBand(el, { ...below, columns: frame.columns - besideBand(frame) }, await dashboard($, e.props.isWorking), actions)}</Box>
           <Box flexDirection="row" columnGap={2} flexShrink={0}>
             {e.surface === 'terminal' || e.surface === 'mobile' ? <Button key="effort" plain hotkey="e" label={t(language, 'band.effort')} onPress={actions.toggleEffortMenu} /> : null}
             <Button key="hide" plain role="dismiss" label="×" onPress={() => toggleBar($)} />

@@ -2146,3 +2146,25 @@ test('the band Clear asks first, and confirming runs the clear once', async ($, 
   expect(await ui.find({ type: 'Text', text: 'Start this conversation over?' })).toBeUndefined()
   await ui.unmount()
 })
+
+// The host keeps what the phone queued (packages/remote/src/queue.ts); the band reads its file and
+// floats a strip over itself while this chat has something waiting, then lets it go.
+for (const surface of ['terminal', 'desktop'] as const) test(`the phone queue strip shows over the ${surface} band only while this chat has something queued`, async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const file = '/home/test/.clauderipple/remote/queue.json'
+  b.files.set(file, JSON.stringify({ other: { items: [{ id: 'x', text: 'not this chat', attachments: [], at: 1 }], held: false } }))
+  await start($)
+  const ui = await band($, surface)
+  await b.clock.advance(3000)
+  expect(JSON.stringify(await ui.drawn())).not.toContain('Phone queue')
+  b.files.set(file, JSON.stringify({ phone: { desktopId: 'session-test', items: [{ id: 'a', text: 'fix the header', attachments: [], at: 1 }, { id: 'b', text: 'then the footer', attachments: [], at: 2 }], held: false } }))
+  await b.clock.advance(3000)
+  const shown = JSON.stringify(await ui.drawn())
+  expect(shown).toContain('Phone queue 2')
+  expect(shown).toContain('fix the header')
+  b.files.set(file, JSON.stringify({}))
+  await b.clock.advance(3000)
+  expect(JSON.stringify(await ui.drawn())).not.toContain('Phone queue')
+  await ui.unmount()
+})

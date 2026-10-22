@@ -358,6 +358,8 @@ declare module 'claude-code' {
   interface PluginState {
     ripple: {
       line: StatusLine
+      /** What the phone queued for this chat, from the host's queue.json; null when nothing. */
+      phoneQueue: { count: number; first: string } | null
       last: StatusRequest | null
       requests: StatusRequest[]
       logOpen: boolean
