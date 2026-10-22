@@ -642,7 +642,9 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | { desc
       const response = await Promise.race([
         $.http.fetch(source === 'zen' ? 'https://opencode.ai/zen/v1/systemone' : 'https://api.typesafe.ai/v1/systemone', { method: 'POST', headers: { 'content-type': 'application/json', authorization: source === 'zen' ? key : `Bearer ${key}` }, body: JSON.stringify({ ...body, model }) })
           .catch(() => 'network' as const),
-        $.clock.sleep(3000).then(() => null),
+        // Jev answers in about 2.1–2.4 s even with a full context (measured 2026-10-22), so 3 s timed
+        // out whenever OpenCode slowed down — and the Haiku fallback then cost more than waiting.
+        $.clock.sleep(5000).then(() => null),
       ])
       // A dropped connection or a slow answer is often one bad moment, not a broken judge.
       if (!response || response === 'network') {
