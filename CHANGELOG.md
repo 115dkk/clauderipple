@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.9 — 2026-10-22
+
+### Fixed
+
+- **A session can no longer pick a model you didn't ask for.** Naming a model on `ripple:auto`,
+  calling a worker agent directly or giving `general-purpose` a model now counts only when you named
+  that model in your last messages (or approved an answer that did). Otherwise ClaudeRipple says so
+  and sends the task by its tier.
+- **The domain comes from the session, not a guess.** A tier marker can say `ui` or `backend`
+  (`[[ripple: standard ui]]`); without it the task uses the general ladder. The judge no longer
+  rates tiered tasks in the background, so they start without waiting for it.
+- **A domain ladder's "light work" row is for easy work only.** Ordinary work now takes the
+  "heavy work" row with the hard work, so "easy design on Sonnet, the rest on Opus" does what it
+  says. Saved settings carry over.
+
 ## 0.12.8 — 2026-10-22
 
 ### Fixed
