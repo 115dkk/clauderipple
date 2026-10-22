@@ -264,6 +264,13 @@ async function install(): Promise<void> {
   } catch (e) {
     console.log(`  menu-bar app launcher not written: ${(e as Error).message}`);
   }
+  // The phone host has the same problem as the router above: new files, old process. The host
+  // decides whether it is ours and idle (remote host-service refreshPlan). Never fatal.
+  try {
+    execFileSync(installedRuntime.node, [installedRuntime.cli, "remote", "refresh"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
+  } catch {
+    console.log("  the phone host was not restarted; if you use it, run: clauderipple remote install");
+  }
   console.log("\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
 }
 

@@ -9,6 +9,14 @@
   Electron is about 270MB and fetched once; `CLAUDERIPPLE_NO_TRAY=1` skips it, and a failed
   fetch leaves the router installed with a hint to add the app later. Linux keeps it opt-in.
 
+### Fixed
+
+- **Updating restarts the phone host too.** An update replaced the files but left the running
+  host on the old code until the machine restarted, so a fix like 0.12.4's Windows sending did
+  not arrive. `install` (which every update ends with) now restarts a phone host this
+  installation registered, unless a turn is in progress; then it says to run
+  `clauderipple remote install` afterwards. A host run from a source checkout is left alone.
+
 ## 0.12.4 — 2026-10-22
 
 ### Added

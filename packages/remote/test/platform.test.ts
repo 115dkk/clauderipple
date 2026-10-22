@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { listProcesses, ProcessSnapshot } from "../src/processes.ts";
 import { processHasSession, liveDesktopProcesses } from "../src/desktop.ts";
 import { findClaude, specFor } from "../src/service.ts";
-import { renderService, TASK, UNIT, controlShutdown } from "../src/host-service.ts";
+import { renderService, TASK, UNIT, controlShutdown, refreshPlan } from "../src/host-service.ts";
 import { keepAwakeCommand, PowerHold, nodeSpawner } from "../src/power.ts";
 import { noisyFolder } from "../src/folders.ts";
 import { batchCommand, launcherOptions } from "../src/sdk-launcher.ts";
@@ -154,4 +154,21 @@ test("shutdown requires the existing loopback secret, answers before callback, a
   assert.equal((await fetch(url, { headers: { "x-ripple-local": localSecret(dir) } })).status, 404);
   await controlShutdown(dir);
   assert.equal(stops, 1);
+});
+
+test("an update restarts only the phone host this installation registered, and not mid-turn", () => {
+  const script = "/opt/cr/lib/node_modules/clauderipple/dist/remote/src/main.js";
+  const ours = `<string>${script}</string>`;
+  assert.equal(refreshPlan({ installed: false, definition: null, script, busy: undefined }), "absent");
+  assert.equal(refreshPlan({ installed: true, definition: null, script, busy: false }), "absent");
+  // A host run from a source checkout belongs to whoever set it up that way.
+  assert.equal(refreshPlan({ installed: true, definition: "<string>/Users/me/src/clauderipple/packages/remote/src/main.ts</string>", script, busy: false }), "foreign");
+  assert.equal(refreshPlan({ installed: true, definition: ours, script, busy: true }), "busy");
+  assert.equal(refreshPlan({ installed: true, definition: ours, script, busy: false }), "restart");
+  // A host from before the busy field, or one not answering, is restarted.
+  assert.equal(refreshPlan({ installed: true, definition: ours, script, busy: undefined }), "restart");
+  // The plist escapes XML; the Windows launcher doubles single quotes.
+  const odd = "/Users/a&b/cr's/main.js";
+  assert.equal(refreshPlan({ installed: true, definition: "<string>/Users/a&amp;b/cr's/main.js</string>", script: odd, busy: false }), "restart");
+  assert.equal(refreshPlan({ installed: true, definition: "'\"/Users/a&b/cr''s/main.js\"'", script: odd, busy: false }), "restart");
 });
