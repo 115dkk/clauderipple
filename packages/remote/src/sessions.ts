@@ -132,7 +132,9 @@ class Inbox implements AsyncIterable<SdkUserMessage> {
 
 /** Routed models take their effort as `model@level`, which the router reads (ARCHITECTURE §3a); Claude models take the SDK's own option. */
 export function modelArg(model: string, effort: Effort | null): { model: string; effort?: Effort } {
-  if (model.startsWith("claude-")) return effort && ["low", "medium", "high", "xhigh", "max"].includes(effort) ? { model, effort } : { model };
+  // Claude Code's own aliases (router.ts offers them when no anthropic provider is declared) are
+  // Claude models too: `opus@high` would reach Anthropic as a model nobody has.
+  if (model.startsWith("claude-") || /^(opus|sonnet|haiku)(\[1m\])?$/.test(model)) return effort && ["low", "medium", "high", "xhigh", "max"].includes(effort) ? { model, effort } : { model };
   return { model: effort ? `${model}@${effort}` : model };
 }
 

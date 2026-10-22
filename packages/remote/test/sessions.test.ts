@@ -314,6 +314,7 @@ function eventLabels(events: SessionEvent[]): string[] {
 for (const { model, effort, expected } of [
   { model: "claude-test", effort: "high" as const, expected: { model: "claude-test", effort: "high" } },
   { model: "gpt-test", effort: "max" as const, expected: { model: "gpt-test@max" } },
+  { model: "opus", effort: "high" as const, expected: { model: "opus", effort: "high" } },
 ]) {
   test(`create uses cwd, proxy env and modelArg for ${model}, and emits an ordered turn`, { timeout: 4500 }, async t => {
     const f = fixture(t);
