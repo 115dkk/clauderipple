@@ -103,7 +103,21 @@ export async function recentFolders(sources: RecentSource[], limit = 12): Promis
   return out;
 }
 
-export async function browse(target: string | undefined, hidden = false, home = os.homedir()): Promise<BrowseResult> {
+/**
+ * The drive roots this Windows machine answers for (`C:\`, `E:\`, …). A: and B: are floppy letters
+ * that can stall; a mapped drive that does not answer within a second is left out.
+ */
+export async function windowsDrives(platform: NodeJS.Platform = process.platform): Promise<string[]> {
+  if (platform !== "win32") return [];
+  const roots = "CDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(letter => `${letter}:\\`);
+  const found = await Promise.all(roots.map(root => Promise.race([
+    isDirectory(root).then(ok => (ok ? root : null)),
+    new Promise<null>(resolve => setTimeout(resolve, 1000, null).unref()),
+  ])));
+  return found.filter((root): root is string => root !== null);
+}
+
+export async function browse(target: string | undefined, hidden = false, home = os.homedir(), drives: () => Promise<string[]> = windowsDrives): Promise<BrowseResult> {
   const dir = path.resolve(target && target.trim() ? target : home);
   const dirents = await macConsent(dir, () => fs.readdir(dir, { withFileTypes: true }), { home });
   const names: string[] = [];
@@ -113,7 +127,10 @@ export async function browse(target: string | undefined, hidden = false, home = 
     else if (d.isSymbolicLink() && (await isDirectory(path.join(dir, d.name)))) names.push(d.name);
   }
   names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
-  const entries = names.slice(0, BROWSE_CAP).map((name) => ({ path: path.join(dir, name), name }));
   const parent = path.dirname(dir);
+  // A drive root has no parent to go up to, so on Windows the other drives are listed first: a
+  // project on E: was out of reach from a browse that starts in C:\Users (Discord, 2026-10-22).
+  const others = parent === dir ? (await drives()).filter(root => root.toLowerCase() !== dir.toLowerCase()) : [];
+  const entries = [...others.map(root => ({ path: root, name: root })), ...names.slice(0, BROWSE_CAP).map((name) => ({ path: path.join(dir, name), name }))];
   return { path: dir, parent: parent === dir ? null : parent, home, entries, truncated: names.length > BROWSE_CAP };
 }
