@@ -90,6 +90,14 @@ Node를 우리가 내려받은 경우에는 npm이 만든 `env node` 셔뱅 링�
    `ENEEDAUTH`가 뜹니다. 게시 없이 검사만 하려면 Actions → Publish → Run workflow(`--dry-run`)를 씁니다.
    급할 때는 예전처럼 로컬에서 `npm publish`도 됩니다(브라우저 인증 필요).
 
+6. GitHub 릴리스를 만듭니다. 태그만으로는 저장소 첫 화면의 "Latest"가 바뀌지 않습니다. 0.10~0.12.5에서
+   이 단계를 빠뜨려 첫 화면에 열흘 넘게 0.9.0이 걸려 있었습니다(2026-10-22). 본문은 CHANGELOG의 그 버전 절과
+   설치 명령, Anthropic과 무관하다는 한 줄입니다.
+
+   ```sh
+   gh release create v<버전> --title "ClaudeRipple <버전> — <한 줄 요약>" --notes-file <본문> --latest
+   ```
+
 ## 빌드가 하는 일
 
 `npm run build`(= `scripts/build-npm.mjs`)가 만드는 것은 이것뿐입니다.
