@@ -419,7 +419,7 @@ Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Clau
 
 ## 社区
 
-提问、报告问题以及报名 Ripple Remote Android 测试版（Google Play 封闭测试）都在 Discord：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。想参加 Android 测试版，请在那里留下你在 Google Play 上使用的 Gmail 地址。
+提问、报告问题以及报名 Ripple Remote Android 测试版（Google Play 封闭测试）都在 Discord：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。想参加 Android 测试版，请把你在 Google Play 上使用的 Gmail 地址私信发给 @pbj_ripple，不要发在所有人都能看到的频道里。
 
 ## 无关联声明
 

@@ -694,7 +694,7 @@ Em uso diário pelo autor, mas ainda jovem. Espere algumas arestas:
 
 ## Comunidade
 
-Perguntas, relatos de bugs e o beta do Ripple Remote para Android (um teste fechado no Google Play) ficam no Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). Para entrar no beta do Android, deixe lá o endereço do Gmail que você usa no Google Play.
+Perguntas, relatos de bugs e o beta do Ripple Remote para Android (um teste fechado no Google Play) ficam no Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). Para entrar no beta do Android, envie o endereço do Gmail que você usa no Google Play para @pbj_ripple por mensagem direta, não em um canal onde todos podem lê-lo.
 
 ## Sem afiliação
 

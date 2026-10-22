@@ -570,7 +570,7 @@ Codex 앱 / CLI ──/v1/responses──▶ ClaudeRipple 입구 ──▶ Claud
 
 ## 커뮤니티
 
-질문, 버그 제보, Ripple Remote 안드로이드 베타(Google Play 비공개 테스트) 신청은 디스코드에서 받습니다: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). 안드로이드 베타에 참여하려면 Google Play에서 쓰는 Gmail 주소를 남겨 주세요.
+질문, 버그 제보, Ripple Remote 안드로이드 베타(Google Play 비공개 테스트) 신청은 디스코드에서 받습니다: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). 안드로이드 베타에 참여하려면 Google Play에서 쓰는 Gmail 주소를 @pbj_ripple에게 DM으로 보내 주세요. 모두가 읽는 채널에는 올리지 마세요.
 
 ## 비제휴
 

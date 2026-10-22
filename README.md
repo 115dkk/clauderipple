@@ -699,7 +699,7 @@ In daily use by the author, but young. Expect rough edges:
 
 ## Community
 
-Questions, bug reports and the Ripple Remote Android beta (a closed test on Google Play) are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). To join the Android beta, leave the Gmail address you use on Google Play there.
+Questions, bug reports and the Ripple Remote Android beta (a closed test on Google Play) are on Discord: [https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw). To join the Android beta, send the Gmail address you use on Google Play to @pbj_ripple as a direct message, not in a channel where everyone can read it.
 
 ## Not affiliated
 

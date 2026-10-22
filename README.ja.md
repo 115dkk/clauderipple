@@ -420,7 +420,7 @@ Codex app / CLI ──/v1/responses──▶ ClaudeRipple ingress ──▶ Clau
 
 ## コミュニティ
 
-質問、不具合の報告、Ripple Remote Android 版ベータ（Google Play のクローズドテスト）への参加受付は Discord で行っています：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。Android 版ベータに参加するには、Google Play で使っている Gmail アドレスを Discord に書き込んでください。
+質問、不具合の報告、Ripple Remote Android 版ベータ（Google Play のクローズドテスト）への参加受付は Discord で行っています：[https://discord.gg/R8ZgGSNHjw](https://discord.gg/R8ZgGSNHjw)。Android 版ベータに参加するには、Google Play で使っている Gmail アドレスを @pbj_ripple にダイレクトメッセージで送ってください。誰でも読めるチャンネルには書き込まないでください。
 
 ## 提携関係について
 
