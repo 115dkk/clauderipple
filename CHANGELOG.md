@@ -1,9 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.12.6 — 2026-10-22
 
 ### Fixed
 
+- **The phone can pick a folder on another Windows drive.** Browsing starts in `C:\Users\<name>`,
+  and a drive root had nowhere to go up to, so a project on `E:` was out of reach. A drive root now
+  lists the other drives first.
+- **The phone's model picker always offers Claude.** It listed only what the router's providers
+  declare, so a router that passes Claude straight through showed no Claude, and with no other
+  provider the picker was empty. Claude Code's own Opus, Sonnet and Haiku are now offered when no
+  Claude provider is configured.
+- **A running worker's row names its model** as soon as the worker's first answer (or, for a Claude
+  app session, its meta file) says which model ran it, instead of only when it finishes.
+- **A quiet computer reads as a wait, not a lost connection.** The phone's red "connection lost"
+  card came after 30 seconds of silence, which a phone that slept or switched networks often
+  reaches. It now comes after a minute, in the warning tone, as "waiting for your computer", and
+  time the phone app spent in the background no longer counts toward it.
+- **Jev gets 5 seconds to answer** before Haiku judges instead. It answers in about 2.1–2.4
+  seconds, so 3 seconds timed out whenever OpenCode slowed down.
+- **`clauderipple install` removes npm's `clauderipple.ps1` on Windows.** PowerShell runs it before
+  `clauderipple.cmd`, and its default execution policy refuses it, so an `npm install -g` user could
+  not run `clauderipple` in PowerShell. The README now says to start with `clauderipple.cmd` there.
 - **The phone says when the Mac is asking for folder access.** Opening a folder macOS guards
   (Desktop, Documents, Downloads, iCloud Drive, another volume) for the first time puts up the
   Mac's "would like to access" dialog, and the phone waited in silence, then said the computer did
