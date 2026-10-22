@@ -768,6 +768,25 @@ test('the limits row shows Claude\'s plan on a chat that runs on another provide
   await ui.unmount()
 })
 
+test('a failed first limits read is tried again at the next tick, not a minute later', async ($, on) => {
+  const b = boundaries(on, { extras: ['limits'] })
+  const limits = { providers: [{ provider: 'claude', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, at: NOW, windows: [
+    { kind: 'seven_day', used_percent: 88, window_minutes: 10080, reset_at: (NOW + 7_200_000) / 1000 },
+  ] }] }] }
+  let reads = 0
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
+    if (e.url.endsWith('/api/limits') && ++reads === 1) return { value: { ok: false, status: 503, headers: {}, text: '' } }
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/limits') ? limits : { requests: [] }) } }
+  })
+  await start($)
+  await b.clock.advance(15000)
+  expect(reads).toBeGreaterThan(1)
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: /^88%$/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a tier marker on a worker other than ripple:auto is dropped, not routed as a model', async ($, on) => {
   boundaries(on)
   http(on)

@@ -1092,21 +1092,24 @@ async function fallbackLimits($: EngineInterface): Promise<LimitItem[]> {
  * predates the endpoint (404) the older per-provider routes answer instead, so the row shows before
  * the router is restarted. A failure keeps the last good row rather than blanking it, and the state
  * is written only when it moved: a redraw that shows nothing new is wasted (each answer is drawn
- * afresh).
+ * afresh). Only a good read holds off the next minute, and only while there is a row: a failed read
+ * stamped the minute too, and a session whose first read failed (the router restarting) showed no
+ * limits row for that minute (2026-10-22).
  */
 let limitsAt = 0
 async function refreshLimits($: EngineInterface): Promise<void> {
   if (!(await currentSettings($)).extras.includes('limits')) return
   const now = await $.clock.now()
-  if (now - limitsAt < 60_000) return
-  limitsAt = now
+  if (now - limitsAt < 60_000 && await read($, limits) !== null) return
   try {
     const admin = await adminUrl($)
     const response = await $.http.fetch(`${admin}/api/limits`)
     let items: LimitItem[] | null = null
     if (response.ok) items = routerLimitItems(JSON.parse(response.text), now)
     else if (response.status === 404) items = await fallbackLimits($)
-    if (items && !same(items, await read($, limits))) await update($, limits, () => items)
+    if (!items) return
+    limitsAt = now
+    if (!same(items, await read($, limits))) await update($, limits, () => items)
   } catch (error) { await report($, 'limits', error) }
 }
 async function refreshUsage($: EngineInterface): Promise<void> {
