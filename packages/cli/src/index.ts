@@ -28,7 +28,7 @@ import { GROK_DEFAULT_URL } from "../../router/src/providers/grok/catalog.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
 import { openBrowser } from "./browser.ts";
 import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
-import { installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
+import { dropPowerShellShim, installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
 
 function setPickerEnabled(enabled: boolean): void {
@@ -219,6 +219,8 @@ async function install(): Promise<void> {
   // Persist the single execution contract so the GUI, admin API, hooks, and supervisor all use
   // this installation's runtime rather than any Node installation on the user's PATH.
   writePaths(installedRuntime, home);
+  const shim = dropPowerShellShim(installKind(installedRuntime));
+  if (shim) console.log(`✓ removed ${shim}: PowerShell's default policy refuses it, and clauderipple.cmd runs instead`);
   // Windows and Linux register node + the router script directly (schtasks.ts writes its own .cmd
   // launcher); a macOS source checkout gets a small .app so the agent shows a real name in Login Items.
   // registration.ts holds the mapping, so `repair` registers exactly the same thing.
