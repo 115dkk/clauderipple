@@ -47,7 +47,12 @@ type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly u
 export function userNamed(model: string, messages: readonly Said[]): boolean {
   const words = modelWords(model)
   if (!words.length) return false
-  const human = (m: Said): boolean => m.role === 'user' && !m.toolResults?.length && /^\s*[^<\s]/.test(m.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')) && !m.text.startsWith('This session is being continued')
+  // A notice opens on a tag (`<task-notification>`, `<local-command-stdout>`); a reply the app quotes
+  // opens on `<!-- reply 1 -->` and is the user's own words.
+  const human = (m: Said): boolean => {
+    const text = m.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+    return m.role === 'user' && !m.toolResults?.length && !!text && !/^<[a-z][a-z-]*>/i.test(text) && !text.startsWith('This session is being continued')
+  }
   const at = messages.flatMap((m, index) => human(m) ? [index] : []).slice(-2)
   const last = at.at(-1)
   const heard = at.map(index => messages[index]!.text)

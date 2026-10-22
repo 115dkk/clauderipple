@@ -119,6 +119,10 @@ test('a model counts as named only when the user said it lately, in English or K
   assert.equal(userNamed('gemini-3-8-flash', said('제미나이한테 시켜', '반영해', '이제 서버 고쳐')), false)
   // Tool results, notices and summaries are not the user.
   assert.equal(userNamed('gemini-3-8-flash', [user('일 해'), { role: 'user', text: 'gemini output', toolResults: [{}] }, user('<task-notification>gemini done</task-notification>')]), false)
+  assert.equal(userNamed('gemini-3-8-flash', said('일 해', '<local-command-stdout>gemini</local-command-stdout>', 'This session is being continued … gemini')), false)
+  // A reply the app quotes is the user's: it opens on an HTML comment, not a tag.
+  assert.equal(userNamed('gemini-3-8-flash', said('<!-- reply 1 -->\n> 어느 모델로 할까요?\n\n제미나이로 해')), true)
+  assert.equal(userNamed('gemini-3-8-flash', said('제미나이로 해', '<!-- reply 1 -->\n> 진행할까요?\n\n아니 그건 됐고 다른 거 해')), true, 'the quoted reply is one of the last two, the earlier message still counts')
   // A short "go" approves the answer it replies to.
   const proposal = [user('정리해'), { role: 'assistant' as const, text: '제미나이에게 맡기겠습니다. 진행할까요?' }, user('ㄱㄱ')]
   assert.equal(userNamed('gemini-3-8-flash', proposal), true)
