@@ -342,6 +342,11 @@ npm install -g clauderipple
 clauderipple install
 ```
 
+Windows PowerShell은 기본 실행 정책 때문에 npm이 만든 `clauderipple.ps1`을 실행하지 않습니다. 그래서
+PowerShell에서는 `clauderipple.cmd install`로 실행하십시오(명령 프롬프트에서는 그대로 됩니다). `install`이
+그 파일을 지우므로, 그다음부터는 PowerShell에서도 `clauderipple`만 입력하면 됩니다. 설치 스크립트로 설치하면
+이 파일이 남지 않습니다.
+
 그다음 대시보드를 열어 프로바이더를 추가합니다.
 
 ```sh

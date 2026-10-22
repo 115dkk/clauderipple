@@ -424,6 +424,11 @@ npm install -g clauderipple
 clauderipple install
 ```
 
+En Windows, la política de ejecución predeterminada de PowerShell rechaza el `clauderipple.ps1` que
+crea npm, así que ahí ejecuta `clauderipple.cmd install` (o usa el Símbolo del sistema). `install`
+borra ese archivo y desde entonces basta con `clauderipple` también en PowerShell. El script de
+instalación nunca lo deja.
+
 Luego abre el panel y añade un proveedor:
 
 ```sh

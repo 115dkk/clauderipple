@@ -405,6 +405,10 @@ npm install -g clauderipple
 clauderipple install
 ```
 
+On Windows, PowerShell's default execution policy refuses the `clauderipple.ps1` npm adds, so
+run `clauderipple.cmd install` there (or use Command Prompt). `install` removes that file, and
+plain `clauderipple` works in PowerShell from then on. The install script never leaves one.
+
 Then open the dashboard and add a provider:
 
 ```sh

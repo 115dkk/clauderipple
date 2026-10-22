@@ -249,6 +249,10 @@ npm install -g clauderipple
 clauderipple install
 ```
 
+Windows PowerShell 的默认执行策略会拒绝运行 npm 生成的 `clauderipple.ps1`,所以在 PowerShell 中请输入
+`clauderipple.cmd install`(命令提示符中可直接运行)。`install` 会删除该文件,之后在 PowerShell 中
+直接输入 `clauderipple` 即可。用安装脚本安装不会留下这个文件。
+
 然后打开控制面板并添加供应商：
 
 ```sh
