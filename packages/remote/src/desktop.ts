@@ -458,9 +458,19 @@ export class DesktopSessions {
       let state = this.tailSubs.get(id);
       if (!state) { state = new Map(); this.tailSubs.set(id, state); }
       const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
-      return scanLines(fd, size, line => {
+      const next = scanLines(fd, size, line => {
         for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize, sink, { state, resolve }).bodies) visit(body);
       }, offset);
+      // A worker's meta file, which names its model, is often written just after the line that
+      // started it: say the model once it is known instead of only when the worker ends.
+      for (const [toolUseId, running] of state) {
+        if (running.model) continue;
+        const info = resolve(toolUseId, running.input);
+        if (!info.model || info.ended) continue;
+        running.model = info.model;
+        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: running.model, status: "running", steps: info.steps });
+      }
+      return next;
     } finally { fs.closeSync(fd); }
   }
 

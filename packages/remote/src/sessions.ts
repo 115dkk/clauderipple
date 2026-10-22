@@ -1536,7 +1536,15 @@ export class Sessions {
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b) => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2) }));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     const sub = live.subs.get(parent);
-    if (sub) { sub.steps++; if (message.model) sub.model = message.model; }
+    if (!sub) return;
+    sub.steps++;
+    // A named worker is spawned without a `model` argument, so its row had no model until it
+    // finished; its first answer says which model ran it.
+    if (message.model && sub.model !== message.model) {
+      const first = sub.model === null;
+      sub.model = message.model;
+      if (first) this.append(r.id, { kind: "subagent", toolUseId: parent, sub: `sub-${parent}`, description: sub.description, model: sub.model, status: "running", steps: sub.steps });
+    }
   }
 
   private flush(id: string, live: Live): void {
