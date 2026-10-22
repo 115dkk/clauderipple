@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.8 — 2026-10-22
+
+### Fixed
+
+- **A Workflow script's agents go to the worker their marker names.** Claude Code wraps a workflow
+  agent's prompt in a harness frame, so a `[[ripple: gemini-3-8-flash@high]]` on the script's first
+  line was no longer at the top of a message and every agent ran on the session's model. The router
+  now reads the marker from the first line under that frame.
+
 ## 0.12.7 — 2026-10-22
 
 ### Fixed
