@@ -187,6 +187,9 @@ export function summarize(tool: string, input: Record<string, unknown>, cwd: str
       const files = (Array.isArray(input.files) ? input.files : []).filter((f): f is string => typeof f === "string").map(rel);
       return oneLine([...files, str(input.caption)].filter(Boolean).join(", "));
     }
+    case "AskUserQuestion": return oneLine(str(object(Array.isArray(input.questions) ? input.questions[0] : null)?.question));
+    case "ExitPlanMode": return oneLine(str(input.plan));
+    case "EnterPlanMode": return "";
     case "TodoWrite": return Array.isArray(input.todos) ? `${input.todos.length}` : "";
     default: {
       const first = Object.values(input).find((v) => typeof v === "string") as string | undefined;
