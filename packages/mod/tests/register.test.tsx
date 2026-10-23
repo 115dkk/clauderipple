@@ -947,6 +947,25 @@ for (const [label, spawn] of [
   expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())).toMatchObject({ by: 'session', tier: 'hard', rung: 'hard' })
 })
 
+test("a Workflow's ripple:auto whose marker names a worker runs on that worker's model; a tier marker or none is left alone", async ($, on) => {
+  // 2026-10-23: 31 Workflow workers sent as ripple:auto with [[ripple: gpt-6-1-sol@medium]] ran on Sol
+  // through the router but showed as Opus 5.5, and their later turns lost the marker.
+  boundaries(on, {}, { messages: MESSAGES })
+  http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  const WORKFLOW = { ...SPAWN, workflow: true } as AgentSpawnInput
+  await $.agent.spawn({ ...WORKFLOW, prompt: "[[ripple: gpt-6-1-sol@medium]]\nWrite the review." })
+  // The engine keeps a workflow agent's type and description; its model is what can change.
+  expect(sent[0]).toMatchObject({ subagentType: "ripple:auto", prompt: "Write the review.", model: "gpt-6.1-sol@medium", description: "Rename variable" })
+  await $.agent.spawn({ ...WORKFLOW, prompt: "[[ripple: hard]]\nWrite the review." })
+  expect(sent[1]?.model).toBeUndefined()
+  await $.agent.spawn({ ...WORKFLOW, prompt: "Write the review." })
+  expect(sent[2]?.model).toBeUndefined()
+  expect(judges.length).toBe(0)
+})
+
 test('a worker the user named in their last message runs as called, after a short go-ahead too', async ($, on) => {
   boundaries(on, {}, { messages: [
     { role: 'user', text: '이 문구들 다듬어 줘', toolUses: [] },

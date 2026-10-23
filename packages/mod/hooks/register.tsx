@@ -1668,6 +1668,23 @@ export const register: Register = on => {
         if ('deny' in routed) return routed
         input = routed.input
         chosen = routed.pick
+      } else if (workflow && ['ripple:auto', 'auto'].includes(e.subagentType)) {
+        // A Workflow's agent() is the engine's to schedule, but a ripple:auto there whose marker
+        // names a worker ran under the session's name — the task list said Opus 5.5 for 31 Sol
+        // workers (2026-10-23) — and its later turns lost the marker the router routes by. The
+        // engine keeps a workflow agent's type and description ("do not apply to a workflow
+        // agent") but takes its model: on the worker's model it shows that model and every turn
+        // routes by it. A tier marker or none leaves the agent as the script wrote it.
+        const marker = readMarker(e.prompt)
+        if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name)) {
+          const files = await workerFiles($)
+          const name = files.has(marker.name) ? marker.name : [...files].find(([, f]) => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === marker.name)?.[0]
+          const fileModel = name ? agentModel(files.get(name)!) : undefined
+          if (name && fileModel) {
+            const fix = fixSpawn({ subagentType: name, prompt: e.prompt }, fileModel)
+            input = { ...e, prompt: fix?.prompt ?? e.prompt, model: fix?.model ?? fileModel }
+          }
+        }
       } else if (!e.fork && !workflow) {
         const files = await workerFiles($)
         try { await refreshModels($) } catch (error) { await report($, 'explicit worker catalogue', error) }
@@ -1693,7 +1710,7 @@ export const register: Register = on => {
     } catch (error) { input = e; await report($, 'agent.spawn prepare', error) }
     try {
       // The title names what really runs: the model set above, else the worker file's, else the parent's.
-      if (!e.fork && input.description?.trim()) {
+      if (!e.fork && !('workflow' in e && e.workflow) && input.description?.trim()) {
         const file = (await workerFiles($)).get(input.subagentType)
         const model = input.model ?? (file ? agentModel(file) : undefined) ?? e.parentModel
         const effort = chosen?.effort ?? /@([a-z]+)$/.exec(model)?.[1]
