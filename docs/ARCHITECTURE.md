@@ -516,7 +516,11 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     is not the window Codex runs with: Codex multiplies it by the entry's
     `effective_context_window_percent`, and gpt-6.1-sol measured
     `500000 × 95% = 475000` while `config.json` still said 272000 (and compacted
-    at 258400). `parseCodexCatalog` therefore records the effective window, the
+    at 258400). The backend itself leaves the percent out (same day, asked as
+    0.163.0 and 0.164.0: `context_window: 500000` alone, which ClaudeRipple then
+    reported as 500000); Codex's own `models_cache.json` records 95 for every
+    model, so Codex supplies it, and a missing percent is taken as 95 here too.
+    `parseCodexCatalog` therefore records the effective window, the
     adapter publishes the last-read list process-wide (`providers/chatgpt/
     windows.ts`), and one resolver (`chatgptModelWindow`) hands it to bootstrap's
     `auto_compact_windows`, the picker's `context_window_by_model` and

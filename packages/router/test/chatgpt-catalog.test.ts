@@ -38,7 +38,7 @@ test("parseCodexCatalog keeps listed models, drops hidden ones and formats names
   assert.equal(models[0]!.name, "GPT-6 Sol", "a hyphen before a capital reads as a space");
   assert.equal(models[1]!.name, "GPT-5.5", "a numeric suffix is not a joining hyphen");
   assert.deepEqual(models[0]!.effortLevels, ["low", "ultra"]);
-  assert.equal(models[0]!.contextWindow, 272000);
+  assert.equal(models[0]!.contextWindow, 258400, "272000 at Codex's default 95%");
   assert.deepEqual(models[1]!.effortLevels, ["low", "medium", "high", "xhigh"]);
 });
 
@@ -70,8 +70,9 @@ test("parseCodexCatalog reports the effective window Codex runs with", () => {
   const byId = new Map(models.map((m) => [m.id, m.contextWindow]));
   assert.equal(byId.get("gpt-6.1-sol"), 475000, "500000 × 95%, the window Codex itself uses");
   assert.equal(byId.get("gpt-6-astra"), 258400);
-  assert.equal(byId.get("no-percent"), 200000, "a catalogue without the percent gets the whole window");
-  assert.equal(byId.get("odd-percent"), 200000, "a percent that is not a number is not applied");
+  // The backend sends no percent (2026-10-23) and Codex fills in 95 itself; so does ClaudeRipple.
+  assert.equal(byId.get("no-percent"), 190000, "a catalogue without the percent gets Codex's default 95%");
+  assert.equal(byId.get("odd-percent"), 190000, "a percent that is not a number falls back to the same 95%");
   assert.equal(byId.get("rounded"), 258400, "rounded down");
 });
 

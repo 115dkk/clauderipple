@@ -41,11 +41,15 @@ export const CHATGPT_FALLBACK_MODELS: ProviderModel[] = [
 
 /**
  * The window Codex itself runs with: `context_window` times `effective_context_window_percent`,
- * rounded down (gpt-6.1-sol: 500000 × 95% = 475000, 2026-10-23). A catalogue entry without the
- * percent gets the whole window; a nonsensical percent (not a number, ≤ 0, > 100) does too.
+ * rounded down (gpt-6.1-sol: 500000 × 95% = 475000, 2026-10-23). The backend leaves the percent
+ * out (2026-10-23, client_version 0.163.0 and 0.164.0: gpt-6.1-sol came back as context_window
+ * 500000 alone) while Codex's own models_cache.json records 95 for every model, so Codex fills in
+ * 95 itself; a missing or nonsensical percent (not a number, ≤ 0, > 100) gets that same 95.
  */
+const CODEX_DEFAULT_WINDOW_PERCENT = 95;
+
 function effectiveWindow(contextWindow: number, percent: unknown): number {
-  const pct = typeof percent === "number" && Number.isFinite(percent) && percent > 0 && percent <= 100 ? percent : 100;
+  const pct = typeof percent === "number" && Number.isFinite(percent) && percent > 0 && percent <= 100 ? percent : CODEX_DEFAULT_WINDOW_PERCENT;
   return Math.floor((contextWindow * pct) / 100);
 }
 
