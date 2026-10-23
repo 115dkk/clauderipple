@@ -269,7 +269,7 @@ proxy
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
-      opencodeUsage: (name: string) => proxy.opencodeLimits(name),
+      opencodeUsage: (name, credentialId) => proxy.opencodeLimits(name, credentialId),
       grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal, meta) => proxy.generateImage(req, signal, meta),
       modelCatalog: () => loadModelCatalog(),

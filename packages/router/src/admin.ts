@@ -187,7 +187,7 @@ export type AdminDeps = {
   /** The Claude models the signed-in account can use (`GET /v1/models`); null until one answer. Absent in tests. */
   claudeModels?: () => Promise<ClaudeModel[] | null>;
   /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
-  opencodeUsage?: (name: string) => Promise<OpenCodeWindow[]>;
+  opencodeUsage?: (name: string, credentialId?: string) => Promise<OpenCodeWindow[]>;
   /** A Grok provider's usage pool, for the status bar's limits row (`/api/limits`). Absent in tests. */
   grokUsage?: (name: string) => Promise<GrokWindow[]>;
   /**
@@ -236,7 +236,7 @@ async function claudeAccountUsage(deps: AdminDeps): Promise<{ id: string; label:
 
 /** One window the limits row reads. `reset_at` is epoch seconds, as the other readers use. */
 export type LimitsWindow = { kind: "five_hour" | "seven_day" | "scoped" | "window"; label?: string; used_percent: number; window_minutes?: number; reset_at?: number };
-export type LimitsAccount = { account: number; windows: LimitsWindow[]; at: number };
+export type LimitsAccount = { account: number; label?: string; windows: LimitsWindow[]; at: number };
 export type LimitsProvider = { provider: string; type: string; title: string; accounts: LimitsAccount[] };
 
 /** A `{used_percent, window_minutes, reset_at}` snapshot window as `/api/limits` reads it, or null. */
@@ -350,8 +350,14 @@ async function buildLimits(deps: AdminDeps): Promise<{ providers: LimitsProvider
       const rows = await googleLimitAccounts(deps, name);
       if (rows.length) providers.push({ provider: name, type: "google", title: "Gemini", accounts: rows });
     } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
-      const windows = (await deps.opencodeUsage?.(name)) ?? [];
-      if (windows.length) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });
+      const credentials = p.credentials?.length ? p.credentials : [undefined];
+      const rows = await Promise.all(credentials.map(async (credential, account): Promise<LimitsAccount> => ({
+        account,
+        ...(credential?.label !== undefined ? { label: credential.label } : {}),
+        windows: ((await deps.opencodeUsage?.(name, credential?.id)) ?? []).map((w) => ({ ...w })),
+        at: Date.now(),
+      })));
+      if (rows.some((row) => row.windows.length)) providers.push({ provider: name, type: "opencode-go", title: "Go", accounts: rows });
     } else if (p.type === "grok") {
       const windows = (await deps.grokUsage?.(name)) ?? [];
       if (windows.length) providers.push({ provider: name, type: "grok", title: "Grok", accounts: [{ account: 0, windows: windows.map((w) => ({ ...w })), at: Date.now() }] });

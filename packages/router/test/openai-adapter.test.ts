@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import http from "node:http";
-import { mapHttpError, OpenAiCompatibleAdapter } from "../src/providers/openai/index.ts";
+import { mapHttpError, OpenAiCompatibleAdapter, type OpenAiCredential } from "../src/providers/openai/index.ts";
 import { Logger } from "../src/log.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
@@ -16,6 +16,10 @@ const upstream = http.createServer((req, res) => {
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
+    if (req.headers.authorization === "Bearer hop-first") {
+      res.writeHead(429, { "retry-after": "123" }).end('{"error":{"message":"hop-first limited"}}');
+      return;
+    }
     if (mode === "error") {
       res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "missing key" } }));
       return;
@@ -95,12 +99,13 @@ const upstreamPort = await listen(upstream);
 const log = new Logger(null, 1_000_000, 1, false);
 let adapter: OpenAiCompatibleAdapter;
 let configuredEffort = "high";
+let credential: OpenAiCredential | undefined;
 const front = http.createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
   req.on("end", () => {
     const json = JSON.parse(Buffer.concat(chunks).toString("utf8")) as AnthropicRequest;
-    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "vendor-model", configuredEffort);
+    void adapter.handle(req, res, req.url ?? "/v1/messages", json, "vendor-model", configuredEffort, credential);
   });
 });
 const frontPort = await listen(front);
@@ -372,6 +377,41 @@ test("a Chat vendor's refusal of reasoning_content is retried once without it", 
   assert.equal(response.status, 200, "the retry answered, the refusal did not reach the user");
   const attempts = seen.slice(-2).map((s) => JSON.stringify((s.body as { messages?: unknown }).messages ?? []).includes('"reasoning_content"'));
   assert.deepEqual(attempts, [true, false], "the second ask carried no reasoning");
+});
+
+test("per-call credential wins over session and configured headers; reasoning retry survives a hop", async () => {
+  mode = "refuse-chat";
+  adapter = new OpenAiCompatibleAdapter("fake", {
+    type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire: "chat",
+    sessionHeader: "authorization", headers: { authorization: "Bearer config" },
+  }, log);
+  const before = seen.length;
+  const refusals: [number, number | undefined, string][] = [];
+  credential = {
+    headers: { authorization: "Bearer hop-first" },
+    next: (status, retry, body) => {
+      refusals.push([status, retry, body]);
+      return status === 429 ? { authorization: "Bearer hop-second" } : null;
+    },
+  };
+  try {
+    const response = await call({
+      ...request, stream: false,
+      messages: [
+        { role: "user", content: "read a" },
+        { role: "assistant", content: [{ type: "thinking", thinking: "thought", signature: encodeEnvelope({ w: "chat", p: "fake", m: "vendor-model", f: "reasoning_content" }) }] },
+        { role: "user", content: "continue" },
+      ],
+    });
+    assert.equal(response.status, 200);
+    const attempts = seen.slice(before);
+    assert.deepEqual(attempts.map((a) => a.headers.authorization), ["Bearer hop-first", "Bearer hop-second", "Bearer hop-second"]);
+    assert.deepEqual(attempts.map((a) => JSON.stringify(a.body).includes('"reasoning_content"')), [true, true, false]);
+    assert.equal(refusals[0]![0], 429);
+    assert.equal(refusals[0]![1], 123000);
+    assert.match(refusals[0]![2], /hop-first limited/);
+    assert.equal(refusals[1]![0], 400);
+  } finally { credential = undefined; }
 });
 
 test("cleanup", () => {

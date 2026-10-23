@@ -123,6 +123,12 @@ export type OpenAiCompatibleProvider = {
   /** Optional vendor headers, normally authorization: Bearer <key>. Never logged. */
   headers?: Record<string, string>;
   /**
+   * Complete header sets sharing the same sticky credential pool as anthropic-compatible providers.
+   * Absent, the provider keeps its single credential. With two or more, `headers` mirrors the first
+   * entry for probes and discovery; retain id "default" when converting an existing single key.
+   */
+  credentials?: ProviderCredential[];
+  /**
    * A header this vendor uses to recognise a conversation, filled with a value that is stable for
    * one conversation and different between two (`x-opencode-session`, for instance). Vendors that
    * key their prompt cache on it hand a cold cache to anyone who does not send one, which costs
@@ -324,6 +330,9 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
     ...provider,
     ...(url !== undefined ? { url } : {}),
     ...(headers !== undefined ? { headers } : {}),
+    ...("credentials" in provider && provider.credentials && entry.authHeader
+      ? { credentials: provider.credentials.map((credential) => ({ ...credential, headers: reauthorized(credential.headers, entry.authHeader!)! })) }
+      : {}),
   };
 
   // Anthropic Messages needs no translation, so this model is served by the anthropic-compatible

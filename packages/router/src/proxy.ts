@@ -454,10 +454,12 @@ export class Proxy {
   }
 
   /** An OpenCode Go provider's usage windows, for the status bar's limits row. Empty otherwise. */
-  opencodeLimits(name: string): Promise<OpenCodeWindow[]> {
+  opencodeLimits(name: string, credentialId?: string): Promise<OpenCodeWindow[]> {
     const cfg = this.deps.config().providers[name];
     if (!cfg || cfg.type !== "openai-compatible" || !isOpenCodeGo(cfg)) return Promise.resolve([]);
-    return this.opencodeUsage.windows(name, cfg.url, cfg.headers ?? {});
+    const credential = credentialId === undefined ? undefined : cfg.credentials?.find((c) => c.id === credentialId);
+    if (credentialId !== undefined && !credential) return Promise.resolve([]);
+    return this.opencodeUsage.windows(credential ? `${name}/${credential.id}` : name, cfg.url, credential?.headers ?? cfg.headers ?? {});
   }
 
   /** Dashboard action: put one resting Google account back into rotation now. */
@@ -1035,13 +1037,29 @@ export class Proxy {
             const routeEffort = effortOf(json);
             if (routeEffort) record.effort = routeEffort;
             tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
+            const credentials = this.credentialsOf(route.provider, provider);
+            const key = conversationKey(json as unknown as AnthropicRequest);
+            let using = this.pool.pick(route.provider, credentials, key) ?? credentials[0]!;
+            const tried = new Set([using.id]);
+            const poolName = route.provider;
+            const next = credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
+              if (!classify(status, undefined, body).retryable) return null;
+              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), key);
+              if (!candidate) return null;
+              this.pool.penalise(poolName, using.id, status, retryAfter, body);
+              log.info(`RETRY ${poolName}: ${using.label ?? using.id} answered ${status}, trying ${candidate.label ?? candidate.id}`);
+              using = candidate;
+              tried.add(using.id);
+              return using.headers;
+            } : undefined;
             try {
-              const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
-              this.recordOutcome(route.provider, o.status);
+              const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { headers: using.headers, ...(next ? { next } : {}) });
+              if (o.status >= 400) this.pool.penalise(poolName, using.id, o.upstreamStatus ?? o.status, o.retryAfterMs, o.errorBody);
+              else if (o.status > 0) this.pool.succeed(poolName, using.id);
               if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
-              this.recordOutcome(route.provider, 0);
+              if (!res.destroyed && !req.aborted) this.pool.penalise(poolName, using.id, 0);
               finish("-", 0, `openai error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
               if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
               else res.destroy();

@@ -15,8 +15,9 @@ import path from "node:path";
 import tls from "node:tls";
 import zlib from "node:zlib";
 
+import { startAdmin, type LimitsProvider } from "../src/admin.ts";
 import { CertStore } from "../src/certs.ts";
-import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
+import { DEFAULTS, providerFor, validate, type Config, type Provider } from "../src/config.ts";
 import { UpstreamHealth } from "../src/health.ts";
 import { Logger } from "../src/log.ts";
 import { Proxy } from "../src/proxy.ts";
@@ -67,6 +68,10 @@ async function upstream(reply: (n: number) => { status: number; headers?: Record
 }
 
 type Rig = {
+  proxy: Proxy;
+  home: string;
+  config: Config;
+  logs: () => string;
   send: (opts?: { cancel?: boolean; conversation?: string }) => Promise<number>;
   /** The same turn, keeping the whole answer so a test can assert on the body too. */
   sendDetailed: () => Promise<{ status: number; body: string }>;
@@ -174,12 +179,152 @@ async function rig(providers: Config["providers"], routes: Config["routes"]): Pr
   };
 
   return {
+    proxy, home, config: cfg,
+    logs: () => fs.readFileSync(path.join(home, "router.log"), "utf8"),
     send,
     sendDetailed,
     sendRaw,
     stop: async () => { proxy.close(); fs.rmSync(home, { recursive: true, force: true }); },
   };
 }
+
+const openaiPooled = (port: number): Extract<Provider, { type: "openai-compatible" }> => ({
+  type: "openai-compatible", url: `http://127.0.0.1:${port}/v1`, preset: "opencode-go",
+  headers: { authorization: "Bearer opaque-first-key" },
+  credentials: [
+    { id: "default", label: "첫 번째", headers: { authorization: "Bearer opaque-first-key" } },
+    { id: "second", label: "두 번째", headers: { authorization: "Bearer opaque-second-key" } },
+  ],
+});
+const chatAnswer = { status: 200, headers: { "content-type": "text/event-stream" }, body: 'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n' };
+
+test("OpenAI pools use generic validation and each model's auth convention", () => {
+  const provider = openaiPooled(12345);
+  const config: Config = { ...DEFAULTS, providers: { p: provider } };
+  assert.deepEqual(validate(config), []);
+  provider.credentials![1]!.id = "default";
+  assert.ok(validate(config).some((error) => error.includes('id "default" is used twice')));
+  provider.credentials![1]!.id = "second";
+  provider.credentials![1]!.headers.authorization = "bad\nheader";
+  assert.ok(validate(config).some((error) => error.includes("line break")));
+  provider.credentials![1]!.headers.authorization = "Bearer opaque-second-key";
+  provider.models = [{ id: "m", wire: "anthropic", authHeader: "x-api-key" }];
+  const folded = providerFor(provider, "m");
+  assert.equal(folded.type, "anthropic-compatible");
+  assert.ok("credentials" in folded);
+  assert.deepEqual(folded.credentials!.map((c) => c.headers), [{ "x-api-key": "opaque-first-key" }, { "x-api-key": "opaque-second-key" }]);
+  assert.equal(provider.credentials![0]!.headers.authorization, "Bearer opaque-first-key", "the config was not mutated");
+});
+
+test("OpenAI pool: a 429 hops inside the turn, cools only that key and stays sticky", async () => {
+  const up = await upstream((n) => n === 1 ? { status: 429, headers: { "retry-after": "300" }, body: '{}' } : chatAnswer);
+  const r = await rig({ p: openaiPooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 200);
+    assert.equal(await r.send(), 200);
+    assert.equal(await r.send(), 200);
+    assert.deepEqual(up.seen.map((s) => s.auth), ["Bearer opaque-first-key", "Bearer opaque-second-key", "Bearer opaque-second-key", "Bearer opaque-second-key"]);
+    const health = r.proxy.credentialHealth().p!;
+    assert.deepEqual(health.map((c) => c.state), ["cooling", "ready"]);
+    assert.equal(health[0]!.failures, 1);
+    assert.ok(health[0]!.cooldownSeconds! > 290);
+    assert.deepEqual(r.proxy.providerHealth.snapshot(), {}, "only the successful final outcome reaches provider health");
+    assert.match(r.logs(), /첫 번째 answered 429, trying 두 번째/);
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("OpenAI pool: a healthy conversation never rotates keys between turns", async () => {
+  const up = await upstream(() => chatAnswer);
+  const r = await rig({ p: openaiPooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    for (let n = 0; n < 3; n++) assert.equal(await r.send(), 200);
+    assert.deepEqual(up.seen.map((s) => s.auth), Array(3).fill("Bearer opaque-first-key"));
+    assert.deepEqual(r.proxy.credentialHealth().p!.map((c) => c.state), ["ready", "ready"]);
+    assert.doesNotMatch(r.logs(), /RETRY/);
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("OpenAI pool: a 400 never spends another key", async () => {
+  const up = await upstream(() => ({ status: 400, body: '{"error":{"message":"bad request"}}' }));
+  const r = await rig({ p: openaiPooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 400);
+    assert.equal(up.seen.length, 1);
+    assert.deepEqual(r.proxy.credentialHealth().p!.map((c) => c.failures), [0, 0]);
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("OpenAI pool: every key limited maps the final 429 and redacts all attempted keys", async () => {
+  const up = await upstream(() => ({ status: 429, headers: { "retry-after": "300" }, body: JSON.stringify({ error: { message: "quota opaque-first-key opaque-second-key" } }) }));
+  const r = await rig({ p: openaiPooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    const response = await r.sendDetailed();
+    assert.equal(response.status, 429);
+    assert.match(response.body, /rate_limit_error/);
+    assert.equal(up.seen.length, 2);
+    assert.deepEqual(r.proxy.credentialHealth().p!.map((c) => [c.state, c.failures]), [["cooling", 1], ["cooling", 1]]);
+    for (const text of [response.body, r.logs()]) assert.doesNotMatch(text, /opaque-(first|second)-key/);
+    assert.equal(await r.send(), 429, "even with every key cooling, real headers go upstream");
+    assert.equal(up.seen[2]!.auth, "Bearer opaque-first-key");
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("OpenAI single key: configured headers, one attempt, default health and no hop log", async () => {
+  const up = await upstream(() => ({ status: 429, body: '{}' }));
+  const provider = openaiPooled(up.port);
+  delete provider.credentials;
+  const r = await rig({ p: provider }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    assert.equal(await r.send(), 429);
+    assert.deepEqual(up.seen.map((s) => s.auth), ["Bearer opaque-first-key"]);
+    assert.deepEqual(r.proxy.credentialHealth(), {});
+    assert.doesNotMatch(r.logs(), /RETRY/);
+    provider.credentials = [{ id: "default", headers: provider.headers! }, { id: "second", headers: { authorization: "Bearer another" } }];
+    assert.equal(r.proxy.credentialHealth().p![0]!.state, "cooling", "conversion preserves default's health history");
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("OpenAI pools appear in status and OpenCode limits fetch and cache each credential separately", async () => {
+  let usageCalls = 0;
+  const server = http.createServer((req, res) => {
+    usageCalls++;
+    const percent = req.headers.authorization === "Bearer opaque-first-key" ? 11 : 72;
+    res.end(JSON.stringify({ usage: { rolling: { percent } } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const provider = openaiPooled((server.address() as net.AddressInfo).port);
+  const r = await rig({ p: provider }, {});
+  const beforeHome = process.env.CLAUDERIPPLE_HOME;
+  process.env.CLAUDERIPPLE_HOME = r.home;
+  const admin = await startAdmin({
+    config: () => ({ ...r.config, admin: { port: 0 } }), configFile: path.join(r.home, "config.json"),
+    log: new Logger(null, 1e6, 1, false), requests: new RequestLog(path.join(r.home, "admin-requests.jsonl")), stats: () => r.proxy.stats,
+    health: () => 0, version: "test", credentials: () => r.proxy.credentialHealth(),
+    opencodeUsage: (name, id) => r.proxy.opencodeLimits(name, id),
+  });
+  try {
+    const base = `http://127.0.0.1:${admin.port}`;
+    const status = await (await fetch(`${base}/api/status`)).json() as { credentials: ReturnType<Proxy["credentialHealth"]> };
+    assert.deepEqual(status.credentials.p!.map((c) => [c.id, c.label, c.state]), [["default", "첫 번째", "ready"], ["second", "두 번째", "ready"]]);
+    const limits = await (await fetch(`${base}/api/limits`)).json() as { providers: LimitsProvider[] };
+    assert.deepEqual(limits.providers[0]!.accounts.map((a) => [a.account, a.label, a.windows[0]!.used_percent]), [[0, "첫 번째", 11], [1, "두 번째", 72]]);
+    await fetch(`${base}/api/limits`);
+    assert.equal(usageCalls, 2, "each key fetched exactly once, with separate cached answers");
+    delete provider.credentials;
+    const single = await (await fetch(`${base}/api/limits`)).json() as { providers: LimitsProvider[] };
+    assert.equal(single.providers[0]!.accounts.length, 1);
+    assert.equal(single.providers[0]!.accounts[0]!.account, 0);
+    assert.equal(single.providers[0]!.accounts[0]!.label, undefined);
+    assert.equal(single.providers[0]!.accounts[0]!.windows[0]!.used_percent, 11);
+    assert.equal(usageCalls, 3);
+  } finally {
+    admin.close();
+    if (beforeHome === undefined) delete process.env.CLAUDERIPPLE_HOME; else process.env.CLAUDERIPPLE_HOME = beforeHome;
+    await r.stop();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 
 const pooled = (port: number): Provider => ({
   type: "anthropic-compatible",

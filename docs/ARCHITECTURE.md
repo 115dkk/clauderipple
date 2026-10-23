@@ -923,6 +923,11 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   The narrowly classified Antigravity prompt refusal (§4d-ii) additionally permits one same-turn
   route fallback after the upstream rejects the request but **before any response reaches the
   client**; it does not mark a usable account as exhausted.
+  - **OpenAI-compatible pools (2026-10-23).** `openai-compatible` shares the same CredentialPool,
+    conversation stickiness and in-turn failover as `anthropic-compatible`, before any response is
+    written. One key stays in `headers`; several use complete `credentials` entries with `headers`
+    mirroring the first, retaining id `default` when converting a single key. OpenCode Go usage is
+    fetched and cached separately per credential and exposed in configured order, with optional labels.
   - Four things an independent review found, each of which had made it past the unit tests because
     each lived in the wiring rather than the state machine: the pool never heard about the ChatGPT
     or openai-compatible adapters, so those providers looked healthy forever and a slot pointing at
