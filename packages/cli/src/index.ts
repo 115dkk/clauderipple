@@ -70,7 +70,8 @@ async function pickerOn(): Promise<void> {
 function describeRestart(r: ReturnType<typeof restartAgent>): string {
   if (r === "drained") return "✓ router restarted (in-flight model calls were allowed to finish)";
   if (r === "kickstarted") return "✓ router restarted (hard restart: it did not exit on its own in time)";
-  return "  router not restarted (not installed?) — run `clauderipple install`";
+  if (r === "direct") return `! router restarted outside the ${supervisorName()}: its start did not bring one up. Run \`clauderipple repair\` to restore the ${supervisorName()}`;
+  return "✗ router not restarted — run `clauderipple repair` (or `clauderipple install`)";
 }
 
 function pickerOff(): void {
@@ -233,9 +234,14 @@ async function install(): Promise<void> {
   console.log(`✓ ${supervisorName()} registered: ${plist}${isLinux || reg.bundle ? "" : ' (shows as "ClaudeRipple" in Login Items)'}`);
 
   // launchd starts the agent the moment it is bootstrapped (RunAtLoad); a scheduled task waits for
-  // its logon trigger, so the router would only appear after the next sign-in. Start it either way.
-  const started = startAgent();
-  console.log(started === "failed" ? `✗ could not start the router (${supervisorName()})` : `✓ router ${started === "already-running" ? "already running" : "started"}`);
+  // its logon trigger, so the router would only appear after the next sign-in. Start it either way,
+  // and believe it only once the router's process exists (supervisor.startRouter).
+  const started = startAgent({ onProgress: (m) => console.log(`  ${m}`) });
+  console.log(
+    started === "failed" ? `✗ could not start the router (${supervisorName()})`
+    : started === "started-directly" ? `! router started without the ${supervisorName()}; run \`clauderipple repair\``
+    : `✓ router ${started === "already-running" ? "already running" : "started"}`,
+  );
   // Running the installer again is how an update arrives, and it replaces files, not the process:
   // a router left alone keeps serving the old code until the next login. Restart one that
   // answers with another version.
@@ -243,7 +249,16 @@ async function install(): Promise<void> {
     const running = await runningVersion(adminPort(cfg));
     if (running && running !== VERSION) {
       console.log(`  the running router is ${running}; restarting it on ${VERSION}`);
-      console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
+      const restarted = restartAgent({ onProgress: (m) => console.log(`  ${m}`) });
+      console.log(describeRestart(restarted));
+      if (restarted === "failed") {
+        // The old router may still be answering, so the probe below would pass and the installer
+        // would report a version it never switched to — what the tray showed as "updated" while
+        // the version stayed old until `repair` (#62, #80).
+        process.exitCode = 1;
+        console.log(`${settingsPath()} was left as it was: the router was not switched to ${VERSION}. Run \`clauderipple restart\`, then install again.`);
+        return;
+      }
     }
   }
 
@@ -658,13 +673,22 @@ try {
       await recovery();
       break;
     case "start": {
-      const r = startAgent();
-      console.log(r === "already-running" ? "already running" : r === "started" ? "started" : "start failed (is it installed?)");
+      const r = startAgent({ onProgress: (m) => console.log(`  ${m}`) });
+      console.log(
+        r === "already-running" ? "already running"
+        : r === "started" ? "started"
+        : r === "started-directly" ? `started without the ${supervisorName()} (run \`clauderipple repair\`)`
+        : "start failed (is it installed?)",
+      );
+      if (r === "failed") process.exitCode = 1;
       break;
     }
-    case "restart":
-      console.log(describeRestart(restartAgent({ onProgress: (m) => console.log(`  ${m}`) })));
+    case "restart": {
+      const r = restartAgent({ onProgress: (m) => console.log(`  ${m}`) });
+      console.log(describeRestart(r));
+      if (r === "failed") process.exitCode = 1;
       break;
+    }
     case "stop":
       console.log(stopAgent() ? "stopped (run `clauderipple start` or `install` to bring it back)" : "stop failed (not loaded?)");
       await releaseHeldSleep("router stopped");

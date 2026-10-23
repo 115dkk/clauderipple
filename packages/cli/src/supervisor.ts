@@ -2,16 +2,19 @@
 // a systemd user service on Linux.
 // Everything outside this module talks to the router's lifecycle through here.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { ConfigStore, configPath } from "../../router/src/config.ts";
 import { adminPort } from "../../router/src/admin.ts";
 import * as launchd from "./launchd.ts";
 import * as schtasks from "./schtasks.ts";
 import * as systemd from "./systemd.ts";
+import { runtime } from "./runtime.ts";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
 export type AgentState = "running" | "loaded" | "not-loaded";
-export type RestartResult = "drained" | "kickstarted" | "failed";
+/** `direct` is a router that is up but was started outside its supervisor (see startRouter). */
+export type StartResult = "already-running" | "started" | "started-directly" | "failed";
+export type RestartResult = "drained" | "kickstarted" | "direct" | "failed";
 
 export const isWindows = process.platform === "win32";
 export const isLinux = process.platform === "linux";
@@ -38,8 +41,96 @@ export function agentPid(): number | null {
   return isWindows ? schtasks.agentPid() : isLinux ? systemd.agentPid() : launchd.agentPid();
 }
 
-export function startAgent(): "already-running" | "started" | "failed" {
-  return isWindows ? schtasks.startAgent() : isLinux ? systemd.startAgent() : launchd.startAgent();
+/**
+ * How a start is asked for and how its result is judged. Injected so tests can model a supervisor
+ * that accepts the request but never produces a process, without touching a real one.
+ */
+export type StartOps = {
+  start(): "already-running" | "started" | "failed";
+  /** True while the router's process exists — the same pid `stop` and `restart` look for. */
+  up(): boolean;
+  /** Starts the router without the supervisor; the new process's pid, or null. */
+  fallback(): number | null;
+  /** True while `pid` is alive. */
+  alive(pid: number): boolean;
+  now(): number;
+  sleep(ms: number): void;
+};
+
+/**
+ * A start is done when the router is, not when the supervisor says so. Every supervisor answers
+ * once the *request* is accepted — Task Scheduler on Start-ScheduledTask, launchd on kickstart,
+ * systemd once the unit is activated — so a launcher that never runs the router, or a program that
+ * exits at once, still reads as "started". On 2026-10-22 an update drained the router, the
+ * scheduled task accepted the start, nothing came up, and the update ended "updated": Claude had
+ * no router for 11h47m until the next sign-in (#80). So the process is waited for, and when it
+ * never appears the router is started without the supervisor — unsupervised beats absent — and if
+ * that fails too the answer is failure, never success.
+ */
+export function startRouter(ops: StartOps, opts: { budgetMs?: number; pollMs?: number; onProgress?: (msg: string) => void } = {}): StartResult {
+  if (ops.up()) return "already-running";
+  let asked: "already-running" | "started" | "failed" = "failed";
+  try {
+    asked = ops.start();
+  } catch {
+    // A supervisor whose call throws has not started anything; the direct path below is the answer.
+    asked = "failed";
+  }
+  if (asked !== "failed" && waitUntil(ops, () => ops.up(), opts)) return asked;
+  opts.onProgress?.(`the ${supervisorName()} did not bring the router up; starting it directly`);
+  const pid = ops.fallback();
+  if (pid === null) return "failed";
+  return waitUntil(ops, () => ops.alive(pid), opts) ? "started-directly" : "failed";
+}
+
+function waitUntil(ops: Pick<StartOps, "now" | "sleep">, ok: () => boolean, opts: { budgetMs?: number; pollMs?: number }): boolean {
+  const deadline = ops.now() + (opts.budgetMs ?? 20_000);
+  while (ops.now() < deadline) {
+    if (ok()) return true;
+    ops.sleep(opts.pollMs ?? 500);
+  }
+  return ok();
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The router started outside its supervisor: the last resort that still leaves Claude working when
+ * the supervisor will not. It runs unsupervised until the next logon or `clauderipple repair`.
+ */
+function startRouterDirectly(): number | null {
+  try {
+    const rt = runtime();
+    const child = spawn(rt.node, [rt.router], { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ...rt.env } });
+    // A spawn failure (ENOENT) arrives as an event; it must surface as "no pid", not as a crash.
+    child.on("error", () => {});
+    child.unref();
+    return child.pid ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function realStartOps(): StartOps {
+  return {
+    start: () => (isWindows ? schtasks.startAgent() : isLinux ? systemd.startAgent() : launchd.startAgent()),
+    up: () => agentPid() !== null,
+    fallback: startRouterDirectly,
+    alive: isAlive,
+    now: () => Date.now(),
+    sleep: sleepSync,
+  };
+}
+
+export function startAgent(opts: { onProgress?: (msg: string) => void } = {}): StartResult {
+  return startRouter(realStartOps(), opts);
 }
 
 export function stopAgent(): boolean {
@@ -103,17 +194,33 @@ function sleepSync(ms: number): void {
  */
 function restartWindows(opts: { waitMs?: number; onProgress?: (msg: string) => void }): RestartResult {
   const pid = schtasks.agentPid();
-  if (pid === null) return schtasks.startAgent() === "failed" ? "failed" : "kickstarted";
+  if (pid === null) {
+    const started = startAgent(opts);
+    if (started === "failed") return "failed";
+    return started === "started-directly" ? "direct" : "kickstarted";
+  }
 
   if (!askShutdown()) opts.onProgress?.("router did not answer /api/shutdown; waiting for it to exit anyway");
   const exited = waitForExit(pid, opts.waitMs ?? 120_000, opts.onProgress);
+  // Still draining: a second router would only fight it for the port, so this is a failure.
   if (!exited) return "failed";
-  // A clean drain ends the launcher loop too, so the task has to be started again.
-  return schtasks.startAgent() === "failed" ? "failed" : "drained";
+  // A clean drain ends the launcher loop too, so the task has to be started again — and a task
+  // start is not a router until its process is seen (startRouter).
+  const started = startAgent(opts);
+  if (started === "failed") return "failed";
+  return started === "started-directly" ? "direct" : "drained";
 }
 
 export function restartAgent(opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}): RestartResult {
-  return isWindows ? restartWindows(opts) : isLinux ? systemd.restartAgent(opts) : launchd.restartAgent(opts);
+  if (isWindows) return restartWindows(opts);
+  const r = isLinux ? systemd.restartAgent(opts) : launchd.restartAgent(opts);
+  if (r !== "failed") return r;
+  // The supervisor said the restart failed. If a process still holds the port, the drain did not
+  // finish and a second router must not be put on it; otherwise try starting the router directly.
+  if (agentPid() !== null) return "failed";
+  opts.onProgress?.(`the ${supervisorName()} did not bring the router back; starting it directly`);
+  const pid = startRouterDirectly();
+  return pid !== null && waitUntil({ now: () => Date.now(), sleep: sleepSync }, () => isAlive(pid), {}) ? "direct" : "failed";
 }
 
 /** Path to the supervisor's own definition, for status output. */

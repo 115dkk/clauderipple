@@ -253,10 +253,48 @@ export function agentPid(): number | null {
   return r.ok && Number.isFinite(n) && n > 0 ? n : null;
 }
 
-export function startAgent(name = taskName()): "already-running" | "started" | "failed" {
-  if (name === taskName() ? agentPid() !== null : agentState(name) === "running") return "already-running";
-  const r = run(`Start-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop; 'ok'`);
-  return r.ok ? "started" : "failed";
+/**
+ * What `startAgent` asks and what it judges the answer by. Injected so a test can model a task
+ * whose start was accepted while no router ever appeared, without Task Scheduler existing.
+ */
+export type StartProbe = {
+  /** True once what this task starts is actually running (the router for the default task). */
+  up(): boolean;
+  /** `Start-ScheduledTask`; true when the request was accepted, not when anything came up. */
+  start(): boolean;
+};
+
+function realStartProbe(name: string): StartProbe {
+  return {
+    up: () => (name === taskName() ? agentPid() !== null : agentState(name) === "running"),
+    start: () => run(`Start-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop; 'ok'`).ok,
+  };
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function waitUntil(ok: () => boolean, budgetMs: number, pollMs = 500): boolean {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (ok()) return true;
+    sleepSync(pollMs);
+  }
+  return ok();
+}
+
+/**
+ * Start-ScheduledTask succeeds once the task has been told to run — the launcher may then fail to
+ * start the router, or start a program that exits at once. On 2026-10-22 an update drained the
+ * router, the task start was accepted, nothing came up, and the update reported success while
+ * Claude had no router for 11h47m (#80). So "started" means the router's process exists.
+ */
+export function startAgent(name = taskName(), opts: { waitMs?: number; probe?: StartProbe } = {}): "already-running" | "started" | "failed" {
+  const probe = opts.probe ?? realStartProbe(name);
+  if (probe.up()) return "already-running";
+  if (!probe.start()) return "failed";
+  return waitUntil(probe.up, opts.waitMs ?? 20_000) ? "started" : "failed";
 }
 
 export function stopAgent(name = taskName()): boolean {

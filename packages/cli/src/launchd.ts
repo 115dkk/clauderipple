@@ -130,12 +130,16 @@ export function kickstart(opts: { force?: boolean } = {}, run: Launchctl = launc
  * used to be the "Start Router" path, so pressing it while launchd was still bringing the router
  * up killed it and started the wait over (observed 2026-09-14: three runs in the four minutes
  * after login). Re-bootstraps the plist when the agent was unloaded by `clauderipple stop`.
+ *
+ * `kickstart` succeeding only means launchd accepted the request; a plist whose program is gone
+ * fails after that, silently. So the pid is waited for, as on Windows (#80).
  */
-export function startAgent(run: Launchctl = launchctl): "already-running" | "started" | "failed" {
+export function startAgent(run: Launchctl = launchctl, opts: { waitMs?: number } = {}): "already-running" | "started" | "failed" {
   if (agentState(run) === "running") return "already-running";
-  if (kickstart({}, run)) return "started";
+  const budget = opts.waitMs ?? START_BUDGET_MS;
+  if (kickstart({}, run)) return waitForPid(run, budget) ? "started" : "failed";
   const file = plistPath();
-  if (fs.existsSync(file) && run(["bootstrap", domain(), file]).ok) return "started";
+  if (fs.existsSync(file) && run(["bootstrap", domain(), file]).ok && waitForPid(run, budget)) return "started";
   return "failed";
 }
 
@@ -150,6 +154,18 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** How long a job launchd accepted is given to produce a process before it counts as a failure. */
+const START_BUDGET_MS = 15_000;
+
+function waitForPid(run: Launchctl, budgetMs: number, pollMs = 250): boolean {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (agentPid(run) !== null) return true;
+    sleepSync(pollMs);
+  }
+  return agentPid(run) !== null;
+}
+
 /**
  * Graceful restart. `launchctl kickstart -k` SIGKILLs about 5s after its SIGTERM (measured
  * 2026-09-13: the drain was cut and two in-flight model calls died), so instead we send
@@ -159,11 +175,11 @@ function sleepSync(ms: number): void {
  */
 export function restartAgent(opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}): "drained" | "kickstarted" | "failed" {
   const pid = agentPid();
-  if (pid === null) return kickstart({ force: true }) ? "kickstarted" : "failed";
+  if (pid === null) return kickstart({ force: true }) && waitForPid(launchctl, START_BUDGET_MS) ? "kickstarted" : "failed";
   try {
     process.kill(pid, "SIGTERM");
   } catch {
-    return kickstart({ force: true }) ? "kickstarted" : "failed";
+    return kickstart({ force: true }) && waitForPid(launchctl, START_BUDGET_MS) ? "kickstarted" : "failed";
   }
   const t0 = Date.now();
   const deadline = t0 + (opts.waitMs ?? 120_000);
@@ -183,14 +199,14 @@ export function restartAgent(opts: { waitMs?: number; onProgress?: (msg: string)
     }
     sleepSync(250);
   }
-  if (!exited) return kickstart({ force: true }) ? "kickstarted" : "failed";
+  if (!exited) return kickstart({ force: true }) && waitForPid(launchctl, START_BUDGET_MS) ? "kickstarted" : "failed";
   // KeepAlive relaunches it; ThrottleInterval is 2s.
   const upBy = Date.now() + 15_000;
   while (Date.now() < upBy) {
     if (agentState() === "running" && agentPid() !== pid) return "drained";
     sleepSync(250);
   }
-  return kickstart({ force: true }) ? "kickstarted" : "failed";
+  return kickstart({ force: true }) && waitForPid(launchctl, START_BUDGET_MS) ? "kickstarted" : "failed";
 }
 
 export function stopAgent(): boolean {
