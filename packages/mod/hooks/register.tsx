@@ -749,7 +749,8 @@ async function testJudge($: EngineInterface): Promise<void> {
   }
 }
 
-async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings): Promise<{ input: AgentSpawnInput; pick: WorkerPick } | { deny: string }> {
+/** `dropped`: a model the main chat named that the user did not, already taken off the prompt. */
+async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings, dropped?: string): Promise<{ input: AgentSpawnInput; pick: WorkerPick } | { deny: string }> {
   const language = await read($, lang)
   const files = await workerFiles($)
   try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
@@ -760,7 +761,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // A model the user did not name is not the main chat's to pick: the marker goes, and the tier
   // decides as if it had never been written (worker.ts userNamed).
   if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !userNamed(marker.name, await $.session.messages(), await read($, heardPrompts))) {
-    await $.ui.toast(t(language, 'toasts.unnamedModel', { model: marker.name }))
+    dropped = marker.name
     e = { ...e, prompt: e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
     marker = readMarker(e.prompt)
   }
@@ -826,6 +827,14 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   const named = by === 'marker' || by === 'default' || by === 'session'
   await persistWorkerPick($, { type: 'pick', id, ...entry, at: new Date(now).toISOString(), verdict: rawVerdict, by: named ? by : 'judge', judge: named ? null : by, ...(tier ? { tier } : {}), ms, ...(judgeError ? { error: judgeError } : {}), promptChars: e.prompt.length })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
+  // Said once the tier has picked, and only when it picked something else: "not named, so by
+  // tier" ahead of a tier pick that landed on that very model read as a refusal of it (2026-10-23).
+  if (dropped) {
+    const name = dropped.toLowerCase()
+    const droppedModel = (files.get(name) ? agentModel(files.get(name)!) : name)?.replace(/@[^@]*$/, '')
+    const same = selected.agent === name || model?.replace(/@[^@]*$/, '') === droppedModel
+    if (!same) await $.ui.toast(t(language, 'toasts.unnamedModel', { model: dropped, name: targetLabel(selected, language) }))
+  }
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
   return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
@@ -1647,11 +1656,10 @@ export const register: Register = on => {
       if (picked && !userNamed(picked, await $.session.messages(), await read($, heardPrompts))) {
         // A worker or model the main chat picked by name, the user never having named it, goes
         // through the ladder like any delegation (userNamed in worker.ts says why).
-        await $.ui.toast(t(await read($, lang), 'toasts.unnamedModel', { model: picked }))
         const marker = readMarker(e.prompt)
         const { model: _model, ...rest } = e
         const prompt = marker && !tierOf(marker) ? e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') : e.prompt
-        const routed = await requestPick($, { ...rest, subagentType: 'ripple:auto', prompt }, s)
+        const routed = await requestPick($, { ...rest, subagentType: 'ripple:auto', prompt }, s, picked)
         if ('deny' in routed) return routed
         input = routed.input
         chosen = routed.pick
