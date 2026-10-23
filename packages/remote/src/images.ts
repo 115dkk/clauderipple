@@ -84,12 +84,30 @@ function secretPath(file: string): boolean {
     /\.(?:p8|pem|key|jks|keystore|p12|pfx|mobileprovision)$/i.test(name) ||
     /(?:^|[._ -])(?:secrets?|tokens?|passwords?|keys?|api[-_]?keys?|service[-_]?account|auth|oauth)(?:[._ -]|$)/i.test(name));
 }
+/** One credential-name rule for JSON, YAML and environment assignments. A prefix such as DB_
+ * is allowed, but suffixes such as passwordHint, tokenLimit and publicKey are not credentials. */
+function secretField(name: string): boolean {
+  const words = name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[. -]+/g, "_").toLowerCase();
+  return /(?:^|_)(?:password|passwd|secret|client_?secret|api_?key|access_?token|refresh_?token|private_?key|auth_?token|secret_?key|bearer(?:_?token)?|authorization|token)$/.test(words);
+}
+/** Only empty/null values, full variable references and explicit masks are non-secrets.
+ * Short/example-looking literals (including "password" and "example") still block the file. */
+function secretValue(raw: string): boolean {
+  const value = raw.trim();
+  if (/^(?:null|~)$/i.test(value)) return false;
+  const text = (/^["']/.test(value) ? value.slice(1, -1) : value).trim();
+  return !!text && !/^(?:\$\{[A-Za-z_]\w*\}|\{\{\s*[A-Za-z_]\w*\s*\}\}|\[redacted\]|<redacted>|\*{3,})$/i.test(text);
+}
 function secretBytes(bytes: Buffer): boolean {
   const text = bytes.toString("utf8");
-  return /-----BEGIN (?:[A-Z ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/.test(text) ||
-    /["'](?:private_key|client_secret|access_token|refresh_token|api_key|apiKey)["']\s*[:=]\s*["'][^"']+/i.test(text) ||
-    /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|private[_-]?key)\s*[:=]\s*\S+/i.test(text) ||
-    /\b(?:AKIA[0-9A-Z]{16}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,})\b/.test(text);
+  if (/-----BEGIN (?:[A-Z ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/.test(text) ||
+      /\b(?:AKIA[0-9A-Z]{16}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,})\b/.test(text)) return true;
+  // Horizontal whitespace only: an empty YAML/.env value must not consume the next line.
+  const assignments = /(?:^|[^\w.-])(["']?)([A-Za-z_][\w.-]*(?:[ \t]+(?:token|key|secret))?)\1[ \t]*[:=][ \t]*("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|(?:\$\{[A-Za-z_]\w*\}|\{\{[ \t]*[A-Za-z_]\w*[ \t]*\}\})(?=[ \t]*(?:$|[\r\n,}\]#]))|[\[{]|[^\r\n,{}\[\]#"']*)/gi;
+  for (const match of text.matchAll(assignments)) {
+    if (secretField(match[2]!) && secretValue(match[3]!)) return true;
+  }
+  return false;
 }
 /** Extensions may refine validated UTF-8 text, but never authorize binary bytes as an active format. */
 function sniff(bytes: Buffer, name: string): string {

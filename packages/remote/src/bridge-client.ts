@@ -24,7 +24,7 @@ export interface BridgePermissionRequest {
 type SettingRequest = { subtype: "set_model"; model: string }
   | { subtype: "apply_flag_settings"; settings: { effortLevel: Effort | null } }
   | { subtype: "set_permission_mode"; mode: PermissionMode };
-interface ControlWaiter { fingerprint: string; promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
+interface ControlWaiter { sessionId: string; fingerprint: string; promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
 
 export const DESKTOP_BLOCKED = "Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
 export const LOGIN_EXPIRED = "이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.";
@@ -223,7 +223,7 @@ export class BridgeClient {
     if (previous) return previous.fingerprint === fingerprint ? previous.promise : Promise.reject(new Error("Control request id reused"));
     let resolve!: () => void, reject!: (error: Error) => void;
     const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
-    this.controls.set(key, { fingerprint, promise, resolve, reject });
+    this.controls.set(key, { sessionId: id, fingerprint, promise, resolve, reject });
     void this.post(id, { type: "control_request", request_id: requestId, request }).catch((error: unknown) => {
       // A reset/timeout does not prove the CLI did not apply the setting. Reconnect reads
       // its durable response; a definite HTTP refusal can reject immediately.
@@ -250,9 +250,13 @@ export class BridgeClient {
     return true;
   }
 
-  closeControls(): void {
-    for (const waiter of this.controls.values()) waiter.reject(new OutcomeUnknownError());
-    this.controls.clear();
+  /** A replaced worker's unanswered writes are unknown, never replayed on its replacement.
+   * Keep their settled promises until shutdown so reusing an id cannot send the write again. */
+  closeControls(id?: string): void {
+    for (const waiter of this.controls.values()) {
+      if (id === undefined || waiter.sessionId === id) waiter.reject(new OutcomeUnknownError());
+    }
+    if (id === undefined) this.controls.clear();
   }
 
   async session(id: string): Promise<{ worker_status: "running" | "idle" | "requires_action"; status?: string; status_bucket?: string; connection_status?: string }> {

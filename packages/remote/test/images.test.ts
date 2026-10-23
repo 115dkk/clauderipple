@@ -129,6 +129,57 @@ test("secret names, credentials content and hard links are refused even when exp
   assert.equal(sessionFiles(["copy.txt"], { cwd }, sink)[0]?.status, "blocked");
 });
 
+const credentialFields = ["password", "passwd", "secret", "client_secret", "clientSecret", "api_key", "apiKey", "access_token", "accessToken", "refresh_token", "refreshToken", "private_key", "privateKey", "auth_token", "authToken", "bearer", "authorization", "token", "secretKey", "DB_PASSWORD", "databasePassword", "ACCESS_TOKEN", "bearerToken", "api-key", "auth token", "access token"];
+
+for (const format of ["json", "single-quoted", "yaml", "env", "quoted-env", "spaces"] as const) test(`SendUserFile blocks credential values before publishing any blob (${format})`, t => {
+  const cwd = directory(t);
+  let writes = 0;
+  for (const field of credentialFields) {
+    const key = format === "spaces" ? field.replace(/_/g, " ") : field;
+    const value = "fixture-value-not-for-phone";
+    const content = format === "json" ? JSON.stringify({ nested: [{ [key]: value }] })
+      : format === "single-quoted" ? `{'${key}': '${value}'}`
+      : format === "yaml" || format === "spaces" ? `${key}: ${value}\n`
+      : format === "quoted-env" ? `export ${key}="${value}"\n` : `${key}=${value}\n`;
+    fs.writeFileSync(path.join(cwd, "config.json"), content);
+    const result = sessionFileTool("SendUserFile", { files: ["config.json"] }, { cwd }, () => { writes++; return "leaked-blob"; });
+    assert.equal(result.files?.[0]?.status, "blocked", `${format}: ${key}`);
+    assert.equal(result.files?.[0]?.blob, undefined);
+  }
+  assert.equal(writes, 0, "refused bytes must never enter the blob store");
+});
+
+test("empty credentials, explicit references and masked values do not block ordinary configuration", t => {
+  const { cwd, log, sink } = fixture(t);
+  const samples = [
+    '{"password":"", "apiKey":"  ", "client_secret":null}',
+    "password:\nlabel: ordinary\napi_key= # not configured\n",
+    'password=""\napi_key=\'\'\nsecret: null\nprivate_key: ~\n',
+    '{"password":"${DB_PASSWORD}", "apiKey":"{{ API_KEY }}", "secret":"[REDACTED]"}',
+    "password: <redacted>\napi_key: ***\n",
+    "password=${DB_PASSWORD}\napiKey: {{ API_KEY }}\n",
+    '{"nested":{"password":"", "label":"kept"}, "entries":[{"apiKey":""}]}',
+    '{"passwordHint":"a hint", "secretCount":3, "tokenLimit":1000, "publicKey":"public", "monkey":"banana"}',
+    '{"description":"password", "fields":["password", "apiKey"]}',
+    'password: # empty\napi_key: ""\nlabel: "kept"',
+  ];
+  for (const content of samples) {
+    fs.writeFileSync(path.join(cwd, "config.json"), content);
+    const result = sessionFileTool("SendUserFile", { files: ["config.json"] }, { cwd }, sink);
+    const file = result.files?.[0];
+    assert.equal(file?.status, "ready", content);
+    assert.equal(Buffer.from(log.blob(file!.blob!)!, "base64").toString(), content);
+  }
+});
+
+test("short or example-looking credential values are still secrets; empty fields cannot hide later values", t => {
+  const cwd = directory(t);
+  for (const content of ['{"password":"example"}', '{"passwd":"x"}', 'secret: password', 'password: ""\napi_key: actual-value', 'password: |\n  actual-value', 'authToken: >\n  actual-value', '{"password":["actual-value"]}', '{"secret":{"value":"actual-value"}}', 'password: "${DB_PASSWORD}-literal-suffix"', 'apiKey=${API_KEY}-literal-suffix']) {
+    fs.writeFileSync(path.join(cwd, "config.json"), content);
+    assert.equal(sessionFileTool("SendUserFile", { files: ["config.json"] }, { cwd }, () => "blob").files?.[0]?.status, "blocked", content);
+  }
+});
+
 test("per-file 8 MiB, per-call eight files and total 32 MiB bounds are inclusive", t => {
   const { cwd, log, sink } = fixture(t);
   fs.writeFileSync(path.join(cwd, "full.bin"), Buffer.alloc(ATTACHMENT_CAP));

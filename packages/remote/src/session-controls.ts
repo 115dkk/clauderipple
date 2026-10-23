@@ -75,16 +75,16 @@ export class SessionSettings {
         resolve(result);
       }, this.timeoutMs);
     });
-    const finished = Promise.resolve().then(work).then(result => {
-      this.save(key, { ...record, result });
-      publish(result);
-      return result;
-    }, (error: unknown) => {
+    const finished = Promise.resolve().then(work).catch((error: unknown) => {
       if (error instanceof OutcomeUnknownError) return { status: "unknown" } satisfies SettingsResult;
       const message = error instanceof Error ? error.message : String(error);
       this.save(key, { ...record, error: message });
       if (timedOut) publish({ status: "unknown", errors: { [field]: message } });
       throw error;
+    }).then(result => {
+      this.save(key, { ...record, result });
+      if (!timedOut || result.status !== "unknown") publish(result);
+      return result;
     }).finally(() => { clearTimeout(timer); this.waiting.delete(key); });
     const response = Promise.race([finished, unknown]);
     this.waiting.set(key, response);

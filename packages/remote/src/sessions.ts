@@ -1413,8 +1413,12 @@ export class Sessions {
     this.unwatchDesktop(id);
     const connection = this.bridges.get(id);
     if (!connection) return;
-    // Reconnecting the permission stream says nothing about whether an accepted turn started.
-    if (!preserveRunning) this.bridgeRunning.delete(connection.bridgeId);
+    // A stream reconnect is still the same worker: durable replies may settle its writes later.
+    // A replacement/removal cannot confirm the old worker's writes and must release its lane.
+    if (!preserveRunning) {
+      this.bridgeRunning.delete(connection.bridgeId);
+      this.bridge.closeControls(connection.bridgeId);
+    }
     connection.abort.abort();
     this.opts.permissions.expireSession(id, "aborted");
     this.bridges.delete(id);
