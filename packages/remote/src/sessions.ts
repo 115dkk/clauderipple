@@ -344,11 +344,12 @@ export class Sessions {
   private bridgeEchoes = new Set<string>();
   /** Cap for bridgeEchoes: prompts are answered or superseded long before this many pile up. */
   private static readonly ECHO_CAP = 500;
-  /** Bridge requestIds already answered or withdrawn (`${session}/${requestId}` → answered at),
-   * so a replay that still lists them skips them instead of reviving the card. Bounded below. */
+  /** Bridge requestIds already answered or withdrawn (`${session}/${requestId}` → noted at),
+   * so a replay that still lists them skips them instead of reviving the card. Never forgotten with
+   * time: a Remote Control session can keep listing a request the desktop app answered (the answer
+   * may never reach its stored events), and a replay an hour later revived the card (issue #82). */
   private answeredBridge = new Map<string, number>();
-  private static readonly ANSWERED_CAP = 500;
-  private static readonly ANSWERED_MS = 3_600_000;
+  private static readonly ANSWERED_CAP = 2_000;
   /** Recent phone message ids per session, so resend checks skip the log scan while warm. */
   private seenIds = new Map<string, Set<string>>();
   private static readonly SEEN_INDEX_CAP = 200;
@@ -633,7 +634,7 @@ export class Sessions {
     if (event.kind === "permission" && !("tool" in event)) {
       const bridgeId = this.desktop?.liveProcess(record?.sdkSessionId ?? id)?.bridgeSessionId;
       if (bridgeId) {
-        const request = (await this.bridge.openRequests(bridgeId))[0];
+        const request = (await this.bridge.openRequests(bridgeId))?.[0];
         if (request) { context.tool = request.tool; context.summary = summarize(request.tool, request.input, summary?.cwd ?? ""); }
       }
     }
@@ -1136,6 +1137,8 @@ export class Sessions {
     this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, req.input, r.cwd), canAlways: false });
     this.setState(r, "waiting");
     void decision.then(answer => {
+      // Shutdown expires every open request after its logs are closed; there is nobody left to read it.
+      if (this.shuttingDown) return;
       this.append(id, { kind: "permission_decided", id: record.id, decision: answer.decision, ...(answer.reason ? { reason: answer.reason } : {}) });
       if (answer.decision === "expired") connection.permissions.delete(req.requestId);
       this.clearPermissionAttention(id);
@@ -1162,30 +1165,42 @@ export class Sessions {
     const connection = this.bridges.get(id);
     const r = this.records.get(id);
     if (!connection || connection.bridgeId !== bridgeId || !r) return;
+    // Cards opened after this read began may belong to a request the snapshot predates, so only
+    // cards that already existed are closed on its word.
+    const startedAt = this.now();
     let open;
     try { open = await this.bridge.openRequests(bridgeId); }
     catch (error) { this.bridgeFailure(id, error); return; }
+    if (open === null) return;
     if (this.bridges.get(id) !== connection) return;
+    const openIds = new Set(open.map(req => req.requestId));
+    // A card whose request is no longer open was answered or withdrawn somewhere else — the person
+    // used the Claude app. Leaving it pending kept a question on the phone that the app had already
+    // closed, and the next replay carded it again (issue #82).
+    for (const [requestId, pending] of [...connection.permissions]) {
+      if (openIds.has(requestId)) continue;
+      const record = this.opts.permissions.get(pending.id);
+      if (record?.state === "pending" && record.createdAt >= startedAt) continue;
+      connection.permissions.delete(requestId);
+      this.rememberAnsweredBridge(id, requestId);
+      this.opts.permissions.expire(pending.id, "cancelled"); // its decision handler writes the event
+    }
     for (const req of open) this.openBridgePermission(id, connection, r, req);
   }
 
   /**
    * Remember a bridge requestId as answered, so a replay that still lists it (the server records
-   * the control_response after we do) skips it instead of reviving an answered card. Bounded to
-   * the last ANSWERED_CAP entries and entries from the last hour.
+   * the control_response after we do, or never records an answer made in the desktop app) skips it
+   * instead of reviving an answered card. Bounded to the most recent ANSWERED_CAP entries; a
+   * requestId is never reused, so an entry needs no other expiry.
    */
   private rememberAnsweredBridge(id: string, requestId: string): void {
-    const at = this.now();
-    for (const [key, answeredAt] of this.answeredBridge) if (at - answeredAt > Sessions.ANSWERED_MS) this.answeredBridge.delete(key);
-    this.answeredBridge.set(`${id}/${requestId}`, at);
+    this.answeredBridge.set(`${id}/${requestId}`, this.now());
     while (this.answeredBridge.size > Sessions.ANSWERED_CAP) this.answeredBridge.delete(this.answeredBridge.keys().next().value!);
   }
 
   private wasAnsweredBridge(id: string, requestId: string): boolean {
-    const at = this.answeredBridge.get(`${id}/${requestId}`);
-    if (at === undefined) return false;
-    if (this.now() - at > Sessions.ANSWERED_MS) { this.answeredBridge.delete(`${id}/${requestId}`); return false; }
-    return true;
+    return this.answeredBridge.has(`${id}/${requestId}`);
   }
 
   /** Remember a phone message id so later resend checks hit memory instead of the log. Bounded. */
