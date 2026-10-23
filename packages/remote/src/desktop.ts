@@ -8,6 +8,7 @@ import { EventLog } from "./eventlog.ts";
 import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot, sameFileTime, type ProcessSnapshot } from "./processes.ts";
 import { messageContent, sendUserFileImages, type ImageSink } from "./images.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
+import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
@@ -147,6 +148,12 @@ function prompt(r: RecordValue): string {
   const body = text(message?.content).trim();
   // CLI-generated command/context messages are not the person's first prompt.
   return /^(<local-command-|<command-name>|<system-reminder>|\[Request interrupted)/.test(body) ? "" : body;
+}
+/** A message the person themselves typed: a tool result, a task notification and the CLI's own
+ * housekeeping lines are not one, so they cannot close a turn's question or its recap. */
+function humanPrompt(r: RecordValue): string {
+  const body = prompt(r);
+  return body && !/^<task-notification>/.test(body) ? body : "";
 }
 function title(value: string): string { return value.trim().replace(/\s+/g, " ").slice(0, 160); }
 
@@ -431,6 +438,9 @@ export class BackgroundTasks {
   }
 }
 
+/** A turn's wrap_up with its tool_use id, so one question is raised once however often it is read. */
+export interface TurnWrapUp extends WrapUpFields { key: string }
+
 export class DesktopSessions {
   private opts: DesktopOptions;
   private projects: string;
@@ -700,6 +710,33 @@ export class DesktopSessions {
         else if (r.type === "system" && r.subtype === "turn_duration") outcome = true;
       }
       return outcome;
+    } finally { fs.closeSync(fd); }
+  }
+
+  /** The wrap_up a Claude app turn closed with, from the tail window: the last one the model made
+   * after the person's own last message. Null when that turn left none (or the window holds none),
+   * which is also what a window holding only the person's new message reads as. */
+  wrapUp(id: string): TurnWrapUp | null {
+    const source = this.sources.get(id);
+    if (!source) return null;
+    let fd: number;
+    try { fd = this.open(source.file); } catch (error) { if (missing(error)) return null; throw error; }
+    try {
+      let found: TurnWrapUp | null = null;
+      for (const line of windowLines(fd, fs.fstatSync(fd).size, true)) {
+        const r = record(line);
+        if (!r || r.isSidechain === true || r.isMeta === true) continue;
+        if (humanPrompt(r)) { found = null; continue; }
+        const content = object(r.message)?.content;
+        const blocks = Array.isArray(content) ? content : [];
+        for (const value of blocks) {
+          const block = object(value);
+          if (block?.type !== "tool_use" || block.name !== WRAP_TOOL) continue;
+          const input = object(block.input);
+          if (input) found = { ...wrapUpFields(input), key: str(block.id) || str(r.uuid) };
+        }
+      }
+      return found;
     } finally { fs.closeSync(fd); }
   }
 

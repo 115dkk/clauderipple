@@ -195,6 +195,10 @@ export interface SessionSummary {
   /** The host's archive flag: an archived session leaves the default list but is never deleted
    * (transcripts and files stay). Absent on older hosts. */
   archived?: boolean;
+  /** The Claude app's own sidebar line for this session: the first sentence of the last wrap_up's
+   * recap (≤200 characters). Cleared when the person sends a new message, since the next turn is
+   * already under way. Claude app sessions only; absent on older hosts and for host sessions. */
+  status?: string;
   /** The session wants the person's eye; the phone's `seen` clears all but a permission request.
    * Absent on older hosts; null means nothing is waiting. */
   attention?: Attention | null;

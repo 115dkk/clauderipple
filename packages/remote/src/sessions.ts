@@ -12,6 +12,7 @@ import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, messageContent, sendUserFileImages, type InputBlock } from "./images.ts";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
+import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeAuthError, BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, isCliNotLoggedIn, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
@@ -291,6 +292,9 @@ export class Sessions {
   /** The last state seen per non-bridged Mac session, for the away-alert transitions. The first
    * sight of a session only seeds it: a host start must not push for turns that ended before it. */
   private macStates = new Map<string, { state: SessionState; permission: boolean }>();
+  /** Claude app sessions: the status line read from the transcript at `size`. Recomputed only when
+   * that file grew, so a poll never rereads a transcript it has already read (a 256 KB window). */
+  private statuses = new Map<string, { size: number; status: string }>();
 
   /** The registry says busy (it counts background work) while the main turn itself is not running. */
   private background(process: DesktopProcess): boolean {
@@ -432,7 +436,8 @@ export class Sessions {
     const hostCliIds = new Set([...this.records.values()].flatMap(r => r.sdkSessionId ? [r.sdkSessionId] : []));
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
-      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...this.sendQueue.summary(s.id) };
+      const status = this.statusLine(s.id);
+      return { ...s, ...this.desktopModels.get(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.sendQueue.summary(s.id) };
     })];
     return this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
   }
@@ -443,6 +448,7 @@ export class Sessions {
 
   async pollDesktop(): Promise<void> {
     if (this.desktop?.poll()) this.opts.onSessions();
+    this.refreshStatuses();
     const sessions = this.list();
     this.pollMacAlerts(sessions);
     if (this.sidebar) {
@@ -609,6 +615,44 @@ export class Sessions {
     }
   }
 
+  /**
+   * The Claude app's own sidebar line for each of its sessions: the last wrap_up's recap, first
+   * sentence only. Read from the transcript's tail window, and only when that file grew; the list is
+   * re-sent only when a line actually changed, so an idle poll costs nothing.
+   */
+  private refreshStatuses(): void {
+    if (!this.desktop) return;
+    let changed = false;
+    const seen = new Set<string>();
+    for (const s of this.desktop.list()) {
+      const record = this.records.get(s.id);
+      if (record ? !record.desktopBridge : s.origin !== "desktop") continue;
+      if (this.archived.has(s.id)) continue;
+      seen.add(s.id);
+      const size = this.desktop.transcriptSize(s.id);
+      const cached = this.statuses.get(s.id);
+      if (cached && cached.size === size) continue;
+      const wrap = this.desktop.wrapUp(s.id);
+      const status = wrap ? firstSentence(wrap.recap, STATUS_CAP) : "";
+      this.statuses.set(s.id, { size, status });
+      if ((cached?.status ?? "") !== status) changed = true;
+    }
+    for (const id of this.statuses.keys()) if (!seen.has(id)) this.statuses.delete(id);
+    if (changed) this.opts.onSessions();
+  }
+
+  private statusLine(id: string): string | null { return this.statuses.get(id)?.status || null; }
+
+  /** The person sent this session a message: the previous turn's status line is over. The size stays,
+   * so the still-unchanged transcript is not read again for a recap the person has already moved
+   * past. */
+  private personMessage(id: string): void {
+    let changed = false;
+    const cached = this.statuses.get(id);
+    if (cached?.status) { this.statuses.set(id, { size: cached.size, status: "" }); changed = true; }
+    if (changed) this.opts.onSessions();
+  }
+
   private learnWindow(model: string, window: number): void {
     const key = windowKey(model);
     if (!(window > 0) || this.windows.get(key) === window) return;
@@ -771,7 +815,8 @@ export class Sessions {
     const plan = working ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : [];
     // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
     const mode = r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto");
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, plan, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    const status = r.desktopBridge ? this.statusLine(r.id) : null;
+    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, plan, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -1063,6 +1108,7 @@ export class Sessions {
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
     id = r.id;
     if (this.seen(id, clientMsgId)) return id;
+    this.personMessage(id);
     const converted = attachmentContent(r.cwd, text, attachments, blob => this.log(id).blob(blob));
     this.opts.permissions.denySession(id, "superseded by a new message from the user");
     this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
@@ -1099,6 +1145,7 @@ export class Sessions {
     }
     if (!r.desktopBridge) this.rebaseDesktop(r);
     if (this.seen(id, clientMsgId)) return id;
+    this.personMessage(id);
     // Re-store in the current epoch; the local event must never point at deleted upload blobs.
     if (Array.isArray(converted.content)) {
       let index = 0;
