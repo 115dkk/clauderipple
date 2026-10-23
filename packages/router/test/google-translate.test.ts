@@ -64,6 +64,18 @@ test("effort maps to thinkingLevel for Gemini 3 and thinkingBudget for 2.5", () 
   assert.equal(config("gemini-1.5-pro", "high"), undefined);
 });
 
+test("Gemini 4 Argon sends its documented low/medium/high thinking levels, never token budgets", () => {
+  for (const model of ["gemini-4-argon", "gemini-4-argon-contributor"]) {
+    for (const [effort, level] of [["none", "low"], ["minimal", "low"], ["low", "low"], ["medium", "medium"], ["high", "high"], ["xhigh", "high"], ["max", "high"], ["ultra", "high"]] as const) {
+      const out = toGeminiRequest(request, { model, effort });
+      assert.deepEqual(out.generationConfig?.thinkingConfig, { thinkingLevel: level }, `${model}@${effort}`);
+    }
+    assert.equal(toGeminiRequest(request, { model }).generationConfig?.thinkingConfig, undefined);
+    assert.equal(toGeminiRequest(request, { model, effort: "bogus" }).generationConfig?.thinkingConfig, undefined);
+  }
+  assert.equal(toGeminiRequest(request, { model: "gemini-5-unknown", effort: "high" }).generationConfig?.thinkingConfig, undefined);
+});
+
 test("a capped ladder clamps the effort the model is told and sent", () => {
   const levels = ["low", "medium", "high"];
   const out = toGeminiRequest({ ...request, output_config: { effort: "xhigh" }, tools: [] }, { model: "gemini-3-pro", effort: "xhigh", caps: { effortLevels: levels } });
