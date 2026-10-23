@@ -6,7 +6,8 @@ export type Lang = 'ko' | 'en' | 'zh' | 'ja' | 'es' | 'pt'
 export type StatusLine = string | null
 
 /** A user's standing delegation choice, held only for this session. */
-export type DelegationPin = { model: string; provider?: string }
+/** `said` is the sentence that pinned it, cut short, shown beside the pin and never stored. */
+export type DelegationPin = { model: string; provider?: string; said?: string }
 
 export type StatusRequest = {
   at: string

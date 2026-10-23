@@ -99,6 +99,8 @@ export type DashboardView = {
   mode?: string
   /** Short name of this session's user-pinned delegation model. */
   delegationPin?: string
+  /** The person's own sentence that pinned it, already cut short. */
+  delegationSaid?: string
 }
 
 export type BandActions = {

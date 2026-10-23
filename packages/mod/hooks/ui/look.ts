@@ -27,8 +27,6 @@ export type Paint = {
   /** Every capsule's backdrop, `width` × `height` px; '' when the skin paints none and the Box's own colour shows. */
   sea: (width: number, height: number, sea: Sea) => string
   plate: (width: number, height: number) => string
-  /** The delegation pin's chip above the band, `width` px × a control's height. */
-  chip: (width: number) => string
   switch: (on: boolean, busy?: boolean) => string
   word: (label: string, on: boolean, busy?: boolean) => { source: string; cells: number }
   extraHover: (widthPx: number) => string
@@ -71,7 +69,7 @@ export type Look = {
 }
 
 const DEEP_PAINT: Paint = {
-  sea: deep.seaArt, plate: deep.plateArt, chip: deep.chipArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
+  sea: deep.seaArt, plate: deep.plateArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
   pill: deep.pillArt, segmented: deep.segmentedArt, slider: deep.sliderArt, well: deep.wellArt, close: deep.closeArt,
   meter: deep.meterArt, ring: deep.ringArt, clock: deep.clockArt, gauge: deep.gaugeArt, icon: deep.iconArt,
   agents: deep.agentsArt, counted: deep.countedArt, rule: deep.ruleArt, tile: deep.tileArt, beads: deep.beadsArt,

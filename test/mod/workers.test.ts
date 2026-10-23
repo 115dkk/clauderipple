@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
-const { delegationPin, pinAllows, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
+const { delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -202,6 +202,15 @@ test('session pin replaces, releases and authorizes only its model and source', 
   // Words about something else keep the pin.
   for (const text of ['너가 알아서 판단해서 해', '자동으로 재시작되게 해']) assert.equal(delegationPin({ role: 'user', text }, []), undefined, text)
   assert.equal(pinAllows(null, 'gpt-6.1-sol', 'chatgpt'), false)
+})
+
+test('the sentence shown beside a pin is the one that pinned, whitespace folded and cut short', () => {
+  assert.equal(pinSaid('앞으로 솔로 해'), '앞으로 솔로 해')
+  assert.equal(pinSaid('먼저 이 파일을 읽어 줘.\n앞으로  솔로   해. 그리고 테스트도 돌려'), '앞으로 솔로 해.')
+  const long = pinSaid('이 세션은 ' + '아주 길게 '.repeat(40) + '솔로 해')!
+  assert.equal([...long].length, PIN_SAID_MAX)
+  assert.ok(long.endsWith('…'))
+  assert.equal(pinSaid('   '), undefined)
 })
 
 test('session pin ignores assistant, tools, notices, summaries and reminder contents', () => {

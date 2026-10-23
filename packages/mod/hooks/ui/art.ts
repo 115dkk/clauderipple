@@ -317,28 +317,6 @@ export function extraHoverArt(widthPx: number): string {
     '<rect x="2" y="1" width="' + r(Math.max(0, widthPx - 4)) + '" height="' + r(CONTROL_PX - 2) + '" fill="url(#v)"/>')
 }
 
-/** The pin's mark on a 12 px square: a round head and its needle. */
-export const PIN_MARK = '<circle cx="7.8" cy="4.2" r="2.6"/><path d="M6.1 6l-3.9 3.9"/>'
-
-/**
- * The delegation pin's chip, `width` × 26 px: a small capsule of the water's own shade and the band's
- * warm edge, sitting above the band, with the pin's mark in violet (the one point of colour) at its
- * left. Its words and its way out are laid over it by the band.
- */
-export function chipArt(width: number): string {
-  const w = Math.max(40, width)
-  const h = CONTROL_PX
-  const t = TONE.violet
-  return svg(w, h,
-    '<defs><linearGradient id="b" x1="0" x2="1"><stop offset="0" stop-color="' + WATER[0] + '"/><stop offset=".5" stop-color="' + WATER[1] + '"/><stop offset="1" stop-color="' + WATER[2] + '"/></linearGradient>' +
-    '<radialGradient id="g" cx="14" cy="13" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="' + t.glow + '" stop-opacity=".3"/><stop offset="1" stop-color="' + t.glow + '" stop-opacity="0"/></radialGradient>' +
-    '<linearGradient id="s" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".07"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>' +
-    '<rect x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" fill="url(#b)" stroke="rgba(128,124,116,.55)"/>' +
-    '<rect x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" fill="url(#g)"/>' +
-    '<rect x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" fill="url(#s)"/>' +
-    '<g transform="translate(9 7)" fill="none" stroke="' + t.hi + '" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + PIN_MARK + '</g>')
-}
-
 /** The look of a drawn button: the one thing to press, or a quiet one. */
 export type PillLook = 'primary' | 'ghost'
 
@@ -599,7 +577,7 @@ export function barArt(percent: number, tone: Tone | 'ink'): string {
 export const ICON_PX = 16
 
 /** Line icons of the band's controls, 16 px. */
-export type Icon = 'flame' | 'gear' | 'agents' | 'log' | 'compact' | 'clear'
+export type Icon = 'flame' | 'gear' | 'agents' | 'log' | 'compact' | 'clear' | 'pin'
 
 export const FLAME = 'M8.1 14.3c2.8 0 4.5-1.9 4.5-4.4 0-2.8-2.4-4.2-2.8-7.2-1.7 1.1-2.6 2.8-2.5 4.3-1-.4-1.5-1.4-1.6-2.3-1.4 1.3-2 2.9-2 5.2 0 2.5 1.6 4.4 4.4 4.4z'
 
@@ -608,6 +586,8 @@ export const ICON: Record<Icon, string> = {
   gear: '<circle cx="8" cy="8" r="2.3"/><path d="M8 1.7v1.8M8 12.5v1.8M1.7 8h1.8M12.5 8h1.8M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M3.5 12.5l1.3-1.3M11.2 4.8l1.3-1.3"/><circle cx="8" cy="8" r="4.8"/>',
   agents: '<circle cx="4.8" cy="5" r="2.1"/><circle cx="11.4" cy="5" r="2.1"/><path d="M1.6 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6M8.2 13.4c.4-2.4 1.7-3.6 3.2-3.6s2.8 1.2 3.2 3.6"/>',
   log: '<path d="M2.4 3.8h11.2M2.4 8h11.2M2.4 12.2h6.8"/>',
+  // A pin: a round head and its needle.
+  pin: '<circle cx="9.8" cy="5.6" r="3.2"/><path d="M7.6 7.8L2.8 12.6"/>',
   // Two arrows coming in from the corners to the middle: the chat drawn down into itself.
   compact: '<path d="M3.2 3.2L7.1 7.1M7.1 7.1H4.9M7.1 7.1V4.9M12.8 12.8L8.9 8.9M8.9 8.9h2.2M8.9 8.9v2.2"/>',
   // An eraser laid on its edge, the sleeve band bold, a short line being swept away below.

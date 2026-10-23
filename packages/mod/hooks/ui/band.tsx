@@ -33,7 +33,7 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort, LimitItem } from '../../types'
-import { AGENTS_W, CELL_PX, CONTROL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -809,84 +809,84 @@ function effortMenuDrawn(el: Els, frame: Frame, view: DashboardView, actions: Ba
   )
 }
 
-/** Session-only authorization, with the same keyed hover scope as the band's facts. */
-function delegationChip(el: Els, frame: Frame, view: DashboardView, actions: Pick<BandActions, 'releaseDelegationPin'>): RenderNode {
+// ---- The delegation pin ------------------------------------------------------------------------
+//
+// A session-only authorization shown as one line of plain words: the pin's name, the person's own
+// sentence that set it (or, without one, how long it holds), and a way to release it. On the desktop
+// it is the capsule's own first row (the app lays a grey plate behind the band, so anything drawn
+// apart from the capsule floats on it, 2026-10-23); on the terminal and in the footer it is a line
+// of text. Not pinned, there is no line and the band draws as it always did.
+
+/** The pin line's height on the desktop, px. */
+const PIN_ROW_PX = 24
+/** The least room the person's sentence gets before it is dropped for the name alone. */
+const PIN_REASON_MIN = 20
+/** A name's place in the pin's label: what lies before it and after it, whatever the language. */
+const PIN_HOLE = String.fromCharCode(1)
+
+type PinWords = { before: string; name: string; after: string; reason: string }
+
+function pinWords(frame: Frame, view: DashboardView): PinWords {
+  const [before = '', after = ''] = t(frame.lang, 'band.delegationPin', { name: PIN_HOLE }).split(PIN_HOLE)
+  const reason = view.delegationSaid ? t(frame.lang, 'band.pinSaid', { said: view.delegationSaid }) : t(frame.lang, 'band.pinKept')
+  return { before, name: view.delegationPin ?? '', after, reason }
+}
+
+/** Cells the sentence has beside the label, or 0 when it would be cut to less than PIN_REASON_MIN. */
+function pinReasonRoom(frame: Frame, words: PinWords, taken: number, columns: number): number {
+  const room = columns - taken - cells(frame, words.before + words.name + words.after) - cells(frame, ' · ') - 1
+  return room >= PIN_REASON_MIN ? room : 0
+}
+
+/** The pin as a line of text (terminal, minimal footer): label, name in the accent, sentence, Unpin. */
+function pinText(el: Els, frame: Frame, view: DashboardView, actions: Pick<BandActions, 'releaseDelegationPin'>, reserve: number): RenderNode {
   if (!view.delegationPin) return ''
   const { Box, Text } = el
-  const rich = isRich(frame)
-  const scope = tipScope('delegation-pin')
-  const lines = (['band.pinWhy', 'band.pinDoes', 'band.pinHow', 'band.pinOn'] as const).map(key => t(frame.lang, key, { name: view.delegationPin! }))
-  const width = Math.max(24, Math.min(76, frame.columns - 4))
-  const height = (2 + lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(textPx(line) / ((width - 2) * CELL_PX))), 0)) * ROW_PX
+  const words = pinWords(frame, view)
+  const release = actions.releaseDelegationPin ? t(frame.lang, 'band.releasePin') : ''
+  const room = pinReasonRoom(frame, words, reserve + (release ? cells(frame, release) + 1 : 0), frame.columns)
   return (
-    <Box key="delegation-pin" position="relative" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} {...(rich ? { hover: { scope } } : {})}>
-      <Text>{t(frame.lang, 'band.delegationPin', { name: view.delegationPin })}</Text>
-      {actions.releaseDelegationPin ? textButton(el, 'release-pin', t(frame.lang, 'band.releasePin'), actions.releaseDelegationPin) : null}
-      {rich ? (
-        <Box position="absolute" bottom={1} left={0} width={width} display="none" hover={{ scope, display: 'flex' }} flexDirection="column" padding={1}>
-          {'Svg' in el ? <Box position="absolute" top={0} left={0}>{pic(el, 'pin-help-plate', lookOf(frame).art.plate(width * CELL_PX, height), '', width * CELL_PX, height)}</Box> : null}
-          <Box position="relative" flexDirection="column">
-            {lift(el)}
-            {lines.map((line, i) => <Text key={'pin-help-' + i} {...lookOf(frame).ink} wrap="wrap">{line}</Text>)}
-          </Box>
-        </Box>
-      ) : null}
+    <Box key="delegation-pin" flexDirection="row" flexWrap="wrap" columnGap={1}>
+      <Text>
+        <Text dimColor>{words.before}</Text>
+        <Text color={textTone(frame.appearance).accent}>{words.name}</Text>
+        <Text dimColor>{words.after + (room ? ' · ' + clip(words.reason, room) : '')}</Text>
+      </Text>
+      {actions.releaseDelegationPin ? textButton(el, 'release-pin', release, actions.releaseDelegationPin) : null}
     </Box>
   )
 }
 
-/** The desktop chip's air, px: the pin's mark at its left, and what follows its last part. */
-const PIN_LEAD_PX = 30
-const PIN_TAIL_PX = 10
-/** Below this many columns the chip drops its label and shows the model alone. */
-const PIN_LABEL_COLUMNS = 50
-
 /**
- * The delegation pin on the desktop: a small capsule above the band, right-aligned, drawn as the
- * band is (the chip's plate in the water's shade, its words in the skin's ink, a violet mark, the
- * band's own way-out disc to unpin). It is its own row above the band, so the band itself is
- * the same drawing pinned or not. The explanation card is an absolute Box laid last, so it paints
- * over the band's top (a positioned Box later in the tree wins) and nothing clips it: the band's
- * capsule clips what lies inside it, and the chip sits outside.
+ * The desktop's pin line, the capsule's first row: the pin's mark, the label in soft ink with the
+ * name in violet, the person's sentence quieter, and Unpin lit under the pointer at the right.
+ * Narrow, the sentence goes and only the label, the name and Unpin are left.
  */
-function pinChipDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): { chip: RenderNode; card: RenderNode } | null {
-  if (!view.delegationPin) return null
+function pinRowDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions, cols: number): RenderNode {
+  if (!view.delegationPin) return ''
   const { Box, Text } = el
   const k = lookOf(frame)
-  const scope = tipScope('delegation-pin')
-  const label = frame.columns < PIN_LABEL_COLUMNS ? view.delegationPin : t(frame.lang, 'band.delegationPin', { name: view.delegationPin })
+  const words = pinWords(frame, view)
   const release = actions.releaseDelegationPin
-  const closePx = release ? CLOSE_CELLS * CELL_PX : 0
-  const room = Math.max(8, frame.columns - 2)
-  const cells = Math.min(room, Math.ceil((PIN_LEAD_PX + textPx(label) * 1.08 + (release ? 4 : 0) + closePx + PIN_TAIL_PX) / CELL_PX))
-  const widthPx = cells * CELL_PX
-  const chip = (
-    <Box key="delegation-pin" position="relative" flexDirection="row" alignItems="center" width={cells} height={rowsOf(CONTROL_PX)} flexShrink={1} minWidth={0} {...{ hover: { scope } }}>
-      <Box position="absolute" top={0} left={0}>
-        {pic(el, 'pin-chip', k.art.chip(widthPx), label, widthPx, CONTROL_PX)}
+  const releaseLabel = t(frame.lang, 'band.releasePin')
+  const releaseCells = release ? Math.ceil((textPx(releaseLabel) * 1.05) / CELL_PX + 1.2) : 0
+  // The row's own air: the indent, the mark and its gap, the release control and the gap before it.
+  const taken = CREST_CELLS + Math.ceil((ICON_PX + CELL_PX) / CELL_PX) + (release ? releaseCells + 1 : 0)
+  const room = pinReasonRoom(frame, words, taken, cols)
+  return (
+    <Box key="delegation-pin" flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0} height={rowsOf(PIN_ROW_PX)} paddingLeft={CREST_CELLS}>
+      {pic(el, 'pin-mark', k.art.icon('pin', true, 'violet'), '', ICON_PX, 16)}
+      <Box key="pin-words" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Text wrap="truncate">
+          <Text {...k.sub}>{words.before}</Text>
+          <Text color={k.tone('violet')} bold>{words.name}</Text>
+          <Text {...k.sub}>{words.after}</Text>
+          {room ? <Text {...k.mute}>{' · ' + words.reason}</Text> : ''}
+        </Text>
       </Box>
-      <Box position="relative" flexDirection="row" alignItems="center" columnGap={0.5} width="100%" minWidth={0} paddingLeft={PIN_LEAD_PX / CELL_PX} paddingRight={release ? 0.25 : PIN_TAIL_PX / CELL_PX}>
-        {lift(el)}
-        <Box flexGrow={1} flexShrink={1} minWidth={0}>
-          <Text {...k.ink} wrap="truncate">{label}</Text>
-        </Box>
-        {release ? closeButton(el, frame, 'release-pin', t(frame.lang, 'band.releasePin'), release) : null}
-      </Box>
+      {release ? lit(el, frame, 'release-pin', releaseCells, [<Text key="release-pin-word" {...k.sub}>{releaseLabel}</Text>, press(el, 'release-pin', releaseCells * CELL_PX, release)], 0.5) : ''}
     </Box>
   )
-  const lines = (['band.pinWhy', 'band.pinDoes', 'band.pinHow', 'band.pinOn'] as const).map(key => t(frame.lang, key, { name: view.delegationPin! }))
-  const width = Math.max(24, Math.min(76, frame.columns - 4))
-  const height = (2 + lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(textPx(line) / ((width - 2) * CELL_PX))), 0)) * ROW_PX
-  const card = (
-    <Box position="absolute" top={2} right={1} width={width} display="none" hover={{ scope, display: 'flex' }} flexDirection="column" padding={1}>
-      <Box position="absolute" top={0} left={0}>{pic(el, 'pin-help-plate', k.art.plate(width * CELL_PX, height), '', width * CELL_PX, height)}</Box>
-      <Box position="relative" flexDirection="column">
-        {lift(el)}
-        {lines.map((line, i) => <Text key={'pin-help-' + i} {...k.ink} wrap="wrap">{line}</Text>)}
-      </Box>
-    </Box>
-  )
-  return { chip, card }
 }
 
 function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
@@ -972,26 +972,16 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
       </Box>
     </Box>
   )
-  const band = capsule(el, frame, {
+  // A pinned model adds one line at the top of the capsule; the sea and its glow follow 리플이 down.
+  const pinned = !!view.delegationPin
+  return capsule(el, frame, {
     key: 'band',
-    sea: { ...bandSea(mood), reach: 120, at: { x: PAD_X * CELL_PX + (CREST_CELLS * CELL_PX) / 2, y: PAD_Y * ROW_PX * 0.5 + ROW_H / 2 } },
-    rows: view.effortMenu ? (limitsRow ? 4.6 : 3.4) : limitsRow ? 3 : 1.8,
+    sea: { ...bandSea(mood), reach: 120, at: { x: PAD_X * CELL_PX + (CREST_CELLS * CELL_PX) / 2, y: PAD_Y * ROW_PX * 0.5 + ROW_H / 2 + (pinned ? PIN_ROW_PX : 0) } },
+    rows: (view.effortMenu ? (limitsRow ? 4.6 : 3.4) : limitsRow ? 3 : 1.8) + (pinned ? rowsOf(PIN_ROW_PX) : 0),
     paddingX: PAD_X,
     paddingY: PAD_Y,
-    children: [row, ...(limitsRow ? [limitsRow.node] : []), view.effortMenu ? effortMenuDrawn(el, frame, view, actions) : ''],
+    children: [...(pinned ? [pinRowDrawn(el, frame, view, actions, cols)] : []), row, ...(limitsRow ? [limitsRow.node] : []), view.effortMenu ? effortMenuDrawn(el, frame, view, actions) : ''],
   })
-  // The capsule clips its sea, so the pin's chip and its card live outside it, above and over it.
-  const pin = pinChipDrawn(el, frame, view, actions)
-  if (!pin) return band
-  return (
-    <Box key="band-pinned" flexDirection="column" rowGap={0.25} width="100%" minWidth={0}>
-      <Box key="band-pin-row" flexDirection="row" justifyContent="flex-end" width="100%" minWidth={0} paddingRight={1}>
-        {pin.chip}
-      </Box>
-      {band}
-      {pin.card}
-    </Box>
-  )
 }
 
 // ---- Terminal ----------------------------------------------------------------------------------
@@ -1075,6 +1065,7 @@ function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActio
   ) : null
   return (
     <Box flexDirection="column" width="100%">
+      {pinText(el, frame, view, actions, 0)}
       {p.oneRow ? (
         <Box key="row" flexDirection="row" width="100%">
           {factRow}
@@ -1084,7 +1075,6 @@ function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActio
       ) : (
         [factRow, ctrlRow]
       )}
-      {delegationChip(el, frame, view, actions)}
       {menu}
     </Box>
   )
@@ -1136,7 +1126,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
       {view.limit && view.extras.includes('limits') ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
       {textButton(el, 'auto', t(frame.lang, 'band.auto') + (view.auto ? ' ●' : ' ○'), actions.toggleAuto)}
       {textButton(el, 'settings', '⚙', actions.openSettings)}
-      {delegationChip(el, frame, view, actions)}
+      {pinText(el, frame, view, actions, 60)}
       {engine ?? null}
     </Box>
   )

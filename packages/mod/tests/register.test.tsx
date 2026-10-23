@@ -918,6 +918,8 @@ test('a session pin survives later prompts, authorizes only its model, and relea
   await submit($, '테스트도 확인해')
   ui = await band($)
   expect(await ui.find({ type: 'Text', text: /Pinned: .*sol/i })).toBeDefined()
+  // The band keeps the person's own sentence that pinned it, beside the pin.
+  expect(await ui.find({ type: 'Text', text: /“앞으로 솔로 해” pinned it/ })).toBeDefined()
   await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@high]]\nReview.' })
   await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: 'Review again.' })
   expect(sent.slice(0, 2).map(spawn => spawn.subagentType)).toEqual(['gpt-6-1-sol', 'gpt-6-1-sol'])
@@ -980,8 +982,9 @@ test('an explicit marker the user did not name is dropped; the judge decides, or
   await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nReview this.' })
   expect(judges.length).toBe(1)
   expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', prompt: 'Review this.' })
-  expect(b.toasts.some(text => text.includes('gpt-6-1-sol') && text.includes('by tier'))).toBe(true)
-  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())
+  // Dropped silently: the owner found the toast noise, and it was false over a resumed worker.
+  expect(b.toasts.some(text => text.includes('by tier'))).toBe(false)
+  const row =JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())
   expect(row.by).not.toBe('marker')
 })
 
@@ -998,7 +1001,7 @@ for (const [label, spawn] of [
   await $.agent.spawn({ ...SPAWN, ...spawn })
   expect(judges.length).toBe(0)
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Fix the race.' })
-  expect(b.toasts.some(text => text.includes('by tier'))).toBe(true)
+  expect(b.toasts.some(text => text.includes('by tier'))).toBe(false)
   expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())).toMatchObject({ by: 'session', tier: 'hard', rung: 'hard' })
 })
 

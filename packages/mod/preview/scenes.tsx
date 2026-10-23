@@ -196,12 +196,13 @@ function queued(el: Els, frame: Frame, view: DashboardView, first: string): Rend
 
 const SCENES: Scene[] = [
   { name: 'band', draw: (el, f) => site(el, f, DASH) },
-  // The delegation pin's chip above the band (2026-10-23): pinned, narrow, very narrow, flat; the band itself is `band`'s.
-  { name: 'band-pinned', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol' }) },
-  { name: 'band-pinned-limits', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol', limits: LIMITS, extras: ['context', 'limits'] }) },
-  { name: 'band-pinned-narrow', columns: 70, draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol' }) },
-  { name: 'band-pinned-tiny', columns: 40, draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'GPT-6.1 Sol' }) },
-  { name: 'flat-band-pinned', skin: 'flat', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol' }) },
+  // The delegation pin's line at the top of the capsule (2026-10-23): with the person's sentence, without, narrow, flat.
+  { name: 'band-pinned', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol', delegationSaid: '앞으로 솔로 해' }) },
+  { name: 'band-pinned-limits', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol', delegationSaid: '이 세션은 솔로 고정해서 진행해 줘', limits: LIMITS, extras: ['context', 'limits'] }) },
+  { name: 'band-pinned-nosaid', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol' }) },
+  { name: 'band-pinned-narrow', columns: 70, draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol', delegationSaid: '앞으로 솔로 해' }) },
+  { name: 'band-pinned-tiny', columns: 40, draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'GPT-6.1 Sol', delegationSaid: '앞으로 솔로 해' }) },
+  { name: 'flat-band-pinned', skin: 'flat', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol', delegationSaid: '앞으로 솔로 해' }) },
   { name: 'band-phone-queue', draw: (el, f) => queued(el, f, { ...DASH, isWorking: true }, '홈 카드 제목이랑 점수 알약도 같이 정리해 줘') },
   { name: 'band-phone-queue-long', columns: 70, draw: (el, f) => queued(el, f, { ...DASH, isWorking: true }, '이 날의 흐름 이것도 한국어가 좀 어색한데 사람마다 달라지는 리포트 같은 건 빼고 모든 한국어를 정리해서 자연스럽게') },
   { name: 'band-phone-queue-flat', skin: 'flat', draw: (el, f) => queued(el, f, { ...DASH, isWorking: true }, '홈 카드 제목이랑 점수 알약도 같이 정리해 줘') },

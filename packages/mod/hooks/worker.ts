@@ -85,6 +85,20 @@ export function delegationPin(message: Said, sources: readonly { model: string; 
   return { model: first.model.replace(/@[^@]*$/, ''), ...(providers.length === 1 ? { provider: providers[0]! } : {}) }
 }
 
+/** The most characters of the person's sentence the band keeps beside a pin. */
+export const PIN_SAID_MAX = 60
+/**
+ * The sentence that pinned, for the band to show: the first one carrying a standing phrase, its
+ * whitespace folded and cut to PIN_SAID_MAX characters. Session state only.
+ */
+export function pinSaid(text: string): string | undefined {
+  const parts = text.split(/(?<=[.!?。])\s+|\n+/).map(part => part.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  const part = parts.find(p => pinInstruction(p) === 'pin') ?? parts[0]
+  if (!part) return undefined
+  const chars = [...part]
+  return chars.length > PIN_SAID_MAX ? chars.slice(0, PIN_SAID_MAX - 1).join('') + '…' : part
+}
+
 export function pinAllows(pin: DelegationPin | null, model: string, provider?: string): boolean {
   return !!pin && pinId(pin.model) === pinId(model) && (!pin.provider || pin.provider === provider)
 }

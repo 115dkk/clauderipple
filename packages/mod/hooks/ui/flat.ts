@@ -7,7 +7,7 @@
 // No gradient, glow, water or weather; 리플이 keeps its life. Every size is art.ts's, so the presses
 // laid over the pictures line up (kit.tsx). Pure: SVG only, so node tests can load it.
 
-import { AGENTS_W, CELL_PX, CLOSE_PX, CONTROL_PX, FLAME, GLYPH, ICON, ICON_PX, METER_H, METER_W, PIN_MARK, SWITCH_H, SWITCH_W, TILE_PX, esc, labelPx, r } from './art.ts'
+import { AGENTS_W, CELL_PX, CLOSE_PX, CONTROL_PX, FLAME, GLYPH, ICON, ICON_PX, METER_H, METER_W, SWITCH_H, SWITCH_W, TILE_PX, esc, labelPx, r } from './art.ts'
 import type { Icon, Tone } from './art.ts'
 import type { Paint } from './look.ts'
 import { svgDoc } from './theme.ts'
@@ -72,16 +72,6 @@ export function flatPictures(appearance: Appearance): Paint {
 
     // The capsule's own surface: it hides the words beneath a tip.
     plate: (width, height) => doc(width, height, '<rect class="p" width="' + r(width) + '" height="' + r(height) + '"/>', themed('.p', 'fill:#ffffff', 'fill:#30302e')),
-
-    // The pin's chip: the app's own surface in a hairline, the pin's mark in the accent.
-    chip: width => {
-      const w = Math.max(40, width)
-      const h = CONTROL_PX
-      return doc(w, h,
-        '<rect class="c" x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" stroke="' + STROKE + '"/>' +
-        '<g transform="translate(9 7)" fill="none" stroke="' + ACCENT + '" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + PIN_MARK + '</g>',
-        themed('.c', 'fill:#ffffff', 'fill:#30302e'))
-    },
 
     // On: the accent's track and a white knob at the right; off: an outline and a quiet knob at the left.
     switch: (on, busy = false) =>

@@ -9,7 +9,7 @@ import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
-import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinAllows, pinInstruction, rivalProviders, userNamed } from './worker'
+import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinAllows, pinInstruction, pinSaid, rivalProviders, userNamed } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -538,8 +538,11 @@ async function hearDelegationPin($: EngineInterface, text: string): Promise<void
   const pin = parseDelegationPin({ role: 'user', text }, sources)
   if (pin === undefined) return
   if (pin === null) { await releaseDelegationPin($); return }
-  if (same(pin, await read($, delegationPin))) return
-  await update($, delegationPin, () => pin)
+  const current = await read($, delegationPin)
+  // The same model said again keeps the sentence that first pinned it.
+  if (current && current.model === pin.model && current.provider === pin.provider) return
+  const said = pinSaid(text)
+  await update($, delegationPin, () => ({ ...pin, ...(said ? { said } : {}) }))
   await $.ui.toast(t(await read($, lang), 'toasts.delegationPinned', { name: titleName(pin.model, await read($, routerModels)) }))
 }
 async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | null> {
@@ -1332,7 +1335,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
     swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
     ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
-    ...(pinned ? { delegationPin: titleName(pinned.model, await read($, routerModels)) } : {}),
+    ...(pinned ? { delegationPin: titleName(pinned.model, await read($, routerModels)), ...(pinned.said ? { delegationSaid: pinned.said } : {}) } : {}),
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
