@@ -36,7 +36,7 @@ test("background task list carries the launch description, command fallback and 
   tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "b", input: { command: "npm test", run_in_background: true } }] } }));
   tasks.accept(line({ type: "user", toolUseResult: { backgroundTaskId: "s1" }, message: { content: [{ type: "tool_result", tool_use_id: "b", content: "started" }] } }));
   assert.deepEqual(tasks.list, [
-    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z") },
+    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z"), sub: "sub-a" },
     { id: "s1", kind: "shell", label: "npm test", startedAt: null },
   ]);
 });

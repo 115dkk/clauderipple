@@ -420,7 +420,7 @@ export class BackgroundTasks {
       } else if (result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(body)) {
         id = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(body)?.[1] || "";
       }
-      if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null });
+      if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null, ...(tool.name === "Bash" ? {} : { sub: `sub-${str(b.tool_use_id)}` }) });
       this.tools.delete(str(b.tool_use_id));
     }
   }

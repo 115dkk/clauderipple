@@ -204,7 +204,7 @@ export interface SessionSummary {
   epoch: string;
 }
 
-export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null }
+export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null; /** an agent's own log for `op: "sub"`; absent on older hosts */ sub?: string }
 export interface PlanStep { text: string; status: "pending" | "in_progress" | "completed" }
 
 /** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
