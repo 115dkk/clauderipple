@@ -631,6 +631,11 @@ Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 try {
   switch (cmd) {
     case "remote": {
+      if (args.slice(1).some(arg => arg === "--help" || arg === "-h")) {
+        const { REMOTE_USAGE } = await import("../../remote/src/usage.ts");
+        console.log(REMOTE_USAGE);
+        break;
+      }
       const sub = args[1];
       // Remote (SSH) hosts for Claude Desktop sessions; every other `remote` verb is the phone host's.
       if (sub === "add" || sub === "remove" || sub === "hosts") {

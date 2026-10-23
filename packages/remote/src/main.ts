@@ -34,6 +34,7 @@ import { LocalControl } from "./local-control.ts";
 import { findClaude, specFor, cliLoginWarning } from "./service.ts";
 import { installService, uninstallService, serviceStatus, servicePaths, renderService, supervisorName, controlShutdown, refreshPlan, hostBusy } from "./host-service.ts";
 import { Sessions } from "./sessions.ts";
+import { REMOTE_USAGE } from "./usage.ts";
 import { desktopHandoff } from "./handoff.ts";
 import type { QueryFn } from "./sessions.ts";
 import { claudeBinary, claudeCodeLogin } from "../../cli/src/claude-auth.ts";
@@ -163,7 +164,6 @@ async function runHost(): Promise<void> {
     onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },
     onDesktopProblem: (problem) => server?.setDesktopProblem(problem),
   });
-  sessions.recover();
   const live = sessions;
   const host = new HostServer({
     listen: where.listen, port: cfg.port, token: cfg.token, webDir: path.resolve(here, "..", "web"), sessions: live, router,
@@ -187,6 +187,10 @@ async function runHost(): Promise<void> {
   });
   server = host;
   await host.listen();
+  // Recovery writes restart notices and stopped states. A competing foreground process
+  // must fail to bind before it can append to the running host's session logs.
+  try { live.recover(); }
+  catch (error) { await host.close(); throw error; }
   power.update(live.busy());
   const relay = cfg.relay
     ? new RelayHost({
@@ -266,6 +270,7 @@ async function refreshCmd(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.slice(2).some(arg => arg === "--help" || arg === "-h")) { out(REMOTE_USAGE); return; }
   const sub = process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : null;
   switch (sub) {
     case null: return runHost();
