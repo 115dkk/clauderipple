@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.12 — 2026-10-23
+
+### Fixed
+
+- **A worker added while a session sat idle can be spawned there.** Claude Code missed an agent
+  file written in the last 30 s of a session's idle polling, and `/clear` kept the old list, so
+  the session answered "Agent type not found" for good. The router touches the generated agent
+  files again 45 s after it writes or removes one, which makes every session reread them.
+- **A Claude app session cleared with `/clear` lists once on the phone.** The conversation before
+  the clear no longer shows beside the live one.
+
 ## 0.12.11 — 2026-10-23
 
 ### Added
