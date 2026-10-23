@@ -39,6 +39,7 @@ const require = module.createRequire(import.meta.url);
 export const SHARED: Record<string, (pkgDir: string) => string> = {
   "src/protocol.ts": (pkg) => path.join(pkg, "src", "protocol.ts"),
   "src/tool-details.ts": (pkg) => path.join(pkg, "src", "tool-details.ts"),
+  "src/wrap-up.ts": (pkg) => path.join(pkg, "src", "wrap-up.ts"),
   "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
   "vendor/nacl-fast.min.js": () => require.resolve("tweetnacl/nacl-fast.min.js"),
 };

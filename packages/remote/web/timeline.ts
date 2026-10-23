@@ -1,5 +1,6 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
 import type { PermissionContent, Effort, Figures, ImagePart, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
+import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[] } }
 
@@ -144,7 +145,7 @@ export interface ToolGroup {
   tools: number; workers: number; running: boolean; latest: string;
 }
 /** A reply button in a turn's closing box: `label` on the button, `message` what a tap sends. */
-export interface WrapUpReply { label: string; message: string }
+export type { WrapUpReply };
 /** The Code tab's closing box (its wrap_up tool): drawn only when the turn leaves the person a question. */
 export interface WrapUp { type: "wrapUp"; key: string; ver: string; recap: string; ask: string; replies: WrapUpReply[]; blocked: boolean; answered: boolean }
 /** The Code tab's chapter mark (its mark_chapter tool): a divider where the work moved to a new phase. */
@@ -156,7 +157,6 @@ export const isWidgetTool = (name: string): boolean => name === "show_widget" ||
 
 // The Claude app's Code-tab tools, which draw something of their own there (only its sessions call them).
 const PLAN_TOOL = "mcp__ccd_turn__update_plan";
-const WRAP_TOOL = "mcp__ccd_turn__wrap_up";
 const CHAPTER_TOOL = "mcp__ccd_session__mark_chapter";
 
 function inputOf(tool: ToolView): Record<string, unknown> | null {
@@ -168,20 +168,15 @@ function inputOf(tool: ToolView): Record<string, unknown> | null {
 }
 const words = (value: unknown, max: number): string => typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
 
-/** The closing box a wrap_up call draws, with the Claude app's limits; null when it has no question
- * (the app draws no box then), undefined when its input cannot be read (it stays a tool row). App
- * buttons such as commit or create PR run inside the Mac app, so only reply buttons come over. */
+/** The closing box a wrap_up call draws, with the Claude app's limits (wrap-up.ts, which the host
+ * reads its pushes and status line from too); null when it has no question (the app draws no box
+ * then), undefined when its input cannot be read (it stays a tool row). */
 function wrapUpOf(tool: ToolView, ver: string): WrapUp | null | undefined {
   const input = inputOf(tool);
   if (!input) return undefined;
-  const replies = (Array.isArray(input.actions) ? input.actions : []).flatMap((value): WrapUpReply[] => {
-    const action = value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
-    const label = words(action.label, 24);
-    return action.action === undefined && label ? [{ label, message: words(action.message, 300) || label }] : [];
-  }).slice(0, 2);
-  const ask = words(input.ask, 100);
+  const { recap, ask, replies, blocked } = wrapUpFields(input);
   if (!ask && !replies.length) return null;
-  return { type: "wrapUp", key: `w${tool.id}`, ver, recap: words(input.recap, 300), ask, replies, blocked: input.blocked === true || input.blocked === "true", answered: false };
+  return { type: "wrapUp", key: `w${tool.id}`, ver, recap, ask, replies, blocked, answered: false };
 }
 
 /** Presentation only: text, permissions and turn boundaries separate consecutive activity. */
