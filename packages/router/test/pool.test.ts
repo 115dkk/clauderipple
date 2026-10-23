@@ -35,6 +35,23 @@ test("explicit billing/quota errors mark exhaustion; transient 429 and unrelated
   assert.equal(providerExhaustion(402)?.reason, 'billing_exhausted');
 });
 
+test("Google's monthly spending cap is billing exhaustion, including its JSON error message", () => {
+  const now = 1_000_000;
+  const message = "Your project has exceeded its monthly spending cap.";
+  for (const body of [message, JSON.stringify({ error: { code: 429, message, status: "RESOURCE_EXHAUSTED" } })]) {
+    const exhaustion = providerExhaustion(429, body, undefined, now);
+    assert.deepEqual(exhaustion, { reason: "billing_exhausted", at: now, until: now + 1_800_000 });
+    const health = new ProviderHealth();
+    health.observe("google-gemini", 429, exhaustion);
+    assert.equal(health.snapshot(now)["google-gemini"]?.reason, "billing_exhausted");
+    assert.deepEqual(providerExhaustion(429, body, 60_000, now), { reason: "billing_exhausted", at: now, until: now + 60_000 });
+  }
+  for (const message of ["RESOURCE_EXHAUSTED", "Rate limit exceeded.", "Your project has a monthly spending cap.", "Monthly spending cap may be exceeded.", "Your project has exceeded its requests per minute quota."]) {
+    assert.equal(providerExhaustion(429, JSON.stringify({ error: { code: 429, message, status: "RESOURCE_EXHAUSTED" } })), undefined, message);
+  }
+  for (const status of [400, 401, 403, 500, 503]) assert.equal(providerExhaustion(status, message), undefined);
+});
+
 /** A clock the test drives, so cooldowns are asserted rather than waited for. */
 function clock(start = 1_000_000) {
   let t = start;
