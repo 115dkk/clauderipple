@@ -57,8 +57,10 @@ export type Isolation = "local" | "worktree";
 /**
  * Why a session wants the person's eye. The phone clears it when it opens that session, except
  * `permission`, which clears only when the approval itself is answered (a phone can look and leave).
+ * `question` is a Claude app turn that stopped on its wrap_up's question and waits for the answer;
+ * a client that does not know it must read it as an attention it can clear, never fail on it.
  */
-export type AttentionReason = "permission" | "failed" | "finished";
+export type AttentionReason = "permission" | "failed" | "finished" | "question";
 export interface Attention { reason: AttentionReason; at: number }
 
 /** A string moved out of an event (INLINE_CAP); the client fetches `/api/blob/<session>/<id>`. */
@@ -100,11 +102,15 @@ export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "route
 export type SessionEvent = EventBody & { seq: number; at: number };
 
 /**
- * A push-worthy moment on a Mac session the host is not tailing: a turn finished (ok/failed) or an
- * approval is waiting. It goes to the pushes only, never into a session log, so it carries just
- * what they read — a bridged session's own result/permission events carry the rest.
+ * A push-worthy moment on a Mac session the host is not tailing: a turn finished (ok/failed), a turn
+ * closed on a question the person must answer, or an approval is waiting. It goes to the pushes only,
+ * never into a session log, so it carries just what they read — a bridged session's own
+ * result/permission events carry the rest.
  */
-export type AlertBody = { kind: "permission" } | { kind: "result"; ok: boolean };
+export type AlertBody = { kind: "permission" } | { kind: "result"; ok: boolean }
+  /** A Claude app turn that closed on its wrap_up: `ask` is the question, and `blocked` says the
+   * session does not go on until the person answers it. */
+  | { kind: "question"; ask: string; blocked: boolean };
 /** What a push reads: a real log event, or an alert for a Mac session the host does not tail. */
 export type PushEvent = EventBody | AlertBody;
 

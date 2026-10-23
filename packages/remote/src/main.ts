@@ -151,7 +151,13 @@ async function runHost(): Promise<void> {
     queryFn: query as unknown as QueryFn,
     ...(claudePath ? { claudePath, ...(process.platform === "darwin" ? { handoff: desktopHandoff(claudePath) } : {}) } : {}),
     log,
-    onEvent: (id, event) => { server?.onEvent(id); void notifier.onEvent(id, event); void expoNotifier.onEvent(id, event); },
+    // A Claude app turn that closed on a wrap_up question pushes that question, not its result.
+    onEvent: (id, event) => {
+      server?.onEvent(id);
+      const push = sessions?.pushEvent(id, event) ?? event;
+      void notifier.onEvent(id, push);
+      void expoNotifier.onEvent(id, push);
+    },
     away: () => away.away(),
     onAlert: (id, body) => { void notifier.onEvent(id, body); void expoNotifier.onEvent(id, body); },
     onSessions: () => { server?.onSessions(); if (sessions) power.update(sessions.busy()); },

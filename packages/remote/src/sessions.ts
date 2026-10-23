@@ -11,7 +11,7 @@ import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, messageContent, sendUserFileImages, type InputBlock } from "./images.ts";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SendBehavior } from "./protocol.ts";
-import { DesktopSessions, type DesktopProcess } from "./desktop.ts";
+import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
 import { BridgeAuthError, BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, isCliNotLoggedIn, object, slashCommands, type BridgeFrame } from "./bridge-client.ts";
@@ -295,6 +295,9 @@ export class Sessions {
   /** Claude app sessions: the status line read from the transcript at `size`. Recomputed only when
    * that file grew, so a poll never rereads a transcript it has already read (a 256 KB window). */
   private statuses = new Map<string, { size: number; status: string }>();
+  /** The wrap_up whose blocked question the person was already told about, per session, so a later
+   * poll that still finds the same question (or a phone that cleared it) raises it only once. */
+  private askedWrapUps = new Map<string, string>();
 
   /** The registry says busy (it counts background work) while the main turn itself is not running. */
   private background(process: DesktopProcess): boolean {
@@ -643,14 +646,43 @@ export class Sessions {
 
   private statusLine(id: string): string | null { return this.statuses.get(id)?.status || null; }
 
-  /** The person sent this session a message: the previous turn's status line is over. The size stays,
-   * so the still-unchanged transcript is not read again for a recap the person has already moved
-   * past. */
+  /** The wrap_up a Claude app session's newest turn left; null for any session the app does not own. */
+  private desktopWrapUp(id: string): TurnWrapUp | null {
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    return this.desktop?.has(desktopId) ? this.desktop.wrapUp(desktopId) : null;
+  }
+
+  /**
+   * The attention a Claude app turn that stopped on a blocked question leaves: the person's answer is
+   * what resumes it. Raised once per wrap_up — a phone's `seen` clears it, and a poll that still
+   * finds the same question does not put it back. `wrap` is a reading the caller already has.
+   */
+  private questionAttention(id: string, from: SessionState, to: SessionState, wrap?: TurnWrapUp | null): Attention | null {
+    if (to !== "idle" || (from !== "running" && from !== "waiting")) return null;
+    const found = wrap === undefined ? this.desktopWrapUp(id) : wrap;
+    if (!found?.ask || !found.blocked || this.askedWrapUps.get(id) === found.key) return null;
+    this.askedWrapUps.set(id, found.key);
+    return { reason: "question", at: this.now() };
+  }
+
+  /** The person sent this session a message: the previous turn's status line is over, and a question
+   * that turn left is answered by whatever they typed. The size stays, so the still-unchanged
+   * transcript is not read again for a recap the person has already moved past. */
   private personMessage(id: string): void {
+    this.askedWrapUps.delete(id);
     let changed = false;
     const cached = this.statuses.get(id);
     if (cached?.status) { this.statuses.set(id, { size: cached.size, status: "" }); changed = true; }
+    if (this.attention.get(id)?.reason === "question") { this.attention.delete(id); this.saveListState(); changed = true; }
     if (changed) this.opts.onSessions();
+  }
+
+  /** What the pushes should say about an event: a Claude app turn that closed on a question pushes
+   * the question instead of that it finished. */
+  pushEvent(id: string, event: PushEvent): PushEvent {
+    if (event.kind !== "result" || !this.records.get(id)?.desktopBridge) return event;
+    const wrap = this.desktopWrapUp(id);
+    return wrap?.ask ? { kind: "question", ask: wrap.ask, blocked: wrap.blocked } : event;
   }
 
   private learnWindow(model: string, window: number): void {
@@ -664,8 +696,9 @@ export class Sessions {
   /**
    * Alerts for Mac sessions the host is not tailing: a bridged record already pushes through its
    * own appended events, so this path is for the ones only the list knows. A turn that was running
-   * and is now idle finished (ok, or failed when the transcript's result says so), and a session
-   * that newly waits for approval asks. The first sight of a session only seeds its state.
+   * and is now idle finished — on a question the Claude app's wrap_up left, which is what the push
+   * says instead, or otherwise ok/failed as the transcript's result reports. A session that newly
+   * waits for approval asks. The first sight of a session only seeds its state.
    */
   private pollMacAlerts(sessions: SessionSummary[]): void {
     if (!this.desktop) return;
@@ -678,7 +711,16 @@ export class Sessions {
       this.macStates.set(s.id, { state: s.state, permission });
       if (!previous) continue;
       if (permission && !previous.permission) this.alert(s.id, { kind: "permission" });
-      else if (previous.state === "running" && s.state === "idle") this.alert(s.id, { kind: "result", ok: this.desktop.turnOutcome(s.id) ?? true });
+      else if (previous.state === "running" && s.state === "idle") {
+        const wrap = this.desktop.wrapUp(s.id);
+        if (!wrap?.ask) this.alert(s.id, { kind: "result", ok: this.desktop.turnOutcome(s.id) ?? true });
+        else {
+          // A blocked question keeps the session on "someone must answer" until they do.
+          const question = this.questionAttention(s.id, "running", "idle", wrap);
+          if (question) { this.setAttention(s.id, question); this.opts.onSessions(); }
+          this.alert(s.id, { kind: "question", ask: wrap.ask, blocked: wrap.blocked });
+        }
+      }
     }
     for (const id of this.macStates.keys()) if (!seen.has(id)) this.macStates.delete(id);
   }
@@ -882,7 +924,9 @@ export class Sessions {
     if (r.state === state && !detail) return;
     const from = r.state;
     r.state = state;
-    this.setAttention(r.id, nextAttention(this.attention.get(r.id) ?? null, from, state, this.now()));
+    // A bridged session's turn can end on a question the person must answer; that outranks "finished".
+    const question = r.desktopBridge ? this.questionAttention(r.id, from, state) : null;
+    this.setAttention(r.id, question ?? nextAttention(this.attention.get(r.id) ?? null, from, state, this.now()));
     this.append(r.id, { kind: "state", state, ...(detail ? { detail } : {}) }, touch);
     this.save();
     this.opts.onSessions();

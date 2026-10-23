@@ -13,6 +13,9 @@ import { BridgeClient } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import type { AlertBody } from "../src/protocol.ts";
 import { firstSentence, wrapUpFields, WRAP_LIMITS } from "../src/wrap-up.ts";
+import { pushFor } from "../src/push.ts";
+import { expoBody } from "../src/expo-push.ts";
+import { pushContent } from "../src/push-content.ts";
 import { bridgeFixture, bridgeId, line as bridgeLine } from "./bridge-fixture.ts";
 
 const id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
@@ -74,6 +77,51 @@ function fixture(t: TestContext, opts: { tail?: unknown[]; status?: DesktopProce
   };
 }
 
+test("a Mac turn that closed on a wrap_up question pushes the question, not that it finished", async t => {
+  const f = fixture(t, { tail: [wrapUp({ recap: "Found the leak.", ask: "Run the tests now?", blocked: true }), done] });
+  await f.poll();
+  assert.equal(f.alerts.length, 0, "the host's first sight of a session only seeds it");
+  f.advance(); f.setStatus("idle");
+  await f.poll();
+  assert.deepEqual(f.alerts, [{ session: id, body: { kind: "question", ask: "Run the tests now?", blocked: true } }]);
+});
+
+test("a wrap_up without an ask, and a turn without one, keep the finished push", async t => {
+  const recapOnly = fixture(t, { tail: [wrapUp({ recap: "All done." }), done] });
+  await recapOnly.poll();
+  recapOnly.advance(); recapOnly.setStatus("idle");
+  await recapOnly.poll();
+  assert.deepEqual(recapOnly.alerts.map(a => a.body), [{ kind: "result", ok: true }]);
+
+  const plain = fixture(t, { tail: [done] });
+  await plain.poll();
+  plain.advance(); plain.setStatus("idle");
+  await plain.poll();
+  assert.deepEqual(plain.alerts.map(a => a.body), [{ kind: "result", ok: true }]);
+});
+
+test("a blocked question raises an attention the phone clears by opening the session", async t => {
+  const f = fixture(t, { tail: [wrapUp({ recap: "Fixed it.", ask: "Restart the router?", blocked: true }), done] });
+  await f.poll();
+  f.advance(); f.setStatus("idle");
+  await f.poll();
+  assert.equal(f.listed().attention?.reason, "question");
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(f.listed().attention, null);
+  f.advance();
+  await f.poll();
+  assert.equal(f.listed().attention, null, "a later poll does not raise the same question again");
+});
+
+test("an ask that is not blocked pushes the question but leaves no attention", async t => {
+  const f = fixture(t, { tail: [wrapUp({ recap: "Two options.", ask: "Which one first?" }), done] });
+  await f.poll();
+  f.advance(); f.setStatus("idle");
+  await f.poll();
+  assert.deepEqual(f.alerts.map(a => a.body), [{ kind: "question", ask: "Which one first?", blocked: false }]);
+  assert.equal(f.listed().attention, null);
+});
+
 test("the status line is the recap's first sentence, and the list is sent only when it changes", async t => {
   const f = fixture(t, { tail: [wrapUp({ recap: "Found the leak. Fixed two files." }), done], status: "idle" });
   await f.poll();
@@ -90,7 +138,7 @@ test("the status line is the recap's first sentence, and the list is sent only w
   assert.equal(f.listed().status, "Tests pass.");
 });
 
-test("a bridged session's status is cleared by the person's next message", async t => {
+test("a bridged session's status and question attention are cleared by the person's next message", async t => {
   const f = bridgeFixture(t);
   f.registry.get(bridgeId)!.status = "busy";
   fs.appendFileSync(f.file, [
@@ -103,9 +151,37 @@ test("a bridged session's status is cleared by the person's next message", async
   f.registry.get(bridgeId)!.status = "idle"; f.status("idle");
   f.advance();
   await f.sessions.pollDesktop();
-  assert.equal(f.sessions.summaryOf(bridgeId)!.status, "Fixed it, tests pass.");
+  const s = f.sessions.summaryOf(bridgeId)!;
+  assert.equal(s.status, "Fixed it, tests pass.");
+  assert.equal(s.attention?.reason, "question");
   await f.sessions.send(bridgeId, "m2", "Yes, open it.");
-  assert.equal(f.sessions.summaryOf(bridgeId)!.status, undefined, "a new turn is under way; its recap is not written yet");
+  const after = f.sessions.summaryOf(bridgeId)!;
+  assert.equal(after.status, undefined, "a new turn is under way; its recap is not written yet");
+  assert.equal(after.attention, null);
+});
+
+test("a bridged turn's result event is pushed as its question", async t => {
+  const f = bridgeFixture(t);
+  fs.appendFileSync(f.file, [
+    bridgeLine(spoken("p1", "fix the leak")),
+    bridgeLine(wrapUp({ recap: "Found it.", ask: "Fix it now?", blocked: true })),
+    bridgeLine(done),
+  ].join(""));
+  f.sessions.log(bridgeId);
+  await f.sessions.pollDesktop();
+  assert.deepEqual(f.sessions.pushEvent(bridgeId, { kind: "result", ok: true }), { kind: "question", ask: "Fix it now?", blocked: true });
+  const plain = { kind: "result" as const, ok: true };
+  assert.deepEqual(f.sessions.pushEvent("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", plain), plain, "a session the app does not own is untouched");
+});
+
+test("the question push says what it is and carries the ask in the person's words", () => {
+  const event = { kind: "question", ask: "Run the tests now?", blocked: true } as const;
+  const s = { id, title: "Leak hunt", cwd: "/synthetic/project" };
+  assert.deepEqual(pushFor(event, s, "ko"), { title: "Leak hunt", body: "답변이 필요합니다 · Run the tests now?", session: id, tag: `ask-${id}` });
+  assert.equal(pushFor(event, s, "en")!.body, "Answer needed · Run the tests now?");
+  assert.equal(expoBody(event, "ko"), "답변이 필요합니다 · Run the tests now?");
+  assert.equal(pushContent(event, "ko", { title: "Leak hunt" }, "x").body, "답변이 필요합니다 · Run the tests now?");
+  assert.equal(expoBody({ kind: "result", ok: true }, "en"), "Work finished", "the old moments read as before");
 });
 
 test("the shared wrap_up rules cap at the app's own lengths and keep only reply buttons", () => {
