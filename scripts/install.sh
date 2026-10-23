@@ -161,7 +161,14 @@ if [ "${CLAUDERIPPLE_NO_SETUP:-}" = "1" ]; then
 fi
 
 say ""
-"$BIN/clauderipple" install
+# `install` exits non-zero when the router does not answer its end-to-end probe. `set -e` already
+# stops here, but without saying why or what to do: the user saw an update that "finished" while
+# the version stayed old, and only `repair` recovered it (#62, #80).
+if ! "$BIN/clauderipple" install; then
+  printf 'error: %s\n' "the router could not be set up." >&2
+  printf '%s\n' "Run again: clauderipple install" "If the router still does not start, run: clauderipple repair" >&2
+  exit 1
+fi
 
 # --- the menu-bar app ---------------------------------------------------------------------------
 # Part of the default install on macOS: it carries the dashboard that opens with the router down

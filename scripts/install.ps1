@@ -162,6 +162,19 @@ if ($env:CLAUDERIPPLE_NO_SETUP -eq '1') {
 
 Write-Host ''
 & $cmd install
+# `install` exits 1 when the router does not answer its end-to-end probe (the scheduled task was
+# started, but no router came up). Windows PowerShell 5.1 leaves that code in $LASTEXITCODE and
+# carries on, so this script used to end 0 — and print "Open the dashboard…" — over a setup that
+# had not brought the router up. An update then looked complete while the version stayed old, and
+# only `repair` recovered it (#62, #80). The failure is inherited, not swallowed.
+$setupCode = $LASTEXITCODE
+if ($setupCode -ne 0) {
+  Write-Host ''
+  Write-Host "The router could not be set up (install exited with code $setupCode)."
+  Write-Host 'Run again: clauderipple.cmd install'
+  Write-Host 'If the router still does not start, run: clauderipple.cmd repair'
+  exit $setupCode
+}
 
 # Part of the default install on Windows: it carries the dashboard that opens with the router down
 # (repair, switch to Claude's own connection), which is the entry point a non-terminal user needs.
