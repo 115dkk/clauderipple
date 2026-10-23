@@ -44,7 +44,7 @@ type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly u
  * their last two messages, and the answer they replied to when the last one is a short "go".
  * Tool results, notices and compaction summaries are not the user.
  */
-export function userNamed(model: string, messages: readonly Said[]): boolean {
+export function userNamed(model: string, messages: readonly Said[], prompts: readonly string[] = []): boolean {
   const words = modelWords(model)
   if (!words.length) return false
   // A notice opens on a tag (`<task-notification>`, `<local-command-stdout>`); a reply the app quotes
@@ -60,7 +60,8 @@ export function userNamed(model: string, messages: readonly Said[]): boolean {
     const answer = messages.slice(0, last).findLast(m => m.role === 'assistant' && m.text.trim())
     if (answer) heard.push(answer.text.slice(-2000))
   }
-  return heard.some(text => words.some(word => says(text, word)))
+  // The prompts as submitted (`heardPrompts`): one typed mid-turn is in no user message above.
+  return [...heard, ...prompts].some(text => words.some(word => says(text, word)))
 }
 
 export type Spawn = { subagentType: string; prompt: string; model?: string }

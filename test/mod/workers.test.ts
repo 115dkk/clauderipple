@@ -123,6 +123,10 @@ test('a model counts as named only when the user said it lately, in English or K
   // A reply the app quotes is the user's: it opens on an HTML comment, not a tag.
   assert.equal(userNamed('gemini-3-8-flash', said('<!-- reply 1 -->\n> 어느 모델로 할까요?\n\n제미나이로 해')), true)
   assert.equal(userNamed('gemini-3-8-flash', said('제미나이로 해', '<!-- reply 1 -->\n> 진행할까요?\n\n아니 그건 됐고 다른 거 해')), true, 'the quoted reply is one of the last two, the earlier message still counts')
+  // A prompt typed while a turn ran is absorbed into that turn and never a user message: the prompts
+  // as submitted are heard too (2026-10-23: "솔한테 돌려" mid-turn went by tier).
+  assert.equal(userNamed('gpt-6-1-sol', said('에이전트 창이 비어', '버그 고쳐'), ['솔한테 버그탐지 돌려']), true)
+  assert.equal(userNamed('gpt-6-1-sol', said('에이전트 창이 비어'), ['이것도 고쳐']), false)
   // A short "go" approves the answer it replies to.
   const proposal = [user('정리해'), { role: 'assistant' as const, text: '제미나이에게 맡기겠습니다. 진행할까요?' }, user('ㄱㄱ')]
   assert.equal(userNamed('gemini-3-8-flash', proposal), true)

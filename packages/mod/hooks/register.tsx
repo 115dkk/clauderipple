@@ -94,6 +94,12 @@ const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const
 const agentOpen = atom({ plugin: 'ripple', key: 'agentOpen' } as const, null)
 const agentRunsOpen = atom({ plugin: 'ripple', key: 'agentRunsOpen' } as const, [])
 const agentsTick = atom({ plugin: 'ripple', key: 'agentsTick' } as const, 0)
+/**
+ * The person's last few prompts as submitted. One typed while a turn runs is absorbed into that turn
+ * and never becomes a user message in `$.session.messages()`, so "솔한테 돌려" said mid-turn was not
+ * heard and the worker went by tier (2026-10-23). userNamed reads these beside the transcript.
+ */
+const heardPrompts = atom({ plugin: 'ripple', key: 'heardPrompts' } as const, [] as string[])
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const ladderOptions = atom({ plugin: 'ripple', key: 'ladderOptions' } as const, null)
@@ -753,7 +759,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   let marker = readMarker(e.prompt)
   // A model the user did not name is not the main chat's to pick: the marker goes, and the tier
   // decides as if it had never been written (worker.ts userNamed).
-  if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !userNamed(marker.name, await $.session.messages())) {
+  if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !userNamed(marker.name, await $.session.messages(), await read($, heardPrompts))) {
     await $.ui.toast(t(language, 'toasts.unnamedModel', { model: marker.name }))
     e = { ...e, prompt: e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
     marker = readMarker(e.prompt)
@@ -1525,6 +1531,7 @@ export const register: Register = on => {
       }
       const human = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
       if (human && !hostCommand) {
+        if (e.text.trim()) await update($, heardPrompts, list => [...list, e.text].slice(-2))
         await markSeen($)
         await endModeIfOver($)
         const noted = await read($, modeNoted)
@@ -1637,7 +1644,7 @@ export const register: Register = on => {
       if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
       const picked = !workflow && !teammate && !e.fork && s.agentAuto !== 'off' ? await sessionPickedModel($, e) : null
-      if (picked && !userNamed(picked, await $.session.messages())) {
+      if (picked && !userNamed(picked, await $.session.messages(), await read($, heardPrompts))) {
         // A worker or model the main chat picked by name, the user never having named it, goes
         // through the ladder like any delegation (userNamed in worker.ts says why).
         await $.ui.toast(t(await read($, lang), 'toasts.unnamedModel', { model: picked }))

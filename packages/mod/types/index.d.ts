@@ -420,6 +420,8 @@ declare module 'claude-code' {
       agentRunsOpen: string[]
       /** Counts the Agents pane's seconds while an agent runs: a write redraws its clocks. */
       agentsTick: number
+      /** The person's last two prompts as submitted, mid-turn ones included (userNamed). */
+      heardPrompts: string[]
       jev: JevState
       routerModels: RouterModel[]
       /** The router's rung choices and presets (GET /api/mod-options), for the quick settings. */
