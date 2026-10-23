@@ -126,7 +126,7 @@ async function runHost(): Promise<void> {
   const cfg = configFromArgs(dir);
   const where = resolveBind(cfg.bind);
   const router = new RouterClient(cfg.adminUrl);
-  const permissions = PermissionQueue.open(path.join(dir, "permissions.json"));
+  const permissions = PermissionQueue.deferred(path.join(dir, "permissions.json"));
   let server: HostServer | null = null;
   const claudePath = findClaude(cfg.claudePath);
   const power = new PowerHold();
@@ -189,7 +189,7 @@ async function runHost(): Promise<void> {
   await host.listen();
   // Recovery writes restart notices and stopped states. A competing foreground process
   // must fail to bind before it can append to the running host's session logs.
-  try { live.recover(); }
+  try { permissions.open(); live.recover(); }
   catch (error) { await host.close(); throw error; }
   power.update(live.busy());
   const relay = cfg.relay

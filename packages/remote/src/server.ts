@@ -210,6 +210,7 @@ export class HostServer {
         this.timers.push(setInterval(() => this.reapStale(), PING_MS));
         this.timers.push(setInterval(() => void this.checkRouter(), 15_000));
         this.timers.push(setInterval(() => this.pollDesktop(), 3000));
+        this.timers.push(setInterval(() => this.opts.sessions.pollQueued(), 1000));
         void this.checkRouter();
         resolve();
       });
@@ -452,7 +453,7 @@ export class HostServer {
       case "set_model":
         try {
           // Stop from the phone also pauses what it queued: the person decides what goes next.
-          if (msg.t === "interrupt") { await s.interrupt(msg.session); s.holdQueue(msg.session); }
+          if (msg.t === "interrupt") { s.holdQueue(msg.session); await s.interrupt(msg.session); }
           else await s.setModel(msg.session, msg.model, msg.effort);
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
         } catch (e) {
@@ -506,7 +507,7 @@ export class HostServer {
       case "queue_resume": s.resumeQueue(op.session); return null;
       case "blob": {
         if (!s.has(op.session)) throw new Error("no such session");
-        const text = s.log(op.session).blob(op.id);
+        const text = s.blob(op.session, op.id);
         if (text === null) throw new Error("no such blob");
         const offset = Math.max(0, op.offset ?? 0);
         const end = Math.min(text.length, offset + BLOB_CHUNK_CHARS);

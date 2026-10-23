@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
-import type { QueuedMessage, SessionEvent } from "./protocol.ts";
+import type { Attachment, QueuedMessage, SessionEvent } from "./protocol.ts";
 
 export const QUEUE_CAP = 20;
 
@@ -16,6 +16,8 @@ export interface QueueAttachment { name: string; mediaType: string; file: string
 export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; error?: string }
 interface Entry {
   items: QueueItem[];
+  /** Attachments taken back to the composer; retained outside the timeline's rebase lifecycle. */
+  editing?: { blob: string; file: string }[];
   /** After the phone's Stop: nothing goes on its own until the person sends or resumes. */
   held: boolean;
   /** The Claude app's session id, when it differs from the phone's; the mod finds its count by it. */
@@ -39,7 +41,7 @@ export class SendQueue {
     for (const [session, entry] of Object.entries(saved)) {
       if (!entry || !Array.isArray(entry.items)) continue;
       const items = entry.items.filter(item => item && typeof item.id === "string" && typeof item.text === "string" && Array.isArray(item.attachments));
-      if (items.length || entry.awaiting) queue.entries.set(session, { items, held: entry.held === true, ...(typeof entry.desktopId === "string" ? { desktopId: entry.desktopId } : {}), ...(entry.awaiting ? { awaiting: entry.awaiting } : {}) });
+      if (items.length || entry.awaiting || entry.editing?.length) queue.entries.set(session, { items, held: entry.held === true, ...(typeof entry.desktopId === "string" ? { desktopId: entry.desktopId } : {}), ...(entry.awaiting ? { awaiting: entry.awaiting } : {}), ...(entry.editing?.length ? { editing: entry.editing } : {}) });
     }
     return queue;
   }
@@ -74,22 +76,40 @@ export class SendQueue {
   }
 
   /** The bytes of a queued attachment, base64, or null when the file is gone. */
-  data(attachment: QueueAttachment): string | null {
+  data(attachment: Pick<QueueAttachment, "file">): string | null {
     try { return fs.readFileSync(path.join(this.blobs, attachment.file), "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
   }
 
-  /** Takes an item out, its attachment files with it. */
-  remove(session: string, id: string): QueueItem | null {
+  /** Delete normally; an edit transfers its files to the composer's retained draft. */
+  remove(session: string, id: string, editing?: Attachment[]): QueueItem | null {
     const entry = this.entries.get(session);
     const index = entry?.items.findIndex(item => item.id === id) ?? -1;
     if (!entry || index < 0) return null;
+    if (editing) this.releaseEditing(session);
     const [item] = entry.items.splice(index, 1);
-    for (const a of item!.attachments) fs.rmSync(path.join(this.blobs, a.file), { force: true });
+    if (editing) {
+      entry.editing = item!.attachments.map((a, index) => ({ blob: editing[index]!.blob, file: a.file }));
+    } else for (const a of item!.attachments) fs.rmSync(path.join(this.blobs, a.file), { force: true });
     if (!entry.items.length) entry.held = false;
     this.prune(session);
     this.save();
     return item!;
+  }
+
+  editingBlob(session: string, blob: string): string | null {
+    const attachment = this.entries.get(session)?.editing?.find(a => a.blob === blob);
+    return attachment ? this.data(attachment) : null;
+  }
+
+  /** The next accepted send uses or abandons the editing draft; taking another draft replaces it. */
+  releaseEditing(session: string): void {
+    const entry = this.entries.get(session);
+    if (!entry?.editing) return;
+    for (const a of entry.editing) fs.rmSync(path.join(this.blobs, a.file), { force: true });
+    delete entry.editing;
+    this.prune(session);
+    this.save();
   }
 
   fail(session: string, id: string, error: string): void {
@@ -151,7 +171,7 @@ export class SendQueue {
 
   private prune(session: string): void {
     const entry = this.entries.get(session);
-    if (entry && !entry.items.length && !entry.awaiting) this.entries.delete(session);
+    if (entry && !entry.items.length && !entry.awaiting && !entry.editing?.length) this.entries.delete(session);
   }
 
   private save(): void {

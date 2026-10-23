@@ -280,7 +280,7 @@ export type ReqOp =
   /** Queue a message for when the running turn ends; attachments are uploads, as for `send`. A
    * session that is not busy takes it at once. Answers `{ queued: true }`; a resent id is a no-op. */
   | { op: "enqueue"; session: string; clientMsgId: string; text: string; attachments?: Attachment[] }
-  /** Take a queued message out (delete, or edit: the phone puts the returned text in its field). */
+  /** Take a queued message out: returns { text, attachments: Attachment[] } for editing. */
   | { op: "queue_remove"; session: string; id: string }
   /** Send a queued message now, into the running turn like a steer; un-holds the queue. */
   | { op: "queue_send"; session: string; id: string }

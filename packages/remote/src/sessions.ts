@@ -76,7 +76,8 @@ interface Live {
   restartAfterTurn: boolean;
   retried: boolean;
   interrupted: boolean;
-  pendingTurns: number;
+  /** Inputs still owed a result, including ones the SDK already read into its own queue. */
+  pendingMessages: SdkUserMessage[];
 }
 
 export interface SessionsOptions {
@@ -486,7 +487,7 @@ export class Sessions {
       // drop messages the phone already had acked.
       if (!r.desktopBridge && r.sdkSessionId && desktopProcess?.bridgeSessionId) {
         const live = this.live.get(r.id);
-        if (!live || (live.pendingTurns === 0 && !BUSY.has(r.state))) {
+        if (!live || (live.pendingMessages.length === 0 && !BUSY.has(r.state))) {
           this.stop(r.id);
           // The app already has this conversation, so a pending handoff would only open it again.
           if (r.desktopHandoff === "pending") { r.desktopHandoff = "attempted"; this.save(); }
@@ -896,12 +897,28 @@ export class Sessions {
     // A Mac (Claude app) session's worker log lives beside its transcript, not under the host's dir.
     // Only a session the host itself drives (a resumed record) keeps the host's own sub log, so a
     // live SDK worker is written and read in the same place.
-    if ((!record || record.desktopBridge) && this.desktop?.has(id)) return this.desktop.subLog(id, sub);
+    const desktopId = record?.sdkSessionId ?? id;
+    if ((!record || record.desktopBridge) && this.desktop?.has(desktopId)) return this.desktop.subLog(desktopId, sub);
     if (!this.records.has(id)) return null;
     const key = `${id}/${sub}`;
     let log = this.logs.get(key);
     if (!log) { log = EventLog.open({ dir: path.join(this.opts.dir, "sessions", id, sub), now: this.now }); this.logs.set(key, log); }
     return log;
+  }
+
+  /** The wire's blob operation is scoped to one session, including its workers and editing draft. */
+  blob(id: string, blob: string): string | null {
+    const data = this.log(id).blob(blob);
+    if (data !== null) return data;
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    return this.desktop?.workerBlob(desktopId, blob) ?? this.sendQueue.editingBlob(id, blob);
+  }
+
+  private attachmentData(id: string, blob: string): string | null {
+    const data = this.blob(id, blob);
+    // A draft can outlive a desktop rebase; copy it into this epoch before releasing its files.
+    if (data !== null) this.log(id).image(data);
+    return data;
   }
 
   recentSources(): { path: string; lastUsed: number; model: string }[] {
@@ -956,20 +973,32 @@ export class Sessions {
     if (!Array.isArray(attachments) || attachments.length > ATTACHMENT_COUNT) throw new Error(`At most ${ATTACHMENT_COUNT} attachments.`);
     // The bytes are copied out of the session's blobs now: a desktop rebase deletes those.
     const files = attachments.map(a => {
-      const data = a && typeof a.blob === "string" ? this.log(id).blob(a.blob) : null;
+      const data = a && typeof a.blob === "string" ? this.blob(id, a.blob) : null;
       if (!data || typeof a.name !== "string" || typeof a.mediaType !== "string") throw new Error("Attachment missing or too large (8 MB limit).");
       return { name: a.name, mediaType: a.mediaType, data };
     });
     if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
+    this.watchQueueRegistry();
     this.opts.onSessions();
     void this.drainQueue(id);
   }
 
-  /** Take a queued message out; its text, for a phone that puts it back in the field. */
-  removeQueued(id: string, itemId: string): { text: string } | null {
-    const item = this.sendQueue.remove(id, itemId);
-    if (item) this.opts.onSessions();
-    return item ? { text: item.text } : null;
+  /** Take text and upload-shaped attachments back to the composer's editing draft. */
+  removeQueued(id: string, itemId: string): { text: string; attachments: Attachment[] } | null {
+    const item = this.sendQueue.items(id).find(item => item.id === itemId);
+    if (!item) return null;
+    const attachments = this.restoreQueuedAttachments(id, item);
+    this.sendQueue.remove(id, itemId, attachments);
+    this.opts.onSessions();
+    return { text: item.text, attachments };
+  }
+
+  private restoreQueuedAttachments(id: string, item: QueueItem): Attachment[] {
+    return item.attachments.map(a => {
+      const data = this.sendQueue.data(a);
+      if (data === null) throw new Error("Attachment missing.");
+      return { blob: this.log(id).image(data), name: a.name, mediaType: a.mediaType };
+    });
   }
 
   /** Send one queued message now, into the running turn like a steer. */
@@ -995,12 +1024,50 @@ export class Sessions {
     for (const id of this.sendQueue.sessions()) void this.drainQueue(id);
   }
 
-  private async drainQueue(id: string): Promise<void> {
+  /** A cheap queue-only tick: registry idle wins over a stale Remote Control state cache. */
+  pollQueued(): void {
+    if (this.shuttingDown) return;
+    const ids = this.sendQueue.sessions();
+    if (!ids.length) { this.closeQueueWatch(); return; }
+    this.watchQueueRegistry();
+    for (const id of ids) {
+      if (this.sendQueue.held(id) || this.draining.has(id)) continue;
+      const r = this.records.get(id);
+      if (r && !r.desktopBridge) { void this.drainQueue(id); continue; }
+      const process = this.desktop?.liveProcess(r?.sdkSessionId ?? id);
+      if (process?.status === "idle") void this.drainQueue(id, true);
+    }
+  }
+
+  private queueWatch: (() => void) | null = null;
+  private queueWatchAttempted = false;
+  private queueWatchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private watchQueueRegistry(): void {
+    if (!this.desktop || this.queueWatchAttempted || this.shuttingDown) return;
+    this.queueWatchAttempted = true;
+    this.queueWatch = this.desktop.watchRegistry(() => {
+      if (this.shuttingDown || this.queueWatchTimer) return;
+      this.queueWatchTimer = setTimeout(() => { this.queueWatchTimer = null; this.pollQueued(); }, 25);
+    }, error => (this.opts.log ?? console.error)(`[queue registry watch] ${String(error)}; one-second polling continues`));
+  }
+
+  private closeQueueWatch(): void {
+    this.queueWatch?.();
+    this.queueWatch = null;
+    this.queueWatchAttempted = false;
+    if (this.queueWatchTimer) clearTimeout(this.queueWatchTimer);
+    this.queueWatchTimer = null;
+  }
+
+  private async drainQueue(id: string, registryIdle = false): Promise<void> {
     if (this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
-    const summary = this.has(id) ? this.summaryOf(id) : undefined;
-    if (!summary || BUSY.has(summary.state)) return;
+    if (!registryIdle) {
+      const summary = this.has(id) ? this.summaryOf(id) : undefined;
+      if (!summary || BUSY.has(summary.state)) return;
+    }
     const awaiting = this.sendQueue.awaiting(id);
     if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now())) return;
     this.draining.add(id);
@@ -1166,7 +1233,7 @@ export class Sessions {
     id = r.id;
     if (this.seen(id, clientMsgId)) return id;
     this.personMessage(id);
-    const converted = attachmentContent(r.cwd, text, attachments, blob => this.log(id).blob(blob));
+    const converted = attachmentContent(r.cwd, text, attachments, blob => this.attachmentData(id, blob));
     this.opts.permissions.denySession(id, "superseded by a new message from the user");
     this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
     this.rememberClientMsgId(id, clientMsgId);
@@ -1181,7 +1248,8 @@ export class Sessions {
     }
     const message: SdkUserMessage = { type: "user", uuid: uuidFrom(clientMsgId), message: { role: "user", content: converted.content }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } };
     if (handoff) handoff.messages.push(message);
-    else if (live) { live.pendingTurns++; live.input.push(message); }
+    else if (live) { live.pendingMessages.push(message); live.input.push(message); }
+    this.sendQueue.releaseEditing(id);
     return id;
   }
 
@@ -1191,7 +1259,7 @@ export class Sessions {
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId, true);
     // Rebase deletes this log's blobs too: validate and retain the bytes before it can run.
-    const converted = attachmentContent(r.cwd, text, attachments, blob => this.log(id).blob(blob));
+    const converted = attachmentContent(r.cwd, text, attachments, blob => this.attachmentData(id, blob));
     if (Array.isArray(converted.content)) {
       const blocks = converted.content;
       const images = blocks.filter(block => block.type === "image");
@@ -1235,6 +1303,7 @@ export class Sessions {
     if (r.state === "running") this.append(id, { kind: "state", state: "running" });
     else this.setState(r, "running");
     this.opts.onSessions();
+    this.sendQueue.releaseEditing(id);
     return id;
   }
 
@@ -1274,8 +1343,13 @@ export class Sessions {
       const size = this.desktop.transcriptSize(transcript);
       if (size === this.bridgeTitleSize.get(r.id)) return;
       this.bridgeTitleSize.set(r.id, size);
-      const title = this.desktop.titleOf(transcript);
-      if (title && title !== r.title) { r.title = title; this.save(); this.opts.onSessions(); }
+      const meta = this.desktop.metadataOf(transcript);
+      if (meta && (meta.title !== r.title || meta.model && meta.model !== r.model)) {
+        r.title = meta.title;
+        if (meta.model) r.model = meta.model;
+        this.save();
+        this.opts.onSessions();
+      }
     } catch (error) {
       (this.opts.log ?? console.error)(`[bridge meta] ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1499,13 +1573,28 @@ export class Sessions {
   private implementPlan(id: string, permId: string): Promise<boolean> {
     const pending = this.planDecisions.get(permId);
     if (pending) return pending;
-    const change = (async () => {
+    const change = this.scheduleModeChange(id, async () => {
+      if (this.opts.permissions.get(permId)?.state !== "pending") return false;
       const r = this.records.get(id)!;
-      await this.setMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits");
-      const approved = this.opts.permissions.decide(permId, "allow") !== null;
-      if (approved) this.clearPermissionAttention(id);
-      return approved;
-    })();
+      const previousMode = r.permissionMode ?? "auto";
+      const previousPrePlanMode = r.prePlanMode;
+      await this.changeMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits");
+      let approved = false;
+      try {
+        approved = this.opts.permissions.decide(permId, "allow") !== null;
+        if (approved) this.clearPermissionAttention(id);
+        return approved;
+      } finally {
+        if (!approved) {
+          // Cancellation/expiry or a failed durable decision can win during the SDK request.
+          // Roll back in this lane before a later user mode change runs.
+          await this.changeMode(id, previousMode);
+          if (previousPrePlanMode === undefined) delete r.prePlanMode;
+          else r.prePlanMode = previousPrePlanMode;
+          this.save();
+        }
+      }
+    });
     this.planDecisions.set(permId, change);
     void change.finally(() => this.planDecisions.delete(permId)).catch(() => {});
     return change;
@@ -1583,21 +1672,27 @@ export class Sessions {
     const handoff = this.handingOff.get(id);
     if (handoff) handoff.messages = [];
     await live.ready;
-    try { await live.query.interrupt(); }
+    try { if (this.live.get(id) === live) await live.query.interrupt(); }
     finally {
-      // SDK Query.interrupt() may retain still_queued input (sdk.d.ts:2850–2857).
-      // No cancelAsyncMessage is exposed: closing the process withdraws that input too.
-      this.stop(id);
-      this.setState(r, "idle");
+      // A result may have retired this query and another send may already have started one.
+      // A late interrupt completion owns only its original query, never the replacement.
+      if (this.live.get(id) === live) {
+        this.stop(id, live);
+        this.setState(r, "idle");
+      }
     }
     this.append(id, { kind: "notice", code: "interrupted" });
   }
 
-  private modeChanges = new Map<string, Promise<void>>();
+  private modeChanges = new Map<string, Promise<unknown>>();
 
   setMode(id: string, mode: PermissionMode): Promise<void> {
+    return this.scheduleModeChange(id, () => this.changeMode(id, mode));
+  }
+
+  private scheduleModeChange<T>(id: string, work: () => Promise<T>): Promise<T> {
     const previous = this.modeChanges.get(id) ?? Promise.resolve();
-    const change = previous.catch(() => {}).then(() => this.changeMode(id, mode));
+    const change = previous.catch(() => {}).then(work);
     this.modeChanges.set(id, change);
     void change.finally(() => { if (this.modeChanges.get(id) === change) this.modeChanges.delete(id); }).catch(() => {});
     return change;
@@ -1650,9 +1745,9 @@ export class Sessions {
     this.opts.onSessions();
   }
 
-  stop(id: string): void {
+  stop(id: string, expected?: Live): void {
     const live = this.live.get(id);
-    if (!live) return;
+    if (!live || (expected && live !== expected)) return;
     this.live.delete(id);
     live.input.close();
     live.abort.abort();
@@ -1661,6 +1756,7 @@ export class Sessions {
 
   shutdown(): void {
     this.shuttingDown = true;
+    this.closeQueueWatch();
     for (const id of this.transcriptWatches.keys()) this.unwatchDesktop(id);
     this.bridgeRunning.clear();
     for (const id of Array.from(this.live.keys())) this.stop(id);
@@ -1696,7 +1792,7 @@ export class Sessions {
       ...(r.sdkSessionId ? { resume: r.sdkSessionId } : {}),
       ...(this.opts.claudePath ? { pathToClaudeCodeExecutable: this.opts.claudePath } : {}),
     };
-    const live: Live = { query: null as unknown as SdkQuery, ready: Promise.resolve(), input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingTurns: 0 };
+    const live: Live = { query: null as unknown as SdkQuery, ready: Promise.resolve(), input, abort, buffer: null, flushTimer: null, current: null, subs: new Map(), turnStart: this.now(), restartAfterTurn: false, retried: false, interrupted: false, pendingMessages: [] };
     this.live.set(r.id, live);
     live.ready = this.opts.router.status().then((s) => {
       // The router's own word on where its proxy and CA are wins over whatever this process inherited.
@@ -1842,16 +1938,14 @@ export class Sessions {
         return;
       }
       case "result": {
-        live.pendingTurns = Math.max(0, live.pendingTurns - 1);
+        live.pendingMessages.shift();
         this.flush(r.id, live);
         live.current = null;
         live.retried = false;
         if (live.interrupted) {
           // The person pressed Stop; the "interrupted" notice already says so. A failed-turn line would not be true.
-          live.interrupted = false;
-          this.setState(r, live.pendingTurns > 0 ? "running" : "idle");
-          if (live.pendingTurns === 0) this.handoff(r);
-          if (live.restartAfterTurn) this.stop(r.id);
+          this.stop(r.id, live);
+          this.setState(r, "idle");
           return;
         }
         const ok = msg.subtype === "success" && msg.is_error !== true;
@@ -1861,10 +1955,18 @@ export class Sessions {
         for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
         const error = ok ? undefined : this.failureText(r.id, String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"))).slice(0, 500);
         this.append(r.id, { kind: "result", ok, ...(error ? { error } : {}), ms: typeof msg.duration_ms === "number" ? msg.duration_ms : this.now() - live.turnStart, turns: typeof msg.num_turns === "number" ? msg.num_turns : 0 });
-        this.setState(r, live.pendingTurns > 0 ? "running" : ok ? "idle" : "error");
-        if (live.pendingTurns === 0) this.handoff(r);
+        if (live.restartAfterTurn) {
+          const messages = live.pendingMessages;
+          this.stop(r.id, live);
+          if (messages.length) {
+            const next = this.start(r);
+            next.pendingMessages.push(...messages);
+            for (const message of messages) next.input.push(message);
+          }
+        }
+        this.setState(r, live.pendingMessages.length > 0 ? "running" : ok ? "idle" : "error");
+        if (live.pendingMessages.length === 0) this.handoff(r);
         void this.refreshFigures(r, true);
-        if (live.restartAfterTurn) this.stop(r.id);
         return;
       }
       default:
@@ -1891,7 +1993,7 @@ export class Sessions {
         this.handingOff.delete(r.id);
         if (transfer.messages.length && !this.shuttingDown) {
           const writer = this.live.get(r.id) ?? this.start(r);
-          writer.pendingTurns += transfer.messages.length;
+          writer.pendingMessages.push(...transfer.messages);
           for (const message of transfer.messages) writer.input.push(message);
         }
       }

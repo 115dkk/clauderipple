@@ -487,6 +487,34 @@ test("a Mac session's worker status follows its result, its notification, a queu
   assert.deepEqual(run([toolUse("e"), sync("e", true)]), [["e", "running"], ["e", "failed"]]);
 });
 
+test("a running worker with a known model emits progress as only its own transcript grows", t => {
+  const f = fixture(t);
+  const worker = "toolu_progress";
+  subagent(f.project, "progress", { toolUseId: worker, model: "sol@high" }, [
+    assistantTurn("sol", "tool_use", [{ type: "tool_use", id: "read", name: "Read", input: {} }]),
+  ]);
+  const file = path.join(f.project, `${id}.jsonl`);
+  fs.writeFileSync(file, line(user) + line({ type: "assistant", message: { content: [{ type: "tool_use", id: worker, name: "Agent", input: { run_in_background: true } }] } }) +
+    line({ type: "user", toolUseResult: { isAsync: true, agentId: "progress" }, message: { content: [{ type: "tool_result", tool_use_id: worker, content: "launched asynchronously" }] } }));
+  f.desktop.list();
+  const events: import("../src/protocol.ts").EventBody[] = [];
+  const imported = f.desktop.importInto(id, path.join(f.root, "opened-timeline"), Date.now);
+  assert.equal(imported.tail().events.find(e => e.kind === "subagent")?.model, "sol");
+  imported.close();
+  const offset = fs.statSync(file).size;
+  const workerFile = path.join(f.project, id, "subagents", "agent-progress.jsonl");
+  fs.appendFileSync(workerFile, line({ isSidechain: true, type: "user", message: { content: [{ type: "tool_result", tool_use_id: "read", content: "read output" }] } }));
+  assert.equal(f.desktop.tail(id, offset, body => events.push(body)), offset, "the parent transcript did not grow");
+  assert.deepEqual(events.map(e => e.kind === "subagent" ? [e.model, e.steps, e.status] : e.kind), [["sol", 1, "running"]]);
+  events.length = 0;
+  f.desktop.tail(id, offset, body => events.push(body));
+  assert.equal(events.length, 0, "an unchanged worker emits nothing");
+  fs.appendFileSync(workerFile, assistantTurn("sol", "end_turn", [{ type: "text", text: "finished" }]));
+  f.desktop.tail(id, offset, body => events.push(body));
+  assert.deepEqual(events.map(e => e.kind === "subagent" ? [e.model, e.steps, e.status] : e.kind), [["sol", 2, "done"]]);
+  assert.equal(f.desktop.subLog(id, `sub-${worker}`)?.tail().events.at(-1)?.kind, "assistant");
+});
+
 test("a Mac session's worker log is readable and grows with its transcript", t => {
   const f = fixture(t);
   subagent(f.project, "grow", { toolUseId: "toolu_grow", model: "sol@high", description: "sol·high · Task" }, [

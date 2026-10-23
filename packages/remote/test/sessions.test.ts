@@ -77,7 +77,37 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
   return { queryFn, options, users, answers, suggestions, spies };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Pick<SessionsOptions, "handoff" | "log"> = {}) {
+/** A query boundary whose input reading, result delivery and control replies are independent. */
+function controlledQueries(readInputs = true) {
+  const queries: { options: Record<string, unknown>; users: SdkUserMessage[]; emit: (event: Record<string, unknown>) => void; closed: boolean; interruptReply: ReturnType<typeof Promise.withResolvers<void>>; modeReply: ReturnType<typeof Promise.withResolvers<void>> | null; modes: string[] }[] = [];
+  const queryFn: QueryFn = params => {
+    let wake = Promise.withResolvers<void>();
+    const events: Record<string, unknown>[] = [];
+    const control = { options: params.options, users: [] as SdkUserMessage[], closed: false,
+      interruptReply: Promise.withResolvers<void>(), modeReply: null as ReturnType<typeof Promise.withResolvers<void>> | null, modes: [] as string[],
+      emit: (event: Record<string, unknown>) => { events.push(event); wake.resolve(); },
+    };
+    queries.push(control);
+    if (readInputs || queries.length > 1) void (async () => { for await (const user of params.prompt) control.users.push(user); })();
+    return {
+      async *[Symbol.asyncIterator]() {
+        while (!control.closed) {
+          const event = events.shift();
+          if (event) { yield event; continue; }
+          await wake.promise;
+          wake = Promise.withResolvers<void>();
+        }
+      },
+      interrupt: () => control.interruptReply.promise,
+      setModel: async () => {},
+      setPermissionMode: async mode => { control.modes.push(mode); await control.modeReply?.promise; },
+      close: () => { control.closed = true; wake.resolve(); },
+    };
+  };
+  return { queryFn, queries };
+}
+
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -133,6 +163,71 @@ test("thinking streams finalize at original block indices without exposing signa
   assert.deepEqual(thoughts.map(e => [e.block, e.text, e.delta === true]), [[2, "thought 2", true], [2, "thought 2 complete", false], [4, "thought 4", true], [4, "thought 4 complete", false]]);
   assert.ok(!JSON.stringify(stored).includes("private signature"));
   assert.deepEqual(reduce(stored).items.filter(i => i.type === "thinking").map(i => i.text), ["thought 2 complete", "thought 4 complete"]);
+});
+
+test("an effort restart carries every accepted input, whether still in the inbox or prefetched by the SDK", async t => {
+  for (const prefetch of [false, true]) {
+    const boundary = controlledQueries(prefetch);
+    const f = fixture(t, {}, { queryFn: boundary.queryFn });
+    const id = await f.create();
+    await waitFor(() => boundary.queries.length === 1);
+    const first = boundary.queries[0]!;
+    first.emit({ type: "system", subtype: "init", session_id: "sdk-restart" });
+    await nextTick();
+    await f.sessions.send(id, "second", "second input");
+    await f.sessions.send(id, "third", "third input");
+    await nextTick();
+    assert.equal(first.users.length, prefetch ? 3 : 0);
+    await f.sessions.setModel(id, "claude-test", "max");
+    first.emit({ type: "result", subtype: "success" });
+    await waitFor(() => boundary.queries.length === 2);
+    const second = boundary.queries[1]!;
+    await waitFor(() => second.users.length === 2);
+    assert.equal(first.closed, true);
+    assert.equal(second.options.resume, "sdk-restart");
+    assert.equal(second.options.effort, "max");
+    assert.deepEqual(second.users.map(u => u.message.content), ["second input", "third input"]);
+    assert.equal(f.sessions.summaryOf(id)?.state, "running");
+    const receipts = MessageReceipts.open(path.join(f.dir, "receipts.json"));
+    for (const key of ["second", "third"]) {
+      assert.equal(receipts.status(`send:${id}:${key}`), "completed");
+      assert.equal(await f.sessions.send(id, key, "resend"), id);
+    }
+    await nextTick();
+    assert.equal(second.users.length, 2, "completed receipts cover the carried input, not a dropped message");
+    assert.equal(f.sessions.log(id).tail().events.filter(e => e.kind === "user").length, 3);
+    second.emit({ type: "result", subtype: "success" });
+    second.emit({ type: "result", subtype: "success" });
+    await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  }
+});
+
+test("a plan approval cancelled during the mode control restores plan mode and its original return mode", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  await f.sessions.setMode(id, "bypassPermissions");
+  await f.sessions.setMode(id, "plan");
+  const query = boundary.queries[0]!;
+  const callback = query.options.canUseTool as CanUseTool;
+  const abort = new AbortController();
+  const answer = callback("ExitPlanMode", { plan: "Implement" }, { signal: abort.signal });
+  const permission = f.permissions.pending(id)[0]!;
+  query.modeReply = Promise.withResolvers<void>();
+  const deciding = f.sessions.decide(id, permission.id, "allow");
+  await waitFor(() => query.modes.length === 3);
+  abort.abort();
+  query.modeReply.resolve();
+  assert.equal(await deciding, false);
+  assert.equal((await answer).behavior, "deny");
+  assert.equal(f.permissions.get(permission.id)?.state, "expired");
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, "plan");
+  assert.deepEqual(query.modes, ["bypassPermissions", "plan", "bypassPermissions", "plan"]);
+  const again = callback("ExitPlanMode", { plan: "Revised" }, { signal: new AbortController().signal });
+  assert.equal(await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow"), true);
+  assert.equal((await again).behavior, "allow");
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, "bypassPermissions");
 });
 
 test("steer keeps the running query; interrupt closes it and withdraws unstarted inputs", async t => {
@@ -737,7 +832,7 @@ test("an idle session takes a queued message at once; Stop holds the queue until
   assert.equal(f.fake.users.length, 1, "a held queue does not go when the turn ends");
   assert.equal(f.sessions.summaryOf(id)?.queueHeld, true);
   // Edit: the text comes back and the item is gone.
-  assert.deepEqual(f.sessions.removeQueued(id, "held-1"), { text: "after the stop" });
+  assert.deepEqual(f.sessions.removeQueued(id, "held-1"), { text: "after the stop", attachments: [] });
   assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
   assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
   f.sessions.enqueue(id, "held-2", "again");
@@ -757,6 +852,41 @@ test("an idle session takes a queued message at once; Stop holds the queue until
   assert.equal(f.fake.users[2]!.message.content, "resumed");
   await waitFor(() => f.permissions.pending(id).length === 1);
   f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "deny");
+});
+
+test("taking a queued message back restores upload-shaped attachments and retains bytes until the edited send", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  const photo = Buffer.from("editing photo").toString("base64");
+  const file = Buffer.from("editing document").toString("base64");
+  const attachments = [
+    { blob: f.sessions.log(id).image(photo), name: "photo.png", mediaType: "image/png" },
+    { blob: f.sessions.log(id).image(file), name: "notes.txt", mediaType: "text/plain" },
+  ];
+  f.sessions.enqueue(id, "edit-queued", "original", attachments);
+  const removed = f.sessions.removeQueued(id, "edit-queued");
+  assert.deepEqual(removed, { text: "original", attachments });
+  assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  assert.equal(fs.readdirSync(path.join(f.dir, "queue")).length, 2, "removing the queue item did not delete its draft files");
+  assert.equal(f.sessions.removeQueued(id, "edit-queued"), null);
+  // A desktop rebase can discard upload blobs after the item was returned to the composer.
+  fs.rmSync(path.join(f.dir, "sessions", id, "blobs"), { recursive: true });
+  assert.equal(f.sessions.blob(id, attachments[0]!.blob), photo);
+  assert.equal(f.sessions.blob(id, attachments[1]!.blob), file);
+  const retained = (await import("../src/queue.ts")).SendQueue.open(f.dir);
+  assert.equal(retained.editingBlob(id, attachments[0]!.blob), photo, "the editing bytes also survive a host restart");
+  await f.sessions.send(id, "edited-new-id", "edited", removed!.attachments);
+  await waitFor(() => f.fake.users.length === 2);
+  const content = f.fake.users[1]!.message.content;
+  assert.ok(Array.isArray(content));
+  assert.equal(content.find(block => block.type === "image")?.source.data, photo);
+  const files = fs.readdirSync(path.join(f.cwd, ".ripple-attachments"));
+  assert.equal(fs.readFileSync(path.join(f.cwd, ".ripple-attachments", files[0]!), "utf8"), "editing document");
+  assert.equal(fs.readdirSync(path.join(f.dir, "queue")).length, 0, "the accepted edited send releases draft files");
+  assert.equal(f.sessions.log(id).blob(attachments[0]!.blob), photo, "the event keeps its own image bytes");
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
 });
 
 test("send-now puts a queued message into the running turn; the queue survives a host restart", { timeout: 4500 }, async t => {

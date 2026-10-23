@@ -159,7 +159,7 @@ function title(value: string): string { return value.trim().replace(/\s+/g, " ")
 
 /** A subagent's running state while its parent transcript is converted; `input` lets a terminal
  * event re-resolve its model once its own transcript has written one. */
-export interface SubagentState { description: string; model: string | null; steps: number; input: RecordValue }
+export interface SubagentState { description: string; model: string | null; steps: number; bytes: number; input: RecordValue }
 /** How to convert one transcript. Omitting it is the top-level session: sidechain records are skipped
  * and no subagent events are produced. The sub pass reads a subagent's own transcript instead. */
 export interface SubagentContext {
@@ -169,7 +169,7 @@ export interface SubagentContext {
   state?: Map<string, SubagentState>;
   /** What a subagent's own transcript reports: the model that answered, its steps, its description
    * (meta.json), and whether it stopped on its own answer (`ended`). */
-  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; ended: boolean };
+  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; ended: boolean; bytes?: number };
 }
 
 /** Unknown records and malformed block shapes never become events. */
@@ -241,7 +241,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       // Only a top-level worker opens its own log; sidechain records never carry their own subagent event.
       if (worker && !sidechain && state && resolve) {
         const info = resolve(b.id, input);
-        const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, input };
+        const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, bytes: info.bytes ?? 0, input };
         state.set(b.id, running);
         bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, status: "running", steps: running.steps });
       }
@@ -518,6 +518,18 @@ export class DesktopSessions {
     return () => watcher.close();
   }
 
+  /** Registry directory notifications are an optional queue wake-up, never a network poll. */
+  watchRegistry(changed: () => void, failed: (error: unknown) => void): (() => void) | null {
+    let watcher: fs.FSWatcher;
+    try {
+      watcher = fs.watch(path.join(path.dirname(this.projects), "sessions"), { persistent: false }, (_event, filename) => {
+        if (filename === null || /^\d+\.json$/.test(filename.toString())) changed();
+      });
+    } catch (error) { if (!missing(error)) failed(error); return null; }
+    watcher.on("error", error => { watcher.close(); failed(error); });
+    return () => watcher.close();
+  }
+
   /** Tail complete transcript lines into an existing host log; never write the transcript. */
   tail(id: string, offset: number, visit: (body: EventBody) => void, sink?: ImageSink): number {
     const source = this.sources.get(id);
@@ -532,14 +544,16 @@ export class DesktopSessions {
       const next = scanLines(fd, size, line => {
         for (const body of transcriptEvents(line, source.summary.cwd, this.opts.summarize, sink, { state, resolve }).bodies) visit(body);
       }, offset);
-      // A worker's meta file, which names its model, is often written just after the line that
-      // started it: say the model once it is known instead of only when the worker ends.
+      // Worker transcripts grow independently of the parent, even once their model is known.
       for (const [toolUseId, running] of state) {
-        if (running.model) continue;
         const info = resolve(toolUseId, running.input);
-        if (!info.model || info.ended) continue;
-        running.model = info.model;
-        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: running.model, status: "running", steps: info.steps });
+        const model = info.model ?? running.model;
+        if (model === running.model && info.steps === running.steps && (info.bytes ?? 0) === running.bytes && !info.ended) continue;
+        running.model = model;
+        running.steps = info.steps;
+        running.bytes = info.bytes ?? 0;
+        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, status: info.ended ? "done" : "running", steps: info.steps });
+        if (info.ended) state.delete(toolUseId);
       }
       return next;
     } finally { fs.closeSync(fd); }
@@ -589,10 +603,10 @@ export class DesktopSessions {
   }
 
   /** What a worker's own transcript reports, for its parent's subagent events. */
-  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; steps: number; description: string; ended: boolean } {
+  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; steps: number; description: string; ended: boolean; bytes?: number } {
     const source = this.sources.get(id);
     const agentId = source ? this.agentMap(id).get(toolUseId) : undefined;
-    let model = "", steps = 0, ended = false, description = "";
+    let model = "", steps = 0, ended = false, description = "", bytes = 0;
     if (source && agentId) {
       const dir = this.subagentsDir(source);
       const meta = record(safeRead(path.join(dir, `agent-${agentId}.meta.json`)));
@@ -604,18 +618,19 @@ export class DesktopSessions {
       model = read.model || model;
       steps = read.steps;
       ended = read.ended;
+      bytes = read.bytes;
     }
-    return { model: model || str(input.model) || null, steps, description, ended };
+    return { model: model || str(input.model) || null, steps, description, ended, bytes };
   }
 
   /** The model that answered (its last assistant record) and how far it got. Tail-bounded read. */
-  private readSubTranscript(file: string): { model: string; steps: number; ended: boolean } {
+  private readSubTranscript(file: string): { model: string; steps: number; ended: boolean; bytes: number } {
     let fd: number;
-    try { fd = this.openUnder(file); } catch { return { model: "", steps: 0, ended: false }; }
+    try { fd = this.openUnder(file); } catch { return { model: "", steps: 0, ended: false, bytes: 0 }; }
     try {
       let model = "", steps = 0;
       let last: RecordValue | null = null;
-      scanLines(fd, fs.fstatSync(fd).size, line => {
+      const bytes = scanLines(fd, fs.fstatSync(fd).size, line => {
         const r = record(line);
         if (!r) return;
         last = r;
@@ -630,7 +645,7 @@ export class DesktopSessions {
       const content = message?.content;
       const ended = ending?.type === "assistant" && ["end_turn", "stop_sequence"].includes(str(message?.stop_reason)) &&
         !(Array.isArray(content) && content.some(b => object(b)?.type === "tool_use"));
-      return { model, steps, ended };
+      return { model, steps, ended, bytes };
     } finally { fs.closeSync(fd); }
   }
 
@@ -656,6 +671,16 @@ export class DesktopSessions {
     const log = this.importSub(id, file, dir);
     this.subImports.set(key, { size: stat.size, mtime: stat.mtimeMs, log, dir });
     return log;
+  }
+
+  /** Blob ids in an opened worker page belong to that cached worker log, not the parent. */
+  workerBlob(id: string, blob: string): string | null {
+    for (const [key, cached] of this.subImports) {
+      if (!key.startsWith(`${id}::`)) continue;
+      const data = cached.log.blob(blob);
+      if (data !== null) return data;
+    }
+    return null;
   }
 
   private importSub(id: string, file: string, dir: string): EventLog {
@@ -769,13 +794,14 @@ export class DesktopSessions {
   permissionMode(id: string): PermissionMode | undefined { return this.sources.get(id)?.summary.permissionMode; }
 
   /** The transcript's current title (a Mac rename lands as a custom-title line), without liveness checks. Read-only. */
-  titleOf(id: string): string | null {
+  metadataOf(id: string): Pick<SessionSummary, "title" | "model"> | null {
     const source = this.sources.get(id);
     if (!source) return null;
     let stat: fs.Stats;
     try { stat = fs.lstatSync(source.file); } catch (error) { if (!missing(error)) throw error; return null; }
     if (!stat.isFile()) return null;
-    return this.readSummary(id, source.file, stat)?.summary.title ?? null;
+    const summary = this.readSummary(id, source.file, stat)?.summary;
+    return summary ? { title: summary.title, model: summary.model } : null;
   }
 
   continuation(id: string): { summary: SessionSummary; open: boolean } {
@@ -810,8 +836,13 @@ export class DesktopSessions {
       // the parent, is done: without this it would read "running" for good.
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
-        if (info.ended) log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+        if (info.ended) {
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+          state.delete(toolUseId);
+        }
       }
+      // An attached timeline starts tailing after this import, not from the worker's launch line.
+      this.tailSubs.set(id, state);
       importing = false;
       const figures = this.opts.figures?.(id);
       if (figures) log.append({ kind: "figures", figures });

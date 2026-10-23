@@ -68,13 +68,16 @@ test("app group order, recency, exact titles and unread IDs (unless focused sinc
   assert.equal(sidebarState({ ...joined[1]!, state: "idle", background: true }), "running");
   assert.equal(sidebarState({ ...joined[1]!, state: "idle", tasks: 2 }), "read");
 });
-test("mtime cache obeys three-second gate; archive index hides rows and SDK IDs join phone handoffs", t => {
+test("mtime cache obeys three-second gate; archived rows reach the phone and SDK IDs join phone handoffs", t => {
   const f = fixture(t); f.sidebar.read();
   f.session(id, 300, { title: "새 이름", isArchived: true });
   assert.equal(f.sidebar.read().sessions.get(id)?.title, "앱 제목 c");
   f.write(`claude-code-sessions/${account}/${org}/archived-sessions.idx`, { v: 1, archived: [`local_${other}`] });
   f.advance();
-  assert.deepEqual(f.sidebar.join([summary(id), summary(other)], s => s), []);
+  const archived = f.sidebar.join([summary(id), { ...summary(other, "host"), desktopBridge: true }], s => s);
+  assert.deepEqual(archived.map(s => [s.id, s.archived]), [[id, true], [other, true]]);
+  assert.equal(archived[0]?.title, "새 이름");
+  assert.equal(f.sidebar.join([{ ...summary("host-id", "host"), desktopBridge: true }], () => id)[0]?.archived, true);
   f.session(id, 400, { title: "휴대폰 전달" }); f.advance();
   const joined = f.sidebar.join([summary("host-id", "host")], () => id);
   assert.equal(joined[0]?.id, "host-id"); assert.equal(joined[0]?.group, "사용자 그룹"); assert.equal(joined[0]?.title, "휴대폰 전달");

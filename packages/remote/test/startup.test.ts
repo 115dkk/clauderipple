@@ -8,6 +8,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { EventLog } from "../src/eventlog.ts";
+import { PermissionQueue } from "../src/permissions.ts";
+import { Sessions } from "../src/sessions.ts";
 
 const exec = promisify(execFile);
 const main = fileURLToPath(new URL("../src/main.ts", import.meta.url));
@@ -31,7 +33,7 @@ for (const script of [cli, main]) for (const flag of ["--help", "-h"]) {
   });
 }
 
-test("a foreground host that cannot bind leaves session logs and records untouched", async t => {
+test("a host that cannot bind leaves pending permissions untouched for the real restart's expiry event", async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-startup-"));
   const occupied = http.createServer((_req, res) => res.end("occupied"));
   await new Promise<void>(resolve => occupied.listen(0, "127.0.0.1", resolve));
@@ -44,8 +46,13 @@ test("a foreground host that cannot bind leaves session logs and records untouch
   const home = path.join(dir, "remote");
   const id = "test-session";
   const sessionDir = path.join(home, "sessions", id);
+  const permissionsFile = path.join(home, "permissions.json");
+  const permissions = PermissionQueue.open(permissionsFile);
+  const pending = permissions.request({ session: id, tool: "Bash", title: "", summary: "fixture", input: {} }).record;
+  const permissionBytes = fs.readFileSync(permissionsFile);
   const log = EventLog.open({ dir: sessionDir });
   log.append({ kind: "state", state: "running" });
+  log.append({ kind: "permission", id: pending.id, tool: "Bash", title: "", summary: "fixture", input: "fixture", canAlways: false });
   log.close();
   const records = JSON.stringify([{ id, state: "running", cwd: dir, title: "test", model: "test", effort: null, createdAt: 1, updatedAt: 1 }]);
   fs.writeFileSync(path.join(home, "sessions.json"), records);
@@ -61,4 +68,17 @@ test("a foreground host that cannot bind leaves session logs and records untouch
   assert.equal(fs.readFileSync(path.join(home, "sessions.json"), "utf8"), records);
   assert.deepEqual(fs.readdirSync(sessionDir).sort(), [...before.keys()].sort());
   for (const [name, bytes] of before) assert.deepEqual(fs.readFileSync(path.join(sessionDir, name)), bytes, name);
+  assert.deepEqual(fs.readFileSync(permissionsFile), permissionBytes, "the losing process did not expire the live host's approval");
+  const reopened = PermissionQueue.open(permissionsFile);
+  assert.deepEqual(reopened.expiredOnOpen.map(p => p.id), [pending.id]);
+  const restarted = new Sessions({ dir: home, permissions: reopened,
+    router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
+    queryFn: () => { throw new Error("recovery never starts a query"); }, onEvent() {}, onSessions() {},
+  });
+  try {
+    restarted.recover();
+    const expired = restarted.log(id).tail().events.find(e => e.kind === "permission_decided");
+    assert.ok(expired?.kind === "permission_decided");
+    assert.deepEqual([expired.id, expired.decision, expired.reason], [pending.id, "expired", "host_restarted"]);
+  } finally { restarted.shutdown(); }
 });
