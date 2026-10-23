@@ -2137,6 +2137,38 @@ function claudePreferButton(name, id, disabled) {
   return button;
 }
 
+/**
+ * The same pool controls for stored logins and API keys; borrowed logins omit these.
+ * @param {{preferred?: boolean, paused?: boolean, state?: string, cooldownSeconds?: number}} account
+ * @param {(change: {preferred?: boolean, paused?: boolean, clearCooldown?: true}) => Promise<unknown>} patch
+ */
+function accountPoolActions(account, patch) {
+  const actions = [];
+  const add = (text, change) => {
+    const button = el("button", { class: "btn secondary compact", type: "button", text });
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try { await patch(change); }
+      catch (error) { toast(t("common.actionFailed"), true, error.message); }
+      finally { button.disabled = false; }
+    });
+    actions.push(button);
+  };
+  add(t(account.preferred ? "providers.preferClear" : "providers.preferAction"), { preferred: !account.preferred });
+  add(t(account.paused ? "providers.chatgptResume" : "providers.chatgptPause"), { paused: !account.paused });
+  if (account.state === "cooling" || account.cooldownSeconds > 0) add(t("providers.chatgptClearCooldown"), { clearCooldown: true });
+  return actions;
+}
+
+/** Runtime use is independent of first place, pauses and cooldowns. */
+function accountPoolBadges(account) {
+  return [
+    account.preferred ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null,
+    chatgptStateBadge(account),
+    account.inUse && account.state && account.state !== "ready" ? el("span", { class: "badge ok", text: t("providers.chatgptInUse") }) : null,
+  ];
+}
+
 function renderClaudeAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
   // A stored account the router recognises as the current login (left over from an earlier setup)
@@ -2149,7 +2181,6 @@ function renderClaudeAccountRows(target, data, name, generation) {
   if (preferredIndex > 0) stored.unshift(...stored.splice(preferredIndex, 1));
   const leader = preferredIndex >= 0 ? stored[0].id : data.current ? "current" : stored[0] && stored[0].id;
   const choosable = (data.current ? 1 : 0) + stored.length > 1;
-  const firstBadge = (id) => (choosable && id === leader ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null);
   const rows = [];
   let removeOld = null;
   if (duplicates.length) {
@@ -2171,7 +2202,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
       duplicates.length ? hint(t("providers.anthropicOldSignIn")) : null,
       currentActions.length ? el("div", { class: "account-card-actions" }, currentActions) : null,
     ]),
-    el("div", { class: "account-card-badges" }, [firstBadge("current"), el("span", { class: "badge ok", text: t("providers.anthropicCurrent") })]),
+    el("div", { class: "account-card-badges" }, accountPoolBadges({ ...data.current, preferred: choosable && leader === "current" })),
   ]) : null;
   if (currentRow && preferredIndex < 0) rows.push(currentRow);
   for (const account of stored) {
@@ -2189,8 +2220,10 @@ function renderClaudeAccountRows(target, data, name, generation) {
       try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshClaudeAccountPanel(name); }
       catch (error) { toast(t("common.actionFailed"), true, error.message); }
     });
-    const actions = [rename, remove];
-    if (choosable && account.id !== leader) actions.unshift(claudePreferButton(name, account.id, unavailable));
+    const actions = [...accountPoolActions(account, async (change) => {
+      await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(change) });
+      await refreshClaudeAccountPanel(name);
+    }), rename, remove];
     if (unavailable) {
       const reauth = el("button", { class: "btn secondary compact", type: "button", text: t("providers.reauthAction") });
       reauth.addEventListener("click", () => openClaudeAccountConsent(name));
@@ -2201,7 +2234,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
         el("strong", { text: claudeAccountLabel(account) }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp")),
         el("div", { class: "account-card-actions" }, actions),
       ]),
-      el("div", { class: "account-card-badges" }, [firstBadge(account.id), el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") })]),
+      el("div", { class: "account-card-badges" }, accountPoolBadges({ ...account, state: account.state || (unavailable ? "needs-login" : "ready"), preferred: account.preferred || (choosable && account.id === leader) })),
     ]));
     if (currentRow && rows.length === 1 && preferredIndex >= 0) rows.push(currentRow);
   }
@@ -2289,11 +2322,11 @@ function durationText(seconds) {
 }
 
 function chatgptStateBadge(account) {
-  if (account.state === "paused") return el("span", { class: "badge", text: t("providers.chatgptPaused") });
+  if (account.paused || account.state === "paused") return el("span", { class: "badge", text: t("providers.chatgptPaused") });
   if (account.state === "needs-login" || account.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.anthropicReauth") });
   if (account.state === "needs-verification") return el("span", { class: "badge warn", text: t("providers.googleVerifyNeeded") });
   if (account.state === "cooling") return el("span", { class: "badge warn", text: t("pool.coolingFor", { duration: durationText(account.cooldownSeconds) }) });
-  return el("span", { class: "badge ok", text: account.active ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
+  return el("span", { class: "badge ok", text: account.inUse ? t("providers.chatgptInUse") : t("providers.chatgptStandby") });
 }
 
 async function patchChatgptAccount(name, id, change) {
@@ -2314,14 +2347,13 @@ function renderChatgptAccountRows(target, data, name, generation) {
       reauth.addEventListener("click", () => void startChatgptLogin(() => void refreshChatgptAccountPanel(name), true));
       if (own) actions.push(reauth);
     }
-    if (account.state === "cooling") {
+    if (!own && (account.state === "cooling" || account.cooldownSeconds > 0)) {
       const now = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });
       now.addEventListener("click", () => void patchChatgptAccount(name, account.id, { clearCooldown: true }));
       actions.push(now);
     }
     if (own) {
-      const pause = el("button", { class: "btn secondary compact", type: "button", text: account.paused ? t("providers.chatgptResume") : t("providers.chatgptPause") });
-      pause.addEventListener("click", () => void patchChatgptAccount(name, account.id, { paused: !account.paused }));
+      actions.push(...accountPoolActions(account, (change) => patchChatgptAccount(name, account.id, change)));
       const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
       rename.addEventListener("click", () => {
         const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
@@ -2334,12 +2366,12 @@ function renderChatgptAccountRows(target, data, name, generation) {
         try { await api(`/api/chatgpt-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshChatgptAccountPanel(name); }
         catch (error) { toast(t("common.actionFailed"), true, error.message); }
       });
-      actions.push(pause, rename, remove);
+      actions.push(rename, remove);
     }
     const quota = chatgptQuotaText(account.quota);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.planType || null].filter(Boolean).join(" · ");
     const help = account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : own ? t("providers.chatgptOwnHelp") : t("providers.chatgptCodexHelp");
-    return el("article", { class: `cell account-card${account.active ? " current" : ""}` }, [
+    return el("article", { class: `cell account-card${account.inUse ? " current" : ""}` }, [
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
@@ -2347,7 +2379,7 @@ function renderChatgptAccountRows(target, data, name, generation) {
         hint(help),
         actions.length ? el("div", { class: "account-card-actions" }, actions) : null,
       ]),
-      el("div", { class: "account-card-badges" }, [chatgptStateBadge(account)]),
+      el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
   });
   target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.chatgptNoAccounts") })]));
@@ -2421,13 +2453,7 @@ function renderGoogleAccountRows(target, data, name, generation) {
       recheck.addEventListener("click", () => { recheck.disabled = true; void recheckGoogleVerification(name, account.id); });
       actions.push(link, recheck);
     }
-    if (account.state === "cooling") {
-      const now = el("button", { class: "btn secondary compact", type: "button", text: t("providers.chatgptClearCooldown") });
-      now.addEventListener("click", () => void patchGoogleAccount(name, account.id, { clearCooldown: true }));
-      actions.push(now);
-    }
-    const pause = el("button", { class: "btn secondary compact", type: "button", text: account.paused ? t("providers.chatgptResume") : t("providers.chatgptPause") });
-    pause.addEventListener("click", () => void patchGoogleAccount(name, account.id, { paused: !account.paused }));
+    actions.push(...accountPoolActions(account, (change) => patchGoogleAccount(name, account.id, change)));
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
     rename.addEventListener("click", () => {
       const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
@@ -2440,16 +2466,16 @@ function renderGoogleAccountRows(target, data, name, generation) {
       try { await api(`/api/google-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshGoogleAccountPanel(name); }
       catch (error) { toast(t("common.actionFailed"), true, error.message); }
     });
-    actions.push(pause, rename, remove);
+    actions.push(rename, remove);
     const detail = [account.email && account.email !== account.label ? account.email : null, account.projectId ? t("providers.googleProject", { id: account.projectId }) : null].filter(Boolean).join(" · ");
-    return el("article", { class: `cell account-card${account.active ? " current" : ""}` }, [
+    return el("article", { class: `cell account-card${account.inUse ? " current" : ""}` }, [
       el("div", { class: "cell-text account-card-copy" }, [
         el("strong", { text: account.label }),
         detail ? el("span", { class: "small", text: detail }) : null,
         hint(account.state === "needs-login" || account.state === "quarantined" ? t("providers.chatgptReauthHelp") : account.state === "needs-verification" ? t("providers.googleVerifyHelp") : t("providers.googleOwnHelp")),
         el("div", { class: "account-card-actions" }, actions),
       ]),
-      el("div", { class: "account-card-badges" }, [chatgptStateBadge(account)]),
+      el("div", { class: "account-card-badges" }, accountPoolBadges(account)),
     ]);
   });
   target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.googleNoAccounts") })]));
@@ -2514,8 +2540,8 @@ function chatgptAccountsPanel(name) {
 
 // ---- API-key accounts (openai-compatible / anthropic-compatible) ---------------------------------
 //
-// One key lives in `headers` alone. Two or more are `credentials`, each a full header set, with
-// `headers` kept equal to the first: probing, model discovery and the usage reader all read `headers`.
+// An unnamed key without flags lives in `headers` alone. Named/flagged keys and pools retain
+// `credentials`, with `headers` equal to the first for probing, model discovery and usage readers.
 
 /** The inline add/edit form that is open: `{ provider, id }`, `id` null while adding. */
 let keyForm = null;
@@ -2547,9 +2573,9 @@ function keyPool(provider) {
   if (Array.isArray(provider.credentials) && provider.credentials.length) return provider.credentials;
   return provider.headers ? [{ id: "default", headers: provider.headers }] : [];
 }
-/** Back into the config shape: one key is `headers` only, two or more add `credentials`. */
+/** Keep a single key's identity when it has a label or explicit pool flags. */
 function writeKeyPool(provider, pool) {
-  if (pool.length > 1) {
+  if (pool.length > 1 || (pool[0] && (pool[0].label || pool[0].preferred !== undefined || pool[0].paused !== undefined))) {
     provider.credentials = pool;
     provider.headers = { ...pool[0].headers };
     return;
@@ -2569,16 +2595,16 @@ function newKeyId(pool) {
 }
 
 function keyStateBadge(name, credential, single) {
-  // The router reports per-key state only for a pool; one key is the provider's own verdict.
-  if (single) {
-    const verdict = providerConnection(name);
-    return el("span", { class: `badge ${verdict.level}`, text: verdict.level === "ok" ? t("providers.keyStateReady") : verdict.text });
-  }
+  if (credential.paused) return el("span", { class: "badge", text: t("providers.chatgptPaused") });
   const entry = ((status && status.credentials && status.credentials[name]) || []).find((item) => item.id === credential.id);
-  if (!entry) return null;
-  if (entry.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.keyStateRejected") });
-  if (entry.state === "cooling") return el("span", { class: "badge warn", text: t("providers.keyStateCooling", { minutes: Math.max(1, Math.ceil((entry.cooldownSeconds || 0) / 60)) }) });
-  return el("span", { class: "badge ok", text: t("providers.keyStateReady") });
+  if (entry) {
+    if (entry.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.keyStateRejected") });
+    if (entry.state === "cooling") return el("span", { class: "badge warn", text: t("providers.keyStateCooling", { minutes: Math.max(1, Math.ceil((entry.cooldownSeconds || 0) / 60)) }) });
+    return el("span", { class: "badge ok", text: t("providers.keyStateReady") });
+  }
+  if (!single) return null;
+  const verdict = providerConnection(name);
+  return el("span", { class: `badge ${verdict.level}`, text: verdict.level === "ok" ? t("providers.keyStateReady") : verdict.text });
 }
 
 function keyUsageText(name, index) {
@@ -2600,6 +2626,25 @@ async function saveKeyPool(next) {
     toast(t("common.saveFailed"), true, error.message);
     return false;
   }
+}
+
+/** Pool flags are saved together so first place is unique within this provider. */
+async function patchKeyAccount(name, id, change) {
+  if (change.clearCooldown) {
+    await api("/api/credentials/clear-cooldown", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: name, id }) });
+    await refreshKeyAccountPanel(name);
+    return;
+  }
+  const next = clone(await latestConfig());
+  const provider = next.providers[name];
+  if (!provider) throw new Error(t("common.loadFailed"));
+  const pool = clone(keyPool(provider));
+  const entry = pool.find((credential) => credential.id === id);
+  if (!entry) throw new Error(t("common.loadFailed"));
+  if (change.preferred) for (const credential of pool) credential.preferred = false;
+  Object.assign(entry, change);
+  writeKeyPool(provider, pool);
+  await saveKeyPool(next);
 }
 
 /** Adds a key (`id` null) or changes one's label and key; an empty key field keeps the key. */
@@ -2647,9 +2692,8 @@ async function removeKeyAccount(name, id, label) {
   await saveKeyPool(next);
 }
 
-/** The inline form, in place of "Add" or of the row being edited. One key has no name to keep. */
+/** The inline form, in place of "Add" or of the row being edited. */
 function keyAccountForm(name, credential, index, pool) {
-  const named = credential === null || pool.length > 1;
   const labelInput = el("input", { maxlength: "60", placeholder: t("providers.keyAccountNamePlaceholder") });
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: credential ? t("providers.keyKeepCurrent") : t("providers.keyPlaceholder") });
   // The page redraws under the form (a probe finishing, a save elsewhere), so what is typed lives in
@@ -2665,17 +2709,17 @@ function keyAccountForm(name, credential, index, pool) {
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
   const save = el("button", { class: "btn compact", type: "button", text: t("common.save") });
-  save.addEventListener("click", () => void saveKeyAccount(name, credential ? credential.id : null, named ? labelInput.value : null, keyInput.value, save));
+  save.addEventListener("click", () => void saveKeyAccount(name, credential ? credential.id : null, labelInput.value, keyInput.value, save));
   const cancel = el("button", { class: "btn secondary compact", type: "button", text: t("common.cancel") });
   cancel.addEventListener("click", () => { keyForm = null; renderProviderDetail(); });
   for (const input of [labelInput, keyInput]) input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.isComposing) save.click();
     if (event.key === "Escape") cancel.click();
   });
-  queueMicrotask(() => (named && draft.focus !== "key" ? labelInput : keyInput).focus());
+  queueMicrotask(() => (draft.focus !== "key" ? labelInput : keyInput).focus());
   return el("div", { class: "cell key-account-form" }, [
     el("div", { class: "cell-text" }, [
-      named ? inputRow(t("providers.keyAccountName"), labelInput) : null,
+      inputRow(t("providers.keyAccountName"), labelInput),
       el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.keyAccountKey") }), el("div", { class: "key-control" }, [keyInput, showKey])]),
       el("div", { class: "actions end" }, [cancel, save]),
     ]),
@@ -2688,6 +2732,9 @@ function keyAccountRow(name, credential, index, pool) {
   const label = keyLabel(credential, index);
   const key = keyOfHeaders(credential.headers);
   const usage = keyUsageText(name, index);
+  const runtime = ((status && status.credentials && status.credentials[name]) || []).find((item) => item.id === credential.id);
+  const account = { ...runtime, ...credential };
+  const actions = accountPoolActions(account, (change) => patchKeyAccount(name, credential.id, change));
   const edit = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
   edit.addEventListener("click", () => { keyForm = { provider: name, id: credential.id }; renderProviderDetail(); });
   // The last key goes with the provider itself (개요 → 프로바이더 삭제), so it has no 삭제 here.
@@ -2698,9 +2745,13 @@ function keyAccountRow(name, credential, index, pool) {
       el("strong", { text: label }),
       key ? el("span", { class: "small mono", text: maskKey(key) }) : null,
       usage ? el("p", { class: "small account-quota", text: usage }) : null,
-      el("div", { class: "account-card-actions" }, [edit, remove]),
+      el("div", { class: "account-card-actions" }, [...actions, edit, remove]),
     ]),
-    el("div", { class: "account-card-badges" }, [keyStateBadge(name, credential, single)]),
+    el("div", { class: "account-card-badges" }, [
+      account.preferred ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null,
+      account.inUse ? el("span", { class: "badge ok", text: t("providers.chatgptInUse") }) : null,
+      keyStateBadge(name, account, single),
+    ]),
   ]);
 }
 
