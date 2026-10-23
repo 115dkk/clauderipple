@@ -441,9 +441,22 @@ export class Sessions {
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
       if (!this.desktop) continue;
-      // A record the host once resumed, now open in the desktop app with Remote Control.
-      if (!r.desktopBridge && !this.live.has(r.id) && r.sdkSessionId && this.desktop.has(r.sdkSessionId) && this.desktop.liveProcess(r.sdkSessionId)?.bridgeSessionId) {
-        try { this.rebaseDesktop(r); } catch (error) { this.bridgeFailure(r.id, error); continue; }
+      const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
+      // The Claude app worker has Remote Control on for a conversation the host is still driving
+      // (a phone session, or one the phone resumed): the app is the writer now. Stop our own query
+      // and follow the app's transcript (#82) — together they would append to one transcript and
+      // the phone would follow neither. A query still owed a turn finishes first: stopping it would
+      // drop messages the phone already had acked.
+      if (!r.desktopBridge && r.sdkSessionId && desktopProcess?.bridgeSessionId) {
+        const live = this.live.get(r.id);
+        if (!live || (live.pendingTurns === 0 && !BUSY.has(r.state))) {
+          this.stop(r.id);
+          // The app already has this conversation, so a pending handoff would only open it again.
+          if (r.desktopHandoff === "pending") { r.desktopHandoff = "attempted"; this.save(); }
+          if (this.desktop.has(r.sdkSessionId)) {
+            try { this.rebaseDesktop(r); } catch (error) { this.bridgeFailure(r.id, error); continue; }
+          }
+        }
       }
       if (!r.desktopBridge) continue;
       try {
@@ -456,7 +469,7 @@ export class Sessions {
           }
         }, data => this.log(r.id).image(data));
         this.save();
-        this.refreshBridgeTitle(r);
+        this.refreshBridgeMeta(r);
         const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
         this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
         if (process?.bridgeSessionId) this.ensureBridge(r.id, process.bridgeSessionId);
@@ -604,7 +617,10 @@ export class Sessions {
     const { summary: s, open } = this.desktop.continuation(id);
     if (open && !bridgeMode) throw new Error(DESKTOP_BLOCKED);
     const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
-    const r: SessionRecord = { id, sdkSessionId: id, cwd: s.cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
+    // The app's registry records the folder the conversation runs in now; the transcript's first
+    // line keeps the one it started in (a conversation moved folders, issue #82).
+    const cwd = this.desktop.liveProcess(id)?.cwd ?? s.cwd;
+    const r: SessionRecord = { id, sdkSessionId: id, cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
     if (bridgeMode) { r.desktopBridge = true; r.transcriptOffset = this.desktop.transcriptSize(id); }
     Object.assign(r, this.desktopModels.get(id));
     this.desktopModels.delete(id);
@@ -1049,21 +1065,24 @@ export class Sessions {
   }
 
   /**
-   * A rename on the Mac lands in the transcript as a custom-title line. The session list and
-   * pushes read the record title, so refresh it when the transcript grew since the last check.
-   * Read-only: never writes the transcript, and a failed read only logs.
+   * A rename on the Mac lands in the transcript as a custom-title line, and a conversation moved to
+   * another folder updates the app's registry rather than the transcript's first line. The session
+   * list, pushes and relative paths read the record, so refresh both when they change. Read-only:
+   * never writes the transcript, and a failed read only logs.
    */
-  private refreshBridgeTitle(r: SessionRecord): void {
+  private refreshBridgeMeta(r: SessionRecord): void {
     if (!this.desktop) return;
     try {
       const transcript = r.sdkSessionId ?? r.id;
+      const cwd = this.desktop.liveProcess(transcript)?.cwd;
+      if (cwd && cwd !== r.cwd) { r.cwd = cwd; this.save(); this.opts.onSessions(); }
       const size = this.desktop.transcriptSize(transcript);
       if (size === this.bridgeTitleSize.get(r.id)) return;
       this.bridgeTitleSize.set(r.id, size);
       const title = this.desktop.titleOf(transcript);
       if (title && title !== r.title) { r.title = title; this.save(); this.opts.onSessions(); }
     } catch (error) {
-      (this.opts.log ?? console.error)(`[bridge title] ${error instanceof Error ? error.message : String(error)}`);
+      (this.opts.log ?? console.error)(`[bridge meta] ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
