@@ -24,7 +24,7 @@ import { renderAlert } from './ui/alerts'
 import { PHONE_QUEUE_ROWS, renderPhoneQueue } from './ui/queue'
 import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
-import { renderAgents, talkOf } from './ui/agents'
+import { renderAgents, renderAgentsFallback, talkOf } from './ui/agents'
 import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
@@ -1460,6 +1460,11 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   return { ...e, effort: saving && EFFORTS.indexOf(p.effort) > EFFORTS.indexOf('medium') ? 'medium' : p.effort }
 }
 
+async function agentsRenderFailure($: EngineInterface, e: RenderInput, error: unknown): Promise<RenderElement> {
+  await report($, 'agents render', error)
+  return renderAgentsFallback($.ui.resolve(e), await frameOf($, e), await read($, agents), reason(error), { ...agentsActions($), close: () => $.ui.close({ id: AGENTS_PANE }) }, await read($, agentOpen) !== null) as RenderElement
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -1876,7 +1881,7 @@ export const register: Register = on => {
       return renderLog($.ui.resolve(e), await frameOf($, e), { rows: await read($, requests), mineOnly: await read($, onlySession), judges: await read($, judgeRuns) }, { toggleScope: async () => { await update($, onlySession, value => !value); await refreshRouter($) } }) as RenderElement
     } catch (error) { await report($, 'log render', error); return next(e) }
   })
-  on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e, next) => {
+  on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e) => {
     try {
       startTimers($)
       const frame = await frameOf($, e)
@@ -1884,7 +1889,8 @@ export const register: Register = on => {
       await read($, agentsTick)
       const id = await read($, agentOpen)
       const open = id === null ? undefined : { id, talk: await agentTalk($, id), runsOpen: await read($, agentRunsOpen) }
+      if (open && 'deny' in open.talk) throw new Error(open.talk.deny)
       return renderAgents($.ui.resolve(e), frame, { agents: await read($, agents), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
-    } catch (error) { await report($, 'agents render', error); return next(e) }
-  })
+    } catch (error) { return agentsRenderFailure($, e, error) }
+  }).catch(($, e, next) => agentsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

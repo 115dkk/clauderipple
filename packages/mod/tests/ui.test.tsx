@@ -5,7 +5,7 @@
 // plugin's may not). The engine validates every tree against the surface's element table, and
 // presses reach the callbacks below, so these check both the trees and their wiring.
 
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, RenderElement, RenderPropsOf } from 'claude-code'
 
@@ -700,6 +700,76 @@ test('the Agents pane draws forty agents at once, and a record missing its title
       await one.unmount()
     }
   }
+})
+
+test('the Agents pane draws forty mixed real-world records on every surface, skin and theme', async ($, on) => {
+  const by = ['marker', 'session', 'judge', 'haiku', 'jev', 'model', 'default', 'tier'] as const
+  const states = ['running', 'waiting', 'done', 'failed', 'killed'] as const
+  const mixed: AgentRec[] = Array.from({ length: 40 }, (_, i): AgentRec => ({
+    ...AGENTS[0]!, id: 'mixed-' + i, description: '에이전트 표시 오류 수정 ' + i,
+    state: states[i % states.length]!,
+    model: i % 3 === 0 ? 'gemini-3.8-flash@high' : i % 3 === 1 ? 'gpt-6.1-sol@medium' : undefined,
+    type: i % 3 === 0 ? 'ripple:auto' : i % 3 === 1 ? 'general-purpose' : undefined,
+    answeredBy: undefined, provider: i % 3 === 0 ? undefined : 'chatgpt', effort: i % 3 === 0 ? undefined : 'high',
+    pick: i % 3 === 0 ? undefined : { ...AGENTS[0]!.pick!, by: by[i % by.length]!, target: i % 2 ? { agent: 'general-purpose', model: 'opus' } : { agent: 'gpt-6-1-sol' }, fallbackReason: i % 5 === 0 ? '요청한 모델의 사용 한도를 초과했습니다.' : undefined },
+    now: 'Bash ' + '아주 긴 도구 실행 명령어 '.repeat(1000),
+    usage: { input: 1_234_567, cached: 9_876_543, cacheWrite: 100_000, output: 50_000 }, tools: 150,
+    endedAt: NOW - i * 1000,
+  }))
+  // Exercise the real register.tsx boundary too: text the engine's FINAL validation refuses must
+  // be caught before the tree leaves us, and an unreadable conversation must return to the list.
+  mock.clock(on, { now: NOW })
+  let broken: string | null = null
+  let selected: string | null = null
+  let closes = 0
+  const errors: string[] = []
+  on('state.get', { plugin: 'ripple', key: 'settings' }, () => ({ value: { value: SETTINGS, version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'lang' }, () => ({ value: { value: 'ko', version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'agents' }, () => ({ value: { value: broken === null ? mixed : [{ ...mixed[0]!, description: broken }, ...mixed.slice(1)], version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'agentOpen' }, async ($, e, next) => {
+    const held = await next(e)
+    return { value: { value: selected, version: held.value?.version ?? 0 } }
+  })
+  on('state.set', { plugin: 'ripple', key: 'agentOpen' }, async ($, e, next) => { selected = typeof e.value === 'string' ? e.value : null; return next(e) })
+  on('session.messages', () => ({ value: { deny: '대화 기록을 읽을 수 없습니다.' } }))
+  on('ui.log', ($, e) => { errors.push(e.text); return { value: undefined } })
+  on('ui.close', () => { closes++; return { value: undefined } })
+  for (const skin of SKINS) for (const appearance of ['light', 'dark'] as const) {
+    const id = ['mixed', skin, appearance].join('-')
+    drawPane(on, id, (el, surface) => renderAgents(el, { ...frameOf(surface, 40, 12, skin), appearance, lang: 'ko' }, { agents: mixed, now: NOW, showDone: true }, AGENT_NOOP))
+  }
+  for (const skin of SKINS) for (const appearance of ['light', 'dark'] as const) {
+    const id = ['mixed', skin, appearance].join('-')
+    for (const surface of ['desktop', 'terminal', 'vscode', 'mobile'] as const) {
+      const ui = await mount($, id, surface, 40)
+      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 0' }), id + ' ' + surface).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 39' }), id + ' ' + surface).toBeDefined()
+      await ui.unmount()
+    }
+  }
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    for (const description of ['표시 오류 \u001b[31m\u0085\u{10eeee}\u{2800}\u{0305}', '\u{0305}표시 오류', '\u{2800}\u{0305}표시 오류']) {
+      broken = description
+      selected = null
+      const fallback = await $.ui.mount({ plugin: 'ripple', surface, component: 'Pane', requestId: 'ripple-agents', props: paneProps(40), viewport: { columns: 40, rows: 40 } })
+      expect(await fallback.find({ type: 'Text', text: /제어 문자|결합 문자/ }), surface + ' validation reason').toBeDefined()
+      expect(await fallback.find({ type: 'Text', text: '에이전트 표시 오류 수정 39' }), surface + ' fallback list').toBeDefined()
+      expect(await fallback.findAll({ type: 'Svg' })).toHaveLength(0)
+      expect(await fallback.find({ key: 'back' })).toBeUndefined()
+      await fallback.press({ key: 'close' })
+      await fallback.unmount()
+    }
+    broken = null
+    selected = 'mixed-0'
+    const denied = await $.ui.mount({ plugin: 'ripple', surface, component: 'Pane', requestId: 'ripple-agents', props: paneProps(40), viewport: { columns: 40, rows: 40 } })
+    expect(await denied.find({ type: 'Text', text: '대화 기록을 읽을 수 없습니다.' }), surface + ' conversation reason').toBeDefined()
+    expect(await denied.find({ type: 'Text', text: '에이전트 표시 오류 수정 39' }), surface + ' returned to list').toBeDefined()
+    await denied.press({ key: 'back' })
+    expect(selected).toBe(null)
+    await denied.unmount()
+  }
+  expect(closes).toBe(12)
+  expect(errors.some(error => error.includes('제어 문자'))).toBe(true)
 })
 
 test('pictures tile at the SVG side limit without rescaling or restarting their artwork', async ($, on) => {
