@@ -57,6 +57,15 @@ test("when the direct start also produces nothing, the start is a failure", () =
   assert.equal(startRouter(threw, { budgetMs: 0 }), "failed");
 });
 
+test("where the supervisor relaunches the router itself, a start that brings none up is a failure, never a second router", () => {
+  const c = clock();
+  const notes: string[] = [];
+  // launchd and systemd: no fallback is offered, since a router beside them would fight their relaunch.
+  const out = startRouter({ start: () => "started", up: () => false, alive: () => false, now: c.now, sleep: c.sleep }, { budgetMs: 1_000, onProgress: (m) => notes.push(m) });
+  assert.equal(out, "failed");
+  assert.deepEqual(notes, []);
+});
+
 test("a start the supervisor really made is not repeated", () => {
   const c = clock();
   let checks = 0;

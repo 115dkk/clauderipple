@@ -49,8 +49,10 @@ export type StartOps = {
   start(): "already-running" | "started" | "failed";
   /** True while the router's process exists — the same pid `stop` and `restart` look for. */
   up(): boolean;
-  /** Starts the router without the supervisor; the new process's pid, or null. */
-  fallback(): number | null;
+  /** Starts the router without the supervisor; the new process's pid, or null. Absent where the
+   * supervisor keeps the router alive by itself (launchd's KeepAlive, systemd's Restart): a router
+   * started beside it would fight the one it relaunches for the port. */
+  fallback?: () => number | null;
   /** True while `pid` is alive. */
   alive(pid: number): boolean;
   now(): number;
@@ -77,6 +79,7 @@ export function startRouter(ops: StartOps, opts: { budgetMs?: number; pollMs?: n
     asked = "failed";
   }
   if (asked !== "failed" && waitUntil(ops, () => ops.up(), opts)) return asked;
+  if (!ops.fallback) return "failed";
   opts.onProgress?.(`the ${supervisorName()} did not bring the router up; starting it directly`);
   const pid = ops.fallback();
   if (pid === null) return "failed";
@@ -122,7 +125,8 @@ function realStartOps(): StartOps {
   return {
     start: () => (isWindows ? schtasks.startAgent() : isLinux ? systemd.startAgent() : launchd.startAgent()),
     up: () => agentPid() !== null,
-    fallback: startRouterDirectly,
+    // Only the Windows launcher stops for good after a drain (#80); the others relaunch the router.
+    ...(isWindows ? { fallback: startRouterDirectly } : {}),
     alive: isAlive,
     now: () => Date.now(),
     sleep: sleepSync,
@@ -212,15 +216,10 @@ function restartWindows(opts: { waitMs?: number; onProgress?: (msg: string) => v
 }
 
 export function restartAgent(opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}): RestartResult {
+  // launchd and systemd relaunch the router themselves, so a failure there is reported as one: a
+  // router started beside them would fight their next relaunch for the port.
   if (isWindows) return restartWindows(opts);
-  const r = isLinux ? systemd.restartAgent(opts) : launchd.restartAgent(opts);
-  if (r !== "failed") return r;
-  // The supervisor said the restart failed. If a process still holds the port, the drain did not
-  // finish and a second router must not be put on it; otherwise try starting the router directly.
-  if (agentPid() !== null) return "failed";
-  opts.onProgress?.(`the ${supervisorName()} did not bring the router back; starting it directly`);
-  const pid = startRouterDirectly();
-  return pid !== null && waitUntil({ now: () => Date.now(), sleep: sleepSync }, () => isAlive(pid), {}) ? "direct" : "failed";
+  return isLinux ? systemd.restartAgent(opts) : launchd.restartAgent(opts);
 }
 
 /** Path to the supervisor's own definition, for status output. */
