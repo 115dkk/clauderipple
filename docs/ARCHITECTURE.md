@@ -512,6 +512,20 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     unknown to the backend answer `400 "… model is not supported when using
     Codex with a ChatGPT account"` before any quota check, so a `429` for
     gpt-6-sol/luna that day confirmed the ids without spending quota.
+  - **Windows follow the live catalogue (2026-10-23).** A model's `context_window`
+    is not the window Codex runs with: Codex multiplies it by the entry's
+    `effective_context_window_percent`, and gpt-6.1-sol measured
+    `500000 × 95% = 475000` while `config.json` still said 272000 (and compacted
+    at 258400). `parseCodexCatalog` therefore records the effective window, the
+    adapter publishes the last-read list process-wide (`providers/chatgpt/
+    windows.ts`), and one resolver (`chatgptModelWindow`) hands it to bootstrap's
+    `auto_compact_windows`, the picker's `context_window_by_model` and
+    `providerModelWindow` — ahead of any stored `contextWindow` and of
+    `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by id,
+    alias, prefix rule or as a route's target). An explicit
+    `route.contextWindow` still wins; every non-chatgpt provider keeps the old
+    fallback. The catalogue is now read at router start and every two hours, not
+    only when the dashboard asks.
   - Model self-introduction is not evidence of routing. Verify by upstream
     usage records.
   - **Implemented 2026-09-11** in `packages/router/src/providers/chatgpt/`.

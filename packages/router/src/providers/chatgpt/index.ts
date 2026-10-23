@@ -17,6 +17,7 @@ import { providerExhaustion, type ProviderExhaustion } from "../../health.ts";
 import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { codexClientVersion, latestCodexVersion, parseCodexCatalog } from "./catalog.ts";
+import { noteChatgptModelWindows } from "./windows.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { homeDir, fastSwitches } from "../../config.ts";
@@ -711,6 +712,8 @@ export class ChatGptAdapter {
       return null;
     }
     this.modelsCache = { at: Date.now(), models };
+    // The windows ClaudeRipple reports to Claude Code follow the catalogue from here (windows.ts).
+    noteChatgptModelWindows(models);
     return models;
   }
 

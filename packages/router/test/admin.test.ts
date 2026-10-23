@@ -13,7 +13,7 @@ import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
 import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
@@ -47,6 +47,7 @@ async function withAdmin(
     google?: NonNullable<AdminDeps["google"]>;
     opencodeUsage?: NonNullable<AdminDeps["opencodeUsage"]>;
     claudeUsage?: NonNullable<AdminDeps["claudeUsage"]>;
+    claudeIdentity?: NonNullable<AdminDeps["claudeIdentity"]>;
     googleOAuthFetch?: (url: string, init?: RequestInit) => Promise<Response>;
     googleOAuthPort?: number;
   } = {},
@@ -557,6 +558,63 @@ test("Claude account admin endpoints expose no secrets and rename or remove only
     const missing = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
     assert.equal(missing.status, 404);
   });
+});
+
+test("/api/claude-accounts marks a stored copy of the current Claude login, by subject hash or by email", async () => {
+  const uuid = "current-login-uuid";
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token", "2026-10-23T00:00:00.000Z");
+    const sameByHash = saveClaudeOAuthAccount(home, {
+      accessToken: "pool-token-1", refreshToken: "pool-refresh-1", expiresAt: Date.now() + 3_600_000,
+      accountId: uuid, email: "some-label@example.test",
+    });
+    const sameByEmail = saveClaudeOAuthAccount(home, {
+      accessToken: "pool-token-2", refreshToken: "pool-refresh-2", expiresAt: Date.now() + 3_600_000,
+      email: "PERSON@example.test",
+    });
+    const other = saveClaudeOAuthAccount(home, {
+      accessToken: "pool-token-3", refreshToken: "pool-refresh-3", expiresAt: Date.now() + 3_600_000,
+      accountId: "someone-else", email: "person@example.test",
+    });
+    const body = await (await fetch(`${base()}:${port}/api/claude-accounts`)).json() as {
+      current: { email?: string }; accounts: { id: string; sameAsCurrent?: boolean }[];
+    };
+    assert.equal(body.current.email, "Person@Example.Test");
+    const byId = new Map(body.accounts.map((account) => [account.id, account]));
+    assert.equal(byId.get(sameByHash.id)?.sameAsCurrent, true, "the same upstream account, whatever its label");
+    assert.equal(byId.get(sameByEmail.id)?.sameAsCurrent, true, "no subject hash: the email decides, case-insensitively");
+    assert.equal(byId.get(other.id)?.sameAsCurrent, undefined, "another upstream account stays separate even with the same email");
+    assert.doesNotMatch(JSON.stringify(body), new RegExp(subjectHash(uuid)!), "the subject hash itself never reaches the GUI");
+    assert.doesNotMatch(JSON.stringify(body), /pool-token|pool-refresh/, "no token material either");
+  }, { claudeIdentity: async () => ({ email: "Person@Example.Test", subjectHash: subjectHash(uuid)! }) });
+});
+
+test("an unknown current identity leaves /api/claude-accounts exactly as it was", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token");
+    const stored = saveClaudeOAuthAccount(home, {
+      accessToken: "pool-token", refreshToken: "pool-refresh", expiresAt: Date.now() + 3_600_000,
+      email: "person@example.test",
+    });
+    const body = await (await fetch(`${base()}:${port}/api/claude-accounts`)).json() as {
+      current: unknown; accounts: unknown[];
+    };
+    assert.deepEqual(body.current, { id: "current", label: "Current Claude login", source: "token-file", external: true });
+    assert.deepEqual(body.accounts, [{ id: stored.id, label: "person@example.test", email: "person@example.test", expiresAt: stored.expiresAt, needsReauth: false, preferred: false }]);
+    assert.doesNotMatch(JSON.stringify(body), /sameAsCurrent/);
+  }, { claudeIdentity: async () => null });
+});
+
+test("a failed identity lookup does not break /api/claude-accounts", async () => {
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    saveClaudeAuthFile(home, "current-login-token");
+    const res = await fetch(`${base()}:${port}/api/claude-accounts`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { current: { source?: string; email?: string }; accounts: unknown[] };
+    assert.equal(body.current.source, "token-file");
+    assert.equal(body.current.email, undefined);
+    assert.deepEqual(body.accounts, []);
+  }, { claudeIdentity: async () => { throw new Error("profile endpoint down"); } });
 });
 
 test("/readyz separates readiness from liveness and names each problem", async () => {
@@ -1570,7 +1628,7 @@ test("POST /api/providers/probe[chatgpt] falls back to the measured list when th
       });
       const body = (await res.json()) as { models: { id: string }[]; modelsSource: string };
       assert.equal(body.modelsSource, "fallback");
-      assert.deepEqual(body.models.map((m) => m.id), ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
+      assert.deepEqual(body.models.map((m) => m.id), ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"]);
     },
     { chatgpt: () => ({ quota: { gpt: null }, auth: { gpt: "borrow-codex" }, models: () => Promise.resolve(null) }) },
   );

@@ -239,6 +239,12 @@ proxy
     // Quota only arrives on GPT response headers, so a quiet day left the status 11 hours stale
     // (2026-09-20). Ask once now, after listen(), and never wait for the answer.
     proxy.chatgptRefreshAll();
+    // The model catalogue is where a GPT model's real window comes from (6.1 Sol runs 500000 × 95%
+    // = 475000), and until now only an open dashboard asked for it. Read it now and every two hours;
+    // the adapter's own hour-long cache makes the interval the refresh, not a poll (§4, 2026-10-23).
+    const catalogEvery = 2 * 60 * 60_000;
+    proxy.chatgptRefreshCatalog();
+    setInterval(() => proxy.chatgptRefreshCatalog(), catalogEvery).unref();
     const adminDeps: AdminDeps = {
       autoUpdater,
       config: () => store.get(),
@@ -269,13 +275,13 @@ proxy
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),
       claudeModels: () => proxy.claudeModels.list(),
+      claudeIdentity: () => proxy.claudeIdentity.identify(),
       opencodeUsage: (name, credentialId) => proxy.opencodeLimits(name, credentialId),
       grokUsage: (name: string) => proxy.grokLimits(name),
       image: (req, signal, meta) => proxy.generateImage(req, signal, meta),
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
       remote: {
-      claudeIdentity: () => proxy.claudeIdentity.identify(),
         status: () => tunnels!.status(),
         reload: () => {
           tunnels!.reconcile(store.get().remote?.hosts ?? []);

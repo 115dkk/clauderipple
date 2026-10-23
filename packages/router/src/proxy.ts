@@ -299,6 +299,19 @@ export class Proxy {
     }
   }
 
+  /**
+   * Read every configured chatgpt provider's model catalogue now, in the background. Nothing else
+   * asks for it unless the dashboard is open, yet it is where a model's real window comes from
+   * (6.1 Sol: 500000 × 95% = 475000, ARCHITECTURE §4). The adapter keeps its own hour-long cache,
+   * so a caller may ask as often as it likes; the startup call and the periodic one in index.ts
+   * share that cache. Never throws.
+   */
+  chatgptRefreshCatalog(): void {
+    for (const [name, p] of Object.entries(this.deps.config().providers)) {
+      if (p.type === "chatgpt") void this.chatgptFetchModels(name).catch(() => {});
+    }
+  }
+
   chatgptAuthStatus(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const [name, a] of this.chatgptAdapters) out[name] = a.adapter.describeAuth();
@@ -498,6 +511,10 @@ export class Proxy {
       upstream: () => this.deps.config().upstream,
       warn: (message) => deps.log.warn(message),
     });
+    this.claudeIdentity = new ClaudeCurrentIdentity(this.claudeAccounts, {
+      upstream: () => this.deps.config().upstream,
+      warn: (message) => deps.log.warn(message),
+    });
     this.opencodeUsage = new OpenCodeUsage({ warn: (message) => deps.log.warn(message) });
     this.httpServer = http.createServer({ maxHeaderSize: 64 * 1024 }, (req, res) => {
       void this.handle(req, res);
@@ -509,10 +526,6 @@ export class Proxy {
       }
       socket.destroy();
     });
-      warn: (message) => deps.log.warn(message),
-    });
-    this.claudeIdentity = new ClaudeCurrentIdentity(this.claudeAccounts, {
-      upstream: () => this.deps.config().upstream,
     this.httpServer.on("upgrade", (req, socket, head) => this.upgrade(req, socket as net.Socket, head));
     this.server = net.createServer((sock) => this.onConnect(sock));
   }

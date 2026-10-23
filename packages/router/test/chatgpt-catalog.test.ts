@@ -57,6 +57,24 @@ test("parseCodexCatalog tolerates garbage and missing fields", () => {
   assert.equal(odd[1]!.contextWindow, undefined);
 });
 
+test("parseCodexCatalog reports the effective window Codex runs with", () => {
+  const models = parseCodexCatalog({
+    models: [
+      { slug: "gpt-6.1-sol", visibility: "list", context_window: 500000, effective_context_window_percent: 95 },
+      { slug: "gpt-6-astra", visibility: "list", context_window: 272000, effective_context_window_percent: 95 },
+      { slug: "no-percent", visibility: "list", context_window: 200000 },
+      { slug: "odd-percent", visibility: "list", context_window: 200000, effective_context_window_percent: "95" },
+      { slug: "rounded", visibility: "list", context_window: 272001, effective_context_window_percent: 95 },
+    ],
+  });
+  const byId = new Map(models.map((m) => [m.id, m.contextWindow]));
+  assert.equal(byId.get("gpt-6.1-sol"), 475000, "500000 × 95%, the window Codex itself uses");
+  assert.equal(byId.get("gpt-6-astra"), 258400);
+  assert.equal(byId.get("no-percent"), 200000, "a catalogue without the percent gets the whole window");
+  assert.equal(byId.get("odd-percent"), 200000, "a percent that is not a number is not applied");
+  assert.equal(byId.get("rounded"), 258400, "rounded down");
+});
+
 test("codexClientVersion floors without a cache file and honours a newer one", () => {
   withCodexHome((home) => {
     assert.equal(codexClientVersion(home), CODEX_CLIENT_VERSION_FLOOR);
@@ -85,7 +103,7 @@ test("codexClientVersion floors without a cache file and honours a newer one", (
 
 test("the fallback catalogue carries the measured ladders", () => {
   const byId = new Map(CHATGPT_FALLBACK_MODELS.map((m) => [m.id, m]));
-  assert.deepEqual([...byId.keys()], ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
+  assert.deepEqual([...byId.keys()], ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"]);
   assert.deepEqual(byId.get("gpt-5.6-terra")!.effortLevels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
   assert.deepEqual(byId.get("gpt-5.6-sol")!.effortLevels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
   assert.deepEqual(byId.get("gpt-6-sol")!.effortLevels, ["low", "medium", "high", "xhigh", "max", "ultra"]);
@@ -93,4 +111,5 @@ test("the fallback catalogue carries the measured ladders", () => {
   assert.deepEqual(byId.get("gpt-5.6-luna")!.effortLevels, ["low", "medium", "high", "xhigh", "max"], "Luna takes no ultra");
   assert.deepEqual(byId.get("gpt-6-luna")!.effortLevels, ["low", "medium", "high", "xhigh", "max"], "Luna takes no ultra");
   assert.equal(byId.get("gpt-5.6-luna")!.contextWindow, 272000);
+  assert.equal(byId.get("gpt-6.1-sol")!.contextWindow, 475000, "the effective window measured 2026-10-23");
 });
