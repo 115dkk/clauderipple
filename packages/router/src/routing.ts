@@ -287,6 +287,22 @@ export function threadDecision(json: Record<string, unknown>): "refuse" | "strip
   return thread.type === "continue" ? "refuse" : "strip";
 }
 
+/** The id every translated answer here is given (chatgpt, openai and google translators, web search). */
+const MINTED_MESSAGE_ID = /^msg_[0-9a-f]{24}$/;
+
+/**
+ * A `continue` whose previous message this router made up, i.e. the last turn was answered by a
+ * translated provider. A continue carries only the new messages, so a marker in the first one is not
+ * there to route by: such a request used to pass through to Anthropic, which has no such thread and
+ * answers 404, and the CLI resent the whole turn — every turn of every workflow worker (414 in a day,
+ * 2026-10-23). The 404 is not the refusal that makes the CLI go stateless; THREAD_UNSUPPORTED is.
+ */
+export function continuesTranslatedTurn(json: Record<string, unknown>): boolean {
+  const thread = json.thread as { type?: unknown; previous_message_id?: unknown } | undefined;
+  return !!thread && typeof thread === "object" && thread.type === "continue"
+    && typeof thread.previous_message_id === "string" && MINTED_MESSAGE_ID.test(thread.previous_message_id);
+}
+
 export function stripThreadFields(json: Record<string, unknown>): void {
   delete json.thread;
   delete json.diagnostics;

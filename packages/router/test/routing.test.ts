@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config } from "../src/config.ts";
-import { markerOverride, resolve, rewriteBody, unroutableReason } from "../src/routing.ts";
+import { continuesTranslatedTurn, markerOverride, resolve, rewriteBody, unroutableReason } from "../src/routing.ts";
 import { injectBootstrap } from "../src/bootstrap.ts";
 import { withAgentAliases } from "../src/agents.ts";
 
@@ -381,4 +381,13 @@ test("a Workflow agent's marker is the top of the script's text, under the harne
   const quoted = task.replace("[[ripple: luna@high]]\n  역할", "역할: [[ripple: luna@high]]");
   assert.equal(markerOverride(body(quoted), cfg.aliases), null, "inside the script's text, below its top, it is prose");
   assert.equal(markerOverride(body(`Summary: …\n${task}`), cfg.aliases), null, "a frame quoted below the top is not a frame");
+});
+
+// A workflow worker's continue carries no marker; when the turn before it was translated, Anthropic
+// has no such thread (404 on every turn, 2026-10-23), so it is recognised by the id we minted.
+test("a continue of a turn this router minted is recognised; Anthropic's own ids and creates are not", () => {
+  assert.equal(continuesTranslatedTurn({ thread: { type: "continue", previous_message_id: "msg_8f46eee3c1a01d63c54f683e" } }), true);
+  assert.equal(continuesTranslatedTurn({ thread: { type: "continue", previous_message_id: "msg_011CgJN1qQSD73cvPhge2Cri" } }), false);
+  assert.equal(continuesTranslatedTurn({ thread: { type: "create" } }), false);
+  assert.equal(continuesTranslatedTurn({}), false);
 });

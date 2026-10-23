@@ -25,7 +25,7 @@ import type { Logger } from "./log.ts";
 import { ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
-import { THREAD_UNSUPPORTED, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
+import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
 import { applyIdentityToAnthropicBody } from "./identity.ts";
@@ -941,6 +941,15 @@ export class Proxy {
           finish("400", payload.length, `ClaudeRipple: ${reason}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unroutable" });
           return;
         }
+      }
+      // A continue of a turn a translated provider answered carries no marker to route by and would
+      // pass through to Anthropic, which has no such thread (404). Refused the way a translated route
+      // refuses it, so the CLI resends the whole conversation, marker included, and stays stateless.
+      if (!resolved && isApiHost && isMessages && json && continuesTranslatedTurn(json)) {
+        const out = JSON.stringify(THREAD_UNSUPPORTED);
+        res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
+        finish("400", out.length, "continue of a translated turn refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
+        return;
       }
       // A slot with fallbacks picks its provider before anything is sent, so a primary that is rate
       // limited for the next hour is skipped rather than rediscovered once per request. A distinct
