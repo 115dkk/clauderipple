@@ -139,6 +139,7 @@ async function runHost(): Promise<void> {
     dir, send: webPushSender(vapid), log,
     seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
     summary: (id) => sessions?.summaryOf(id),
+    context: (id, event) => sessions?.pushContext(id, event) ?? {},
   });
   const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log,
     seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
