@@ -434,7 +434,7 @@ export class HostServer {
       case "decide":
         try {
           if (msg.decision !== "allow" && msg.decision !== "allow_always" && msg.decision !== "deny") throw new Error("invalid decision");
-          if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers)) throw new Error("이미 처리됨");
+          if (!await s.decide(msg.session, msg.id, msg.decision, msg.message, msg.answers, msg.reqId)) throw new Error("이미 처리됨");
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
         } catch (e) {
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
@@ -443,8 +443,8 @@ export class HostServer {
         return;
       case "set_mode":
         try {
-          await s.setMode(msg.sessionId, msg.mode);
-          this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
+          const data = await s.setMode(msg.sessionId, msg.mode, msg.reqId);
+          this.send(c, { t: "res", reqId: msg.reqId, ok: true, data });
         } catch (e) {
           this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
         }
@@ -453,9 +453,10 @@ export class HostServer {
       case "set_model":
         try {
           // Stop from the phone also pauses what it queued: the person decides what goes next.
+          let data = null;
           if (msg.t === "interrupt") { s.holdQueue(msg.session); await s.interrupt(msg.session); }
-          else await s.setModel(msg.session, msg.model, msg.effort);
-          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data: null });
+          else data = await s.setModel(msg.session, msg.model, msg.effort, msg.reqId);
+          if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: true, data });
         } catch (e) {
           if (msg.reqId) this.send(c, { t: "res", reqId: msg.reqId, ok: false, error: (e as Error).message });
           else this.send(c, { t: "error", code: msg.t, session: msg.session, message: (e as Error).message });

@@ -39,7 +39,17 @@ export const HOST_SILENT_MS = STALE_MS + PING_MS;
 export const PERMISSION_MODES = ["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const;
 export type PermissionMode = typeof PERMISSION_MODES[number];
 export interface Question { question: string; header: string; options: { label: string; description: string }[]; multiSelect: boolean }
-export interface PermissionContent { requestKind?: "tool" | "plan" | "question"; questions?: Question[] }
+export interface PermissionContent { requestKind?: "tool" | "plan" | "question"; questions?: Question[]; alwaysAllow?: { scope: "session"; summary: string } }
+export type RuleStatus = "sent" | "confirmed" | "unknown";
+/** Only worker-confirmed values are included; a transport acknowledgement is not application. */
+export interface SettingsResult {
+  status: "applied" | "partial" | "unknown";
+  model?: string;
+  effort?: Effort | null;
+  permissionMode?: PermissionMode;
+  errors?: { model?: string; effort?: string; permissionMode?: string };
+}
+export interface SessionControls { model: boolean; effort: boolean; permissionModes: PermissionMode[] }
 
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -94,7 +104,8 @@ export type EventBody = MessageImages & (
   | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
   | ({ kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean } & PermissionContent)
   | { kind: "mode"; mode: PermissionMode }
-  | { kind: "permission_decided"; id: string; decision: "allow" | "allow_always" | "deny" | "expired"; reason?: string }
+  | { kind: "permission_decided"; id: string; decision: "allow" | "allow_always" | "deny" | "expired"; reason?: string; ruleStatus?: RuleStatus }
+  | ({ kind: "settings"; reqId: string } & SettingsResult)
   | { kind: "result"; ok: boolean; error?: string; ms: number; turns: number }
   | { kind: "state"; state: SessionState; detail?: string }
   | { kind: "figures"; figures: Figures }
@@ -179,6 +190,8 @@ export interface SessionSummary {
   model: string;
   effort: Effort | null;
   permissionMode?: PermissionMode;
+  /** Absent on older hosts: controls must stay disabled. Values above describe the next turn. */
+  controls?: SessionControls;
   state: SessionState;
   /** Main-turn state is authoritative for desktop Remote Control sessions. */
   desktopBridge?: boolean;

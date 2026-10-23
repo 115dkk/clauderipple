@@ -26,7 +26,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
-  const suggestions = [{ type: "addRules" }];
+  const suggestions = [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "ls" }], behavior: "allow", destination: "session" }];
   const spies = { modeError: null as Error | null, setPermissionMode: [] as import('../src/protocol.ts').PermissionMode[], interrupt: 0, setModel: [] as (string | undefined)[], close: 0 };
   const queryFn: QueryFn = params => {
     options.push(params.options);
@@ -53,7 +53,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
             const abort = params.options.abortController;
             assert.equal(typeof fn, "function");
             assert.ok(abort instanceof AbortController);
-            answers.push(await (fn as CanUseTool)("Bash", { command: "ls" }, { signal: abort.signal, suggestions }));
+            answers.push(await (fn as CanUseTool)("Bash", { command: "ls" }, { signal: abort.signal, suggestions, suppressAlwaysAllowRule: false }));
           }
           if (script.toolOutput !== undefined) {
             yield { type: "user", parent_tool_use_id: null, message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: script.toolOutput, is_error: false }] } };
@@ -79,12 +79,12 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
 }
 
 /** A query boundary whose input reading, result delivery and control replies are independent. */
-function controlledQueries(readInputs = true) {
-  const queries: { options: Record<string, unknown>; users: SdkUserMessage[]; emit: (event: Record<string, unknown>) => void; closed: boolean; interruptReply: ReturnType<typeof Promise.withResolvers<void>>; modeReply: ReturnType<typeof Promise.withResolvers<void>> | null; modes: string[] }[] = [];
+function controlledQueries(readInputs = true, waitForExit = false) {
+  const queries: { options: Record<string, unknown>; users: SdkUserMessage[]; emit: (event: Record<string, unknown>) => void; closed: boolean; exitReply: ReturnType<typeof Promise.withResolvers<void>>; interruptReply: ReturnType<typeof Promise.withResolvers<void>>; modeReply: ReturnType<typeof Promise.withResolvers<void>> | null; modes: string[] }[] = [];
   const queryFn: QueryFn = params => {
     let wake = Promise.withResolvers<void>();
     const events: Record<string, unknown>[] = [];
-    const control = { options: params.options, users: [] as SdkUserMessage[], closed: false,
+    const control = { options: params.options, users: [] as SdkUserMessage[], closed: false, exitReply: Promise.withResolvers<void>(),
       interruptReply: Promise.withResolvers<void>(), modeReply: null as ReturnType<typeof Promise.withResolvers<void>> | null, modes: [] as string[],
       emit: (event: Record<string, unknown>) => { events.push(event); wake.resolve(); },
     };
@@ -99,6 +99,7 @@ function controlledQueries(readInputs = true) {
           wake = Promise.withResolvers<void>();
         }
       },
+      ...(waitForExit ? { processExited: control.exitReply.promise } : {}),
       interrupt: () => control.interruptReply.promise,
       setModel: async () => {},
       setPermissionMode: async mode => { control.modes.push(mode); await control.modeReply?.promise; },
@@ -164,6 +165,57 @@ test("thinking streams finalize at original block indices without exposing signa
   assert.deepEqual(thoughts.map(e => [e.block, e.text, e.delta === true]), [[2, "thought 2", true], [2, "thought 2 complete", false], [4, "thought 4", true], [4, "thought 4 complete", false]]);
   assert.ok(!JSON.stringify(stored).includes("private signature"));
   assert.deepEqual(reduce(stored).items.filter(i => i.type === "thinking").map(i => i.text), ["thought 2 complete", "thought 4 complete"]);
+});
+
+test("a model plus effort change waits for writer exit and carries inputs accepted during restart", async t => {
+  const boundary = controlledQueries(true, true);
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const first = boundary.queries[0]!;
+  first.emit({ type: "system", subtype: "init", session_id: "sdk-model-effort" });
+  await nextTick();
+  assert.deepEqual(await f.sessions.setModel(id, "claude-next", "max", "model-and-effort"), { status: "applied", model: "claude-next", effort: "max" });
+  await f.sessions.send(id, "next-turn", "use the new settings");
+  first.emit({ type: "result", subtype: "success" });
+  await waitFor(() => first.closed);
+  await f.sessions.send(id, "while-exiting", "also preserve this input");
+  await nextTick();
+  assert.equal(boundary.queries.length, 1, "close is not process exit; no second writer may start yet");
+  first.exitReply.resolve();
+  await waitFor(() => boundary.queries.length === 2);
+  const second = boundary.queries[1]!;
+  assert.equal(second.options.model, "claude-next");
+  assert.equal(second.options.effort, "max");
+  assert.equal(second.options.resume, "sdk-model-effort");
+  assert.equal(first.closed, true);
+  assert.equal(second.options.allowDangerouslySkipPermissions, undefined);
+  await waitFor(() => second.users.length === 2);
+  assert.deepEqual(second.users.map(u => u.message.content), ["use the new settings", "also preserve this input"]);
+  second.emit({ type: "result", subtype: "success" });
+  second.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+});
+
+test("unsupported Claude effort is rejected before changing the SDK model or saved next-turn setting", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await assert.rejects(f.sessions.setModel(id, "claude-next", "ultra", "unsupported-effort"), /추론 강도를 지원하지 않습니다/);
+  assert.equal(f.sessions.summaryOf(id)?.model, "claude-test");
+  assert.equal(f.sessions.summaryOf(id)?.effort, "high");
+  assert.deepEqual(f.fake.spies.setModel, []);
+});
+
+test("a stopped SDK session cannot gain a bypass launch flag through a mode change", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  f.sessions.stop(id);
+  await assert.rejects(f.sessions.setMode(id, "bypassPermissions", "no-spawn-bypass"), /bypass_not_launched/);
+  await f.sessions.send(id, "after-rejection", "continue");
+  await waitFor(() => f.fake.options.length === 2);
+  assert.equal(f.fake.options[1]!.allowDangerouslySkipPermissions, undefined);
 });
 
 test("an effort restart carries every accepted input, whether still in the inbox or prefetched by the SDK", async t => {

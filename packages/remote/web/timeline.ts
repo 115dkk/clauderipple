@@ -1,5 +1,5 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
-import type { PermissionContent, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
+import type { PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
@@ -9,7 +9,7 @@ export type Item =
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
   | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
-  | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; reason?: string; at: number })
+  | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; ruleStatus?: RuleStatus; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
   | { type: "start"; key: string; ver: string };
@@ -101,12 +101,12 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, status: e.status, steps: e.steps });
         break;
       case "permission":
-        put({ type: "permission", key: `p${e.id}`, ver: `${e.seq}`, id: e.id, tool: e.tool, title: e.title, summary: e.summary, input: e.input, canAlways: e.canAlways, ...(e.requestKind ? { requestKind: e.requestKind } : {}), ...(e.questions ? { questions: e.questions } : {}), decision: null, at: e.at });
+        put({ type: "permission", key: `p${e.id}`, ver: `${e.seq}`, id: e.id, tool: e.tool, title: e.title, summary: e.summary, input: e.input, canAlways: e.canAlways, ...(e.alwaysAllow ? { alwaysAllow: e.alwaysAllow } : {}), ...(e.requestKind ? { requestKind: e.requestKind } : {}), ...(e.questions ? { questions: e.questions } : {}), decision: null, at: e.at });
         break;
       case "permission_decided": {
         const at = byKey.get(`p${e.id}`);
         const item = at === undefined ? undefined : items[at];
-        if (item?.type === "permission") items[at!] = { ...item, decision: e.decision, ...(e.reason ? { reason: e.reason } : {}), ver: `${item.ver}d${e.seq}` };
+        if (item?.type === "permission") items[at!] = { ...item, decision: e.decision, ...(e.ruleStatus ? { ruleStatus: e.ruleStatus } : {}), ...(e.reason ? { reason: e.reason } : {}), ver: `${item.ver}d${e.seq}` };
         break;
       }
       case "result":
@@ -124,6 +124,11 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         break;
       case "figures":
         figures = e.figures;
+        break;
+      case "settings":
+        // One durable row per operation: a late answer replaces its earlier unknown result.
+        put({ type: "notice", key: `settings:${e.reqId}`, ver: `${e.seq}`, code: `settings_${e.status}`,
+          text: [e.model, e.effort, e.permissionMode, ...Object.values(e.errors ?? {})].filter(Boolean).join(" · ") });
         break;
       case "notice":
         put({ type: "notice", key: `n${e.seq}`, ver: "1", code: e.code, ...(e.text ? { text: e.text } : {}) });
