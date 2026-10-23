@@ -162,6 +162,30 @@ test("bootstrap injection adds CLI models and compaction windows", () => {
   assert.equal(injectBootstrap(raw, cfg), raw);
 });
 
+test("bootstrap supplies missing descriptions without changing existing options or config", () => {
+  const configured: Config = {
+    ...cfg,
+    cli: {
+      extraModels: [
+        { model: "gpt-default", name: "Default description", contextWindow: 400_000 },
+        { model: "gpt-described", name: "Display name", description: "Explicit description" },
+        { model: "gpt-empty", name: "Empty description", description: "" },
+      ],
+    },
+  };
+  const before = structuredClone(configured);
+  const existing = [{ model: "native", name: "Native", description: "Upstream description", disabled_reason: "Unavailable" }];
+  const out = JSON.parse(injectBootstrap(Buffer.from(JSON.stringify({ additional_model_options: existing })), configured, []).toString());
+  assert.deepEqual(out.additional_model_options, [
+    ...existing,
+    { model: "gpt-default", name: "Default description", contextWindow: 400_000, description: "Default description" },
+    { model: "gpt-described", name: "Display name", description: "Explicit description" },
+    { model: "gpt-empty", name: "Empty description", description: "" },
+  ]);
+  assert.equal(out.auto_compact_windows["gpt-default"], 400_000);
+  assert.deepEqual(configured, before, "bootstrap normalization does not mutate the config");
+});
+
 test("each routed model and slot keeps its own compaction window; the global value is only the fallback", () => {
   const perModel: Config = {
     ...cfg,
@@ -221,9 +245,10 @@ test("bootstrap injects agent-file model ids (with @effort) when their base is r
   fs.writeFileSync(path.join(dir, "gpt.md"), "---\nname: gpt\nmodel: gpt-5.6-terra@high\n---\n");
   fs.writeFileSync(path.join(dir, "other.md"), "---\nname: o\nmodel: sonnet\n---\n");
   const cfg = { ...DEFAULTS, providers: {}, routes: {}, aliases: {}, direct: [{ prefix: "gpt-", provider: "chatgpt" }], cli: { extraModels: [{ model: "gpt-5.6-terra", name: "GPT-5.6 Terra" }] } } as unknown as Config;
-  const out = JSON.parse(injectBootstrap(Buffer.from("{}"), cfg, [dir]).toString()) as { additional_model_options: { model: string; name: string }[] };
+  const out = JSON.parse(injectBootstrap(Buffer.from("{}"), cfg, [dir]).toString()) as { additional_model_options: { model: string; name: string; description: string }[] };
   assert.deepEqual(out.additional_model_options.map((m) => m.model), ["gpt-5.6-terra", "gpt-5.6-terra@high"]);
   assert.equal(out.additional_model_options[1]!.name, "GPT-5.6 Terra · high");
+  assert.deepEqual(out.additional_model_options.map((m) => m.description), ["GPT-5.6 Terra", "GPT-5.6 Terra · high"]);
 });
 
 test("a dated model id matches its undated mapping", () => {

@@ -78,7 +78,8 @@ export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[])
   }
   if (extra.length > 0) {
     const existing = Array.isArray(j.additional_model_options) ? (j.additional_model_options as unknown[]) : [];
-    j.additional_model_options = [...existing, ...extra];
+    // The CLI requires a description even when the config or an agent-derived entry omits it.
+    j.additional_model_options = [...existing, ...extra.map((m) => ({ ...m, description: m.description ?? m.name ?? m.model }))];
   }
   if (anyWindow) {
     const acw = { ...((j.auto_compact_windows as Record<string, number> | undefined) ?? {}) };
