@@ -533,17 +533,18 @@ async function hearDelegationPin($: EngineInterface, text: string): Promise<void
   if (instruction === 'release') { await releaseDelegationPin($); return }
   const files = await workerFiles($)
   // Generated files cover routed workers even before the first catalogue poll.
-  const sources = [...files.values()].flatMap(file => {
+  const workers = [...files.values()].flatMap(file => {
     const model = agentModel(file), provider = agentProvider(file)
     return model && provider ? [{ model, provider }] : []
-  }).concat(claudeCandidates(), (await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
-  const pin = parseDelegationPin({ role: 'user', text }, sources)
+  })
+  const sources = workers.concat(claudeCandidates(), (await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
+  const pin = parseDelegationPin({ role: 'user', text }, sources, workers)
   if (pin === undefined) return
   if (pin === null) { await releaseDelegationPin($); return }
   const current = await read($, delegationPin)
   // The same model said again keeps the sentence that first pinned it.
   if (current && current.model === pin.model && current.provider === pin.provider) return
-  const said = pinSaid(text)
+  const said = pinSaid(text, pin.model)
   await update($, delegationPin, () => ({ ...pin, ...(said ? { said } : {}) }))
   await $.ui.toast(t(await read($, lang), 'toasts.delegationPinned', { name: titleName(pin.model, await read($, routerModels)) }))
 }

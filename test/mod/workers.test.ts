@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
-const { delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
+const { agentModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -139,15 +139,18 @@ test('Korean Argon and provider names preserve an explicit worker without author
   for (const model of ['gemini-4-argon', 'gemini-4-argon-contributor']) {
     assert.equal(named(model, model.endsWith('contributor') ? 'opencode-go' : 'google-gemini', '아르곤한테 맡겨'), true)
   }
-  for (const text of ['아르곤 api 지금 한도 꽉 차서 안될걸? 오픈코드쪽으로 써', '아르곤 API 대신 오픈코드', 'use OpenCode for Argon', 'opencode-go로 해', '오픈코드로 해']) {
+  for (const text of ['아르곤 api 지금 한도 꽉 차서 안될걸? 오픈코드쪽으로 써', '아르곤 API 대신 오픈코드', 'use OpenCode for Argon']) {
     assert.equal(named('gemini-4-argon-contributor', 'opencode-go', text), true, text)
     assert.equal(named('gemini-4-argon', 'google-gemini', text), false, text)
   }
-  for (const text of ['구글로 아르곤 돌려', 'google-gemini로 해']) {
+  for (const text of ['구글로 아르곤 돌려', 'google-gemini로 아르곤 돌려']) {
     assert.equal(named('gemini-4-argon', 'google-gemini', text), true, text)
     assert.equal(named('gemini-4-argon-contributor', 'opencode-go', text), false, text)
   }
-  assert.equal(named('gemini-4-argon-contributor', 'opencode-go', '버그 고쳐', ['오픈코드쪽으로 써']), true)
+  assert.equal(named('gemini-4-argon-contributor', 'opencode-go', '아르곤으로 버그 고쳐', ['오픈코드쪽으로 써']), true)
+  for (const text of ['opencode-go로 해', '오픈코드로 해', 'google-gemini로 해', '버그 고쳐']) {
+    assert.equal(named('gemini-4-argon-contributor', 'opencode-go', text, ['오픈코드쪽으로 써']), false, text)
+  }
   assert.equal(named('gemini-4-argon', 'google-gemini', '버그 고쳐', ['오픈코드쪽으로 써']), false)
   assert.equal(named('gemini-4-argon', 'google-gemini', '아르곤처럼 생겼네'), false)
   assert.equal(named('gemini-4-argon-contributor', 'opencode-go', 'opencoded example'), false)
@@ -198,14 +201,166 @@ test('session pin replaces, releases and authorizes only its model and source', 
   current = delegationPin({ role: 'user', text: '이제부터 딥시크로 고정' }, candidates) ?? null
   assert.equal(pinAllows(current, 'deepseek-v4.1-flash@low', 'deepseek'), true)
   assert.equal(pinAllows(current, 'gpt-6.1-sol', 'chatgpt'), false)
-  for (const text of ['고정 풀어', '고정을 풀어', '고정 해제', '고정해제', '모델은 알아서 해', '알아서 골라', '자동으로 골라', 'unpin', 'choose automatically']) assert.equal(delegationPin({ role: 'user', text }, []), null, text)
+  for (const text of ['고정 풀어', '고정을 풀어', '고정 해제', '고정해제', '모델은 알아서 해', '모델은 알아서 골라', '위임 모델은 자동으로 골라', 'unpin', 'choose the model automatically']) assert.equal(delegationPin({ role: 'user', text }, []), null, text)
   // Words about something else keep the pin.
   for (const text of ['너가 알아서 판단해서 해', '자동으로 재시작되게 해']) assert.equal(delegationPin({ role: 'user', text }, []), undefined, text)
   assert.equal(pinAllows(null, 'gpt-6.1-sol', 'chatgpt'), false)
 })
 
+test('standing choices bind a model name to delegation, including colloquial Korean', () => {
+  const sources = [...candidates, { model: 'opus', provider: 'anthropic' }]
+  const examples: [string, string, string][] = [
+    ['앞으로 솔로 해', 'gpt-6.1-sol', 'chatgpt'],
+    ['이제부터 오푸스한테 시켜', 'opus', 'anthropic'],
+    ['이 세션은 딥시크로 돌려', 'deepseek-v4.1-flash', 'deepseek'],
+    ['솔로 고정', 'gpt-6.1-sol', 'chatgpt'],
+    ['솔로고정해 줘', 'gpt-6.1-sol', 'chatgpt'],
+    ['앞으로 솔에게 맡겨 주세요', 'gpt-6.1-sol', 'chatgpt'],
+    ['앞으로 오푸스 써', 'opus', 'anthropic'],
+    ['앞으로 딥시크를 써 주세요', 'deepseek-v4.1-flash', 'deepseek'],
+    ['이제부터 솔한테 검토시켜', 'gpt-6.1-sol', 'chatgpt'],
+    ['앞으로 솔로 작업을 돌려 주세요', 'gpt-6.1-sol', 'chatgpt'],
+    ['위임 고정: 솔', 'gpt-6.1-sol', 'chatgpt'],
+    ['from now on delegate work to Sol', 'gpt-6.1-sol', 'chatgpt'],
+  ]
+  for (const [text, model, provider] of examples) assert.deepEqual(delegationPin({ role: 'user', text }, sources), { model, provider }, text)
+})
+
+test('unrelated standing phrases, logs and automatic choices leave an existing pin unchanged', () => {
+  const sources = [...candidates, { model: 'opus', provider: 'anthropic' }]
+  for (const text of [
+    '앞으로 오푸스 오류 로그만 보여 주세요', '앞으로 오푸스 오류 로그만 보여 줘',
+    '앞으로 솔 로그를 보여 줘', '이 세션은 딥시크 오류만 출력해',
+    '이제부터 오푸스한테 발생한 오류 로그만 보여 줘', '앞으로 솔로 작성한 로그를 보여 줘',
+    '솔이 계속 실패하네', '알아서 판단해서 해', '테스트 데이터는 알아서 골라',
+    '테스트 데이터는 알아서 골라 주세요', '테스트 데이터는 자동으로 골라',
+    '알아서 골라', '자동으로 골라', 'choose automatically', 'choose test data automatically',
+    '헤더 고정 풀어', '테스트 모델은 알아서 골라', '모델 오류 로그는 알아서 골라',
+    '고정하지 마', '모델은 알아서 고르지 마', '위임 고정은 해제하지 마',
+    '앞으로 로그만 보여 줘. 이번에는 솔로 해', '앞으로 로그만 보여 줘, 솔 시켜',
+    '헤더 고정해 줘. 솔로 해', '앞으로 솔로 고정된 헤더만 보여 줘',
+    '솔로 고정한 문장을 보여 줘', 'from now on show Sol error logs',
+    'from now on use Sol error logs', "from now on use Sol's logs",
+  ]) assert.equal(delegationPin({ role: 'user', text }, sources), undefined, text)
+})
+
+test('release phrases name delegation, model selection or the pin itself', () => {
+  for (const text of [
+    '고정 풀어 줘', '고정을 풀어 주세요', '위임 고정 풀어', '위임 고정을 해제해 주세요',
+    '모델 고정 해제', '모델은 알아서 골라 줘', '모델을 자동으로 골라 주세요',
+    '위임은 알아서 해', '위임 모델은 알아서 정해', '모델 선택은 자동으로 해',
+    'unpin the model', 'choose the worker automatically',
+  ]) assert.equal(delegationPin({ role: 'user', text }, []), null, text)
+})
+
+test('an exact normalized full id beats family matches, which otherwise select the latest version', () => {
+  const sources = [
+    { model: 'gpt-6-sol@high', provider: 'chatgpt' },
+    { model: 'gpt-6.1-sol', provider: 'chatgpt' },
+    { model: 'gpt-6.1-sol@medium', provider: 'chatgpt' },
+  ]
+  for (const text of ['앞으로 gpt-6.1-sol로 위임 고정', '앞으로 GPT-6-1-SOL로 해', 'use gpt-6.1-sol for this session']) {
+    assert.deepEqual(delegationPin({ role: 'user', text }, sources), { model: 'gpt-6.1-sol', provider: 'chatgpt' }, text)
+    const pin = delegationPin({ role: 'user', text }, sources)!
+    assert.equal(pinAllows(pin, 'gpt-6-sol', 'chatgpt'), false)
+  }
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 gpt-6-sol로 해' }, sources), { model: 'gpt-6-sol', provider: 'chatgpt' })
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 솔로 해' }, sources), { model: 'gpt-6.1-sol', provider: 'chatgpt' })
+  for (const text of ['앞으로 gpt-6.1-sol-extra로 해', '앞으로 gpt-6.1-sol2로 해']) {
+    assert.equal(delegationPin({ role: 'user', text }, sources), undefined, text)
+  }
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 솔로 해' }, sources.slice(1)), { model: 'gpt-6.1-sol', provider: 'chatgpt' })
+})
+
+test('real default worker files plus the router catalogue pin Sol, Opus and DeepSeek by family', () => {
+  const files = new Map([
+    ['gpt-6-1-sol', '---\nmodel: gpt-6.1-sol@high\ndescription: Worker via chatgpt.\n---\n'],
+    ['deepseek-v4-1-flash', '---\nmodel: deepseek-v4.1-flash@high\ndescription: Worker via deepseek.\n---\n'],
+  ])
+  const workers = [...files.values()].map(file => ({ model: agentModel(file)!, provider: agentProvider(file)! }))
+  const catalogue = routerModelOptions({ providers: {
+    chatgpt: { models: [{ id: 'gpt-6-sol' }, { id: 'gpt-6.1-sol' }] },
+    anthropic: { models: [{ id: 'claude-opus-5-4' }, { id: 'claude-opus-5-5' }] },
+    deepseek: { models: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4.1-flash' }] },
+  } }).map(model => ({ model: model.value, provider: model.provider }))
+  const sources = workers.concat(claudeCandidates(), catalogue)
+  const examples: [string, string, string][] = [
+    ['앞으로 솔로 해', 'gpt-6.1-sol', 'chatgpt'],
+    ['앞으로 오푸스로 해', 'claude-opus-5-5', 'anthropic'],
+    ['이 세션은 딥시크로 돌려', 'deepseek-v4.1-flash', 'deepseek'],
+  ]
+  for (const list of [sources, sources.toReversed()]) {
+    for (const [text, model, provider] of examples) assert.deepEqual(delegationPin({ role: 'user', text }, list, workers), { model, provider }, text)
+  }
+})
+
+test('one generated family worker outranks newer catalogue versions, but never an exact requested id', () => {
+  const worker = { model: 'gpt-6-sol@high', provider: 'chatgpt' }
+  const sources = [worker, { model: 'gpt-6-sol', provider: 'chatgpt' }, { model: 'gpt-6.1-sol', provider: 'chatgpt' }]
+  const workers = [worker, { ...worker, model: 'gpt-6-sol@medium' }]
+  for (const list of [sources, sources.toReversed()]) {
+    assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 솔로 해' }, list, workers), { model: 'gpt-6-sol', provider: 'chatgpt' })
+    assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 GPT-6-1-SOL로 고정' }, list, workers), { model: 'gpt-6.1-sol', provider: 'chatgpt' })
+  }
+})
+
+test('without one generated worker, the family latest compares numeric version components', () => {
+  for (const [text, older, newer, provider] of [
+    ['앞으로 솔로 해', 'gpt-6-sol', 'gpt-6.1-sol', 'chatgpt'],
+    ['앞으로 솔로 해', 'gpt-6.9-sol', 'gpt-6.10-sol', 'chatgpt'],
+    ['앞으로 솔로 해', 'gpt-6.99-sol', 'gpt-7-sol', 'chatgpt'],
+    ['앞으로 오푸스로 해', 'claude-opus-5-9', 'claude-opus-5-10', 'anthropic'],
+    ['이 세션은 딥시크로 돌려', 'deepseek-v4.9-flash', 'deepseek-v4.10-flash', 'deepseek'],
+  ]) {
+    const sources = [{ model: older!, provider: provider! }, { model: newer!, provider: provider! }]
+    for (const list of [sources, sources.toReversed()]) {
+      for (const workers of [[], sources]) assert.deepEqual(delegationPin({ role: 'user', text: text! }, list, workers), { model: newer, provider }, text)
+    }
+  }
+})
+
+test('latest cannot choose across families or break equal-version variant ties', () => {
+  const variants = [
+    { model: 'deepseek-v4.1-flash', provider: 'deepseek' },
+    { model: 'deepseek-v4.1-pro', provider: 'deepseek' },
+  ]
+  for (const workers of [[], variants]) assert.equal(delegationPin({ role: 'user', text: '앞으로 딥시크로 해' }, variants, workers), undefined)
+  assert.equal(delegationPin({ role: 'user', text: '앞으로 GPT로 해' }, [
+    { model: 'gpt-6.1-sol', provider: 'chatgpt' }, { model: 'gpt-6-astra', provider: 'chatgpt' },
+  ]), undefined)
+  assert.equal(delegationPin({ role: 'user', text: '앞으로 솔과 딥시크로 해' }, [...variants, { model: 'gpt-6.1-sol', provider: 'chatgpt' }], [variants[0]!]), undefined)
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 deepseek-v4.1-pro로 해' }, variants, [variants[0]!]), { model: 'deepseek-v4.1-pro', provider: 'deepseek' })
+})
+
+test('generated preference keeps provider restrictions and deduplicates normalized ids', () => {
+  const sources = [
+    { model: 'gpt-6.1-sol@high', provider: 'chatgpt' },
+    { model: 'gpt-6-1-sol', provider: 'chatgpt' },
+    { model: 'gpt-6.1-sol', provider: 'opencode-go' },
+  ]
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 솔로 해' }, sources, sources.slice(0, 2)), { model: 'gpt-6.1-sol', provider: 'chatgpt' })
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 솔을 오픈코드로 위임 고정' }, sources, sources.slice(0, 2)), { model: 'gpt-6.1-sol', provider: 'opencode-go' })
+})
+
+test('provider names restrict only a model that was actually named, in messages or submitted prompts', () => {
+  const sources = [
+    { model: 'gemini-4-argon', provider: 'google-gemini' },
+    { model: 'gemini-4-argon-contributor', provider: 'opencode-go' },
+    { model: 'deepseek-v4.1-flash', provider: 'opencode-go' },
+  ]
+  for (const text of ['아르곤을 오픈코드로 검토시켜 주세요', 'use OpenCode for Argon']) {
+    for (const prompts of [[], [text]]) {
+      const messages = [{ role: 'user' as const, text: prompts.length ? '검토해 주세요' : text }]
+      for (const source of sources) assert.equal(userNamed(source.model, messages, prompts, { ...source, providers: rivalProviders(source.model, sources) }), source.model.endsWith('contributor'), source.model + ': ' + text)
+    }
+  }
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 아르곤을 오픈코드로 위임 고정' }, sources), { model: 'gemini-4-argon-contributor', provider: 'opencode-go' })
+  assert.equal(delegationPin({ role: 'user', text: '앞으로 오픈코드로 위임 고정' }, sources), undefined)
+})
+
 test('the sentence shown beside a pin is the one that pinned, whitespace folded and cut short', () => {
   assert.equal(pinSaid('앞으로 솔로 해'), '앞으로 솔로 해')
+  assert.equal(pinSaid('앞으로 오푸스 오류 로그만 보여 줘.\n이제부터 솔로 해', 'gpt-6.1-sol'), '이제부터 솔로 해')
   assert.equal(pinSaid('먼저 이 파일을 읽어 줘.\n앞으로  솔로   해. 그리고 테스트도 돌려'), '앞으로 솔로 해.')
   const long = pinSaid('이 세션은 ' + '아주 길게 '.repeat(40) + '솔로 해')!
   assert.equal([...long].length, PIN_SAID_MAX)
