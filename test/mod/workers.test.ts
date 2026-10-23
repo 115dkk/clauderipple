@@ -110,6 +110,10 @@ test('a model counts as named only when the user said it lately, in English or K
   assert.equal(userNamed('gemini-3-8-flash', said('제미나이한테 교정안 받아 와')), true)
   assert.equal(userNamed('gemini-3-8-flash', said('ask Gemini for a review')), true)
   assert.equal(userNamed('gpt-6-1-sol', said('솔한테 맡겨')), true)
+  // A delegating verb written straight onto the name still names it; "솔직히" still does not.
+  for (const text of ['아니 오푸스시켜 중요한거잖아', '오푸스써', '오퍼스 돌려']) assert.equal(userNamed('opus', said(text)), true, text)
+  for (const text of ['솔시켜', '솔맡겨']) assert.equal(userNamed('gpt-6-1-sol', said(text)), true, text)
+  assert.equal(userNamed('gpt-6-1-sol', said('솔직히 별로야')), false)
   assert.equal(userNamed('gpt-6-1-sol', said('솔직히 이건 어려운 일이야')), false, 'a word that only starts with the name')
   assert.equal(userNamed('gpt-6-1-sol', said('GPT로 돌려')), true)
   assert.equal(userNamed('sonnet', said('소넷이 낫겠다')), true)

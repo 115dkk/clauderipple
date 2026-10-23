@@ -38,9 +38,12 @@ const PARTICLE = '(?:이한테|이랑|이가|이는|이를|이도|이로|이나|
 export function modelWords(id: string): string[] {
   return [...new Set(id.toLowerCase().split(/[^a-z]+/).filter(word => word.length >= 3 && !GENERIC.has(word)))]
 }
+// A delegating verb written onto the name: "오푸스시켜 중요한거잖아" named Opus and was read as
+// unnamed (2026-10-24), so the marker went and the tier sent the task to Sol.
+const VERB = '(?:시켜|시키|써|쓰|돌려|돌리|맡겨|맡기|불러|부르|줘)'
 function says(text: string, word: string): boolean {
   if (new RegExp(`(?<![a-z])${word}(?![a-z])`, 'i').test(text)) return true
-  return [...(SPOKEN[word] ?? []), ...(PROVIDER_SPOKEN[word] ?? [])].some(name => new RegExp(`${name}(?:쪽)?(?:${PARTICLE}|(?![가-힣]))`).test(text))
+  return [...(SPOKEN[word] ?? []), ...(PROVIDER_SPOKEN[word] ?? [])].some(name => new RegExp(`${name}(?:쪽)?(?:${PARTICLE}|${VERB}|(?![가-힣]))`).test(text))
 }
 type Said ={ role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
 type ModelSource = { model: string; provider: string }
