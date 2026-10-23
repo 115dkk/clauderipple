@@ -241,7 +241,7 @@ export class OpenAiCompatibleAdapter {
       // A 4xx that names reasoning is this vendor refusing the reasoning the conversation carried
       // back — a field it does not take, or a value from another model. The turn goes again without
       // it: replaying is an optimisation the user's turn must never depend on (reasoning.ts).
-      if (carried.replayed > 0 && refusesReplayedReasoning(upstream.status, await upstream.clone().text().catch(() => ""))) {
+      if (carried.replayed > 0 && upstream.status >= 400 && upstream.status < 500 && refusesReplayedReasoning(upstream.status, await upstream.clone().text().catch(() => ""))) {
         const refusal = await upstream.text().catch(() => "");
         this.log.warn(`${this.tag} ${this.name}: upstream ${upstream.status} refused ${carried.replayed} replayed reasoning turn(s) for ${model}; asking again without them: ${redact(refusal).replace(/\s+/g, " ").slice(0, 200)}`);
         carried.replayed = 0;

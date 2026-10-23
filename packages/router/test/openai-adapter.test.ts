@@ -414,6 +414,64 @@ test("per-call credential wins over session and configured headers; reasoning re
   } finally { credential = undefined; }
 });
 
+test("replayed reasoning does not buffer a successful stream until upstream EOF", async (t) => {
+  let pending: http.ServerResponse | undefined;
+  let sent: { messages: { reasoning_content?: string }[] } | undefined;
+  const slow = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      sent = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { messages: { reasoning_content?: string }[] };
+      pending = res;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse([{ choices: [{ delta: { content: "first chunk" }, finish_reason: null }] }]));
+      // The test releases EOF only after the client has received the text.
+    });
+  });
+  const port = await listen(slow);
+  const streaming = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", url: `http://127.0.0.1:${port}/v1` }, log);
+  const gateway = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      void streaming.handle(req, res, "/v1/messages", {
+        ...request,
+        messages: [
+          { role: "user", content: "question" },
+          { role: "assistant", content: [{ type: "thinking", thinking: "thought", signature: encodeEnvelope({ w: "chat", p: "fake", m: "vendor-model", f: "reasoning_content" }) }] },
+          { role: "user", content: "continue" },
+        ],
+      }, "vendor-model", undefined);
+    });
+  });
+  t.after(() => {
+    pending?.end();
+    gateway.closeAllConnections();
+    slow.closeAllConnections();
+    gateway.close();
+    slow.close();
+  });
+  const gatewayPort = await listen(gateway);
+  const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/messages`, { method: "POST", body: "{}", signal: AbortSignal.timeout(2000) });
+  assert.equal(response.status, 200);
+  const reader = response.body!.getReader();
+  let text = "";
+  while (!text.includes('"text":"first chunk"')) {
+    const chunk = await reader.read();
+    assert.equal(chunk.done, false);
+    text += new TextDecoder().decode(chunk.value);
+  }
+  assert.ok(pending);
+  assert.equal(pending.writableEnded, false);
+  assert.ok(sent?.messages.some((message) => message.reasoning_content === "thought"), "the successful request really carried replayed reasoning");
+  pending.end(sse([{ choices: [{ delta: {}, finish_reason: "stop" }] }]));
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    text += new TextDecoder().decode(chunk.value);
+  }
+  assert.match(text, /message_stop/);
+});
+
 test("cleanup", () => {
   front.close();
   upstream.close();
