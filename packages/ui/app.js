@@ -97,6 +97,18 @@ function uniqueName(name, providers, url) {
   while (providers[value]) value = `${base}-${number++}`;
   return value;
 }
+// A provider's key is a slug that never changes once saved (routes, mappings and the picker name
+// it), so the name the user typed lives in `label`. Show `label || key` wherever a person reads it.
+function providerLabel(name, provider = currentConfig && currentConfig.providers && currentConfig.providers[name]) {
+  return (provider && typeof provider.label === "string" && provider.label.trim()) || name;
+}
+// The typed name is kept only when it says something the key does not; typing the key back clears it.
+function applyProviderLabel(provider, key, typedName) {
+  const label = typedName.trim().slice(0, 60);
+  if (label && label !== key) provider.label = label;
+  else delete provider.label;
+  return provider;
+}
 function groupedModels(config) {
   const groups = [];
   for (const [name, provider] of Object.entries(config.providers || {})) {
@@ -790,7 +802,7 @@ function renderHealthProviders() {
       ]));
     }
     // The row opens the provider's own page; a button inside it keeps its own click.
-    const row = cell(el("span", { class: "cell-label", text: name }), [providerState(name, provider), chevronIcon()], lines, "provider-status link");
+    const row = cell(el("span", { class: "cell-label", text: providerLabel(name, provider) }), [providerState(name, provider), chevronIcon()], lines, "provider-status link");
     row.tabIndex = 0;
     const open = (event) => { if (!event.target.closest("button, a")) openProvider(name, provider); };
     row.addEventListener("click", open);
@@ -874,7 +886,7 @@ function renderClientPickerModels(enabled) {
     // <label>, because inside it every click toggles the checkbox instead of reaching the field.
     box.appendChild(el("div", { class: "picker-model", title: model.id }, [
       el("label", { class: "pm-main" }, [input, el("span", { text: labelOf(model) })]),
-      el("small", { text: group.name }),
+      el("small", { text: providerLabel(group.name, group.provider) }),
       windowField,
     ]));
   }
@@ -918,7 +930,7 @@ function renderModelSlots() {
     const select = el("select", {});
     select.appendChild(el("option", { value: "", text: t("slots.slotDefault") }));
     for (const group of groupedModels(currentConfig)) for (const model of group.models) {
-      const option = el("option", { value: model.id, text: `${labelOf(model)} · ${group.name}` });
+      const option = el("option", { value: model.id, text: `${labelOf(model)} · ${providerLabel(group.name, group.provider)}` });
       if (chosen[slot] === model.id) option.selected = true;
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
       // merely worth knowing everywhere else.
@@ -955,7 +967,7 @@ function renderWebSearchSlot() {
     // A Claude account searches on its own when routed to, but `serveWebSearch` has no backend for
     // that provider kind: named here, the search would quietly fall back to `smallFast`.
     if (currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic") continue;
-    const option = el("option", { value: webSearchChoice(group.name, model.id), text: `${labelOf(model)} · ${group.name}` });
+    const option = el("option", { value: webSearchChoice(group.name, model.id), text: `${labelOf(model)} · ${providerLabel(group.name, group.provider)}` });
     if (saved && saved.provider === group.name && saved.model === model.id) { option.selected = true; found = true; }
     select.appendChild(option);
   }
@@ -1639,7 +1651,7 @@ function targetSelect(route) {
   const select = el("select", {});
   select.appendChild(selectOption("", t("slots.passthrough")));
   for (const group of groupedModels(currentConfig)) {
-    const optgroup = el("optgroup", { label: group.name });
+    const optgroup = el("optgroup", { label: providerLabel(group.name, group.provider) });
     for (const model of group.models) optgroup.appendChild(selectOption(JSON.stringify([group.name, model.id]), labelOf(model)));
     select.appendChild(optgroup);
   }
@@ -1978,7 +1990,7 @@ function providerRailItem(name, provider) {
     "aria-selected": String(selected),
   }, [
     el("span", { class: "provider-rail-copy" }, [
-      el("strong", { text: name }),
+      el("strong", { text: providerLabel(name, provider) }),
       el("span", { text: t("providers.modelsCountShort", { count: modelsOf(provider).length }) }),
     ]),
     providerState(name, provider),
@@ -2008,14 +2020,14 @@ function renderProviderRail() {
   const list = $("#providers-list");
   const entries = Object.entries((currentConfig && currentConfig.providers) || {});
   const query = providerSearch.trim().toLowerCase();
-  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
+  const visible = entries.filter(([name, provider]) => !query || name.toLowerCase().includes(query) || providerLabel(name, provider).toLowerCase().includes(query) || providerKind(name, provider).toLowerCase().includes(query));
   list.replaceChildren(...visible.map(([name, provider]) => providerRailItem(name, provider)));
   if (!entries.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.empty") }));
   else if (!visible.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.noSelection") }));
 }
 
 async function removeProvider(name, provider) {
-  if (!confirm(t("providers.removeConfirm", { name }))) return;
+  if (!confirm(t("providers.removeConfirm", { name: providerLabel(name, provider) }))) return;
   const next = clone(await latestConfig());
   delete next.providers[name];
   next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
@@ -2101,9 +2113,10 @@ async function saveAnthropicRotation(name, provider, enabled, control, message) 
   } finally { control.disabled = false; }
 }
 
-/** The current login is named by the router in English; everything else carries the user's own label. */
+/** The router names the current login and an unnamed added account in English; a label the user set is shown as is. */
 function claudeAccountLabel(account) {
-  return account.id === "current" ? t("providers.anthropicCurrent") : account.label;
+  if (account.id === "current") return t("providers.anthropicCurrent");
+  return account.label === "Claude account" ? t("providers.claudeAccountDefault") : account.label;
 }
 
 /** "5h 14% · weekly 10%" under a Claude account, or nothing while its usage is unknown. */
@@ -2126,18 +2139,37 @@ function claudePreferButton(name, id, disabled) {
 
 function renderClaudeAccountRows(target, data, name, generation) {
   if (generation !== providerDetailGeneration) return;
+  // A stored account the router recognises as the current login (left over from an earlier setup)
+  // is the same person's one account: it gets no row of its own and is not counted.
+  const all = Array.isArray(data.accounts) ? data.accounts : [];
+  const duplicates = data.current ? all.filter((account) => account.sameAsCurrent) : [];
   // Rows follow the order the router tries them in: the preferred account, else the current login, first.
-  const stored = Array.isArray(data.accounts) ? [...data.accounts] : [];
+  const stored = all.filter((account) => !duplicates.includes(account));
   const preferredIndex = stored.findIndex((account) => account.preferred);
   if (preferredIndex > 0) stored.unshift(...stored.splice(preferredIndex, 1));
   const leader = preferredIndex >= 0 ? stored[0].id : data.current ? "current" : stored[0] && stored[0].id;
   const choosable = (data.current ? 1 : 0) + stored.length > 1;
   const firstBadge = (id) => (choosable && id === leader ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null);
   const rows = [];
+  let removeOld = null;
+  if (duplicates.length) {
+    removeOld = el("button", { class: "btn secondary compact", type: "button", text: t("providers.anthropicRemoveOld") });
+    removeOld.addEventListener("click", async () => {
+      if (!confirm(t("providers.anthropicRemoveOldConfirm"))) return;
+      removeOld.disabled = true;
+      try {
+        for (const account of duplicates) await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+        await refreshClaudeAccountPanel(name);
+      } catch (error) { removeOld.disabled = false; toast(t("common.actionFailed"), true, error.message); }
+    });
+  }
+  const currentActions = [choosable && leader !== "current" ? claudePreferButton(name, null, false) : null, removeOld].filter(Boolean);
   const currentRow = data.current ? el("article", { class: "cell account-card current" }, [
     el("div", { class: "cell-text account-card-copy" }, [
-      el("strong", { text: data.current.label }), el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp")),
-      choosable && leader !== "current" ? el("div", { class: "account-card-actions" }, [claudePreferButton(name, null, false)]) : null,
+      el("strong", { text: t("providers.anthropicCurrentLogin") }), data.current.email ? el("span", { class: "small", text: data.current.email }) : null,
+      el("span", { class: "small", text: anthropicSourceText(data.current.source) }), claudeQuotaNode(data.current), hint(t("providers.currentAccountHelp")),
+      duplicates.length ? hint(t("providers.anthropicOldSignIn")) : null,
+      currentActions.length ? el("div", { class: "account-card-actions" }, currentActions) : null,
     ]),
     el("div", { class: "account-card-badges" }, [firstBadge("current"), el("span", { class: "badge ok", text: t("providers.anthropicCurrent") })]),
   ]) : null;
@@ -2153,7 +2185,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
     });
     const remove = el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
     remove.addEventListener("click", async () => {
-      if (!confirm(t("providers.anthropicRemoveConfirm", { name: account.label }))) return;
+      if (!confirm(t("providers.anthropicRemoveConfirm", { name: claudeAccountLabel(account) }))) return;
       try { await api(`/api/claude-accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" }); await refreshClaudeAccountPanel(name); }
       catch (error) { toast(t("common.actionFailed"), true, error.message); }
     });
@@ -2166,7 +2198,7 @@ function renderClaudeAccountRows(target, data, name, generation) {
     }
     rows.push(el("article", { class: "cell account-card" }, [
       el("div", { class: "cell-text account-card-copy" }, [
-        el("strong", { text: account.label }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp")),
+        el("strong", { text: claudeAccountLabel(account) }), account.email && account.email !== account.label ? el("span", { class: "small", text: account.email }) : null, claudeQuotaNode(account), hint(t("providers.addedAccountHelp")),
         el("div", { class: "account-card-actions" }, actions),
       ]),
       el("div", { class: "account-card-badges" }, [firstBadge(account.id), el("span", { class: `badge ${unavailable ? "bad" : "ok"}`, text: unavailable ? t("providers.anthropicReauth") : t("pool.ready") })]),
@@ -2702,7 +2734,7 @@ function keyAccountsPanel(name) {
   add.addEventListener("click", () => { keyForm = { provider: name, id: null }; renderProviderDetail(); });
   const panel = el("div", { class: "provider-panel" }, [
     el("section", { class: "section" }, [
-      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name }) }), el("span", { id: "key-account-count", class: "small" })]),
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name: providerLabel(name) }) }), el("span", { id: "key-account-count", class: "small" })]),
       rows,
       el("div", { class: "group stacked-add" }, [adding ? keyAccountForm(name, null, -1, []) : add]),
       el("p", { class: "group-footer", text: t("providers.keyAccountsHelp") }),
@@ -2731,7 +2763,7 @@ function renderProviderDetail() {
   const remove = el("button", { class: "cell-button destructive", type: "button", text: t("providers.remove"), onclick: () => void removeProvider(name, provider) });
   const back = el("button", { class: "provider-back", type: "button", onclick: closeProviderDetail }, [svgIcon("0 0 9 15", ["M7.5 1.5l-6 6 6 6"]), el("span", { text: t("nav.providers") })]);
   const header = el("header", { class: "provider-detail-header" }, [
-    el("div", {}, [el("div", { class: "provider-title-line" }, [el("h2", { text: name }), providerState(name, provider)]), el("p", { class: "small", text: providerKind(name, provider) })]),
+    el("div", {}, [el("div", { class: "provider-title-line" }, [el("h2", { text: providerLabel(name, provider) }), providerState(name, provider)]), el("p", { class: "small", text: providerKind(name, provider) })]),
     el("div", { class: "provider-detail-actions" }, [check, edit]),
   ]);
   let content;
@@ -3009,7 +3041,7 @@ function anthropicSourceText(source) {
 function openAnthropicProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const displayName = options.name || t("providers.anthropic");
+  const displayName = options.name ? providerLabel(options.name, existing) : t("providers.anthropic");
   const nameInput = el("input", { value: displayName, maxlength: "60" });
   const auth = el("select", {}, [selectOption("claude-code", t("providers.anthropicAuthClaudeCode")), selectOption("api-key", t("providers.anthropicAuthApiKey"))]);
   auth.value = (existing && existing.auth) || "claude-code";
@@ -3084,7 +3116,7 @@ function openAnthropicProviderForm(options) {
     const providerName = existing ? options.name : uniqueName(typedName, next.providers);
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), existing && next.providers[options.name]);
     const provider = { type: "anthropic", auth: auth.value, ...(auth.value === "claude-code" && accountPool ? { accountPool: true } : {}), ...(auth.value === "api-key" && (keyInput.value || (existing && existing.apiKey)) ? { apiKey: keyInput.value || existing.apiKey } : {}), limits: limitsInput.checked, models: checkedModels };
-    next.providers[providerName] = provider;
+    next.providers[providerName] = applyProviderLabel(provider, providerName, typedName);
     // accountPool makes these models native Claude routing targets. Without it this remains the
     // historical OpenAI ingress provider, and routing deliberately ignores it.
     saveButton.disabled = true;
@@ -3113,7 +3145,7 @@ function grokTickedAfterCheck(firstListing, tickedIds, listedIds) {
 function openGrokProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const nameInput = el("input", { value: options.name || t("providers.grok"), maxlength: "60" });
+  const nameInput = el("input", { value: options.name ? providerLabel(options.name, existing) : t("providers.grok"), maxlength: "60" });
   const result = el("div", { class: "probe-result" });
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   let foundModels = modelsOf(existing);
@@ -3185,6 +3217,7 @@ function openGrokProviderForm(options) {
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
       models: checkedModels,
     };
+    applyProviderLabel(next.providers[providerName], providerName, typedName);
     const existingSelections = pickerSelectionsExcept(next, providerName);
     applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
     saveButton.disabled = true;
@@ -3200,7 +3233,7 @@ function openGrokProviderForm(options) {
 function openGoogleProviderForm(options) {
   let formActive = true;
   const existing = options.provider;
-  const nameInput = el("input", { value: options.name || t("providers.google"), maxlength: "60" });
+  const nameInput = el("input", { value: options.name ? providerLabel(options.name, existing) : t("providers.google"), maxlength: "60" });
   const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: existing && existing.apiKey ? t("providers.keySaved") : t("providers.keyPlaceholder") });
   const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
@@ -3294,6 +3327,7 @@ function openGoogleProviderForm(options) {
       ...(append.value.trim() ? { instructionsAppend: append.value.trim() } : {}),
       models: checkedModels,
     };
+    applyProviderLabel(next.providers[providerName], providerName, typedName);
     // Same rule as the other provider forms: read after the provider is updated, so an unticked
     // model is already undeclared and falls out of the picker on its own.
     const existingSelections = pickerSelectionsExcept(next, providerName);
@@ -3316,7 +3350,7 @@ function openProviderForm(options) {
   const isAnthropic = options.kind === "anthropic" || (existing && existing.type === "anthropic");
   const isOpenAi = !isChatgpt && !isAnthropic && ((existing && existing.type === "openai-compatible") || (preset && preset.kind === "openai-compatible"));
   const isCustom = options.kind === "custom";
-  const displayName = options.name || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
+  const displayName = (options.name && providerLabel(options.name, existing)) || (preset && preset.name) || (isChatgpt ? t("providers.chatgpt") : isAnthropic ? t("providers.anthropic") : t("providers.customName"));
   if (isAnthropic) { openAnthropicProviderForm(options); return; }
   if (options.kind === "google" || (existing && existing.type === "google")) { openGoogleProviderForm(options); return; }
   if (options.kind === "grok" || (existing && existing.type === "grok")) { openGrokProviderForm(options); return; }
@@ -3583,7 +3617,7 @@ function openProviderForm(options) {
       ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "fast", "models"]
       : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
-    next.providers[providerName] = { ...kept, ...provider };
+    next.providers[providerName] = applyProviderLabel({ ...kept, ...provider }, providerName, typedName);
     // A pooled provider's first key is `headers` and `credentials[0]` at once (the 계정 tab), so a
     // key changed here must change both, or the pool keeps sending the old one.
     const pooled = next.providers[providerName].credentials;
@@ -4571,11 +4605,11 @@ function renderProviderFilter(summary, records) {
   if (requestProvider) knownRequestProviders.add(requestProvider);
   const names = [...knownRequestProviders].sort();
   // Rebuilt only when the list changes, so the 3-second refresh does not close an open menu.
-  const key = names.join("\n");
+  const key = names.map((name) => `${name}\t${providerLabel(name)}`).join("\n");
   const select = $("#logs-provider");
   if (key !== renderedProviderNames) {
     renderedProviderNames = key;
-    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map((name) => el("option", { value: name, text: name })));
+    select.replaceChildren(el("option", { value: "", text: t("logs.all") }), ...names.map((name) => el("option", { value: name, text: providerLabel(name) })));
   }
   if (select.value !== requestProvider) select.value = requestProvider;
 }
@@ -4587,7 +4621,7 @@ function modelUsageRow(entry) {
   const total = totalInputOf(entry);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: entry.model, title: entry.model }),
-    el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: entry.provider }),
+    el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: providerLabel(entry.provider) }),
   ]);
   // The labels show only where a narrow window drops the header row.
   return el("tr", {}, [
@@ -4629,7 +4663,7 @@ function requestRow(record) {
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
-    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: record.provider }),
+    el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: providerLabel(record.provider) }),
   ].filter(Boolean));
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
   // which read as a two-token request (2026-09-23). The split is in the detail row.
