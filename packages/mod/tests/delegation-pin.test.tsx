@@ -48,16 +48,19 @@ test('pin hover has a keyed scope and four explanation lines only on rich surfac
     } else {
       const boxes: { key?: string; props?: Record<string, unknown>; hover?: { scope?: string; display?: string } }[] = []
       let chipClipped = false
-      const walk = (value: unknown, clipped = false): void => {
+      let chipInBand = true
+      const walk = (value: unknown, clipped = false, inBand = false): void => {
         if (!value || typeof value !== 'object') return
-        if (Array.isArray(value)) { value.forEach(child => walk(child, clipped)); return }
+        if (Array.isArray(value)) { value.forEach(child => walk(child, clipped, inBand)); return }
         const node = value as { type?: string; key?: string; props?: Record<string, unknown>; hover?: { scope?: string; display?: string }; children?: unknown[] }
         if (node.type === 'Box') boxes.push(node)
-        if (node.props?.key === 'delegation-pin') chipClipped = clipped
-        node.children?.forEach(child => walk(child, clipped || node.props?.overflow === 'hidden'))
+        if (node.props?.key === 'delegation-pin') { chipClipped = clipped; chipInBand = inBand }
+        node.children?.forEach(child => walk(child, clipped || node.props?.overflow === 'hidden', inBand || node.props?.key === 'band'))
       }
       walk(await ui.drawn())
       expect(chipClipped).toBe(false)
+      // The chip is its own row above the band's capsule, never inside it: the band draws the same pinned or not.
+      expect(chipInBand).toBe(false)
       expect(boxes.find(box => box.props?.key === 'delegation-pin')?.hover).toEqual({ scope: 'ripple-tip-delegation-pin' })
       expect(boxes.some(box => box.props?.display === 'none' && box.hover?.scope === 'ripple-tip-delegation-pin' && box.hover?.display === 'flex')).toBe(true)
       for (const text of [/A request like/, /count as your explicit choice/, /The pin ends with the session/, /To pin a model/]) expect(await ui.find({ type: 'Text', text })).toBeDefined()

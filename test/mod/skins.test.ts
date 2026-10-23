@@ -6,7 +6,7 @@ import type { Paint } from '../../packages/mod/hooks/ui/look.ts'
 import type { Sea, TileArt } from '../../packages/mod/hooks/ui/art.ts'
 
 const DEEP: Paint = {
-  sea: deep.seaArt, plate: deep.plateArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
+  sea: deep.seaArt, plate: deep.plateArt, chip: deep.chipArt, switch: deep.switchArt, word: deep.wordArt, extraHover: deep.extraHoverArt,
   pill: deep.pillArt, segmented: deep.segmentedArt, slider: deep.sliderArt, well: deep.wellArt, close: deep.closeArt,
   meter: deep.meterArt, ring: deep.ringArt, clock: deep.clockArt, gauge: deep.gaugeArt, icon: deep.iconArt,
   agents: deep.agentsArt, rule: deep.ruleArt, tile: deep.tileArt, beads: deep.beadsArt,
@@ -42,6 +42,7 @@ test('the deep and flat draw every picture, each one sound', () => {
       if (drawn) sound(skin + ' sea ' + sea.tone, drawn)
     }
     sound(skin + ' plate', art.plate(300, 19))
+    sound(skin + ' chip', art.chip(120))
     for (const on of [true, false]) for (const busy of [true, false]) sound(skin + ' switch', art.switch(on, busy))
     for (const on of [true, false]) for (const busy of [true, false]) sound(skin + ' word', art.word('Auto', on, busy).source)
     sound(skin + ' extraHover', art.extraHover(7.917))

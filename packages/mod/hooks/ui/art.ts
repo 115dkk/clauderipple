@@ -317,6 +317,28 @@ export function extraHoverArt(widthPx: number): string {
     '<rect x="2" y="1" width="' + r(Math.max(0, widthPx - 4)) + '" height="' + r(CONTROL_PX - 2) + '" fill="url(#v)"/>')
 }
 
+/** The pin's mark on a 12 px square: a round head and its needle. */
+export const PIN_MARK = '<circle cx="7.8" cy="4.2" r="2.6"/><path d="M6.1 6l-3.9 3.9"/>'
+
+/**
+ * The delegation pin's chip, `width` × 26 px: a small capsule of the water's own shade and the band's
+ * warm edge, sitting above the band, with the pin's mark in violet (the one point of colour) at its
+ * left. Its words and its way out are laid over it by the band.
+ */
+export function chipArt(width: number): string {
+  const w = Math.max(40, width)
+  const h = CONTROL_PX
+  const t = TONE.violet
+  return svg(w, h,
+    '<defs><linearGradient id="b" x1="0" x2="1"><stop offset="0" stop-color="' + WATER[0] + '"/><stop offset=".5" stop-color="' + WATER[1] + '"/><stop offset="1" stop-color="' + WATER[2] + '"/></linearGradient>' +
+    '<radialGradient id="g" cx="14" cy="13" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="' + t.glow + '" stop-opacity=".3"/><stop offset="1" stop-color="' + t.glow + '" stop-opacity="0"/></radialGradient>' +
+    '<linearGradient id="s" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".07"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>' +
+    '<rect x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" fill="url(#b)" stroke="rgba(128,124,116,.55)"/>' +
+    '<rect x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" fill="url(#g)"/>' +
+    '<rect x=".5" y=".5" width="' + r(w - 1) + '" height="' + (h - 1) + '" rx="' + (h / 2 - 0.5) + '" fill="url(#s)"/>' +
+    '<g transform="translate(9 7)" fill="none" stroke="' + t.hi + '" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + PIN_MARK + '</g>')
+}
+
 /** The look of a drawn button: the one thing to press, or a quiet one. */
 export type PillLook = 'primary' | 'ghost'
 

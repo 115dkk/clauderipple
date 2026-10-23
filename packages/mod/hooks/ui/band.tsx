@@ -33,7 +33,7 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort, LimitItem } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, CONTROL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -835,6 +835,60 @@ function delegationChip(el: Els, frame: Frame, view: DashboardView, actions: Pic
   )
 }
 
+/** The desktop chip's air, px: the pin's mark at its left, and what follows its last part. */
+const PIN_LEAD_PX = 30
+const PIN_TAIL_PX = 10
+/** Below this many columns the chip drops its label and shows the model alone. */
+const PIN_LABEL_COLUMNS = 50
+
+/**
+ * The delegation pin on the desktop: a small capsule above the band, right-aligned, drawn as the
+ * band is (the chip's plate in the water's shade, its words in the skin's ink, a violet mark, the
+ * band's own way-out disc to unpin). It is its own row above the band, so the band itself is
+ * the same drawing pinned or not. The explanation card is an absolute Box laid last, so it paints
+ * over the band's top (a positioned Box later in the tree wins) and nothing clips it: the band's
+ * capsule clips what lies inside it, and the chip sits outside.
+ */
+function pinChipDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): { chip: RenderNode; card: RenderNode } | null {
+  if (!view.delegationPin) return null
+  const { Box, Text } = el
+  const k = lookOf(frame)
+  const scope = tipScope('delegation-pin')
+  const label = frame.columns < PIN_LABEL_COLUMNS ? view.delegationPin : t(frame.lang, 'band.delegationPin', { name: view.delegationPin })
+  const release = actions.releaseDelegationPin
+  const closePx = release ? CLOSE_CELLS * CELL_PX : 0
+  const room = Math.max(8, frame.columns - 2)
+  const cells = Math.min(room, Math.ceil((PIN_LEAD_PX + textPx(label) * 1.08 + (release ? 4 : 0) + closePx + PIN_TAIL_PX) / CELL_PX))
+  const widthPx = cells * CELL_PX
+  const chip = (
+    <Box key="delegation-pin" position="relative" flexDirection="row" alignItems="center" width={cells} height={rowsOf(CONTROL_PX)} flexShrink={1} minWidth={0} {...{ hover: { scope } }}>
+      <Box position="absolute" top={0} left={0}>
+        {pic(el, 'pin-chip', k.art.chip(widthPx), label, widthPx, CONTROL_PX)}
+      </Box>
+      <Box position="relative" flexDirection="row" alignItems="center" columnGap={0.5} width="100%" minWidth={0} paddingLeft={PIN_LEAD_PX / CELL_PX} paddingRight={release ? 0.25 : PIN_TAIL_PX / CELL_PX}>
+        {lift(el)}
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text {...k.ink} wrap="truncate">{label}</Text>
+        </Box>
+        {release ? closeButton(el, frame, 'release-pin', t(frame.lang, 'band.releasePin'), release) : null}
+      </Box>
+    </Box>
+  )
+  const lines = (['band.pinWhy', 'band.pinDoes', 'band.pinHow', 'band.pinOn'] as const).map(key => t(frame.lang, key, { name: view.delegationPin! }))
+  const width = Math.max(24, Math.min(76, frame.columns - 4))
+  const height = (2 + lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(textPx(line) / ((width - 2) * CELL_PX))), 0)) * ROW_PX
+  const card = (
+    <Box position="absolute" top={2} right={1} width={width} display="none" hover={{ scope, display: 'flex' }} flexDirection="column" padding={1}>
+      <Box position="absolute" top={0} left={0}>{pic(el, 'pin-help-plate', k.art.plate(width * CELL_PX, height), '', width * CELL_PX, height)}</Box>
+      <Box position="relative" flexDirection="column">
+        {lift(el)}
+        {lines.map((line, i) => <Text key={'pin-help-' + i} {...k.ink} wrap="wrap">{line}</Text>)}
+      </Box>
+    </Box>
+  )
+  return { chip, card }
+}
+
 function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   const { Box } = el
   // The capsule's air and edge take their share of the frame.
@@ -926,8 +980,18 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
     paddingY: PAD_Y,
     children: [row, ...(limitsRow ? [limitsRow.node] : []), view.effortMenu ? effortMenuDrawn(el, frame, view, actions) : ''],
   })
-  // The capsule clips its sea; a multi-line hover must live outside that clipping boundary.
-  return view.delegationPin ? <Box flexDirection="column" width="100%">{band}{delegationChip(el, frame, view, actions)}</Box> : band
+  // The capsule clips its sea, so the pin's chip and its card live outside it, above and over it.
+  const pin = pinChipDrawn(el, frame, view, actions)
+  if (!pin) return band
+  return (
+    <Box key="band-pinned" flexDirection="column" rowGap={0.25} width="100%" minWidth={0}>
+      <Box key="band-pin-row" flexDirection="row" justifyContent="flex-end" width="100%" minWidth={0} paddingRight={1}>
+        {pin.chip}
+      </Box>
+      {band}
+      {pin.card}
+    </Box>
+  )
 }
 
 // ---- Terminal ----------------------------------------------------------------------------------
