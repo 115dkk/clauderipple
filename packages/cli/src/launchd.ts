@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { BUNDLE_ID, launcherPath } from "./bundle.ts";
 
 export const LABEL = "com.clauderipple.router";
 
@@ -16,8 +17,71 @@ export function launchdLabel(): string {
 
 /** Test-only override (CLAUDERIPPLE_LAUNCH_AGENTS_DIR); production always uses ~/Library/LaunchAgents. */
 export function plistPath(): string {
+  return agentPlistPath(launchdLabel());
+}
+
+function agentPlistPath(label: string): string {
   const dir = process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR ?? path.join(os.homedir(), "Library", "LaunchAgents");
-  return path.join(dir, `${launchdLabel()}.plist`);
+  return path.join(dir, `${label}.plist`);
+}
+
+export function trayLaunchdLabel(): string {
+  return process.env.CLAUDERIPPLE_TRAY_LAUNCHD_LABEL
+    ?? (process.env.CLAUDERIPPLE_LAUNCHD_LABEL ? `${launchdLabel()}.tray` : "com.clauderipple.tray");
+}
+
+export function trayPlistPath(): string {
+  return agentPlistPath(trayLaunchdLabel());
+}
+
+/** macOS cannot launch an npm tray by opening its bare Electron bundle without a script. */
+export function trayLoginItemDecision(opts: { platform: NodeJS.Platform; packaged: boolean; initialized: boolean; electronOpenAtLogin: boolean }): { removeElectronItem: boolean; enableAgent: boolean } | null {
+  if (opts.platform !== "darwin" || opts.packaged) return null;
+  return { removeElectronItem: opts.electronOpenAtLogin, enableAgent: !opts.initialized || opts.electronOpenAtLogin };
+}
+
+export function renderTrayPlist(home: string): string {
+  const log = path.join(home, "logs", "launcher.log");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${esc(trayLaunchdLabel())}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${esc(launcherPath(home))}</string>
+    <string>tray</string>
+  </array>
+  <key>AssociatedBundleIdentifiers</key>
+  <array><string>${BUNDLE_ID}</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>CLAUDERIPPLE_HOME</key><string>${esc(home)}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>StandardOutPath</key><string>${esc(log)}</string>
+  <key>StandardErrorPath</key><string>${esc(log)}</string>
+</dict>
+</plist>
+`;
+}
+
+/** Next login only: never bootstrap, bootout or kickstart the tray's one-shot agent. */
+export function installTrayAgent(home: string): string {
+  const file = trayPlistPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.join(home, "logs"), { recursive: true });
+  fs.writeFileSync(file, renderTrayPlist(home));
+  return file;
+}
+
+export function removeTrayAgent(): boolean {
+  try {
+    fs.unlinkSync(trayPlistPath());
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return false;
+  }
 }
 
 function esc(s: string): string {

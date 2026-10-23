@@ -63,11 +63,11 @@ export function trayEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv
  * process, which is what a command typed in a terminal wants; the supervisor uses the foreground
  * form instead.
  */
-export async function startTray(options: { detached?: boolean } = {}): Promise<TrayStart> {
+export async function startTray(options: { detached?: boolean; atLogin?: boolean } = {}): Promise<TrayStart> {
   const current = runtime();
   // Started by hand (the app icon, `clauderipple tray`), the window opens; started by the logon
-  // supervisor in the foreground, it stays in the tray. The login item launches Electron directly.
-  const env = { ...trayEnv(), ...((options.detached ?? true) ? { CLAUDERIPPLE_APP_SHOW: "1" } : {}) };
+  // supervisor in the foreground, or by the macOS tray agent at login, it stays in the tray.
+  const env = { ...trayEnv(), ...((options.detached ?? true) && !options.atLogin ? { CLAUDERIPPLE_APP_SHOW: "1" } : {}) };
   if (current.packaged) {
     // The packaged app IS the tray: relaunching its own binary with no script is what opens it.
     // Our own CLI runs under ELECTRON_RUN_AS_NODE here, and inheriting it would relaunch Node.

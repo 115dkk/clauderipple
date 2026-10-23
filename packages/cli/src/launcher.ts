@@ -65,7 +65,7 @@ function launchEnv(rt: Runtime, home: string): Record<string, string> {
 }
 
 /** The app icon (icon.icns / icon.png / icon.ico), committed in the app's assets and shipped in the npm package beside the tray. */
-function findIcon(rt: Runtime, file: string): string | null {
+export function findIcon(rt: Pick<Runtime, "repo">, file: string): string | null {
   for (const dir of [path.join(rt.repo, "packages", "app", "assets"), path.join(rt.repo, "dist", "app", "assets")]) {
     const p = path.join(dir, file);
     if (fs.existsSync(p)) return p;

@@ -17,6 +17,7 @@ import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, checkProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentDefinitionPath, agentState, installAgent, isLinux, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
 import { removeBundle, writeBundle } from "./bundle.ts";
+import { installTrayAgent, removeTrayAgent, trayLoginItemDecision, trayPlistPath } from "./launchd.ts";
 import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
@@ -304,6 +305,7 @@ async function uninstall(): Promise<void> {
   await releaseHeldSleep("uninstalled");
   const removed = removeAgent();
   console.log(removed ? `✓ ${supervisorName()} removed (${agentDefinitionPath()})` : `✓ no ${supervisorName()} registered`);
+  if (process.platform === "darwin") removeTrayAgent();
   removeBundle(home);
   try {
     const app = uninstallLauncher({ rt: installedRuntime, home, version: VERSION });
@@ -849,9 +851,19 @@ async function dispatchCommand(): Promise<void> {
       await update();
       break;
     case "tray": {
+      // Internal app bridge: only plist I/O, never launchctl or Electron runtime installation.
+      const login = opt("login");
+      if (login !== undefined) {
+        const decision = trayLoginItemDecision({ platform: process.platform, packaged: installedRuntime.packaged, initialized: flag("initialized"), electronOpenAtLogin: flag("electron-login") });
+        if (!decision || !["on", "off", "init"].includes(login)) throw new Error("tray --login requires on|off|init on an unpackaged macOS installation");
+        if (login === "on" || (login === "init" && decision.enableAgent)) installTrayAgent(homeDir());
+        else if (login === "off") removeTrayAgent();
+        console.log(JSON.stringify({ on: fs.existsSync(trayPlistPath()), removeElectronItem: login === "init" && decision.removeElectronItem }));
+        break;
+      }
       // --ensure is what the app launcher runs: fetch Electron once if it is missing, then start.
       const ensured = args.includes("--ensure") && !installedRuntime.packaged ? installTrayRuntime() : null;
-      const result = args.includes("--install") ? installTrayRuntime() : ensured && !ensured.ok ? ensured : await startTray();
+      const result = args.includes("--install") ? installTrayRuntime() : ensured && !ensured.ok ? ensured : await startTray({ atLogin: flag("at-login") });
       console.log(result.message);
       if (!result.ok) process.exit(1);
       break;

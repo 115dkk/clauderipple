@@ -55,6 +55,7 @@ const { classifyMode, cliProxyState, desktopProxyState, doctor, repair } = await
 const { directOn, directOff, directStatePath } = await import("../src/direct.ts");
 const { applyAppProxy, configLibraryDir, currentAppProxy } = await import("../src/picker.ts");
 const { installLauncher, uninstallLauncher, LAUNCHER_BUNDLE_ID } = await import("../src/launcher.ts");
+const { writeBundle } = await import("../src/bundle.ts");
 type SupervisorOps = import("../src/registration.ts").SupervisorOps;
 type SupervisorView = import("../src/registration.ts").SupervisorView;
 type Runtime = import("../src/runtime.ts").Runtime;
@@ -319,6 +320,27 @@ test("repair re-registers a plist whose program is gone, starts it and waits for
   assert.equal(again.ok, true);
   assert.equal(again.steps[0]!.detail, "already registered for this installation");
   assert.ok(lc.calls.slice(before).every((c) => c[0] === "print"));
+});
+
+test("doctor and repair accept the shared router/tray launcher after a package version update", async () => {
+  const { home } = scratch();
+  const rt = { ...fakeRuntime(path.join(root, "rt-shared-bundle")), packaged: false };
+  const reg = registration(rt, home, "1.0.0", "darwin", null);
+  assert.ok(reg.bundle);
+  let signed = 0;
+  writeBundle({ home, ...reg.bundle }, () => { signed++; });
+  fs.mkdirSync(path.dirname(plistPath()), { recursive: true });
+  fs.writeFileSync(plistPath(), renderPlist({ ...reg, home, stdoutLog: path.join(home, "logs", "launchd.log") }));
+  const lc = fakeLaunchctl({ loaded: true, running: true });
+  const updated = registration(rt, home, "2.0.0", "darwin", null);
+  const supervisor = launchdSupervisor(updated, home, lc.run);
+  assert.equal(supervisor.inspect().current, true);
+  assert.equal(supervisor.inspect().programExists, true);
+  const result = await repair({ home, version: "2.0.0", supervisor, routerStatus: answering("2.0.0"), sleep: noSleep, remoteHostInstalled: () => false });
+  assert.equal(result.ok, true);
+  assert.equal(result.steps[0]!.detail, "already registered for this installation");
+  assert.ok(lc.calls.every(call => call[0] === "print"));
+  assert.equal(signed, 1);
 });
 
 test("repair leaves a router that answers alone even when its entry names another installation", async () => {
