@@ -33,6 +33,8 @@ export interface SdkQuery extends AsyncIterable<Record<string, unknown>> {
   setModel(model?: string): Promise<void>;
   setPermissionMode(mode: PermissionMode): Promise<void>;
   close(): void;
+  /** The launcher resolves this only after the transcript writer has exited. */
+  processExited?: Promise<void>;
 }
 export type PermissionAnswer =
   | { behavior: "allow"; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }
@@ -55,7 +57,9 @@ interface SessionRecord {
   createdBy: string;
   contextWindow: number | null;
   /** Missing on older host records; desktop continuations are explicitly excluded. */
-  desktopHandoff?: "pending" | "attempted" | "excluded";
+  desktopHandoff?: "pending" | "attempted" | "failed" | "excluded";
+  desktopHandoffAttempts?: number;
+  desktopHandoffError?: string;
   desktopBridge?: boolean;
   transcriptOffset?: number;
 }
@@ -420,7 +424,7 @@ export class Sessions {
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
       // desktop app, are hidden; any other one may be open in the app and must stay reachable
       // (a record the host once resumed is rebased onto Remote Control from here).
-      excluded: () => new Set(Array.from(this.records.values()).filter(r => !r.desktopBridge && (this.live.has(r.id) || r.desktopHandoff === "pending")).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
+      excluded: () => new Set(Array.from(this.records.values()).filter(r => !r.desktopBridge && (this.live.has(r.id) || r.desktopHandoff === "pending" || r.desktopHandoff === "failed")).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
     });
   }
 
@@ -487,10 +491,14 @@ export class Sessions {
       // drop messages the phone already had acked.
       if (!r.desktopBridge && r.sdkSessionId && desktopProcess?.bridgeSessionId) {
         const live = this.live.get(r.id);
-        if (!live || (live.pendingMessages.length === 0 && !BUSY.has(r.state))) {
+        if (this.sdkIdle(r, live)) {
           this.stop(r.id);
           // The app already has this conversation, so a pending handoff would only open it again.
-          if (r.desktopHandoff === "pending") { r.desktopHandoff = "attempted"; this.save(); }
+          if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed") {
+            r.desktopHandoff = "attempted";
+            delete r.desktopHandoffError;
+            this.save();
+          }
           if (this.desktop.has(r.sdkSessionId)) {
             try { this.rebaseDesktop(r); } catch (error) { this.bridgeFailure(r.id, error); continue; }
           }
@@ -1965,7 +1973,7 @@ export class Sessions {
           }
         }
         this.setState(r, live.pendingMessages.length > 0 ? "running" : ok ? "idle" : "error");
-        if (live.pendingMessages.length === 0) this.handoff(r);
+        if (live.pendingMessages.length === 0) this.handoff(r, live);
         void this.refreshFigures(r, true);
         return;
       }
@@ -1974,30 +1982,69 @@ export class Sessions {
     }
   }
 
-  private handoff(r: SessionRecord): void {
+  /** Shared with app-bridge adoption: never stop a query still owed an accepted turn. */
+  private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
+    return !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
+  }
+
+  private handoff(r: SessionRecord, live: Live): void {
     const runner = this.opts.handoff;
-    if (!runner || !r.sdkSessionId || r.desktopHandoff !== "pending") return;
+    if (!runner || !r.sdkSessionId || r.desktopBridge || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
+    if (r.desktopHandoff !== "pending" && r.desktopHandoff !== "failed") return;
+    if ((r.desktopHandoffAttempts ?? 0) >= 3) return;
     r.desktopHandoff = "attempted";
+    r.desktopHandoffAttempts = (r.desktopHandoffAttempts ?? 0) + 1;
     this.save();
     const transfer = { messages: [] as SdkUserMessage[] };
     this.handingOff.set(r.id, transfer);
-    // Defer past result handling so the SDK can finish its result continuation first.
+    // Reserve the send lane now, then let the SDK finish its result continuation.
     void new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
       if (this.shuttingDown) { this.handingOff.delete(r.id); return; }
       try {
+        this.stop(r.id, live);
+        // close() and iterator completion alone do not prove the writer has stopped.
+        // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.
+        await live.query.processExited;
+        if (this.shuttingDown || r.desktopBridge) return;
         const result = await runner({ sessionId: r.sdkSessionId!, title: r.title, cwd: r.cwd });
+        delete r.desktopHandoffError;
+        this.save();
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] ${result}`);
       } catch (error) {
-        (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] failed: ${(error as Error).message}`);
+        r.desktopHandoff = "failed";
+        r.desktopHandoffError = error instanceof Error ? error.message : String(error);
+        this.save();
+        (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] failed: ${r.desktopHandoffError} (attempt ${r.desktopHandoffAttempts}/3)`);
       } finally {
         this.handingOff.delete(r.id);
-        if (transfer.messages.length && !this.shuttingDown) {
-          const writer = this.live.get(r.id) ?? this.start(r);
-          writer.pendingMessages.push(...transfer.messages);
-          for (const message of transfer.messages) writer.input.push(message);
-        }
+        if (transfer.messages.length && !this.shuttingDown) await this.resumeAfterHandoff(r, transfer.messages);
       }
     });
+  }
+
+  private async resumeAfterHandoff(r: SessionRecord, messages: SdkUserMessage[]): Promise<void> {
+    try {
+      this.desktop?.poll();
+      const bridgeId = this.desktop?.liveProcess(r.sdkSessionId!)?.bridgeSessionId;
+      if (bridgeId) {
+        // The app is now the writer. Use the existing send path, never resume a second SDK.
+        if (!r.desktopBridge) this.rebaseDesktop(r);
+        for (const message of messages) {
+          const content = messageContent(message.message.content, data => this.log(r.id).image(data));
+          await this.sendBridge(r.id, message.uuid!, content.text, content.images.map(image => ({ blob: image.blob!, name: "photo", mediaType: image.mediaType })), bridgeId);
+        }
+        return;
+      }
+      const writer = this.live.get(r.id) ?? this.start(r);
+      writer.pendingMessages.push(...messages);
+      for (const message of messages) writer.input.push(message);
+    } catch (error) {
+      // Accepted inputs must get a visible failure if the app is open but not reachable yet.
+      const text = error instanceof Error ? error.message : String(error);
+      (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] queued input failed: ${text}`);
+      this.append(r.id, { kind: "result", ok: false, error: text, ms: 0, turns: 0 });
+      this.setState(r, "error", text);
+    }
   }
 
   private subAssistant(r: SessionRecord, live: Live, parent: string, message: { id?: string; model?: string; content?: { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: Record<string, unknown> }[] }): void {

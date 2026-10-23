@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DesktopSidebar, PHONE_GROUP, UNGROUPED } from "../src/sidebar.ts";
+import { DesktopSidebar, PHONE_GROUP, UNGROUPED, windowsSidebarRoot } from "../src/sidebar.ts";
 import { SidebarStorage } from "../src/sidebar-storage.ts";
 import { sidebarSections, sidebarState } from "../web/sidebar.ts";
 import type { SessionSummary } from "../src/protocol.ts";
@@ -40,6 +40,22 @@ function fixture(t: import("node:test").TestContext) {
   let now = 0;
   return { root, dir, storage, config, write, session, sidebar: new DesktopSidebar({ root, now: () => now }), advance: () => { now += 3001; } };
 }
+test("Windows sidebar discovers only one complete, verified packaged-app layout", t => {
+  const f = fixture(t);
+  const appData = fs.mkdtempSync(path.join(os.tmpdir(), "sidebar-appdata-"));
+  t.after(() => fs.rmSync(appData, { recursive: true, force: true }));
+  assert.equal(windowsSidebarRoot(appData), undefined);
+  const root = path.join(appData, "Claude-Data", "claude_package");
+  fs.cpSync(f.root, root, { recursive: true });
+  assert.equal(windowsSidebarRoot(appData), root);
+  assert.deepEqual(new DesktopSidebar({ root: windowsSidebarRoot(appData)! }).read().groups, f.sidebar.read().groups);
+  fs.cpSync(f.root, path.join(appData, "Claude-Data", "claude_other"), { recursive: true });
+  assert.equal(windowsSidebarRoot(appData), undefined, "ambiguous app profiles are not guessed");
+  fs.rmSync(path.join(root, "claude_desktop_config.json"));
+  fs.rmSync(path.join(appData, "Claude-Data", "claude_other"), { recursive: true });
+  assert.equal(windowsSidebarRoot(appData), undefined, "incomplete data does not enable the sidebar");
+});
+
 test("app group order, recency, exact titles and unread IDs (unless focused since the last activity)", t => {
   const f = fixture(t), snapshot = f.sidebar.read();
   assert.deepEqual(snapshot.groups.map(g => g.name), ["사용자 그룹", UNGROUPED]);

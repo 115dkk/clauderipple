@@ -11,7 +11,8 @@ import { reduce } from "../web/timeline.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
-import { CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
+import { BridgeClient, CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
+import type { DesktopProcess } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
 
@@ -107,7 +108,7 @@ function controlledQueries(readInputs = true) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -651,16 +652,112 @@ test("desktop handoff waits until already queued turns finish", async t => {
   assert.deepEqual(counts, [2]);
 });
 
-test("desktop handoff failure is logged and never retried", async t => {
+test("desktop handoff failures persist and retry only at a later idle, at most three times across restarts", async t => {
   let calls = 0;
   const logs: string[] = [];
-  const f = fixture(t, {}, { handoff: async () => { calls++; throw new Error("timeout"); }, log: line => logs.push(line) });
+  const handoff = async () => { calls++; throw new Error("timeout"); };
+  const f = fixture(t, {}, { handoff, log: line => logs.push(line) });
   const id = await f.create();
   await waitFor(() => logs.length === 1);
-  f.sessions.send(id, "retry-turn", "again");
-  await waitFor(() => f.fake.users.length === 2 && f.sessions.summaryOf(id)?.state === "idle");
-  assert.equal(calls, 1);
+  const saved = () => (JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { desktopHandoff: string; desktopHandoffAttempts: number; desktopHandoffError: string }[])[0]!;
+  assert.deepEqual([saved().desktopHandoff, saved().desktopHandoffAttempts, saved().desktopHandoffError], ["failed", 1, "timeout"]);
+  for (let i = 0; i < 5; i++) await f.sessions.pollDesktop();
+  assert.equal(calls, 1, "polls without a new turn do not spin retries");
+  await f.sessions.send(id, "retry-turn", "again");
+  await waitFor(() => logs.length === 2);
+  assert.equal(saved().desktopHandoffAttempts, 2);
+  f.sessions.shutdown();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.fake.queryFn,
+    handoff, log: line => logs.push(line), onEvent: () => {}, onSessions: () => {} });
+  f.instances.push(recovered);
+  recovered.recover();
+  await recovered.send(id, "retry-after-restart", "again");
+  await waitFor(() => logs.length === 3);
+  await recovered.send(id, "past-limit", "again");
+  await waitFor(() => f.fake.users.length === 4 && recovered.summaryOf(id)?.state === "idle");
+  assert.equal(calls, 3);
+  assert.equal(saved().desktopHandoffAttempts, 3);
   assert.match(logs[0]!, /failed: timeout/);
+  assert.match(logs[2]!, /attempt 3\/3/);
+});
+
+test("handoff closes an idle SDK writer and waits for real process exit before invoking the runner", async t => {
+  const exited = Promise.withResolvers<void>();
+  const boundary = controlledQueries();
+  let calls = 0;
+  const f = fixture(t, {}, { queryFn: params => ({ ...boundary.queryFn(params), processExited: exited.promise }),
+    handoff: async () => { assert.equal(boundary.queries[0]!.closed, true); calls++; return "opened"; }, log: () => {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const first = boundary.queries[0]!;
+  first.emit({ type: "system", subtype: "init", session_id: "sdk-exiting" });
+  first.emit({ type: "result", subtype: "success" });
+  await waitFor(() => first.closed);
+  assert.equal(calls, 0, "close() alone must not permit a second writer");
+  await f.sessions.send(id, "while-exiting", "kept until exit");
+  await nextTick();
+  assert.equal(boundary.queries.length, 1);
+  exited.resolve();
+  await waitFor(() => calls === 1 && boundary.queries.length === 2);
+  await waitFor(() => boundary.queries[1]!.users.length === 1);
+  assert.equal(boundary.queries[1]!.users[0]!.message.content, "kept until exit");
+  boundary.queries[1]!.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(calls, 1);
+});
+
+for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "fails visibly when the app is not reachable"}, never a second SDK writer`, async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-app-projects-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const registry = new Map<string, DesktopProcess>();
+  const posts: string[] = [];
+  const bridgeClient = new BridgeClient({ auth: () => ({ accessToken: "fixture-token", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (options?.method === "POST") { posts.push(String(options.body)); return Response.json({}); }
+    if (String(url).includes("/events/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [], worker_status: "idle" });
+  } });
+  const boundary = controlledQueries();
+  const finish = Promise.withResolvers<void>();
+  let called = false;
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient,
+    handoff: async () => { called = true; await finish.promise; return "opened"; }, log: () => {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${sdkId}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  const first = boundary.queries[0]!;
+  first.emit({ type: "system", subtype: "init", session_id: sdkId });
+  first.emit({ type: "result", subtype: "success" });
+  await waitFor(() => called);
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff");
+  registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(reachable ? { bridgeSessionId: "bridge" } : {}) });
+  finish.resolve();
+  await waitFor(() => reachable ? posts.length === 1 : f.sessions.summaryOf(id)?.state === "error");
+  assert.equal(first.closed, true);
+  assert.equal(boundary.queries.length, 1);
+  if (reachable) {
+    assert.match(posts[0]!, /accepted during handoff/);
+    assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
+    assert.equal(f.sessions.list().length, 1);
+  } else assert.ok(f.sessions.log(id).tail().events.some(event => event.kind === "result" && event.ok === false));
+});
+
+test("a successful later handoff clears the durable failure and is not attempted again", async t => {
+  let calls = 0;
+  const lines: string[] = [];
+  const f = fixture(t, {}, { handoff: async () => { if (++calls === 1) throw new Error("app unavailable"); return "opened"; }, log: line => lines.push(line) });
+  const id = await f.create();
+  await waitFor(() => lines.length === 1);
+  await f.sessions.send(id, "retry-success", "again");
+  await waitFor(() => lines.length === 2);
+  const record = (JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as Record<string, unknown>[])[0]!;
+  assert.equal(record.desktopHandoff, "attempted");
+  assert.equal(record.desktopHandoffAttempts, 2);
+  assert.equal(record.desktopHandoffError, undefined);
+  await f.sessions.send(id, "after-success", "again");
+  await waitFor(() => f.fake.users.length === 3 && f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(calls, 2);
 });
 
 test("attention: a permission request is set, survives `seen`, and clears when the approval is answered", async t => {

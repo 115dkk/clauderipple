@@ -36,6 +36,7 @@ import { installService, uninstallService, serviceStatus, servicePaths, renderSe
 import { Sessions } from "./sessions.ts";
 import { REMOTE_USAGE } from "./usage.ts";
 import { desktopHandoff } from "./handoff.ts";
+import { windowsSidebarRoot } from "./sidebar.ts";
 import type { QueryFn } from "./sessions.ts";
 import { claudeBinary, claudeCodeLogin } from "../../cli/src/claude-auth.ts";
 
@@ -145,12 +146,19 @@ async function runHost(): Promise<void> {
   });
   // Mac sessions the host is not tailing push only while the Mac is away (screen locked or idle).
   const away = new MacAway({ log });
+  const handoff = claudePath ? desktopHandoff(claudePath) : undefined;
+  let sidebarRoot: string | undefined;
+  if (process.platform === "win32") {
+    try { sidebarRoot = windowsSidebarRoot(); }
+    catch (error) { log(`[desktop sidebar] discovery failed; disabled: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   sessions = new Sessions({
     dir, router, permissions,
     desktopProjects: path.join(os.homedir(), ".claude", "projects"),
-    ...(process.platform === "darwin" ? { desktopSidebar: {} } : {}),
+    ...(process.platform === "darwin" ? { desktopSidebar: {} } : sidebarRoot ? { desktopSidebar: { root: sidebarRoot } } : {}),
     queryFn: query as unknown as QueryFn,
-    ...(claudePath ? { claudePath, ...(process.platform === "darwin" ? { handoff: desktopHandoff(claudePath) } : {}) } : {}),
+    ...(claudePath ? { claudePath } : {}),
+    ...(handoff ? { handoff } : {}),
     log,
     // A Claude app turn that closed on a wrap_up question pushes that question, not its result.
     onEvent: (id, event) => {

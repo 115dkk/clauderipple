@@ -17,6 +17,19 @@ export interface SidebarSession { cliSessionId: string; sessionId: string; title
 export interface SidebarSnapshot { groups: { name: string; sessions: string[] }[]; sessions: Map<string, SidebarSession>; superseded: Set<string> }
 export interface SidebarOptions { root?: string; now?: () => number; onError?: (error: unknown) => void }
 
+/** Verified on Windows with bundled CLI 2.1.304: app data moved out of Roaming/Claude.
+ * Enable only a single on-disk layout we recognize, never a guessed AppData path. */
+export function windowsSidebarRoot(localAppData = process.env.LOCALAPPDATA): string | undefined {
+  if (!localAppData) return undefined;
+  const parent = path.join(localAppData, "Claude-Data");
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(parent, { withFileTypes: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  const roots = entries.filter(entry => entry.isDirectory() && /^claude_/i.test(entry.name)).map(entry => path.join(parent, entry.name))
+    .filter(root => ["config.json", "claude_desktop_config.json", "claude-code-sessions", path.join("Local Storage", "leveldb")].every(name => fs.existsSync(path.join(root, name))));
+  return roots.length === 1 ? roots[0] : undefined;
+}
+
 export class DesktopSidebar {
   private root: string;
   private storage: SidebarStorage;
