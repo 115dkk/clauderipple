@@ -5,6 +5,9 @@ export type Lang = 'ko' | 'en' | 'zh' | 'ja' | 'es' | 'pt'
 
 export type StatusLine = string | null
 
+/** A user's standing delegation choice, held only for this session. */
+export type DelegationPin = { model: string; provider?: string }
+
 export type StatusRequest = {
   at: string
   source: string
@@ -424,6 +427,7 @@ declare module 'claude-code' {
       agentsTick: number
       /** The person's last two prompts as submitted, mid-turn ones included (userNamed). */
       heardPrompts: string[]
+      delegationPin: DelegationPin | null
       jev: JevState
       routerModels: RouterModel[]
       /** The router's rung choices and presets (GET /api/mod-options), for the quick settings. */

@@ -809,6 +809,32 @@ function effortMenuDrawn(el: Els, frame: Frame, view: DashboardView, actions: Ba
   )
 }
 
+/** Session-only authorization, with the same keyed hover scope as the band's facts. */
+function delegationChip(el: Els, frame: Frame, view: DashboardView, actions: Pick<BandActions, 'releaseDelegationPin'>): RenderNode {
+  if (!view.delegationPin) return ''
+  const { Box, Text } = el
+  const rich = isRich(frame)
+  const scope = tipScope('delegation-pin')
+  const lines = (['band.pinWhy', 'band.pinDoes', 'band.pinHow', 'band.pinOn'] as const).map(key => t(frame.lang, key, { name: view.delegationPin! }))
+  const width = Math.max(24, Math.min(76, frame.columns - 4))
+  const height = (2 + lines.reduce((rows, line) => rows + Math.max(1, Math.ceil(textPx(line) / ((width - 2) * CELL_PX))), 0)) * ROW_PX
+  return (
+    <Box key="delegation-pin" position="relative" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} {...(rich ? { hover: { scope } } : {})}>
+      <Text>{t(frame.lang, 'band.delegationPin', { name: view.delegationPin })}</Text>
+      {actions.releaseDelegationPin ? textButton(el, 'release-pin', t(frame.lang, 'band.releasePin'), actions.releaseDelegationPin) : null}
+      {rich ? (
+        <Box position="absolute" bottom={1} left={0} width={width} display="none" hover={{ scope, display: 'flex' }} flexDirection="column" padding={1}>
+          {'Svg' in el ? <Box position="absolute" top={0} left={0}>{pic(el, 'pin-help-plate', lookOf(frame).art.plate(width * CELL_PX, height), '', width * CELL_PX, height)}</Box> : null}
+          <Box position="relative" flexDirection="column">
+            {lift(el)}
+            {lines.map((line, i) => <Text key={'pin-help-' + i} {...lookOf(frame).ink} wrap="wrap">{line}</Text>)}
+          </Box>
+        </Box>
+      ) : null}
+    </Box>
+  )
+}
+
 function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
   const { Box } = el
   // The capsule's air and edge take their share of the frame.
@@ -892,7 +918,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
       </Box>
     </Box>
   )
-  return capsule(el, frame, {
+  const band = capsule(el, frame, {
     key: 'band',
     sea: { ...bandSea(mood), reach: 120, at: { x: PAD_X * CELL_PX + (CREST_CELLS * CELL_PX) / 2, y: PAD_Y * ROW_PX * 0.5 + ROW_H / 2 } },
     rows: view.effortMenu ? (limitsRow ? 4.6 : 3.4) : limitsRow ? 3 : 1.8,
@@ -900,6 +926,8 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
     paddingY: PAD_Y,
     children: [row, ...(limitsRow ? [limitsRow.node] : []), view.effortMenu ? effortMenuDrawn(el, frame, view, actions) : ''],
   })
+  // The capsule clips its sea; a multi-line hover must live outside that clipping boundary.
+  return view.delegationPin ? <Box flexDirection="column" width="100%">{band}{delegationChip(el, frame, view, actions)}</Box> : band
 }
 
 // ---- Terminal ----------------------------------------------------------------------------------
@@ -992,6 +1020,7 @@ function bandText(el: Els, frame: Frame, view: DashboardView, actions: BandActio
       ) : (
         [factRow, ctrlRow]
       )}
+      {delegationChip(el, frame, view, actions)}
       {menu}
     </Box>
   )
@@ -1013,7 +1042,7 @@ export function renderBand(el: Els, frame: Frame, view: DashboardView, actions: 
 
 // ---- Minimal: the footer -----------------------------------------------------------------------
 
-export type FooterActions = Pick<BandActions, 'toggleAuto' | 'openSettings'>
+export type FooterActions = Pick<BandActions, 'toggleAuto' | 'openSettings' | 'releaseDelegationPin'>
 
 /**
  * The minimal layout: one quiet line in the footer's mode area (SessionMode), the engine's own
@@ -1043,6 +1072,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
       {view.limit && view.extras.includes('limits') ? <Text dimColor>{limitName(view.limit.kind, frame.lang) + ' ' + Math.round(view.limit.percent) + '%'}</Text> : null}
       {textButton(el, 'auto', t(frame.lang, 'band.auto') + (view.auto ? ' ●' : ' ○'), actions.toggleAuto)}
       {textButton(el, 'settings', '⚙', actions.openSettings)}
+      {delegationChip(el, frame, view, actions)}
       {engine ?? null}
     </Box>
   )

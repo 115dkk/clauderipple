@@ -9,6 +9,7 @@
 //   first line (packages/router/src/routing.ts); anywhere else it is prose and the level is lost.
 // Measured on CLI 2.1.286 (2026-10-05): an `agent.spawn` hook that sets `model` to
 // `deepseek-v4.1-flash@low` runs the worker on that id, and the router records effort low.
+import type { DelegationPin } from '../types/index.d.ts'
 
 /**
  * The router's marker, found anywhere in the prompt rather than only at its top. A tier marker may
@@ -41,7 +42,52 @@ function says(text: string, word: string): boolean {
   if (new RegExp(`(?<![a-z])${word}(?![a-z])`, 'i').test(text)) return true
   return [...(SPOKEN[word] ?? []), ...(PROVIDER_SPOKEN[word] ?? [])].some(name => new RegExp(`${name}(?:쪽)?(?:${PARTICLE}|(?![가-힣]))`).test(text))
 }
-type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
+type Said ={ role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
+/** The person's words alone, shared by one-shot authorization and session pinning. */
+export function humanText(m: Said): string | null {
+  const text = m.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+  return m.role === 'user' && !m.toolResults?.length && !!text && !/^<[a-z][a-z-]*>/i.test(text) && !text.startsWith('This session is being continued') ? text : null
+}
+
+/**
+ * Explicit standing intent, never inferred from a one-off model choice. Everyday words stay out:
+ * "솔이 계속 실패하네" complains about Sol, and "헤더 고정해 줘" pins a header, not a worker.
+ */
+export const PIN_PHRASES = ['앞으로', '이제부터', '이 세션은', '이번 세션 내내', '위임 고정', '로 고정', 'from now on', 'for this session'] as const
+/** Only words about the choice itself: "자동으로 재시작되게 해" says nothing about workers. */
+export const UNPIN_PHRASES = ['고정 풀어', '고정을 풀어', '고정 해제', '고정해제', '모델은 알아서', '알아서 골라', '자동으로 골라', 'unpin', 'choose automatically'] as const
+const hasPhrase = (text: string, phrases: readonly string[]) => phrases.some(phrase => /[a-z]/i.test(phrase)
+  ? new RegExp(`\\b${phrase}\\b`, 'i').test(text) : text.includes(phrase))
+/** Cheap intent check before the hook loads the worker catalogue. */
+export function pinInstruction(text: string): 'pin' | 'release' | undefined {
+  // A standing "don't": "앞으로 솔은 쓰지 마", "솔 말고", "솔로 고정하지 마".
+  if (/(?:고정\s*(?:하지|하지는|말|안)|(?:하지|쓰지|시키지|맡기지|보내지)\s*(?:마|말)|말고|빼고|\b(?:do not|don't|never|stop)\b)/i.test(text)) return undefined
+  if (hasPhrase(text, UNPIN_PHRASES)) return 'release'
+  return hasPhrase(text, PIN_PHRASES) ? 'pin' : undefined
+}
+const pinId = (model: string) => model.toLowerCase().replace(/@[^@]*$/, '').replace(/\./g, '-').replace(/^claude-/, '').replace(/^(opus|sonnet|haiku|fable|mythos)-.*$/, '$1')
+
+/** undefined means no change; null explicitly releases the pin. Ambiguous models never pin. */
+export function delegationPin(message: Said, sources: readonly { model: string; provider: string }[]): DelegationPin | null | undefined {
+  const text = humanText(message)
+  if (!text) return undefined
+  const instruction = pinInstruction(text)
+  if (instruction === 'release') return null
+  if (instruction !== 'pin') return undefined
+  const own: Said[] = [{ role: 'user', text }]
+  const matches = sources.filter(source => userNamed(source.model, own, [], { ...source, providers: rivalProviders(source.model, sources) }))
+  const score = (model: string) => modelWords(model).filter(word => says(text, word)).length
+  const best = Math.max(1, ...matches.map(source => score(source.model)))
+  const named = matches.filter(source => score(source.model) === best)
+  if (new Set(named.map(source => pinId(source.model))).size !== 1) return undefined
+  const first = named[0]!
+  const providers = [...new Set(named.map(source => source.provider))]
+  return { model: first.model.replace(/@[^@]*$/, ''), ...(providers.length === 1 ? { provider: providers[0]! } : {}) }
+}
+
+export function pinAllows(pin: DelegationPin | null, model: string, provider?: string): boolean {
+  return !!pin && pinId(pin.model) === pinId(model) && (!pin.provider || pin.provider === provider)
+}
 /**
  * Whether the user named this model (an id, agent name or Claude alias) in what they last wrote:
  * their last two messages, and the answer they replied to when the last one is a short "go".
@@ -52,13 +98,9 @@ export function userNamed(model: string, messages: readonly Said[], prompts: rea
   if (!words.length) return false
   // A notice opens on a tag (`<task-notification>`, `<local-command-stdout>`); a reply the app quotes
   // opens on `<!-- reply 1 -->` and is the user's own words.
-  const human = (m: Said): boolean => {
-    const text = m.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
-    return m.role === 'user' && !m.toolResults?.length && !!text && !/^<[a-z][a-z-]*>/i.test(text) && !text.startsWith('This session is being continued')
-  }
-  const at = messages.flatMap((m, index) => human(m) ? [index] : []).slice(-2)
+  const at = messages.flatMap((m, index) => humanText(m) ? [index] : []).slice(-2)
   const last = at.at(-1)
-  const heard = at.map(index => messages[index]!.text)
+  const heard = at.map(index => humanText(messages[index]!)!)
   if (last !== undefined && messages[last]!.text.trim().length <= 12) {
     const answer = messages.slice(0, last).findLast(m => m.role === 'assistant' && m.text.trim())
     if (answer) heard.push(answer.text.slice(-2000))
@@ -70,7 +112,7 @@ export function userNamed(model: string, messages: readonly Said[], prompts: rea
   const providers = [...new Set([...(source.providers ?? []), ...(source.provider ? [source.provider] : [])])]
   // Only the user's own words choose a source: the answer a short "go" replies to mentions
   // providers in passing ("Google API is out of quota"), and that is not a choice.
-  const own = [...at.map(index => messages[index]!.text), ...prompts]
+  const own = [...at.map(index => humanText(messages[index]!)!), ...prompts]
   // "Sol or DeepSeek" names two models, not a requirement to run Sol on the DeepSeek API.
   const named = providers.filter(provider => modelWords(provider).some(word => !Object.hasOwn(SPOKEN, word) && !words.includes(word) && own.some(text => says(text, word))))
   if (named.length) return !!source.provider && named.includes(source.provider)

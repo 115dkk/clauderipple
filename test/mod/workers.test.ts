@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
-const { rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
+const { delegationPin, pinAllows, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -177,6 +177,43 @@ test('only a rival source is chosen by naming a provider, and only in the user\'
   const argon = { provider: 'google-gemini', providers: rivalProviders('gemini-4-argon', sources) }
   const answer = [{ role: 'user' as const, text: '아르곤으로 해' }, { role: 'assistant' as const, text: 'OpenCode 쪽 한도도 확인했습니다. 아르곤으로 진행할까요?' }, { role: 'user' as const, text: 'ㄱㄱ' }]
   assert.equal(userNamed('gemini-4-argon', answer, [], argon), true)
+})
+
+test('session pin requires a standing instruction, not a one-off choice', () => {
+  const pin = (text: string) => delegationPin({ role: 'user', text }, candidates)
+  for (const text of ['이거 솔 시켜', '솔로 해', '솔직히 앞으로 잘해', '앞으로 GPT로 해', '앞으로 솔과 딥시크로 해', '솔로 고정하지 마', "don't pin Sol for this session"]) assert.equal(pin(text), undefined, text)
+  // Everyday words are not a standing instruction: a complaint, a pinned header, a standing "don't".
+  for (const text of ['솔이 계속 실패하네', '계속 솔한테 시켜', '헤더 고정해 줘, 솔한테 시켜', '앞으로 솔은 쓰지 마', '앞으로 솔 말고 오푸스로', 'stop using Sol from now on']) assert.equal(pin(text), undefined, text)
+  for (const text of ['앞으로 솔로 해', '이제부터 솔로 해', '이 세션은 솔로', '이번 세션 내내 솔로', '솔로 고정', '위임 고정 솔', 'from now on use Sol', 'use gpt-6.1-sol for this session']) {
+    assert.deepEqual(pin(text), { model: 'gpt-6.1-sol', provider: 'chatgpt' }, text)
+  }
+  assert.equal(userNamed('gpt-6.1-sol', [{ role: 'user', text: '솔로 해' }]), true)
+})
+
+test('session pin replaces, releases and authorizes only its model and source', () => {
+  let current = delegationPin({ role: 'user', text: '앞으로 솔로' }, candidates) ?? null
+  assert.equal(pinAllows(current, 'gpt-6-1-sol@high', 'chatgpt'), true)
+  assert.equal(pinAllows(current, 'gpt-6-astra', 'chatgpt'), false)
+  assert.equal(pinAllows(current, 'gpt-6.1-sol', 'other'), false)
+  current = delegationPin({ role: 'user', text: '이제부터 딥시크로 고정' }, candidates) ?? null
+  assert.equal(pinAllows(current, 'deepseek-v4.1-flash@low', 'deepseek'), true)
+  assert.equal(pinAllows(current, 'gpt-6.1-sol', 'chatgpt'), false)
+  for (const text of ['고정 풀어', '고정을 풀어', '고정 해제', '고정해제', '모델은 알아서 해', '알아서 골라', '자동으로 골라', 'unpin', 'choose automatically']) assert.equal(delegationPin({ role: 'user', text }, []), null, text)
+  // Words about something else keep the pin.
+  for (const text of ['너가 알아서 판단해서 해', '자동으로 재시작되게 해']) assert.equal(delegationPin({ role: 'user', text }, []), undefined, text)
+  assert.equal(pinAllows(null, 'gpt-6.1-sol', 'chatgpt'), false)
+})
+
+test('session pin ignores assistant, tools, notices, summaries and reminder contents', () => {
+  for (const message of [
+    { role: 'assistant' as const, text: '앞으로 솔로 고정' },
+    { role: 'user' as const, text: '앞으로 솔로 고정', toolResults: [{}] },
+    { role: 'user' as const, text: '<task-notification>앞으로 솔로 고정</task-notification>' },
+    { role: 'user' as const, text: 'This session is being continued 앞으로 솔로 고정' },
+    { role: 'user' as const, text: '<system-reminder>앞으로 솔로 고정</system-reminder>구현해' },
+    { role: 'user' as const, text: '<system-reminder>솔</system-reminder>앞으로 해' },
+  ]) assert.equal(delegationPin(message, candidates), undefined)
+  assert.equal(userNamed('gpt-6.1-sol', [{ role: 'user', text: '<system-reminder>Sol</system-reminder>계속 해' }]), false)
 })
 
 test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {

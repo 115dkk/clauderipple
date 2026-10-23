@@ -97,6 +97,8 @@ export type DashboardView = {
   isWorking: boolean
   /** The active operating mode's name; absent when none is on. */
   mode?: string
+  /** Short name of this session's user-pinned delegation model. */
+  delegationPin?: string
 }
 
 export type BandActions = {
@@ -114,6 +116,8 @@ export type BandActions = {
   pickEffort: (effort: Effort) => void
   /** Hides the band (desktop: its × is drawn inside the band). */
   hide?: () => void
+  /** Releases the session-only delegation pin. */
+  releaseDelegationPin?: () => void
 }
 
 // ---- Alerts and cards ------------------------------------------------------------------------

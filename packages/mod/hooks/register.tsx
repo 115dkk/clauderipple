@@ -8,8 +8,8 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
-import { MARKER, agentModel, fixSpawn, rivalProviders, userNamed } from './worker'
+import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
+import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinAllows, pinInstruction, rivalProviders, userNamed } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -100,6 +100,7 @@ const agentsTick = atom({ plugin: 'ripple', key: 'agentsTick' } as const, 0)
  * heard and the worker went by tier (2026-10-23). userNamed reads these beside the transcript.
  */
 const heardPrompts = atom({ plugin: 'ripple', key: 'heardPrompts' } as const, [] as string[])
+const delegationPin = atom({ plugin: 'ripple', key: 'delegationPin' } as const, null)
 const jev = atom({ plugin: 'ripple', key: 'jev' } as const, { source: null, test: { state: 'idle' } })
 const routerModels = atom({ plugin: 'ripple', key: 'routerModels' } as const, [])
 const ladderOptions = atom({ plugin: 'ripple', key: 'ladderOptions' } as const, null)
@@ -516,7 +517,30 @@ async function userNamedPick($: EngineInterface, name: string, files: ReadonlyMa
   const model = file ? agentModel(file)! : name
   const sources = [...files.values()].flatMap(f => { const m = agentModel(f), p = agentProvider(f); return m && p ? [{ model: m, provider: p }] : [] }).concat(models.map(m => ({ model: m.value, provider: m.provider })))
   const providers = rivalProviders(model, sources)
+  if (pinAllows(await read($, delegationPin), model, provider)) return true
   return userNamed(model, await $.session.messages(), await read($, heardPrompts), { ...(provider ? { provider } : {}), providers })
+}
+async function releaseDelegationPin($: EngineInterface): Promise<void> {
+  if (!await read($, delegationPin)) return
+  await update($, delegationPin, () => null)
+  await $.ui.toast(t(await read($, lang), 'toasts.delegationUnpinned'))
+}
+async function hearDelegationPin($: EngineInterface, text: string): Promise<void> {
+  const instruction = pinInstruction(text)
+  if (!instruction) return
+  if (instruction === 'release') { await releaseDelegationPin($); return }
+  const files = await workerFiles($)
+  // Generated files cover routed workers even before the first catalogue poll.
+  const sources = [...files.values()].flatMap(file => {
+    const model = agentModel(file), provider = agentProvider(file)
+    return model && provider ? [{ model, provider }] : []
+  }).concat(claudeCandidates(), (await read($, routerModels)).map(m => ({ model: m.value, provider: m.provider })))
+  const pin = parseDelegationPin({ role: 'user', text }, sources)
+  if (pin === undefined) return
+  if (pin === null) { await releaseDelegationPin($); return }
+  if (same(pin, await read($, delegationPin))) return
+  await update($, delegationPin, () => pin)
+  await $.ui.toast(t(await read($, lang), 'toasts.delegationPinned', { name: titleName(pin.model, await read($, routerModels)) }))
 }
 async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | null> {
   const text = await optionalFile($, `${await rippleHome($)}/generated-agents.json`)
@@ -1292,6 +1316,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
   const saving = (await read($, saveUntil) ?? 0) > await $.clock.now()
   const l = await read($, limit)
   const w = await read($, warm)
+  const pinned = await read($, delegationPin)
   return {
     effort: { level: p?.effort ?? effortOf(await read($, appEffort)) ?? null,
       mode: await read($, deciding) ? 'deciding' : await read($, paused) ? 'paused' : p?.by === 'manual' ? 'manual' : s.effortAuto ? 'auto' : 'off',
@@ -1306,6 +1331,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
     swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
     ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
+    ...(pinned ? { delegationPin: titleName(pinned.model, await read($, routerModels)) } : {}),
   }
 }
 async function settingsView($: EngineInterface): Promise<SettingsView> {
@@ -1376,7 +1402,7 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
   return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), handoff: () => openHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
-    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort) }
+    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
   return { patch: async change => {
@@ -1512,6 +1538,11 @@ export const register: Register = on => {
     } catch (error) { await report($, 'session.start', error) }
     return result
   })
+  on('session.end', async ($, e, next) => {
+    await update($, delegationPin, () => null)
+    await update($, heardPrompts, () => [])
+    return next(e)
+  })
   on('classic.SessionStart', async ($, e, next) => {
     try {
       if (['clear', 'resume', 'fork'].includes(e.source)) {
@@ -1560,7 +1591,11 @@ export const register: Register = on => {
       }
       const human = ['composer', 'bridge', 'sdk'].includes(e.origin.kind)
       if (human && !hostCommand) {
-        if (e.text.trim()) await update($, heardPrompts, list => [...list, e.text].slice(-2))
+        const own = !e.isMeta && !e.command ? humanText({ role: 'user', text: e.text }) : null
+        if (own) {
+          await hearDelegationPin($, own)
+          await update($, heardPrompts, list => [...list, own].slice(-2))
+        }
         await markSeen($)
         await endModeIfOver($)
         const noted = await read($, modeNoted)
