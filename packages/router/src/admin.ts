@@ -969,6 +969,17 @@ function writeConfigFile(configFile: string, config: Config): void {
   fs.renameSync(tmp, configFile);
 }
 
+/** The disk fingerprint also detects CLI edits and background measurements, without persisting API metadata. */
+function configSnapshot(deps: AdminDeps): { config: Config; configRevision: string } {
+  let text: string;
+  try { text = fs.readFileSync(deps.configFile, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    text = JSON.stringify(deps.config());
+  }
+  return { config: JSON.parse(text) as Config, configRevision: crypto.createHash("sha256").update(text).digest("hex") };
+}
+
 function headerValue(headers: Record<string, string> | undefined): { name: string; value: string } | null {
   if (!headers) return null;
   for (const [name, value] of Object.entries(headers)) {
@@ -1458,26 +1469,25 @@ function effortUndeclared(p: Provider): boolean {
  * left entirely alone. The result is validated with the same `validate` the GUI's save uses, so a
  * bad edit is refused rather than written.
  */
-function applyMeasurements(configFile: string, results: Measured[]): { applied: number } | { error: string } {
+function applyMeasurements(configFile: string, providerName: string, results: Measured[]): { applied: number } | { error: string } {
   let current: Config;
   try {
     current = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
   } catch (e) {
     return { error: `could not re-read config: ${errorText(e)}` };
   }
+  const provider = current.providers[providerName];
+  if (!provider?.models) return { applied: 0 };
   let applied = 0;
   for (const result of results) {
     if (result.error || !result.wire) continue;
-    for (const provider of Object.values(current.providers)) {
-      if (!("models" in provider) || !provider.models) continue;
-      const model = provider.models.find((entry) => entry.id === result.id);
-      if (!model) continue;
-      const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
-      if (model.wire === undefined) model.wire = result.wire;
-      if (model.effortLevels === undefined && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
-      if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
-      if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
-    }
+    const model = provider.models.find((entry) => entry.id === result.id);
+    if (!model) continue;
+    const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
+    if (model.wire === undefined) model.wire = result.wire;
+    if (model.effortLevels === undefined && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
+    if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
+    if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
   }
   const errors = validate(current);
   if (errors.length > 0) return { error: `measured config did not validate: ${errors[0]}` };
@@ -1649,7 +1659,7 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     for (let id = queue.shift(); id !== undefined; id = queue.shift()) await measureOne(id);
   }));
   try {
-    const outcome = applyMeasurements(deps.configFile, job.results);
+    const outcome = applyMeasurements(deps.configFile, providerName, job.results);
     if ("error" in outcome) {
       MEASURE_JOBS.set(jobId, { ...job, state: "failed", error: outcome.error, finishedAt: Date.now() });
       deps.log.warn(`admin: measurement for ${providerName} was not applied: ${outcome.error}`);
@@ -1780,20 +1790,16 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
     void handle(req, res);
   });
 
-  /**
-   * Binding to 127.0.0.1 keeps other machines out, but not the browser on this one: any page the
-   * user visits can POST here, and a simple request (no custom header, no JSON content type) is
-   * not stopped by CORS — the response is unreadable, the side effect still happens. That is how
-   * a web page could turn the picker off, or shut the router down and take Claude Desktop with it.
-   *
-   * A browser always sends Origin on a cross-site POST, so requiring it to be our own origin is
-   * enough. Clients that are not browsers (the CLI, the tray app) send none and are let through.
-   */
-  function crossSitePost(req: http.IncomingMessage): boolean {
+  /** Binding to loopback alone does not stop DNS rebinding: check Host even on reads. */
+  function localHost(req: http.IncomingMessage): boolean {
+    return [`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`].includes(req.headers.host ?? "");
+  }
+
+  /** Cross-site browser writes still act despite CORS. CLI and tray forwarding send no Origin. */
+  function crossSiteOrigin(req: http.IncomingMessage): boolean {
     const origin = req.headers.origin;
-    if (!origin) return false;
-    const allowed = new Set([`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`]);
-    return !allowed.has(origin);
+    if (origin === undefined) return false;
+    return ![`http://127.0.0.1:${boundPort}`, `http://localhost:${boundPort}`, `http://[::1]:${boundPort}`].includes(origin);
   }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -1805,16 +1811,20 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
     const method = req.method === "HEAD" ? "GET" : (req.method ?? "GET");
     const pathname = url.split("?")[0] ?? "/";
     try {
-      if (method !== "GET" && crossSitePost(req)) {
+      if (!localHost(req)) {
+        deps.log.warn(`admin: refused ${method} ${pathname} with non-loopback Host`);
+        sendJson(res, 403, { error: "local admin host required" });
+        return;
+      }
+      if (method !== "GET" && crossSiteOrigin(req)) {
         deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
         sendJson(res, 403, { error: "cross-site request refused" });
         return;
       }
       if (pathname.startsWith("/api/phone/")) {
         res.setHeader("cache-control", "no-store");
-        // Pairing is a credential read: guard GETs too, including DNS-rebinding Host values.
-        if (crossSitePost(req) || req.headers["sec-fetch-site"] === "cross-site" ||
-          !new Set([`127.0.0.1:${boundPort}`, `localhost:${boundPort}`]).has(req.headers.host ?? "")) {
+        // Pairing is a credential read: guard cross-site GETs too. Host is checked above.
+        if (crossSiteOrigin(req) || req.headers["sec-fetch-site"] === "cross-site") {
           sendJson(res, 403, { error: "same-origin phone control required" });
           return;
         }
@@ -2098,7 +2108,9 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         return;
       }
       if (pathname === "/api/config" && method === "GET") {
-        sendJson(res, 200, deps.config());
+        res.setHeader("cache-control", "no-store");
+        const { configRevision } = configSnapshot(deps);
+        sendJson(res, 200, { ...deps.config(), configRevision });
         return;
       }
       if (pathname === "/api/config" && method === "PUT") {
@@ -2109,11 +2121,26 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { error: (e as Error).message });
           return;
         }
-        let parsed: Config;
+        let input: unknown;
         try {
-          parsed = JSON.parse(body.toString("utf8")) as Config;
+          input = JSON.parse(body.toString("utf8"));
         } catch (e) {
           sendJson(res, 400, { errors: [`invalid JSON: ${(e as Error).message}`] });
+          return;
+        }
+        if (!input || typeof input !== "object" || Array.isArray(input)) {
+          sendJson(res, 400, { errors: ["config must be a JSON object"] });
+          return;
+        }
+        const { configRevision, ...parsed } = input as Config & { configRevision?: unknown };
+        if (configRevision !== undefined && (typeof configRevision !== "string" || !/^[a-f0-9]{64}$/.test(configRevision))) {
+          sendJson(res, 400, { errors: ["configRevision must be a SHA-256 hex string"] });
+          return;
+        }
+        // No await between comparison and atomic rename: two admin windows cannot both win.
+        const current = configSnapshot(deps);
+        if (configRevision !== undefined && configRevision !== current.configRevision) {
+          sendJson(res, 409, { error: "config revision conflict", ...current });
           return;
         }
         const errors = validate(parsed);
@@ -2121,13 +2148,14 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 400, { errors });
           return;
         }
+        if (configRevision === undefined) deps.log.warn("admin: accepting legacy PUT /api/config without configRevision; conflict protection unavailable");
         writeConfigFile(deps.configFile, parsed);
         deps.log.info(`admin: config saved via GUI (${Object.keys(parsed.routes).length} routes, ${Object.keys(parsed.providers).length} providers)`);
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;
         // otherwise the Clients screen shows a choice that only a later `install` would honour.
         const slotWarning = syncModelSlotsForGui(parsed);
-        sendJson(res, 200, { ok: true, ...(slotWarning ? { warning: slotWarning } : {}) });
+        sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(slotWarning ? { warning: slotWarning } : {}) });
         return;
       }
       if (pathname === "/api/codex" && method === "GET") {

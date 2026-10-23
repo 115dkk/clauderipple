@@ -754,7 +754,7 @@ test("HEAD answers a read-only route with its headers and no body", async () => 
     assert.equal(headCss.headers.get("content-length"), getCss.headers.get("content-length"), "the length of the body a GET would have sent");
     // The body is the part a HEAD must not carry, and `fetch` never exposes one — read the wire.
     const wire = await new Promise<string>((done, fail) => {
-      const sock = net.connect(port, "127.0.0.1", () => sock.write("HEAD /style.css HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"));
+      const sock = net.connect(port, "127.0.0.1", () => sock.write(`HEAD /style.css HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`));
       let text = "";
       sock.on("data", (chunk: Buffer) => { text += chunk.toString("latin1"); });
       sock.on("close", () => done(text));
@@ -946,6 +946,47 @@ test("PUT /api/config accepts a valid config and saves it atomically", async () 
     const dir = fs.readdirSync(path.dirname(configFile));
     assert.ok(!dir.some((f) => f.includes(".tmp-")));
     setCfg(next);
+  });
+});
+
+test("config revisions prevent concurrent lost updates and detect external edits while legacy saves still work", async () => {
+  await withAdmin(makeCfg(), async ({ port, configFile, setCfg }) => {
+    type Snapshot = Config & { configRevision: string };
+    const url = `${base()}:${port}/api/config`;
+    const get = async () => (await (await fetch(url)).json()) as Snapshot;
+    const put = (body: unknown) => fetch(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const firstWindow = await get();
+    const secondWindow = await get();
+    assert.match(firstWindow.configRevision, /^[a-f0-9]{64}$/);
+    assert.deepEqual(secondWindow, firstWindow);
+    const responses = await Promise.all([put({ ...firstWindow, autoUpdate: true }), put({ ...secondWindow, autoUpdate: false })]);
+    assert.deepEqual(responses.map(response => response.status).sort(), [200, 409]);
+    const saved = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    const success = await responses.find(response => response.status === 200)!.json() as { ok: boolean; configRevision: string };
+    assert.equal(success.ok, true);
+    assert.notEqual(success.configRevision, firstWindow.configRevision);
+    assert.equal("configRevision" in saved, false, "revision metadata must not be persisted");
+    assert.deepEqual(await responses.find(response => response.status === 409)!.json(), { error: "config revision conflict", config: saved, configRevision: success.configRevision });
+    setCfg(saved); // Production's ConfigStore reloads the file on get().
+    assert.deepEqual(await get(), { ...saved, configRevision: success.configRevision });
+    const before = fs.readFileSync(configFile, "utf8");
+    assert.equal((await put(firstWindow)).status, 409);
+    assert.equal(fs.readFileSync(configFile, "utf8"), before);
+    for (const configRevision of [null, 0, {}, "", "invalid"]) {
+      assert.equal((await put({ ...saved, configRevision })).status, 400);
+      assert.equal(fs.readFileSync(configFile, "utf8"), before);
+    }
+    const fresh = await put({ ...await get(), autoUpdate: !saved.autoUpdate });
+    assert.equal(fresh.status, 200);
+    const { configRevision } = await fresh.json() as { configRevision: string };
+    const external = { ...saved, providers: { external: { type: "anthropic-compatible", url: "http://127.0.0.1:9" } } } satisfies Config;
+    fs.writeFileSync(configFile, JSON.stringify(external));
+    const conflict = await put({ ...saved, configRevision });
+    assert.equal(conflict.status, 409);
+    const current = await conflict.json() as { config: Config; configRevision: string };
+    assert.deepEqual(current.config, external);
+    assert.notEqual(current.configRevision, configRevision);
+    assert.equal((await put(external)).status, 200, "old clients may save without a revision");
   });
 });
 
@@ -1574,6 +1615,43 @@ test("POST /api/shutdown reports 501 when the router supplied no drain hook", as
   });
 });
 
+test("admin rejects rebinding Hosts and foreign write Origins but accepts dashboard and tray requests", async () => {
+  const cfg = makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:9", headers: { "x-api-key": "test-secret" } } } });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const request = (method: string, pathname: string, host?: string, origin?: string) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request({ hostname: "127.0.0.1", port, path: pathname, method, setHost: false,
+        headers: { ...(host === undefined ? {} : { host }), ...(origin === undefined ? {} : { origin }) } }, res => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => { body += chunk; });
+        res.on("error", reject);
+        res.on("end", () => resolve({ status: res.statusCode!, body }));
+      });
+      req.on("error", reject);
+      req.end(method === "PUT" ? JSON.stringify(cfg) : undefined);
+    });
+    const before = fs.readFileSync(configFile, "utf8");
+    for (const host of [undefined, "evil.example", `evil.example:${port}`, "127.0.0.1", "localhost:1", "[::1]:1", `127.1:${port}`, `localhost.evil.example:${port}`]) {
+      for (const [method, pathname] of [["GET", "/api/config"], ["HEAD", "/api/config"], ["PUT", "/api/config"], ["GET", "/"]]) {
+        const response = await request(method!, pathname!, host);
+        assert.equal(response.status, host === undefined ? 400 : 403, `${method} ${pathname} Host=${host}`);
+        assert.doesNotMatch(response.body, /test-secret/);
+      }
+    }
+    for (const origin of ["https://evil.example", "null", "", "http://localhost:1", `https://localhost:${port}`, "ripple://app"]) {
+      const response = await request("PUT", "/api/config", `127.0.0.1:${port}`, origin);
+      assert.equal(response.status, 403, `Origin=${origin}`);
+    }
+    assert.equal(fs.readFileSync(configFile, "utf8"), before, "rejected requests cannot save");
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]) {
+      assert.equal((await request("GET", "/api/config", host)).status, 200);
+      assert.equal((await request("PUT", "/api/config", host, `http://${host}`)).status, 200);
+    }
+    // ripple://app's main-process forwarder sends the loopback Host and strips Origin.
+    assert.equal((await request("PUT", "/api/config", `127.0.0.1:${port}`)).status, 200);
+  });
+});
+
 test("a POST carrying another site's Origin is refused", async () => {
   // Binding to loopback does not keep the browser out: a page the user visits can send a simple
   // POST here and CORS hides only the response, not the side effect.
@@ -2050,6 +2128,25 @@ test("POST /api/providers/measure runs in the background and polling settles the
     // configuration in both directions, or a level the plan really offers stays out of reach.
     assert.deepEqual(onDisk.providers.oc?.models?.[0]?.effortLevels, ["none", "low", "medium", "high"]);
   }, { measureFetch });
+});
+
+test("measurement updates only its provider when another provider has the same model id", async () => {
+  const cfg = makeCfg({ providers: {
+    p: { type: "openai-compatible", url: "http://127.0.0.1:9/v1", caps: { reasoning: "effort", effortLevels: ["low"] }, models: [{ id: "shared", name: "P's model" }] },
+    q: { type: "openai-compatible", url: "http://127.0.0.1:10/v1", models: [{ id: "shared", name: "Q's model" }] },
+  } });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "p", models: ["shared"] }),
+    });
+    assert.equal(started.status, 202);
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    const saved = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    assert.equal(saved.providers.p?.models?.[0]?.wire, "chat");
+    assert.deepEqual(saved.providers.p?.models?.[0]?.effortLevels, ["low"]);
+    assert.deepEqual(saved.providers.q, cfg.providers.q, "a shared id does not share measured capabilities");
+  }, { measureFetch: stubFetch((_url, body) => body.reasoning_effort === undefined || body.reasoning_effort === "low" ? 200 : 400) });
 });
 
 test("measurement fills blank fields but never overwrites a wire or ladder the user already set", async () => {
