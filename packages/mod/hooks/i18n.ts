@@ -307,6 +307,7 @@ const EN = {
   'agents.doneCount': '{count} finished',
   // Log.
   'log.resent': '↻ {status} resent',
+  'log.statelessSwitch': '↻ resent as the whole conversation (expected)',
   'log.input': 'in {tokens}',
   'log.output': 'out {tokens}',
   'log.thisSession': 'This session',
@@ -808,6 +809,7 @@ const KO: Record<Key, string> = {
   'agents.doneCount': '{count}개 완료',
   // Log.
   'log.resent': '↻ {status} 재전송',
+  'log.statelessSwitch': '↻ 전체 대화로 다시 보냄 (정상)',
   'log.input': '입력 {tokens}',
   'log.output': '출력 {tokens}',
   'log.thisSession': '현재 대화',
@@ -1307,6 +1309,7 @@ const ZH: Record<Key, string> = {
   'agents.doneCount': '{count} 个已完成',
   // Log.
   'log.resent': '↻ {status} 已重发',
+  'log.statelessSwitch': '↻ 以完整对话重发（正常）',
   'log.input': '输入 {tokens}',
   'log.output': '输出 {tokens}',
   'log.thisSession': '本会话',
@@ -1806,6 +1809,7 @@ const JA: Record<Key, string> = {
   'agents.doneCount': '{count} 件完了',
   // Log.
   'log.resent': '↻ {status} 再送',
+  'log.statelessSwitch': '↻ 会話全体で再送（正常）',
   'log.input': '入力 {tokens}',
   'log.output': '出力 {tokens}',
   'log.thisSession': 'このセッション',
@@ -2305,6 +2309,7 @@ const ES: Record<Key, string> = {
   'agents.doneCount': '{count} terminados',
   // Log.
   'log.resent': '↻ {status} reenviado',
+  'log.statelessSwitch': '↻ reenviado como conversación completa (normal)',
   'log.input': 'entrada {tokens}',
   'log.output': 'salida {tokens}',
   'log.thisSession': 'Esta sesión',
@@ -2804,6 +2809,7 @@ const PT: Record<Key, string> = {
   'agents.doneCount': '{count} concluídos',
   // Log.
   'log.resent': '↻ {status} reenviado',
+  'log.statelessSwitch': '↻ reenviado como conversa inteira (normal)',
   'log.input': 'entrada {tokens}',
   'log.output': 'saída {tokens}',
   'log.thisSession': 'Esta sessão',
