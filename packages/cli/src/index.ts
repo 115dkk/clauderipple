@@ -33,6 +33,7 @@ import { openBrowser } from "./browser.ts";
 import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
 import { dropPowerShellShim, installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
+import { requestHostUpdate } from "../../remote/src/host-update.ts";
 
 async function pickerOn(): Promise<void> {
   const home = homeDir();
@@ -238,6 +239,8 @@ async function install(): Promise<void> {
   // launchd starts the agent the moment it is bootstrapped (RunAtLoad); a scheduled task waits for
   // its logon trigger, so the router would only appear after the next sign-in. Start it either way,
   // and believe it only once the router's process exists (supervisor.startRouter).
+  // Durable before the successor router starts: its own completion does not imply host application.
+  requestHostUpdate(home, VERSION);
   const started = startAgent({ onProgress: (m) => console.log(`  ${m}`) });
   console.log(
     started === "failed" ? `✗ could not start the router (${supervisorName()})`
@@ -288,7 +291,7 @@ async function install(): Promise<void> {
   try {
     execFileSync(installedRuntime.node, [installedRuntime.cli, "remote", "refresh"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
   } catch {
-    console.log("  the phone host was not restarted; if you use it, run: clauderipple remote install");
+    console.log("  호스트 적용 대기: 진행 중인 작업을 유지하며 자동으로 다시 시도합니다.");
   }
   console.log(direct ? "\nDone. Claude stays on its default connection (direct on); run \"clauderipple direct off\" to go through ClaudeRipple." : "\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
 }

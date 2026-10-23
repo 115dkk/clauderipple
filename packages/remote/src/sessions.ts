@@ -490,6 +490,7 @@ export class Sessions {
   }
 
   async pollDesktop(): Promise<void> {
+    if (this.shuttingDown) return;
     if (this.desktop?.poll()) this.opts.onSessions();
     this.refreshStatuses();
     const sessions = this.list();
@@ -539,6 +540,7 @@ export class Sessions {
       } catch (error) { this.bridgeFailure(r.id, error); }
     }
     await Promise.all(reads);
+    if (this.shuttingDown) return;
     for (const r of this.records.values()) {
       if (!r.desktopBridge) continue;
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
@@ -853,10 +855,19 @@ export class Sessions {
     return r;
   }
 
-  /** A turn is in progress somewhere (including one waiting on the phone for a permission). */
+  /** Includes accepted work whose running state is not recorded yet. */
   busy(): boolean {
-    for (const r of this.records.values()) if (r.state === "starting" || r.state === "running" || r.state === "waiting") return true;
+    if (this.creating.size || this.sending.size || this.draining.size || this.handingOff.size) return true;
+    for (const r of this.records.values()) if (BUSY.has(r.state)) return true;
     return false;
+  }
+
+  /** Reserve idle synchronously; deferred desktop/queue callbacks may not start another turn. */
+  prepareRefresh(): boolean {
+    if (this.shuttingDown || this.busy()) return false;
+    this.shuttingDown = true;
+    this.closeQueueWatch();
+    return true;
   }
 
   summaryOf(id: string): SessionSummary | undefined {
@@ -1094,7 +1105,7 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
     if (!registryIdle) {

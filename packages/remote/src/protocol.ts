@@ -254,8 +254,12 @@ export interface HostInfo { name: string; version: string; routerOk: boolean; ro
 
 // ---- client → host --------------------------------------------------------------------
 
+/** Per-connection opt-in. Missing/non-array lists mean no features; unknown entries are ignored. */
+export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles"] as const;
+export type ClientFeature = typeof CLIENT_FEATURES[number];
+
 export type ClientMsg =
-  | { t: "hello"; token: string; clientId: string }
+  | { t: "hello"; token: string; clientId: string; features?: ClientFeature[] }
   | { t: "ping"; n: number }
   /** `afterSeq` 0 or absent with no epoch: send the tail page. */
   | { t: "attach"; session: string; epoch?: string; afterSeq?: number }

@@ -164,6 +164,48 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   return { dir, cwd, sessions, fake, server, port, diagnostics, connect, auth, create };
 }
 
+test("idle refresh reservation refuses in-flight commands and blocks new turns and queued polling", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const f = await fixture(t, { recentCli: async () => { entered.resolve(); await release.promise; return []; } });
+  const peer = await f.auth();
+  peer.send({ t: "req", reqId: "pending-folders", op: { op: "folders" } });
+  await entered.promise;
+  assert.equal(f.server.prepareRefresh(), false, "a create/folder/settings handler cannot be raced");
+  release.resolve(); await peer.take("res", msg => msg.reqId === "pending-folders");
+  await peer.barrier();
+  assert.equal(f.server.prepareRefresh(), true);
+  peer.send({ t: "create", clientMsgId: "after-reservation", cwd: f.cwd, model: "test", effort: null, text: "must not start" });
+  const error = (await peer.take("error", msg => msg.clientMsgId === "after-reservation")).msg;
+  assert.equal(error.code, "host_updating");
+  assert.equal(f.fake.options.length, 0);
+  t.mock.timers.tick(1000); await peer.barrier();
+  assert.equal(f.sessions.list().length, 0);
+});
+
+test("refresh cannot race a queued bridge send before its running state is recorded", async t => {
+  const f = bridgeFixture(t);
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions: f.sessions, router,
+    hostName: "test", version: "test", recentCli: async () => [] });
+  await server.listen();
+  t.after(() => server.close());
+  f.sessions.enqueue(bridgeId, "queued-during-refresh", "must finish acceptance");
+  assert.equal(server.prepareRefresh(), false, "a queue send awaiting upstream acceptance is not idle");
+  await tick();
+  assert.equal(f.posts.length, 1);
+});
+
+test("refresh freezes deferred internal queue drains before they start a new turn", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  assert.equal(f.server.prepareRefresh(), true);
+  f.sessions.enqueue(id, "after-freeze", "must remain queued");
+  await nextTick();
+  await f.sessions.pollDesktop();
+  assert.equal(f.fake.users.length, 1);
+  assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.id, "after-freeze");
+});
+
 test("attachment upload is chunked, checks offsets, and sends image blocks", async t => {
   const f = await fixture(t);
   const id = await f.create();
@@ -307,6 +349,110 @@ test("session file blobs use capped chunks, reject foreign sessions and never ac
     peer.send({ t: "req", reqId, op });
     assert.equal((await peer.take("res", msg => msg.reqId === reqId)).msg.ok, false);
   }
+});
+
+test("legacy clients get an error for partial settings; negotiated clients retain structured results", async t => {
+  const f = bridgeFixture(t);
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions: f.sessions, router,
+    hostName: "test", version: "test", recentCli: async () => [] });
+  await server.listen();
+  t.after(() => server.close());
+  const peers: Peer[] = [];
+  t.after(() => peers.forEach(p => p.ws.terminate()));
+  for (const features of [undefined, ["settingsResult"]]) {
+    const peer = new Peer(`ws://127.0.0.1:${server.address().port}/ws`);
+    peers.push(peer); await peer.open();
+    peer.ws.send(JSON.stringify({ t: "hello", token, clientId: "compat", features }));
+    await peer.take("ready");
+    const reqId = features ? "modern-settings" : "legacy-settings";
+    const start = f.posts.length;
+    peer.send({ t: "set_model", session: bridgeId, model: "claude-sonnet-test", effort: "high", reqId });
+    await waitFor(() => f.posts.length > start);
+    const control = (index: number) => (f.posts[index] as { events: { payload: { request_id: string } }[] }).events[0]!.payload.request_id;
+    f.emit({ type: "control_response", response: { request_id: control(start), subtype: "success", response: {} } });
+    await waitFor(() => f.posts.length > start + 1);
+    f.emit({ type: "control_response", response: { request_id: control(start + 1), subtype: "error", error: "effort rejected" } });
+    const response = (await peer.take("res", m => m.reqId === reqId)).msg;
+    assert.equal(response.ok, !!features);
+    if (response.ok) assert.deepEqual(response.data, { status: "partial", model: "claude-sonnet-test", errors: { effort: "effort rejected" } });
+    else assert.match(response.error, /effort rejected/);
+  }
+});
+
+test("scoped approvals are hidden and refused for legacy clients; sent is never reported as always applied", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const log = f.sessions.log(id);
+  log.append({ kind: "permission", id: "scoped", tool: "Bash", title: "", summary: "git status", input: "git status", canAlways: true, alwaysAllow: { scope: "session", summary: "Bash(git status:*)" } });
+  log.append({ kind: "permission_decided", id: "scoped", decision: "allow_always", ruleStatus: "sent" });
+  const old = await f.auth();
+  old.send({ t: "attach", session: id });
+  const events = (await old.take("events")).msg.events;
+  assert.equal(events.find(e => e.kind === "permission")?.canAlways, false);
+  assert.equal(events.find(e => e.kind === "permission_decided")?.decision, "allow");
+  old.send({ t: "decide", session: id, id: "scoped", decision: "allow_always", reqId: "unsafe-old" });
+  const denied = (await old.take("res", m => m.reqId === "unsafe-old")).msg;
+  assert.ok(!denied.ok && /업데이트/.test(denied.error));
+  const modern = await f.connect();
+  modern.ws.send(JSON.stringify({ t: "hello", token, clientId: "modern", features: ["scopedAlways"] }));
+  await modern.take("ready"); modern.send({ t: "attach", session: id });
+  assert.deepEqual((await modern.take("events")).msg.events, log.tail().events);
+  assert.equal(log.tail().events.find(e => e.kind === "permission")?.canAlways, true, "storage is never downgraded");
+});
+
+test("missing image-only rows keep legacy placeholders in tail, history, replay and subagent pages", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const log = f.sessions.log(id);
+  const { messageContent } = await import("../src/images.ts");
+  const content = messageContent("[Image: source: missing.png]", data => log.image(data), { cwd: f.cwd });
+  assert.equal(content.images.length, 0);
+  const event = log.append({ kind: "assistant", msg: "missing-image", model: "test", tools: [], ...content });
+  const sub = f.sessions.subLog(id, "sub-missing")!;
+  sub.append({ kind: "assistant", msg: "missing-image", model: "test", tools: [], ...content });
+  const old = await f.auth();
+  old.send({ t: "attach", session: id });
+  const check = (events: SessionEvent[]) => {
+    const row = events.find(e => e.kind === "assistant" && e.msg === "missing-image");
+    assert.deepEqual(row?.images, [{ type: "image", mediaType: "image/png" }]);
+    assert.equal(JSON.stringify(row).includes(f.cwd), false);
+  };
+  check((await old.take("events")).msg.events);
+  old.send({ t: "history", session: id, beforeSeq: event.seq + 1, reqId: "images-history" });
+  check((await old.take("history")).msg.events);
+  old.send({ t: "attach", session: id, epoch: log.epoch, afterSeq: event.seq - 1 });
+  check((await old.take("events")).msg.events);
+  old.send({ t: "req", reqId: "images-sub", op: { op: "sub", session: id, sub: "sub-missing" } });
+  const page = (await old.take("res", m => m.reqId === "images-sub")).msg;
+  assert.ok(page.ok); check((page.data as { events: SessionEvent[] }).events);
+  const modern = await f.connect();
+  modern.ws.send(JSON.stringify({ t: "hello", token, clientId: "files", features: ["sessionFiles", "unknown-future-feature"] }));
+  await modern.take("ready"); modern.send({ t: "attach", session: id });
+  assert.deepEqual((await modern.take("events")).msg.events.find(e => e.seq === event.seq), event);
+});
+
+test("legacy missing-image pages retain every row within the frame cap", async t => {
+  const f = await fixture(t);
+  const id = await f.create();
+  const log = f.sessions.log(id);
+  for (let index = 0; index < 2200; index++) log.append({ kind: "assistant", msg: `missing-${index}`, model: "test", text: "", tools: [],
+    files: [{ id: `file-${index}`, name: "missing.png", bytes: 0, mediaType: "image/png", status: "missing" }] });
+  const old = await f.auth();
+  old.send({ t: "attach", session: id });
+  const tail = await old.take("events");
+  let page = tail.msg.events, hasOlder = tail.msg.tail!.hasOlder;
+  const seen = [...page];
+  while (hasOlder) {
+    const beforeSeq = page[0]!.seq;
+    old.send({ t: "history", session: id, beforeSeq, reqId: `missing-${beforeSeq}` });
+    const history = (await old.take("history")).msg;
+    page = history.events; hasOlder = history.hasOlder;
+    seen.unshift(...page);
+  }
+  assert.equal(seen.filter(event => event.kind === "assistant" && event.msg.startsWith("missing-")).length, 2200);
+  assert.ok(seen.filter(event => event.files?.some(file => file.status !== "ready")).length === 0);
+  assert.ok(old.received.every(frame => frame.bytes <= FRAME_CAP));
+  assert.deepEqual(f.diagnostics, []);
 });
 
 test("set_mode returns correlated success/error and broadcasts the mode event", async t => {
