@@ -423,6 +423,47 @@ test("a 403 about a broken upstream is not charged to the credential", async () 
   } finally { await r.stop(); await up.close(); }
 });
 
+test("regression: a buffered 403 cannot replace the next credential's successful body or headers", async () => {
+  const answer = zlib.gzipSync(Buffer.from(JSON.stringify({ id: "vendor-recovered", type: "message", content: [{ type: "text", text: "recovered" }] })));
+  const up = await upstream((n) => n === 1
+    ? { status: 403, body: "forbidden ".repeat(600) }
+    : { status: 200, headers: { "content-encoding": "gzip", "content-length": String(answer.length) }, body: answer });
+  const r = await rig({ p: pooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+  try {
+    const response = await r.sendRaw();
+    assert.equal(response.status, 200);
+    assert.equal(response.headers["content-encoding"], "gzip");
+    assert.equal(response.headers["content-length"], String(answer.length));
+    assert.deepEqual(response.body, answer);
+    assert.deepEqual(up.seen.map((s) => s.key), ["one", "two"]);
+    assert.equal(r.proxy.stats.completed, 1);
+    assert.equal(r.proxy.stats.failed, 0);
+    assert.doesNotMatch(r.logs(), /upstream 200:/);
+  } finally { await r.stop(); await up.close(); }
+});
+
+test("regression: replacing an implicit credential lifts its old key's quarantine", async () => {
+  const primary = await upstream((n) => n === 1 ? { status: 401, body: "invalid key" } : { status: 200 });
+  const backup = await upstream(() => ({ status: 200 }));
+  const provider: Extract<Provider, { type: "anthropic-compatible" }> = {
+    type: "anthropic-compatible", url: `http://127.0.0.1:${primary.port}`, headers: { "x-api-key": "old-key" },
+  };
+  const r = await rig({ primary: provider, backup: { type: "anthropic-compatible", url: `http://127.0.0.1:${backup.port}` } }, {
+    "claude-opus-4-8": { provider: "primary", model: "m", fallbacks: [{ provider: "backup", model: "m" }] },
+  });
+  try {
+    assert.equal(await r.send(), 401);
+    r.config.providers.primary = { ...provider, headers: { "x-api-key": "old-key" }, identity: false };
+    assert.equal(await r.send(), 200);
+    assert.equal(primary.seen.length, 1, "unrelated config edits keep the old key quarantined");
+    assert.equal(backup.seen.length, 1);
+    r.config.providers.primary = { ...provider, headers: { "x-api-key": "new-key" } };
+    assert.equal(await r.send(), 200);
+    assert.deepEqual(primary.seen.map((s) => s.key), ["old-key", "new-key"]);
+    assert.equal(backup.seen.length, 1, "the replacement key is tried before fallback");
+  } finally { await r.stop(); await primary.close(); await backup.close(); }
+});
+
 // The other half of the same bug: a 403 arriving with a body was answered by destroying the upstream
 // and never writing anything, so the turn died as a client-side socket reset rather than with the
 // provider's own message.
@@ -788,6 +829,7 @@ async function frig(opts: {
       type: "anthropic-compatible", url: `http://127.0.0.1:${compat.port}`,
       credentials: [{ id: "c1", headers: { "x-api-key": "c1" } }, { id: "c2", headers: { "x-api-key": "c2" } }],
       caps: { effortLevels: ["low", "medium", "high"] },
+      models: [{ id: "fb-model" }],
     } as Provider,
     o: { type: "openai-compatible", url: `http://127.0.0.1:${openai.port}/v1`, headers: { authorization: "Bearer secret" }, caps: { reasoning: "effort", effortLevels: ["low", "medium", "high"] } } as Provider,
     gpt: { type: "chatgpt", auth: "own", url: `http://127.0.0.1:${chatgpt.port}` } as Provider,
@@ -885,6 +927,30 @@ const route = (fallbacks: { provider: string; model: string; effort?: string }[]
   ({ "claude-opus-4-8": { provider: "g", model, fallbacks } as Config["routes"][string] });
 
 const errorOf = (text: string): { type: string; message: string } => (JSON.parse(text) as { error: { type: string; message: string } }).error;
+
+test("regression: a vendor message id keeps a marker-free continue away from Anthropic", async () => {
+  for (const stream of [true, false]) {
+    const r = await frig({ routes: () => ({}) });
+    try {
+      const first = await r.post(turn({ stream, messages: [{ role: "user", content: "[[ripple: fb-model]] answer" }] }));
+      assert.equal(first.status, 200);
+      assert.match(first.text, /compat answer/);
+      const previous = stream
+        ? (JSON.parse(/^data: (.+)$/m.exec(first.text)![1]!) as { message: { id: string } }).message.id
+        : (JSON.parse(first.text) as { id: string }).id;
+      const next = await r.post(turn({ stream, thread: { type: "continue", previous_message_id: previous }, messages: [{ role: "user", content: "continue" }] }));
+      assert.equal(next.status, 400);
+      const error = JSON.parse(next.text) as { error: { details: { error_code: string } } };
+      assert.equal(error.error.details.error_code, "thread_unsupported_request");
+      assert.equal(r.compat.hits.length, 1, "the delta was not sent to the vendor");
+      assert.equal(r.native.hits.length, 0, "the vendor's id never reached Anthropic");
+      const [record] = await r.records(2);
+      assert.equal(record?.refusal, "thread-continue");
+      assert.equal(record?.resent, true);
+      assert.equal(record?.upstreamCalled, false);
+    } finally { await r.stop(); }
+  }
+});
 
 test("prompt refusal, streamed: the fallback answers, nothing of the refusal reaches the client", async () => {
   const r = await frig({ routes: () => route([{ provider: "c", model: "fb-model" }]) });

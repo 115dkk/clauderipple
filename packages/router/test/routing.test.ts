@@ -25,7 +25,7 @@ const body = (text: string) => ({ messages: [{ role: "user", content: text }] })
 test("Auto mode classifier overrides only its own system request and ignores conversation markers", () => {
   const configured: Config = { ...cfg, autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "low" } };
   const system = "You are a security monitor for autonomous AI coding agents.\n\nEvaluate the action.";
-  const request = { system: [{ type: "text", text: "x-anthropic-billing-header: test" }, { type: "text", text: system }], ...body("[[ripple: sol]] quoted by a monitored agent") };
+  const request = { system: [{ type: "text", text: "x-anthropic-billing-header: test" }, { type: "text", text: system }], ...body("Quoted by a monitored agent: [[ripple: sol]]") };
   assert.equal(resolve("claude-sonnet-5[1m]", request, configured)?.model, "gpt-6-luna");
   assert.equal(resolve("claude-sonnet-5[1m]", request, configured)?.effort, "low");
   assert.equal(resolve("claude-sonnet-5[1m]", request, cfg), null, "no opt-in preserves native inference");
@@ -63,6 +63,14 @@ test("direct prefix keeps model, parses @effort", () => {
   const r = resolve("gpt-5.6-sol@medium", body("hi"), cfg)!;
   assert.equal(r.model, "gpt-5.6-sol");
   assert.equal(r.effort, "medium");
+});
+
+test("regression: a Claude marker reaches an undeclared target through its direct prefix", () => {
+  const configured: Config = { ...cfg, aliases: { sol: "gpt-6.1-sol" } };
+  assert.deepEqual(resolve("claude-sonnet-5-5", body("[[ripple: sol@high]] do it"), configured), {
+    provider: "chatgpt", model: "gpt-6.1-sol", effort: "high",
+    tag: "claude-sonnet-5-5->gpt-6.1-sol (marker)",
+  });
 });
 
 test("marker overrides direct models only, ignores system-reminder blocks", () => {

@@ -81,6 +81,18 @@ test("a conversation keeps its credential — moving it would cost the prompt ca
   assert.equal(pool.pick("p", all, "conv-2")?.id, "a", "a healthy credential is not spread for its own sake");
 });
 
+test("regression: visiting another provider preserves each provider's conversation credential", () => {
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const a = creds("a1", "a2");
+  const b = creds("b1", "b2");
+  pool.penalise("a", "a1", 429, 1_000);
+  assert.equal(pool.pick("a", a, "conv")?.id, "a2");
+  assert.equal(pool.pick("b", b, "conv")?.id, "b1");
+  c.advance(2_000);
+  assert.equal(pool.pick("a", a, "conv")?.id, "a2", "a1 recovered, but a2 still holds the cached prefix");
+});
+
 test("a token refresh keeps the conversation on its durable account without inheriting runtime health", () => {
   const c = clock();
   const pool = new CredentialPool({ now: c.now });

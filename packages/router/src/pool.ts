@@ -137,8 +137,8 @@ export type CredentialReport = {
  */
 export class CredentialPool {
   private readonly health = new Map<string, Health>();
-  /** conversation → durable owner id (or runtime id when there is no owner), preserving its cache across token refreshes. */
-  private readonly sticky = new Map<string, { provider: string; ownerId: string; at: number }>();
+  /** (provider, conversation) → durable owner id (or runtime id), preserving each provider's cache. */
+  private readonly sticky = new Map<string, { ownerId: string; at: number }>();
   private readonly now: () => number;
   /** How long an idle conversation keeps its claim on a credential. */
   private readonly stickyTtlMs: number;
@@ -170,9 +170,10 @@ export class CredentialPool {
   pick(provider: string, credentials: readonly Credential[], conversation?: string): Credential | null {
     if (credentials.length === 0) return null;
     this.expireSticky();
+    const stickyKey = JSON.stringify([provider, conversation]);
     if (conversation) {
-      const held = this.sticky.get(conversation);
-      if (held && held.provider === provider) {
+      const held = this.sticky.get(stickyKey);
+      if (held) {
         const current = credentials.find((c) => (c.ownerId ?? c.id) === held.ownerId);
         if (current && !current.paused && this.usable(provider, current.id)) {
           held.at = this.now();
@@ -183,7 +184,7 @@ export class CredentialPool {
     const usable = (c: Credential): boolean => !c.paused && this.usable(provider, c.id);
     const next = credentials.find((c) => c.preferred && usable(c)) ?? credentials.find(usable);
     if (!next) return null;
-    if (conversation) this.sticky.set(conversation, { provider, ownerId: next.ownerId ?? next.id, at: this.now() });
+    if (conversation) this.sticky.set(stickyKey, { ownerId: next.ownerId ?? next.id, at: this.now() });
     return next;
   }
 

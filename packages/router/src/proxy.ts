@@ -261,6 +261,10 @@ export class Proxy {
    * its quarantine again on the first request.
    */
   private readonly pool = new CredentialPool();
+  /** Last configured implicit headers, not model-folded headers: changing wire must not reset health. */
+  private readonly implicitCredentialHeaders = new Map<string, string>();
+  /** Recent non-Anthropic answers whose vendor ids cannot identify the route by their shape. */
+  private readonly routedMessageIds = new Set<string>();
   readonly providerHealth = new ProviderHealth();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
@@ -813,6 +817,16 @@ export class Proxy {
         if (extra?.servedTier !== undefined) completed.servedTier = extra.servedTier;
         if (extra?.upstreamCalled === false && !unwrittenSeen) completed.upstreamCalled = false;
         if (extra?.refusal !== undefined) completed.refusal = extra.refusal;
+        const provider = cfg.providers[completed.provider];
+        if (completed.ok && completed.kind === "messages" && completed.messageId && provider && provider.type !== "anthropic") {
+          this.routedMessageIds.delete(completed.messageId);
+          this.routedMessageIds.add(completed.messageId);
+          // In memory only, bounded independently of the persistent request log.
+          if (this.routedMessageIds.size > 10_000) {
+            const oldest = this.routedMessageIds.values().next().value;
+            if (oldest !== undefined) this.routedMessageIds.delete(oldest);
+          }
+        }
         this.deps.requests.add(completed);
       }
     };
@@ -945,7 +959,7 @@ export class Proxy {
       // A continue of a turn a translated provider answered carries no marker to route by and would
       // pass through to Anthropic, which has no such thread (404). Refused the way a translated route
       // refuses it, so the CLI resends the whole conversation, marker included, and stays stateless.
-      if (!resolved && isApiHost && isMessages && json && continuesTranslatedTurn(json)) {
+      if (!resolved && isApiHost && isMessages && json && continuesTranslatedTurn(json, this.routedMessageIds)) {
         const out = JSON.stringify(THREAD_UNSUPPORTED);
         res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
         finish("400", out.length, "continue of a translated turn refused → CLI resends stateless", false, { resent: true, ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "thread-continue" });
@@ -1357,6 +1371,10 @@ export class Proxy {
       let lastAttemptHeaders: string[] = headers;
       let staleRetries = 0;
       const send = (attemptHeaders: string[]): void => {
+        // Buffered refusal bytes and truncation belong only to the response of this attempt.
+        headFilled = false;
+        errRaw = Buffer.alloc(0);
+        errTruncated = false;
         lastAttemptHeaders = attemptHeaders;
         upReq = lib.request({
           protocol: target.protocol,
@@ -1842,6 +1860,14 @@ export class Proxy {
     const declared = (provider as { credentials?: Credential[] }).credentials;
     if (declared && declared.length > 0) return includePaused ? declared : declared.filter((credential) => !credential.paused);
     const headers = ("headers" in provider && provider.headers) || {};
+    const configured = this.deps.config().providers[name] ?? provider;
+    const configuredHeaders = ("headers" in configured && configured.headers) || {};
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify(
+      Object.entries(configuredHeaders).map(([key, value]): [string, string] => [key.toLowerCase(), value]).sort(([a], [b]) => a.localeCompare(b)),
+    )).digest("hex");
+    const previous = this.implicitCredentialHeaders.get(name);
+    if (previous !== undefined && previous !== fingerprint) this.pool.clear(name, "default");
+    this.implicitCredentialHeaders.set(name, fingerprint);
     return [{ id: "default", headers }];
   }
 
