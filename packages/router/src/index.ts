@@ -15,7 +15,7 @@ import { TetherController } from "./tether.ts";
 import { AutoUpdater } from "./autoupdate.ts";
 import { runCli, startCliDetached } from "./cli-control.ts";
 import { powerPlatform } from "./power.ts";
-import { defaultAgentDir, syncAgentFiles } from "./agents.ts";
+import { defaultAgentDir, retouchLater, syncAgentFiles } from "./agents.ts";
 import { CertStore } from "./certs.ts";
 import { Logger } from "./log.ts";
 import { UpstreamHealth, EXIT_UPSTREAM_UNREACHABLE, checkConnectivity } from "./health.ts";
@@ -55,9 +55,10 @@ const store = new ConfigStore(undefined, (c, errors) => {
     log?.warn(`codex catalog: ${(e as Error).message}`);
   }
   // One place for the truth: the agent files a worker's model comes from are derived from this
-  // config, so a model ticked here cannot disagree with the alias a marker resolves to.
+  // config, so a model ticked here cannot disagree with the alias a marker resolves to. A session
+  // idle when they change can miss the change; the second touch is for it (`RETOUCH_AFTER_MS`).
   try {
-    syncAgentFiles(c, defaultAgentDir(), log ?? console);
+    retouchLater(syncAgentFiles(c, defaultAgentDir(), log ?? console));
   } catch (e) {
     (log ?? console).warn(`agent files: ${(e as Error).message}`);
   }

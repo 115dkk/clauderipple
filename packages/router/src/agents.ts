@@ -251,10 +251,11 @@ export type SyncOptions = {
  * files named in the manifest are ever written or removed — a hand-written agent is left alone, and
  * a name it already uses is skipped rather than overwritten.
  *
- * Never throws: a write failure is a warning, not a dead router.
+ * Never throws: a write failure is a warning, not a dead router. Returns the generated files there
+ * are now when it wrote or removed any, for `retouchLater`; [] when nothing changed.
  */
-export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: SyncOptions = {}): void {
-  if (cfg.cli.agentFiles === false) return;
+export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: SyncOptions = {}): string[] {
+  if (cfg.cli.agentFiles === false) return [];
 
   const manifestFile = opts.manifestPath ?? path.join(homeDir(), "generated-agents.json");
   const manifest = readManifest(manifestFile);
@@ -288,6 +289,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
 
   const imagePort = Object.values(cfg.providers).some((p) => p.type === "chatgpt") ? adminPort(cfg) : null;
   const nextOwned: string[] = [];
+  let changed = false;
   for (const [name, t] of targets) {
     if (handNames.has(name)) {
       log?.info?.(`agent files: "${name}" exists and is not ours; leaving it alone`);
@@ -312,6 +314,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(file, content);
       nextOwned.push(name);
+      changed = true;
       log?.info?.(`agent files: wrote ${name}.md (${t.modelId} via ${t.provider})`);
     } catch (e) {
       log?.warn(`agent files: cannot write ${file}: ${(e as Error).message}`);
@@ -323,6 +326,7 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
     if (nextOwned.includes(name)) continue;
     try {
       fs.rmSync(path.join(dir, `${name}.md`), { force: true });
+      changed = true;
       log?.info?.(`agent files: removed ${name}.md (model no longer configured)`);
     } catch (e) {
       log?.warn(`agent files: cannot remove ${name}.md: ${(e as Error).message}`);
@@ -333,4 +337,35 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
   if (JSON.stringify(sorted) !== JSON.stringify([...manifest.agents].sort())) {
     writeManifest(manifestFile, { agents: sorted }, log);
   }
+  return changed ? sorted.map((name) => path.join(dir, `${name}.md`)) : [];
+}
+
+/**
+ * How long after a sync its files are touched again: past Claude Code's 30 s idle poll and the
+ * 1 s it waits for a write to settle.
+ *
+ * Claude Code 2.1.308 polls `~/.claude/agents` every 2 s while a session is in use and every 30 s
+ * once it has sat a minute. Going back to 2 s rebuilds the watcher, which takes the directory as it
+ * finds it, and the catch-up it then runs compares only skills and commands. A worker written in
+ * the 30 s before the user returns to an idle session is never read there, and `/clear` keeps the
+ * session's list: the MAMBO session refused `zai-org-glm-5-3-flash` 26 s after it was written and
+ * still 33 minutes later, after a `/clear` (2026-10-23). A change to any agent file rereads them
+ * all, so one more touch past that window reaches a session that missed the first.
+ */
+export const RETOUCH_AFTER_MS = 45_000;
+
+/** Touch `files` again after `delay`, never holding the process open. A file gone since is skipped. */
+export function retouchLater(files: string[], delay = RETOUCH_AFTER_MS): void {
+  if (files.length === 0) return;
+  const timer = setTimeout(() => {
+    const now = new Date();
+    for (const file of files) {
+      try {
+        fs.utimesSync(file, now, now);
+      } catch {
+        // removed or replaced by a later sync, which schedules its own touch
+      }
+    }
+  }, delay);
+  timer.unref?.();
 }
