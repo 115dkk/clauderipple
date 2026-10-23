@@ -46,6 +46,8 @@ function toast(message, isError, raw) {
   toastTimer = setTimeout(() => box.classList.remove("show"), isError ? 6500 : 3200);
 }
 
+// Baselines are indexed by the revision carried through JSON clones used by save handlers.
+const configSnapshots = new Map();
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const text = await res.text();
@@ -58,6 +60,10 @@ async function api(path, opts) {
     error.status = res.status;
     throw error;
   }
+  if (path === "/api/config" && (!opts || !opts.method || opts.method === "GET") && body.configRevision !== undefined) {
+    configSnapshots.set(body.configRevision, clone(body));
+    if (configSnapshots.size > 32) configSnapshots.delete(configSnapshots.keys().next().value);
+  }
   return body;
 }
 
@@ -65,9 +71,25 @@ async function api(path, opts) {
 // that write could not happen it says so here — a slot that silently does nothing is the bug this
 // call used to be, so a failure must reach the screen rather than the router log.
 async function configRequest(next) {
-  const out = await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
-  if (out && out.warning) toast(out.warning, true);
-  return out;
+  // Older routers return a raw config without a revision: keep their existing PUT contract.
+  const base = configSnapshots.get(next.configRevision);
+  const arrayKeys = { models: "id", extraModels: "model", direct: "prefix", credentials: "id" };
+  const changes = base ? modChanges(base, next, [], arrayKeys).filter((change) => change.path[0] !== "configRevision") : null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const out = await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
+      if (out && out.configRevision !== undefined) next.configRevision = out.configRevision;
+      if (out && out.warning) toast(out.warning, true);
+      return out;
+    } catch (error) {
+      if (error.status !== 409 || !changes || attempt >= 3) throw error;
+      const fresh = await api("/api/config");
+      const rebased = modApply(fresh, changes, arrayKeys);
+      // Callers retain `next` as their saved copy, including everything the retry preserved.
+      for (const key of Object.keys(next)) delete next[key];
+      Object.assign(next, rebased);
+    }
+  }
 }
 
 // A save sends the whole config, so it starts from what the router holds now rather than the copy
@@ -1764,7 +1786,7 @@ function pickerSelectionsExcept(config, providerName) {
     .map((entry) => ({ id: entry.model, name: entry.name, contextWindow: entry.contextWindow, provider: pickerOwner(config, entry.model) }))
     .filter((entry) => entry.provider && entry.provider !== providerName);
 }
-function applyPickerSelections(next, selections) {
+function applyPickerSelections(next, selections, preserveWindows = false) {
   const known = allKnownModelIds(next);
   // An entry no provider offers any more has no checkbox — the list is built from the providers —
   // so keeping it here left removed models in the app picker forever, twice over once the same id
@@ -1777,8 +1799,10 @@ function applyPickerSelections(next, selections) {
   const extras = new Map();
   const direct = new Map();
   for (const entry of selected) {
-    // Without this the rebuild would drop the window on every checkbox click.
-    extras.set(entry.id, { model: entry.id, name: entry.name || entry.id, ...(Number.isFinite(entry.contextWindow) && entry.contextWindow > 0 ? { contextWindow: entry.contextWindow } : {}) });
+    // A provider form has no window editor; an explicit Clients-screen override wins its catalogue.
+    const saved = preserveWindows && currentExtras.find((extra) => extra.model === entry.id);
+    const contextWindow = saved && saved.contextWindow !== undefined ? saved.contextWindow : entry.contextWindow;
+    extras.set(entry.id, { model: entry.id, name: entry.name || entry.id, ...(Number.isFinite(contextWindow) && contextWindow > 0 ? { contextWindow } : {}) });
     // A rule per ticked model is no longer what makes it route: since 2026-09-19 the router sends a
     // model to the one provider whose own `models` list carries it (routing.ts, "declared models").
     // Writing one anyway restated the same fact in a second place and piled up — one config reached
@@ -1813,6 +1837,7 @@ function updateSlotSummary() {
 // Changes save themselves (debounced); there is no Save button. `slotsStatus` shows saving/saved/error.
 let slotsSaveTimer = null;
 let slotsSaving = false;
+let slotsSaveAgain = false;
 function slotsStatus(text, isError) {
   const box = $("#slots-status");
   box.textContent = text;
@@ -1822,22 +1847,28 @@ function scheduleSlotsSave() {
   if (!currentConfig || !slotsLoaded) return;
   clearTimeout(slotsSaveTimer);
   slotsStatus(t("slots.saving"));
+  if (slotsSaving) { slotsSaveAgain = true; return; }
   slotsSaveTimer = setTimeout(() => void saveSlots(), 500);
 }
 async function saveSlots() {
-  if (!currentConfig || slotsSaving) return;
+  if (!currentConfig) return;
+  if (slotsSaving) { slotsSaveAgain = true; return; }
   slotsSaving = true;
-  const next = clone(await latestConfig());
-  const routes = {};
-  const seen = new Set();
-  for (const row of $all("#slots-list .map-row")) {
-    const item = row._get();
-    if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); slotsSaving = false; return; }
-    seen.add(item.id);
-    if (item.route) routes[item.id] = { ...item.route, ...(effortLevelsFor(item.route.provider, item.route.model).length ? { effort: item.effort } : {}) };
-  }
-  next.routes = routes;
   try {
+    const next = clone(await latestConfig());
+    const routes = {};
+    const seen = new Set();
+    for (const row of $all("#slots-list .map-row")) {
+      const item = row._get();
+      if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); return; }
+      seen.add(item.id);
+      if (!item.route) continue;
+      const route = { ...((next.routes || {})[item.id] || {}), ...item.route };
+      if (effortLevelsFor(item.route.provider, item.route.model).length) route.effort = item.effort;
+      else delete route.effort;
+      routes[item.id] = route;
+    }
+    next.routes = routes;
     await configRequest(next);
     currentConfig = next;
     slotsStatus(t("slots.saved"));
@@ -1846,6 +1877,7 @@ async function saveSlots() {
     slotsStatus(`${t("common.saveFailed")} ${error.message}`, true);
   } finally {
     slotsSaving = false;
+    if (slotsSaveAgain) { slotsSaveAgain = false; await saveSlots(); }
   }
 }
 
@@ -2029,10 +2061,15 @@ function renderProviderRail() {
 async function removeProvider(name, provider) {
   if (!confirm(t("providers.removeConfirm", { name: providerLabel(name, provider) }))) return;
   const next = clone(await latestConfig());
+  // Resolve ownership before deleting declarations or the disambiguating direct rules.
+  if (next.cli) next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => {
+    const rule = (next.direct || []).filter((rule) => entry.model.startsWith(rule.prefix)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
+    const route = (next.routes || {})[entry.model];
+    return (rule ? rule.provider : route ? route.provider : pickerOwner(next, entry.model)) !== name;
+  });
   delete next.providers[name];
   next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
   next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
-  next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => !modelsOf(provider).some((model) => model.id === entry.model));
   try {
     await configRequest(next);
     currentConfig = next;
@@ -3411,7 +3448,8 @@ function openProviderForm(options) {
   showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
   const currentHeaders = (existing && existing.headers) || {};
   const headerKind = preset ? preset.authHeader : (isOpenAi || Object.keys(currentHeaders).some((key) => key.toLowerCase() === "authorization") ? "authorization-bearer" : "x-api-key");
-  const existingKey = headerKind === "authorization-bearer" ? String(currentHeaders.authorization || "").replace(/^Bearer\s+/i, "") : currentHeaders["x-api-key"] || "";
+  const authHeader = Object.entries(currentHeaders).find(([name]) => name.toLowerCase() === (headerKind === "authorization-bearer" ? "authorization" : "x-api-key"));
+  const existingKey = authHeader ? normalizeKey(authHeader[1]) : "";
   if (existingKey) keyInput.placeholder = t("providers.keySaved");
   const urlInput = el("input", { value: (existing && existing.url) || (preset && preset.anthropicBaseUrl) || "", placeholder: "https://" });
   const wireSelect = el("select", {}, [selectOption("chat", "Chat Completions"), selectOption("responses", "Responses")]);
@@ -3536,16 +3574,15 @@ function openProviderForm(options) {
     pickerModeOn() ? null : hint(t("providers.pickerOffHint")),
     advanced,
   ]);
-  function readHeaders() {
-    const headers = {};
+  function readHeaders(baseHeaders = currentHeaders) {
+    // Empty means keep the key, not replay the credentials captured when this form opened.
+    const headers = Object.fromEntries(Object.entries(baseHeaders).filter(([name]) => isKeyHeader(name)));
     const kind = keyInput.dataset.headerKind || headerKind;
-    const key = keyInput.value.replace(/^\s*bearer\s+/i, "").replace(/\s+/g, "");
+    const key = normalizeKey(keyInput.value);
     if (key) {
+      for (const name of Object.keys(headers)) delete headers[name];
       if (kind === "authorization-bearer") headers.authorization = `Bearer ${key}`;
       else headers["x-api-key"] = key;
-    } else if (existingKey) {
-      if (kind === "authorization-bearer") headers.authorization = currentHeaders.authorization;
-      else headers["x-api-key"] = currentHeaders["x-api-key"];
     }
     const rawHeaders = advancedContent._extraHeaders && advancedContent._extraHeaders.value;
     for (const line of String(rawHeaders || "").split("\n")) {
@@ -3587,6 +3624,9 @@ function openProviderForm(options) {
     }
     return d;
   }
+  let modelsListed = Boolean(existing);
+  let modelsEdited = false;
+  modelArea.addEventListener("change", () => { modelsEdited = true; });
   async function runProbe() {
     const draft = probeDraft();
     if (!draft.url || !/^https?:\/\//.test(draft.url)) { toast(t("providers.urlRequired"), true); return; }
@@ -3604,7 +3644,8 @@ function openProviderForm(options) {
     const listed = Boolean(response.models && response.models.length);
     const ticked = modelArea.querySelector(".model-picker").selected();
     foundModels = listed ? response.models.map((model) => typeof model === "string" ? { id: model, name: model } : model) : (preset ? (preset.fallbackModels || []) : foundModels);
-    const keep = existing || foundModels.length > 12 ? new Set([...currentChecked, ...ticked.map((m) => m.id)]) : new Set(foundModels.map((model) => model.id));
+    const keep = modelsListed || modelsEdited || foundModels.length > 12 ? new Set(ticked.map((m) => m.id)) : new Set(foundModels.map((model) => model.id));
+    modelsListed = true;
     // Saved picks that the provider no longer lists stay visible and ticked so nothing is dropped silently.
     for (const saved of modelsOf(existing)) if (keep.has(saved.id) && !foundModels.some((m) => m.id === saved.id)) foundModels = [saved, ...foundModels];
     // So do ids typed in before the test: the provider's list replacing them would undo the typing.
@@ -3635,7 +3676,7 @@ function openProviderForm(options) {
       } catch { return; }
       if (!formActive || !Array.isArray(response.models) || !response.models.length) return;
       // Captured while the fetched list is checked, not against the fallback it is about to replace.
-      const keep = new Set([...currentChecked, ...modelArea.querySelector(".model-picker").selected().map((model) => model.id)]);
+      const keep = new Set(modelArea.querySelector(".model-picker").selected().map((model) => model.id));
       // A model the catalogue no longer lists but the config still names stays visible and ticked,
       // so a save cannot drop it silently.
       const named = new Set(response.models.map((model) => model.id));
@@ -3658,6 +3699,13 @@ function openProviderForm(options) {
     const next = clone(await latestConfig());
     const providerName = existing ? options.name : uniqueName(typedName, next.providers, provider.url);
     const saved = existing && (next.providers[options.name] || existing);
+    if (!isChatgpt) {
+      const headers = readHeaders((saved && saved.headers) || {});
+      if (Object.keys(headers).length) provider.headers = headers;
+      else delete provider.headers;
+      // Caps are catalogue/hand-written data, not fields this form edits.
+      if (existing) delete provider.caps;
+    }
     if (existing && providerName !== options.name) delete next.providers[options.name];
     const checkedModels = withSavedModelFields(form.querySelector(".model-picker").selected(), saved);
     provider.models = checkedModels;
@@ -3666,18 +3714,18 @@ function openProviderForm(options) {
     // A field the form owns is left to the draft, so clearing it in the form still clears it.
     const formKeys = new Set(isChatgpt
       ? ["type", "auth", "defaultEffort", "identity", "limits", "instructionsAppend", "fast", "models"]
-      : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
+      : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = applyProviderLabel({ ...kept, ...provider }, providerName, typedName);
     // A pooled provider's first key is `headers` and `credentials[0]` at once (the 계정 tab), so a
     // key changed here must change both, or the pool keeps sending the old one.
     const pooled = next.providers[providerName].credentials;
-    if (Array.isArray(pooled) && pooled.length && provider.headers) pooled[0] = { ...pooled[0], headers: { ...provider.headers } };
+    if (Array.isArray(pooled) && pooled.length && normalizeKey(keyInput.value) && provider.headers) pooled[0] = { ...pooled[0], headers: { ...provider.headers } };
     // Read after `next.providers` has been updated, so an unticked model is already undeclared here
     // and falls out on its own, and a renamed provider answers to its new name.
     const existingSelections = pickerSelectionsExcept(next, providerName);
     if (pickerInput.checked) {
-      applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))]);
+      applyPickerSelections(next, [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))], true);
     } else {
       applyPickerSelections(next, existingSelections);
     }
@@ -3777,28 +3825,52 @@ function modNormalize(raw) {
 
 /**
  * The fields changed from `before` to `after`, found as the mod's settingsChanges finds them: values
- * and arrays whole, objects field by field, and a rule whose mode changed replaced whole.
+ * and arrays whole except keyed lists (modes by default), objects field by field, and a rule whose
+ * mode changed replaced whole. Config saves reuse this with their own list identities.
+ * @param {Object} before
+ * @param {Object} after
+ * @param {string[]} path
+ * @param {Record<string, string>} arrayKeys Identity fields for lists that merge entry by entry.
  */
-function modChanges(before, after, path = []) {
+function modChanges(before, after, path = [], arrayKeys = { modes: "id" }) {
   if (JSON.stringify(before) === JSON.stringify(after)) return [];
   if (after === undefined) return [{ path, remove: true }];
+  const arrayKey = arrayKeys[path.at(-1)];
+  if (arrayKey && Array.isArray(before) && Array.isArray(after) && [...before, ...after].every((entry) => entry && typeof entry[arrayKey] === "string")) {
+    const byId = (entries) => Object.fromEntries(entries.map((entry) => [entry[arrayKey], entry]));
+    return modChanges(byId(before), byId(after), path, arrayKeys);
+  }
   const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
   if (isObject(before) && isObject(after) && before.mode === after.mode) {
-    return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) => modChanges(before[key], after[key], [...path, key]));
+    return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) => modChanges(before[key], after[key], [...path, key], arrayKeys));
   }
   return [{ path, value: after }];
 }
-function modApply(base, changes) {
+/** Apply changed paths, resolving keyed-list path segments by their stable identity, not position. */
+function modApply(base, changes, arrayKeys = { modes: "id" }) {
   const result = clone(base);
   for (const change of changes) {
     const key = change.path.at(-1);
     if (key === undefined) continue;
     let parent = result;
+    let arrayKey;
     for (const step of change.path.slice(0, -1)) {
-      if (!parent[step] || typeof parent[step] !== "object" || Array.isArray(parent[step])) parent[step] = {};
-      parent = parent[step];
+      if (Array.isArray(parent)) {
+        let entry = parent.find((item) => item[arrayKey] === step);
+        if (!entry) { entry = { [arrayKey]: step }; parent.push(entry); }
+        parent = entry;
+      } else {
+        arrayKey = arrayKeys[step];
+        if (!parent[step] || typeof parent[step] !== "object") parent[step] = arrayKey ? [] : {};
+        parent = parent[step];
+      }
     }
-    if (change.remove) delete parent[key];
+    if (Array.isArray(parent)) {
+      const index = parent.findIndex((entry) => entry[arrayKey] === key);
+      if (change.remove) { if (index >= 0) parent.splice(index, 1); }
+      else if (index >= 0) parent[index] = clone(change.value);
+      else parent.push(clone(change.value));
+    } else if (change.remove) delete parent[key];
     else parent[key] = clone(change.value);
   }
   return result;
