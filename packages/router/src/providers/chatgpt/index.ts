@@ -264,6 +264,7 @@ export type ChatGptAccountStatus = ChatGptAccountSummary & {
   cooldownSeconds?: number;
   quota: Record<string, unknown> | null;
   active: boolean;
+  inUse: boolean;
 };
 
 export class ChatGptAdapter {
@@ -338,13 +339,14 @@ export class ChatGptAdapter {
         ...(report?.cooldownSeconds ? { cooldownSeconds: report.cooldownSeconds } : {}),
         quota: this.rateLimitsByAccount.get(summary.id) ?? null,
         active: summary.id === this.activeOwner,
+        inUse: report?.inUse === true,
       };
     });
   }
 
   /** Put a cooling account back into rotation now (dashboard action). */
   clearCooldown(ownerId: string): void {
-    for (const c of this.accounts.peekCredentials()) if (c.ownerId === ownerId) this.pool.clear(this.name, c.id);
+    this.pool.clear(this.name, ownerId);
   }
 
   /**

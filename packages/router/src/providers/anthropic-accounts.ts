@@ -39,6 +39,7 @@ export type ClaudeOAuthAccount = {
    * write that spreads an account keeps it and removing the account clears it.
    */
   preferred?: boolean;
+  paused?: boolean;
 };
 
 type ClaudeAccountsFile = { version: 1; accounts: ClaudeOAuthAccount[] };
@@ -54,6 +55,7 @@ export type ClaudeAccountSummary = {
   expiresAt: number;
   needsReauth: boolean;
   preferred: boolean;
+  paused: boolean;
 };
 
 export function claudeAccountsPath(home: string): string {
@@ -72,7 +74,8 @@ function validAccount(value: unknown): value is ClaudeOAuthAccount {
     && (a.subjectHash === undefined || (typeof a.subjectHash === "string" && /^[0-9a-f]{64}$/.test(a.subjectHash)))
     && (a.email === undefined || typeof a.email === "string")
     && (a.needsReauth === undefined || typeof a.needsReauth === "boolean")
-    && (a.preferred === undefined || typeof a.preferred === "boolean");
+    && (a.preferred === undefined || typeof a.preferred === "boolean")
+    && (a.paused === undefined || typeof a.paused === "boolean");
 }
 
 function parseClaudeAccountsFile(home: string): ClaudeOAuthAccount[] | null {
@@ -172,6 +175,8 @@ export function saveClaudeOAuthAccount(home: string, grant: ClaudeOAuthAccountGr
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       label: previous?.label ?? defaultLabel(accounts, grant.email),
+      ...(previous?.preferred ? { preferred: true } : {}),
+      ...(previous?.paused ? { paused: true } : {}),
       ...(hash ? { subjectHash: hash } : previous?.subjectHash ? { subjectHash: previous.subjectHash } : {}),
       ...(grant.email ? { email: grant.email } : previous?.email ? { email: previous.email } : {}),
     };
@@ -222,13 +227,24 @@ export function markClaudeAccountNeedsReauth(home: string, id: string, expectedR
 }
 
 export function renameClaudeAccount(home: string, id: string, label: string): boolean {
-  const clean = label.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 80);
-  if (!clean) return false;
+  return updateClaudeAccount(home, id, { label });
+}
+
+export function updateClaudeAccount(home: string, id: string, change: { label?: string; paused?: boolean; preferred?: boolean }): boolean {
+  const clean = change.label?.replace(/[\x00-\x1f\x7f]/g, "").trim().slice(0, 80);
+  if (change.label !== undefined && !clean) return false;
   return withAccountLock(home, () => {
     const accounts = readClaudeOAuthAccountsForMutation(home);
     const index = accounts.findIndex((account) => account.id === id);
     if (index < 0) return false;
-    accounts[index] = { ...accounts[index]!, label: clean, updatedAt: new Date().toISOString() };
+    if (change.preferred === true) for (const account of accounts) account.preferred = false;
+    accounts[index] = {
+      ...accounts[index]!,
+      ...(clean ? { label: clean } : {}),
+      ...(change.paused !== undefined ? { paused: change.paused } : {}),
+      ...(change.preferred !== undefined ? { preferred: change.preferred } : {}),
+      updatedAt: new Date().toISOString(),
+    };
     writeClaudeAccountsFile(home, accounts);
     return true;
   });
@@ -286,6 +302,7 @@ export function summarize(account: ClaudeOAuthAccount): ClaudeAccountSummary {
     expiresAt: account.expiresAt,
     needsReauth: account.needsReauth === true,
     preferred: account.preferred === true,
+    paused: account.paused === true,
   };
 }
 

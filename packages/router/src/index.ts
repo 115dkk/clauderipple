@@ -271,6 +271,8 @@ proxy
         recheckVerification: (id: string) => proxy.googleRecheckVerification(id),
       }),
       credentials: () => proxy.credentialHealth(),
+      clearCredentialCooldown: (provider, id) => proxy.clearCredentialCooldown(provider, id),
+      claudeClearCooldown: (id) => proxy.claudeClearCooldown(id),
       picker: () => ({ enabled: !!store.get().picker?.enabled, hosts: terminateHosts(store.get()).slice(1), last: proxy.lastPickerInjection }),
       observedClaudeCodeAuth,
       claudeUsage: () => proxy.claudeUsage.snapshot(),

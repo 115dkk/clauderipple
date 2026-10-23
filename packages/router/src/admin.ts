@@ -42,6 +42,8 @@ import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import type { Logger } from "./log.ts";
+import { CredentialPool } from "./pool.ts";
+import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import type { ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
@@ -63,7 +65,7 @@ import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
-import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, renameClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, updateClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
@@ -147,7 +149,9 @@ export type AdminDeps = {
    * Optional: per-credential cooldowns and quarantines, for providers that declare a pool. Ids and
    * labels only — never a header value.
    */
-  credentials?: () => Record<string, { id: string; label?: string; state: string; cooldownSeconds?: number; failures: number }[]>;
+  credentials?: () => Record<string, { id: string; label?: string; state: string; cooldownSeconds?: number; failures: number; paused?: boolean; preferred?: boolean; inUse?: boolean }[]>;
+  clearCredentialCooldown?: (provider: string, id: string) => void;
+  claudeClearCooldown?: (id: string) => void;
   /** Optional: picker-mode state and the last bootstrap injection. */
   picker?: () => { enabled: boolean; hosts: string[]; last: unknown };
   /** Optional: observed CLI credentials held by the live proxy, never serialized directly. */
@@ -204,6 +208,14 @@ export type AdminDeps = {
   /** Lid-closed awake and hotspot failover (`GET|PUT /api/power`). Absent: 501. */
   power?: PowerApi;
 };
+
+/** Without a configured adapter there is no runtime cooldown, but account previews still name the next choice. */
+function previewAccounts<T extends { id: string; paused: boolean; preferred: boolean; needsReauth: boolean; expiresAt: number }>(accounts: T[]): (T & { state: string; inUse: boolean })[] {
+  const credentials = accounts.filter((account) => !account.paused && !account.needsReauth && account.expiresAt > Date.now())
+    .map((account) => ({ id: account.id, preferred: account.preferred, headers: {} }));
+  const next = new CredentialPool().pick("preview", credentials)?.id;
+  return accounts.map((account) => ({ ...account, state: account.paused ? "paused" : credentials.some((credential) => credential.id === account.id) ? "ready" : "needs-login", inUse: account.id === next }));
+}
 
 /** Claude usage is looked up only where a Claude subscription provider is configured. */
 function hasClaudeSubscription(cfg: Config): boolean {
@@ -661,7 +673,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     } else if (p.type === "anthropic") {
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY) : claudeAuthStore(deps).describeSource() !== null;
     }
-    if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready");
+    if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready" && !c.paused);
     const exhausted = health[name];
     return { name, type: p.type, usable: usable && !exhausted, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
       ...(exhausted ? { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until } : {}),
@@ -2146,11 +2158,36 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       }
       // Safe account metadata only: labels, emails, plan, rotation state and quota. Tokens and the
       // workspace id stay in the router.
+      if (pathname === "/api/credentials/clear-cooldown" && method === "POST") {
+        let change: { provider?: unknown; id?: unknown };
+        try {
+          change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
+        } catch {
+          sendJson(res, 400, { error: "invalid JSON" });
+          return;
+        }
+        if (!change || typeof change.provider !== "string" || typeof change.id !== "string") {
+          sendJson(res, 400, { error: "expected {provider: string, id: string}" });
+          return;
+        }
+        const provider = deps.config().providers[change.provider];
+        if (!provider || !("credentials" in provider) || !provider.credentials?.some((credential) => credential.id === change.id)) {
+          sendJson(res, 404, { error: "credential not found" });
+          return;
+        }
+        if (!deps.clearCredentialCooldown) {
+          sendJson(res, 501, { error: "credential cooldown control unavailable" });
+          return;
+        }
+        deps.clearCredentialCooldown(change.provider, change.id);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
       if (pathname === "/api/chatgpt-accounts" && method === "GET") {
         const all = deps.chatgpt?.().accounts?.() ?? {};
         const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
         const name = wanted && all[wanted] ? wanted : Object.keys(all)[0];
-        const accounts = name ? all[name]! : readChatGptAccounts(homeDir()).map(summarizeChatGptAccount);
+        const accounts = name ? all[name]! : previewAccounts(readChatGptAccounts(homeDir()).map(summarizeChatGptAccount));
         sendJson(res, 200, { provider: name ?? null, accounts });
         return;
       }
@@ -2180,28 +2217,32 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 200, { ok: true });
           return;
         }
-        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown };
+        let change: { label?: unknown; paused?: unknown; preferred?: unknown; clearCooldown?: unknown };
         try {
           change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
         } catch {
           sendJson(res, 400, { error: "invalid JSON" });
           return;
         }
-        if ((change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean")) {
-          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true}" });
+        if (!change || (change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean") || (change.preferred !== undefined && typeof change.preferred !== "boolean") || (change.clearCooldown !== undefined && change.clearCooldown !== true)) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, preferred?: boolean, clearCooldown?: true}" });
           return;
         }
-        if (change.clearCooldown === true) deps.chatgpt?.().clearCooldown?.(id);
-        if (change.label !== undefined || change.paused !== undefined) {
+        if (id !== "codex" && !readChatGptAccounts(homeDir()).some((account) => account.id === id)) {
+          sendJson(res, 404, { error: "ChatGPT account not found" });
+          return;
+        }
+        if (change.label !== undefined || change.paused !== undefined || change.preferred !== undefined) {
           if (id === "codex") {
             sendJson(res, 409, { error: "the Codex CLI's login cannot be renamed or paused here" });
             return;
           }
-          if (!updateChatGptAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}) })) {
+          if (!updateChatGptAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}), ...(typeof change.preferred === "boolean" ? { preferred: change.preferred } : {}) })) {
             sendJson(res, 404, { error: "ChatGPT account not found" });
             return;
           }
         }
+        if (change.clearCooldown === true) deps.chatgpt?.().clearCooldown?.(id);
         deps.log.info(`admin: updated ChatGPT account ${id.slice(0, 8)}`);
         sendJson(res, 200, { ok: true });
         return;
@@ -2235,22 +2276,38 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // Only a known current login can point out a stored copy of itself; unknown adds nothing,
         // so the response stays exactly what it was before there was an identity lookup.
         const identity = source ? (await deps.claudeIdentity?.().catch(() => null)) ?? null : null;
+        const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
+        const providers = Object.entries(deps.config().providers).filter(([, provider]) => provider.type === "anthropic" && provider.auth === "claude-code");
+        const name = providers.find(([key]) => key === wanted)?.[0] ?? providers[0]?.[0];
+        const projection = new ClaudeAccountAuthPool({ home: homeDir(), current: claudeAuthStore(deps), log: deps.log }).peekCredentials();
+        const reports = (name ? deps.credentials?.()[name] : undefined)
+          ?? new CredentialPool().report(name ?? "claude", projection).map((row) => ({ ...row, id: projection.find((credential) => credential.id === row.id)!.ownerId! }));
         const accounts = listClaudeAccountsWithSubject(homeDir()).map(({ subjectHash: hash, ...account }) => {
           const same = identity !== null && (hash !== undefined
             ? hash === identity.subjectHash
             : account.email !== undefined && account.email.toLowerCase() === identity.email.toLowerCase());
+          const report = reports.find((row) => row.id === account.id);
           return {
             ...account,
+            state: account.paused ? "paused" : account.needsReauth || account.expiresAt <= Date.now() ? "needs-login" : report?.state ?? "ready",
+            inUse: report?.inUse === true,
+            ...(report?.cooldownSeconds !== undefined ? { cooldownSeconds: report.cooldownSeconds } : {}),
             ...(usage[account.id] ? { quota: usage[account.id] } : {}),
             ...(same ? { sameAsCurrent: true } : {}),
           };
         });
+        const currentReport = reports.find((row) => row.id === "current");
         sendJson(res, 200, {
           current: source ? {
             id: "current",
             label: "Current Claude login",
             source,
             external: true,
+            paused: false,
+            preferred: false,
+            state: currentReport?.state ?? "needs-login",
+            inUse: currentReport?.inUse === true,
+            ...(currentReport?.cooldownSeconds !== undefined ? { cooldownSeconds: currentReport.cooldownSeconds } : {}),
             ...(identity ? { email: identity.email } : {}),
             ...(usage.current ? { quota: usage.current } : {}),
           } : null,
@@ -2302,22 +2359,27 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 200, { ok: true });
           return;
         }
-        let label: unknown;
+        let change: { label?: unknown; paused?: unknown; preferred?: unknown; clearCooldown?: unknown };
         try {
-          label = (JSON.parse((await readBody(req)).toString("utf8")) as { label?: unknown }).label;
+          change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
         } catch {
           sendJson(res, 400, { error: "invalid JSON" });
           return;
         }
-        if (typeof label !== "string" || !label.trim()) {
-          sendJson(res, 400, { error: "expected {label: non-empty string}" });
+        if (!change || (change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean") || (change.preferred !== undefined && typeof change.preferred !== "boolean") || (change.clearCooldown !== undefined && change.clearCooldown !== true)) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, preferred?: boolean, clearCooldown?: true}" });
           return;
         }
-        if (!renameClaudeAccount(homeDir(), id, label)) {
+        if (!updateClaudeAccount(homeDir(), id, {
+          ...(typeof change.label === "string" ? { label: change.label } : {}),
+          ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}),
+          ...(typeof change.preferred === "boolean" ? { preferred: change.preferred } : {}),
+        })) {
           sendJson(res, 404, { error: "Claude account not found" });
           return;
         }
-        deps.log.info(`admin: renamed Claude account ${id.slice(0, 8)}`);
+        if (change.clearCooldown === true) deps.claudeClearCooldown?.(id);
+        deps.log.info(`admin: updated Claude account ${id.slice(0, 8)}`);
         sendJson(res, 200, { ok: true });
         return;
       }
@@ -2453,7 +2515,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const all = deps.google?.().accounts?.() ?? {};
         const wanted = new URL(url, "http://127.0.0.1").searchParams.get("provider");
         const name = wanted && all[wanted] ? wanted : Object.keys(all)[0];
-        const accounts = name ? all[name]! : readGoogleAccounts(homeDir()).map(summarizeGoogleAccount);
+        const accounts = name ? all[name]! : previewAccounts(readGoogleAccounts(homeDir()).map(summarizeGoogleAccount));
         sendJson(res, 200, { provider: name ?? null, accounts });
         return;
       }
@@ -2478,15 +2540,19 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           sendJson(res, 200, { ok: true });
           return;
         }
-        let change: { label?: unknown; paused?: unknown; clearCooldown?: unknown; recheck?: unknown };
+        let change: { label?: unknown; paused?: unknown; preferred?: unknown; clearCooldown?: unknown; recheck?: unknown };
         try {
           change = JSON.parse((await readBody(req)).toString("utf8")) as typeof change;
         } catch {
           sendJson(res, 400, { error: "invalid JSON" });
           return;
         }
-        if ((change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean")) {
-          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, clearCooldown?: true, recheck?: true}" });
+        if (!change || (change.label !== undefined && (typeof change.label !== "string" || !change.label.trim())) || (change.paused !== undefined && typeof change.paused !== "boolean") || (change.preferred !== undefined && typeof change.preferred !== "boolean") || (change.clearCooldown !== undefined && change.clearCooldown !== true)) {
+          sendJson(res, 400, { error: "expected {label?: non-empty string, paused?: boolean, preferred?: boolean, clearCooldown?: true, recheck?: true}" });
+          return;
+        }
+        if (!readGoogleAccounts(homeDir()).some((account) => account.id === id)) {
+          sendJson(res, 404, { error: "Google account not found" });
           return;
         }
         if (change.recheck === true) {
@@ -2496,8 +2562,8 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           return;
         }
         if (change.clearCooldown === true) deps.google?.().clearCooldown?.(id);
-        if (change.label !== undefined || change.paused !== undefined) {
-          if (!updateGoogleAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}) })) {
+        if (change.label !== undefined || change.paused !== undefined || change.preferred !== undefined) {
+          if (!updateGoogleAccount(homeDir(), id, { ...(typeof change.label === "string" ? { label: change.label } : {}), ...(typeof change.paused === "boolean" ? { paused: change.paused } : {}), ...(typeof change.preferred === "boolean" ? { preferred: change.preferred } : {}) })) {
             sendJson(res, 404, { error: "Google account not found" });
             return;
           }

@@ -1067,6 +1067,12 @@ export class Proxy {
             if (routeEffort) record.effort = routeEffort;
             tag = `OPENAI ${route.tag} wire=${provider.wire ?? "chat"} effort=${routeEffort ?? "-"}`;
             const credentials = this.credentialsOf(route.provider, provider);
+            if (credentials.length === 0) {
+              const out = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "모든 API 키가 일시 중지되어 있습니다." } });
+              res.writeHead(503, { "content-type": "application/json" }).end(out);
+              finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
+              return;
+            }
             const key = conversationKey(json as unknown as AnthropicRequest);
             let using = this.pool.pick(route.provider, credentials, key) ?? credentials[0]!;
             const tried = new Set([using.id]);
@@ -1244,6 +1250,12 @@ export class Proxy {
           // quarantined leaves `chosen` null, and the request goes out on the configured headers so the
           // provider — not us — gets to say no.
           const credentials = this.credentialsOf(route.provider, provider);
+          if (credentials.length === 0) {
+            const out = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "모든 API 키가 일시 중지되어 있습니다." } });
+            res.writeHead(503, { "content-type": "application/json" }).end(out);
+            finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
+            return;
+          }
           // The same key the prompt cache is keyed on. `metadata.user_id` alone is one value for every
           // conversation a user has, so using it raw would drag all of them onto one credential at once
           // — the opposite of what stickiness is for (see conversationKey and ARCHITECTURE §4).
@@ -1826,11 +1838,23 @@ export class Proxy {
    * A provider's credentials as a pool. A provider that declares none has exactly the one it always
    * had, under a fixed id so its health survives config edits that do not touch it.
    */
-  private credentialsOf(name: string, provider: Config["providers"][string]): Credential[] {
+  private credentialsOf(name: string, provider: Config["providers"][string], includePaused = false): Credential[] {
     const declared = (provider as { credentials?: Credential[] }).credentials;
-    if (declared && declared.length > 0) return declared;
+    if (declared && declared.length > 0) return includePaused ? declared : declared.filter((credential) => !credential.paused);
     const headers = ("headers" in provider && provider.headers) || {};
     return [{ id: "default", headers }];
+  }
+
+  clearCredentialCooldown(provider: string, id: string): void {
+    this.pool.clear(provider, id);
+  }
+
+  claudeClearCooldown(ownerId: string): void {
+    const owners = this.claudeAccounts.cooldownOwners(ownerId);
+    for (const [name, provider] of Object.entries(this.deps.config().providers)) {
+      if (provider.type !== "anthropic" || provider.auth !== "claude-code") continue;
+      for (const owner of owners) this.pool.clearOwner(name, owner);
+    }
   }
 
   /** Health of every credential the config declares, for the dashboard. */
@@ -1840,8 +1864,8 @@ export class Proxy {
     for (const [name, provider] of Object.entries(cfg.providers)) {
       const creds = provider.type === "anthropic" && provider.accountPool
         ? this.claudeAccounts.peekCredentials()
-        : this.credentialsOf(name, provider);
-      if (creds.length === 0 || (creds.length === 1 && creds[0]!.id === "default")) continue; // nothing to report about a pool of one
+        : this.credentialsOf(name, provider, true);
+      if (!(provider.type === "anthropic" && provider.accountPool) && !("credentials" in provider && provider.credentials?.length)) continue;
       out[name] = this.pool.report(name, creds).map((report) => {
         const credential = creds.find((candidate) => candidate.id === report.id);
         return credential?.ownerId ? { ...report, id: credential.ownerId } : report;

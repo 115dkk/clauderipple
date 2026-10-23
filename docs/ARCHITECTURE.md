@@ -942,6 +942,20 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     written. One key stays in `headers`; several use complete `credentials` entries with `headers`
     mirroring the first, retaining id `default` when converting a single key. OpenCode Go usage is
     fetched and cached separately per credential and exposed in configured order, with optional labels.
+  - **Shared operator controls (2026-10-23).** ChatGPT, Claude OAuth, Google CCA and compatible
+    API-key pools share `preferred`, `paused`, `clearCooldown` and `inUse`. At most one stored
+    account/key is preferred: only new conversations try it first while usable; existing healthy
+    affinity keeps its prompt cache, and new conversations return to the preferred account after
+    its cooldown resets. Paused entries are excluded even from the compatible adapters' all-cooling
+    first-key fallback; all paused means no upstream request. `inUse` identifies the next usable
+    account for a new conversation (one or none), not `active`, which remains the last responder.
+    Login account PATCH bodies accept boolean `preferred`/`paused` and `clearCooldown: true`;
+    Claude's existing PUT preference API remains supported. External Codex/current-Claude logins
+    retain their existing ownership restrictions. Compatible credentials persist boolean flags on
+    their `config.json` entries via PUT `/api/config` (validated, at most one preferred per provider);
+    `/api/status.credentials[name]` reports each entry's flags and selection, including a declared
+    single key. POST `/api/credentials/clear-cooldown` with `{provider, id}` clears one key's runtime
+    health. Cooldown clearing also works while an entry is paused, without resuming it.
   - Four things an independent review found, each of which had made it past the unit tests because
     each lived in the wiring rather than the state machine: the pool never heard about the ChatGPT
     or openai-compatible adapters, so those providers looked healthy forever and a slot pointing at

@@ -335,6 +335,42 @@ const pooled = (port: number): Provider => ({
   ],
 } as Provider);
 
+for (const type of ["anthropic-compatible", "openai-compatible"] as const) {
+  test(`${type}: preferred and paused flags reach the wire, including the all-cooling fallback`, async () => {
+    let limited = false;
+    const up = await upstream(() => limited ? { status: 429, headers: { "retry-after": "300" }, body: '{}' } : type === "openai-compatible" ? chatAnswer : { status: 200 });
+    const credentials = [
+      { id: "default", headers: { "x-api-key": "one", authorization: "Bearer one" }, paused: false, preferred: false },
+      { id: "second", headers: { "x-api-key": "two", authorization: "Bearer two" }, paused: false, preferred: true },
+    ];
+    const provider: Provider = { type, url: `http://127.0.0.1:${up.port}`, credentials };
+    const r = await rig({ p: provider }, { "claude-opus-4-8": { provider: "p", model: "m" } });
+    try {
+      assert.equal(await r.send(), 200);
+      assert.equal(up.seen.at(-1)?.key, "two", "the preferred key is actually sent");
+      assert.deepEqual(r.proxy.credentialHealth().p!.map((row) => [row.preferred, row.paused, row.inUse]), [[false, false, false], [true, false, true]]);
+      credentials[0]!.paused = true;
+      limited = true;
+      assert.equal(await r.send(), 429);
+      assert.equal(await r.send(), 429, "all cooling still sends an unpaused credential");
+      assert.deepEqual(up.seen.map((row) => row.key), ["two", "two", "two"]);
+      assert.equal(r.proxy.credentialHealth().p!.some((row) => row.inUse), false);
+      credentials[1]!.paused = true;
+      assert.equal(await r.send(), 503, "all paused sends nothing upstream");
+      assert.equal(up.seen.length, 3);
+      r.proxy.clearCredentialCooldown("p", "second");
+      credentials[1]!.paused = false;
+      limited = false;
+      assert.equal(r.proxy.credentialHealth().p![1]!.inUse, true);
+      assert.equal(await r.send(), 200);
+      credentials.splice(0, 1);
+      credentials[0]!.preferred = false;
+      assert.equal(r.proxy.credentialHealth().p!.length, 1, "a declared single credential still exposes controls");
+      assert.equal(await r.send(), 200);
+    } finally { await r.stop(); await up.close(); }
+  });
+}
+
 test("a rate-limited credential hands the conversation to the next one, which then keeps it", async () => {
   // The first key is always out of quota; the second always answers.
   const up = await upstream((n) => n === 1

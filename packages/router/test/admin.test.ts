@@ -32,6 +32,8 @@ async function withAdmin(
   extraDeps: {
     agentDir?: string;
     credentials?: NonNullable<AdminDeps["credentials"]>;
+    clearCredentialCooldown?: NonNullable<AdminDeps["clearCredentialCooldown"]>;
+    claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
     shutdown?: () => void;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
@@ -90,6 +92,89 @@ async function withAdmin(
 }
 
 const base = () => `http://127.0.0.1`;
+
+for (const kind of ["chatgpt", "claude", "google"]) {
+  test(`${kind} account HTTP controls validate, persist one preference, pause, resume and clear cooldown`, async () => {
+    const cleared: string[] = [];
+    await withAdmin(makeCfg(), async ({ port, home }) => {
+      const chatgpt = await import("../src/providers/chatgpt/accounts.ts");
+      const google = await import("../src/providers/google/accounts.ts");
+      const add = (name: string): string => {
+        const grant = { accessToken: `test-${name}`, refreshToken: `test-refresh-${name}`, expiresAt: Date.now() + 3_600_000, accountId: name };
+        if (kind === "chatgpt") return chatgpt.saveChatGptAccount(home, grant).id;
+        if (kind === "google") return google.saveGoogleAccount(home, { ...grant, projectId: name, email: `${name}@example.test` }).id;
+        return saveClaudeOAuthAccount(home, grant).id;
+      };
+      const a = add("a");
+      const b = add("b");
+      const endpoint = `${base()}:${port}/api/${kind}-accounts`;
+      const patch = (id: string, body: unknown) => fetch(`${endpoint}/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const rows = async () => (await (await fetch(endpoint)).json() as { accounts: { id: string; paused: boolean; preferred: boolean; inUse: boolean; state: string }[] }).accounts;
+      assert.equal((await patch(b, { preferred: true })).status, 200);
+      assert.equal((await rows()).find((row) => row.id === b)?.inUse, true);
+      assert.equal((await patch(a, { preferred: true })).status, 200);
+      assert.deepEqual((await rows()).filter((row) => row.preferred).map((row) => row.id), [a]);
+      assert.equal((await patch(b, { preferred: false })).status, 200);
+      assert.equal((await rows()).find((row) => row.id === a)?.preferred, true);
+      assert.equal((await patch(a, { paused: true, clearCooldown: true })).status, 200);
+      assert.deepEqual(cleared, [a]);
+      const paused = (await rows()).find((row) => row.id === a)!;
+      assert.equal(paused.paused, true);
+      assert.equal(paused.inUse, false);
+      assert.equal(paused.state, "paused");
+      assert.equal((await rows()).find((row) => row.id === b)?.inUse, true);
+      for (const invalid of [null, { preferred: "true" }, { paused: 1 }, { clearCooldown: false }]) assert.equal((await patch(a, invalid)).status, 400);
+      assert.equal((await patch(a, { paused: false })).status, 200);
+      assert.equal((await rows()).find((row) => row.id === a)?.inUse, true);
+      assert.equal((await patch(a, { preferred: false })).status, 200);
+      assert.equal((await rows()).some((row) => row.preferred), false);
+      assert.equal((await patch("00000000-0000-4000-8000-000000000000", { clearCooldown: true })).status, 404);
+    }, {
+      claudeClearCooldown: (id) => { cleared.push(id); },
+      chatgpt: () => ({ quota: {}, auth: {}, clearCooldown: (id) => { cleared.push(id); } }),
+      google: () => ({ accounts: () => ({}), clearCooldown: (id) => { cleared.push(id); } }),
+    });
+  });
+}
+
+test("PUT /api/config persists credential control flags and refuses invalid or duplicate preferences", async () => {
+  const cfg = makeCfg({ providers: { p: { type: "anthropic-compatible", url: "http://127.0.0.1:1", credentials: [{ id: "a", headers: {}, preferred: true, paused: true }] } } });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const put = (value: unknown) => fetch(`${base()}:${port}/api/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+    assert.equal((await put(cfg)).status, 200);
+    const saved = fs.readFileSync(configFile, "utf8");
+    assert.deepEqual((JSON.parse(saved) as Config).providers, cfg.providers);
+    for (const credentials of [
+      [{ id: "a", headers: {}, preferred: "yes" }],
+      [{ id: "a", headers: {}, paused: 1 }],
+      [{ id: "a", headers: {}, preferred: true }, { id: "b", headers: {}, preferred: true }],
+    ]) {
+      assert.equal((await put({ ...cfg, providers: { p: { type: "openai-compatible", url: "http://127.0.0.1:1", credentials } } })).status, 400);
+      assert.equal(fs.readFileSync(configFile, "utf8"), saved, "invalid edits leave the stored config unchanged");
+    }
+  });
+});
+
+test("credential cooldown HTTP endpoint clears one key and status exposes all three control flags", async () => {
+  const { CredentialPool } = await import("../src/pool.ts");
+  const entries = [{ id: "default", headers: {}, preferred: true, paused: false }, { id: "b", headers: {}, paused: true }];
+  const pool = new CredentialPool();
+  pool.penalise("p", "default", 429, 60_000);
+  pool.penalise("p", "b", 401);
+  await withAdmin(makeCfg({ providers: { p: { type: "openai-compatible", url: "http://127.0.0.1:1", credentials: entries } } }), async ({ port }) => {
+    const url = `${base()}:${port}`;
+    const post = (body: unknown) => fetch(`${url}/api/credentials/clear-cooldown`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const status = async () => (await (await fetch(`${url}/api/status`)).json() as { credentials: Record<string, ReturnType<typeof pool.report>> });
+    assert.equal((await post({ provider: "p", id: "default" })).status, 200);
+    assert.deepEqual(pool.report("p", entries).map((row) => [row.state, row.paused, row.preferred, row.inUse]), [["ready", false, true, true], ["quarantined", true, false, false]]);
+    const result = await status();
+    assert.deepEqual(result.credentials, { p: pool.report("p", entries) });
+    assert.equal((await post({ provider: "p", id: "missing" })).status, 404);
+    assert.equal((await post({ provider: "missing", id: "default" })).status, 404);
+    assert.equal((await post({ provider: true, id: "default" })).status, 400);
+    assert.equal((await post(null)).status, 400);
+  }, { credentials: () => ({ p: pool.report("p", entries) }), clearCredentialCooldown: (provider, id) => pool.clear(provider, id) });
+});
 
 test("mod options and status expose runtime provider exhaustion and clear it on recovery", async () => {
   const { ProviderHealth, providerExhaustion } = await import('../src/health.ts');
@@ -415,8 +500,8 @@ test("admin mod-options offers owned workers, every provider model, judge candid
     }, {
       agentDir: agents,
       chatgpt: () => ({ quota: { codex: null }, auth: { codex: "ok" }, refresh: async () => { refreshed++; return { at: Date.now(), ...full }; }, accounts: () => ({ codex: [
-        { id: "ready", label: "Ready", expiresAt: Date.now() + 10000, needsReauth: false, paused: false, source: "own", state: "ready", quota: { ...full, ...(credit ? { credits: { has_credits: true } } : {}) }, active: true },
-        { id: "paused", label: "Paused", expiresAt: Date.now() + 10000, needsReauth: false, paused: true, source: "own", state: "paused", quota: null, active: false },
+        { id: "ready", label: "Ready", expiresAt: Date.now() + 10000, needsReauth: false, paused: false, preferred: false, inUse: true, source: "own", state: "ready", quota: { ...full, ...(credit ? { credits: { has_credits: true } } : {}) }, active: true },
+        { id: "paused", label: "Paused", expiresAt: Date.now() + 10000, needsReauth: false, paused: true, preferred: false, inUse: false, source: "own", state: "paused", quota: null, active: false },
       ] }) }),
       modelScoresFetch: async () => Response.json({ source: "https://artificialanalysis.ai", attribution: "Data: Artificial Analysis (artificialanalysis.ai)", generatedAt: "2026-10-10T00:00:00Z", models: [{ slug: "gpt-6-1-sol-high", base: "gpt-6-1-sol", effort: "high", intelligence: 50.24, costPerTask: 0.3191 }] }),
     });
@@ -525,7 +610,7 @@ test("Claude account admin endpoints expose no secrets and rename or remove only
     assert.equal(listed.status, 200);
     const body = await listed.json() as { current: unknown; accounts: { id: string; label: string }[] };
     assert.equal(body.current, null);
-    assert.deepEqual(body.accounts, [{ id: account.id, label: "person@example.test", email: "person@example.test", expiresAt: account.expiresAt, needsReauth: false, preferred: false }]);
+    assert.deepEqual(body.accounts, [{ id: account.id, label: "person@example.test", email: "person@example.test", expiresAt: account.expiresAt, needsReauth: false, preferred: false, paused: false, state: "ready", inUse: true }]);
     assert.doesNotMatch(JSON.stringify(body), /admin-access-secret|admin-refresh-secret|upstream-account-secret/);
 
     const renamed = await fetch(`${base()}:${port}/api/claude-accounts/${encodeURIComponent(account.id)}`, {
@@ -599,8 +684,8 @@ test("an unknown current identity leaves /api/claude-accounts exactly as it was"
     const body = await (await fetch(`${base()}:${port}/api/claude-accounts`)).json() as {
       current: unknown; accounts: unknown[];
     };
-    assert.deepEqual(body.current, { id: "current", label: "Current Claude login", source: "token-file", external: true });
-    assert.deepEqual(body.accounts, [{ id: stored.id, label: "person@example.test", email: "person@example.test", expiresAt: stored.expiresAt, needsReauth: false, preferred: false }]);
+    assert.deepEqual(body.current, { id: "current", label: "Current Claude login", source: "token-file", external: true, paused: false, preferred: false, state: "ready", inUse: true });
+    assert.deepEqual(body.accounts, [{ id: stored.id, label: "person@example.test", email: "person@example.test", expiresAt: stored.expiresAt, needsReauth: false, preferred: false, paused: false, state: "ready", inUse: false }]);
     assert.doesNotMatch(JSON.stringify(body), /sameAsCurrent/);
   }, { claudeIdentity: async () => null });
 });
@@ -2311,7 +2396,7 @@ test("google login: the API returns the terms warning and account endpoints expo
   };
   const google = () => ({
     accounts: () => ({ ag: [
-      { id: "acct-1", label: "g@example.test", email: "g@example.test", projectId: "proj-1", expiresAt: Date.now() + 3_600_000, needsReauth: false, paused: false, state: "ready" as const, active: true },
+      { id: "acct-1", label: "g@example.test", email: "g@example.test", projectId: "proj-1", expiresAt: Date.now() + 3_600_000, needsReauth: false, paused: false, preferred: false, inUse: true, state: "ready" as const, active: true },
     ] }),
     models: async () => [{ id: "gemini-3.8-flash" }],
     clearCooldown: () => {},
@@ -2389,7 +2474,7 @@ test("update: a check the CLI could not answer is an error, not a guess", () => 
 });
 
 test("an Antigravity provider reads as usable only when an account can answer", () => {
-  const account = (state: GoogleAccountStatus["state"]): GoogleAccountStatus => ({ id: state, label: state, projectId: "p", expiresAt: 0, needsReauth: false, paused: state === "paused", state, active: false });
+  const account = (state: GoogleAccountStatus["state"]): GoogleAccountStatus => ({ id: state, label: state, projectId: "p", expiresAt: 0, needsReauth: false, paused: state === "paused", preferred: false, inUse: state === "ready", state, active: false });
   assert.deepEqual(googleHealth([]), { needsLogin: true });
   assert.deepEqual(googleHealth([account("needs-login")]), { needsLogin: true });
   assert.deepEqual(googleHealth([account("needs-verification")]), { needsLogin: false, needsVerification: true });

@@ -52,6 +52,8 @@ export type ProviderCredential = {
   headers: Record<string, string>;
   /** Shown in the dashboard instead of the id. Not a secret, so keep the key out of it. */
   label?: string;
+  preferred?: boolean;
+  paused?: boolean;
 };
 
 /**
@@ -820,7 +822,7 @@ export function validate(c: Config): string[] {
       else {
         const seen = new Set<string>();
         pool.forEach((entry, i) => {
-          const cred = entry as { id?: unknown; headers?: unknown; label?: unknown } | null;
+          const cred = entry as { id?: unknown; headers?: unknown; label?: unknown; preferred?: unknown; paused?: unknown } | null;
           if (!cred || typeof cred !== "object") { errors.push(`provider ${name}: credential ${i} must be an object`); return; }
           if (typeof cred.id !== "string" || !cred.id) errors.push(`provider ${name}: credential ${i} needs a non-empty id`);
           else if (seen.has(cred.id)) errors.push(`provider ${name}: credential id "${cred.id}" is used twice`);
@@ -835,7 +837,11 @@ export function validate(c: Config): string[] {
             }
           }
           if (cred.label !== undefined && typeof cred.label !== "string") errors.push(`provider ${name}: credential ${i} label must be a string`);
+          for (const field of ["preferred", "paused"] as const) {
+            if (cred[field] !== undefined && typeof cred[field] !== "boolean") errors.push(`provider ${name}: credential ${i} ${field} must be a boolean`);
+          }
         });
+        if (pool.filter((entry) => entry && typeof entry === "object" && entry.preferred === true).length > 1) errors.push(`provider ${name}: at most one credential may be preferred`);
       }
     }
     if (p.type === "anthropic-compatible") {
