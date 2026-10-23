@@ -116,7 +116,8 @@ test("retouchLater moves the files' mtime after the delay and skips one removed 
 
   retouchLater([gone, kept], 10);
   fs.rmSync(gone);
-  assert.equal(fs.statSync(kept).mtimeMs, old.getTime(), "not before the delay");
+  // Within a second: some file systems keep mtime to a coarser step than the Date passed in.
+  assert.ok(Math.abs(fs.statSync(kept).mtimeMs - old.getTime()) < 1_000, "not before the delay");
   await new Promise((resolve) => setTimeout(resolve, 60));
 
   assert.ok(fs.statSync(kept).mtimeMs > old.getTime() + 3_000_000, "touched");
