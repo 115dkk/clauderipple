@@ -9,7 +9,7 @@ import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
-import { MARKER, agentModel, fixSpawn, userNamed } from './worker'
+import { MARKER, agentModel, fixSpawn, rivalProviders, userNamed } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -507,6 +507,17 @@ async function sessionPickedModel($: EngineInterface, e: AgentSpawnInput): Promi
   const marker = readMarker(e.prompt)
   return marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) ? marker.name : null
 }
+/** Check the user's model/source choice using the generated file, not a guess from its id. */
+async function userNamedPick($: EngineInterface, name: string, files: ReadonlyMap<string, string>): Promise<boolean> {
+  const id = name.replace(/@[^@]*$/, '').toLowerCase()
+  const file = files.get(id) ?? [...files.values()].find(f => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === id)
+  const models = await read($, routerModels)
+  const provider = file ? agentProvider(file) : /^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(id) ? 'anthropic' : models.find(m => m.value.toLowerCase() === id)?.provider
+  const model = file ? agentModel(file)! : name
+  const sources = [...files.values()].flatMap(f => { const m = agentModel(f), p = agentProvider(f); return m && p ? [{ model: m, provider: p }] : [] }).concat(models.map(m => ({ model: m.value, provider: m.provider })))
+  const providers = rivalProviders(model, sources)
+  return userNamed(model, await $.session.messages(), await read($, heardPrompts), { ...(provider ? { provider } : {}), providers })
+}
 async function workerFix($: EngineInterface, spawn: Spawn): Promise<WorkerFix | null> {
   const text = await optionalFile($, `${await rippleHome($)}/generated-agents.json`)
   if (!text || !strings(object(JSON.parse(text)).agents).includes(spawn.subagentType)) return null
@@ -760,7 +771,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings, 
   let marker = readMarker(e.prompt)
   // A model the user did not name is not the main chat's to pick: the marker goes, and the tier
   // decides as if it had never been written (worker.ts userNamed).
-  if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !userNamed(marker.name, await $.session.messages(), await read($, heardPrompts))) {
+  if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !await userNamedPick($, marker.name, files)) {
     dropped = marker.name
     e = { ...e, prompt: e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
     marker = readMarker(e.prompt)
@@ -1658,7 +1669,7 @@ export const register: Register = on => {
       if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
       const picked = !workflow && !teammate && !e.fork && s.agentAuto !== 'off' ? await sessionPickedModel($, e) : null
-      if (picked && !userNamed(picked, await $.session.messages(), await read($, heardPrompts))) {
+      if (picked && !await userNamedPick($, picked, await workerFiles($))) {
         // A worker or model the main chat picked by name, the user never having named it, goes
         // through the ladder like any delegation (userNamed in worker.ts says why).
         const marker = readMarker(e.prompt)

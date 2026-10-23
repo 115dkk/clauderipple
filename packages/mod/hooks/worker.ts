@@ -27,7 +27,10 @@ const GENERIC = new Set(['flash', 'free', 'pro', 'mini', 'max', 'lite', 'preview
 const SPOKEN: Record<string, readonly string[]> = {
   gemini: ['제미나이', '제미니'], deepseek: ['딥시크'], minimax: ['미니맥스'], gpt: ['지피티'], sol: ['솔'], astra: ['아스트라'],
   luna: ['루나'], terra: ['테라'], opus: ['오푸스', '오퍼스'], sonnet: ['소넷'], haiku: ['하이쿠'], fable: ['페이블'], mythos: ['미토스'],
-  muse: ['뮤즈'], kimi: ['키미'], qwen: ['큐웬'], mimo: ['미모'], longcat: ['롱캣'],
+  muse: ['뮤즈'], kimi: ['키미'], qwen: ['큐웬'], mimo: ['미모'], longcat: ['롱캣'], argon: ['아르곤'],
+}
+const PROVIDER_SPOKEN: Record<string, readonly string[]> = {
+  opencode: ['오픈코드'], google: ['구글'], chatgpt: ['챗지피티'], antigravity: ['안티그래비티'], anthropic: ['앤트로픽'],
 }
 // A Korean name counts when a particle or nothing Korean follows it: "솔한테" names Sol, "솔직히" does not.
 const PARTICLE = '(?:이한테|이랑|이가|이는|이를|이도|이로|이나|한테|에게|으로|께|로|이|가|은|는|을|를|도|만|랑|와|과|의|님|에)'
@@ -36,7 +39,7 @@ export function modelWords(id: string): string[] {
 }
 function says(text: string, word: string): boolean {
   if (new RegExp(`(?<![a-z])${word}(?![a-z])`, 'i').test(text)) return true
-  return (SPOKEN[word] ?? []).some(name => new RegExp(`${name}(?:${PARTICLE}|(?![가-힣]))`).test(text))
+  return [...(SPOKEN[word] ?? []), ...(PROVIDER_SPOKEN[word] ?? [])].some(name => new RegExp(`${name}(?:쪽)?(?:${PARTICLE}|(?![가-힣]))`).test(text))
 }
 type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
 /**
@@ -44,7 +47,7 @@ type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly u
  * their last two messages, and the answer they replied to when the last one is a short "go".
  * Tool results, notices and compaction summaries are not the user.
  */
-export function userNamed(model: string, messages: readonly Said[], prompts: readonly string[] = []): boolean {
+export function userNamed(model: string, messages: readonly Said[], prompts: readonly string[] = [], source: { provider?: string; providers?: readonly string[] } = {}): boolean {
   const words = modelWords(model)
   if (!words.length) return false
   // A notice opens on a tag (`<task-notification>`, `<local-command-stdout>`); a reply the app quotes
@@ -61,7 +64,26 @@ export function userNamed(model: string, messages: readonly Said[], prompts: rea
     if (answer) heard.push(answer.text.slice(-2000))
   }
   // The prompts as submitted (`heardPrompts`): one typed mid-turn is in no user message above.
-  return [...heard, ...prompts].some(text => words.some(word => says(text, word)))
+  const texts = [...heard, ...prompts]
+  // A provider names the source, not just its model: "Argon on OpenCode" must not authorize the
+  // Google API worker with the same model. Without a provider, the model name covers either source.
+  const providers = [...new Set([...(source.providers ?? []), ...(source.provider ? [source.provider] : [])])]
+  // Only the user's own words choose a source: the answer a short "go" replies to mentions
+  // providers in passing ("Google API is out of quota"), and that is not a choice.
+  const own = [...at.map(index => messages[index]!.text), ...prompts]
+  // "Sol or DeepSeek" names two models, not a requirement to run Sol on the DeepSeek API.
+  const named = providers.filter(provider => modelWords(provider).some(word => !Object.hasOwn(SPOKEN, word) && !words.includes(word) && own.some(text => says(text, word))))
+  if (named.length) return !!source.provider && named.includes(source.provider)
+  return texts.some(text => words.some(word => says(text, word)))
+}
+
+/**
+ * The providers a named source could tell this model apart from: those serving a model that shares
+ * one of its name words. Naming OpenCode then decides between two Argons, and says nothing about Sol.
+ */
+export function rivalProviders(model: string, sources: readonly { model: string; provider: string }[]): string[] {
+  const words = modelWords(model)
+  return [...new Set(sources.filter(s => modelWords(s.model).some(word => words.includes(word))).map(s => s.provider))]
 }
 
 export type Spawn = { subagentType: string; prompt: string; model?: string }

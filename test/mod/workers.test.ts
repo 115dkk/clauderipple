@@ -10,7 +10,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
-const { userNamed } = await import('../../packages/mod/hooks/worker.ts')
+const { rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
   { target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash', provider: 'deepseek' },
   { target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol', provider: 'chatgpt' },
@@ -131,6 +131,52 @@ test('a model counts as named only when the user said it lately, in English or K
   const proposal = [user('정리해'), { role: 'assistant' as const, text: '제미나이에게 맡기겠습니다. 진행할까요?' }, user('ㄱㄱ')]
   assert.equal(userNamed('gemini-3-8-flash', proposal), true)
   assert.equal(userNamed('gemini-3-8-flash', [...proposal.slice(0, 2), user('아니 다른 걸로 해 줘 이번엔')]), false)
+})
+
+test('Korean Argon and provider names preserve an explicit worker without authorizing its other provider', () => {
+  const providers = ['google-gemini', 'opencode-go', 'chatgpt']
+  const named = (model: string, provider: string, text: string, prompts: string[] = []) => userNamed(model, [{ role: 'user', text }], prompts, { provider, providers })
+  for (const model of ['gemini-4-argon', 'gemini-4-argon-contributor']) {
+    assert.equal(named(model, model.endsWith('contributor') ? 'opencode-go' : 'google-gemini', '아르곤한테 맡겨'), true)
+  }
+  for (const text of ['아르곤 api 지금 한도 꽉 차서 안될걸? 오픈코드쪽으로 써', '아르곤 API 대신 오픈코드', 'use OpenCode for Argon', 'opencode-go로 해', '오픈코드로 해']) {
+    assert.equal(named('gemini-4-argon-contributor', 'opencode-go', text), true, text)
+    assert.equal(named('gemini-4-argon', 'google-gemini', text), false, text)
+  }
+  for (const text of ['구글로 아르곤 돌려', 'google-gemini로 해']) {
+    assert.equal(named('gemini-4-argon', 'google-gemini', text), true, text)
+    assert.equal(named('gemini-4-argon-contributor', 'opencode-go', text), false, text)
+  }
+  assert.equal(named('gemini-4-argon-contributor', 'opencode-go', '버그 고쳐', ['오픈코드쪽으로 써']), true)
+  assert.equal(named('gemini-4-argon', 'google-gemini', '버그 고쳐', ['오픈코드쪽으로 써']), false)
+  assert.equal(named('gemini-4-argon', 'google-gemini', '아르곤처럼 생겼네'), false)
+  assert.equal(named('gemini-4-argon-contributor', 'opencode-go', 'opencoded example'), false)
+  assert.equal(userNamed('gemini-4-argon-contributor', [{ role: 'user', text: '<task-notification>오픈코드</task-notification>' }], [], { provider: 'opencode-go', providers }), false)
+})
+
+test('a model name shared with a provider is not a source restriction on other explicitly named models', () => {
+  const source = { provider: 'chatgpt', providers: ['chatgpt', 'deepseek', 'google-gemini', 'opencode-go'] }
+  assert.equal(userNamed('gpt-6.1-sol', [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this.' }], [], source), true)
+  assert.equal(userNamed('gpt-6.1-sol', [{ role: 'user', text: '솔과 제미나이에게 각각 검토시켜' }], [], source), true)
+  for (const provider of ['google-gemini', 'opencode-go']) {
+    assert.equal(userNamed('gemini-4-argon', [{ role: 'user', text: '제미나이로 해' }], [], { ...source, provider }), true)
+  }
+})
+
+test('only a rival source is chosen by naming a provider, and only in the user\'s own words', () => {
+  const sources = [
+    { model: 'gemini-4-argon', provider: 'google-gemini' }, { model: 'gemini-4-argon-contributor', provider: 'opencode-go' },
+    { model: 'gpt-6.1-sol', provider: 'chatgpt' }, { model: 'deepseek-v4.1-flash', provider: 'opencode-go' },
+  ]
+  assert.deepEqual(rivalProviders('gemini-4-argon', sources).sort(), ['google-gemini', 'opencode-go'])
+  assert.deepEqual(rivalProviders('gpt-6.1-sol', sources), ['chatgpt'])
+  // Naming OpenCode for DeepSeek says nothing about which source runs Sol.
+  const sol = { provider: 'chatgpt', providers: rivalProviders('gpt-6.1-sol', sources) }
+  assert.equal(userNamed('gpt-6.1-sol', [{ role: 'user', text: '솔은 구현, 딥시크는 오픈코드로' }], [], sol), true)
+  // The answer a short "go" replies to mentions a provider in passing; that is not the user's choice.
+  const argon = { provider: 'google-gemini', providers: rivalProviders('gemini-4-argon', sources) }
+  const answer = [{ role: 'user' as const, text: '아르곤으로 해' }, { role: 'assistant' as const, text: 'OpenCode 쪽 한도도 확인했습니다. 아르곤으로 진행할까요?' }, { role: 'user' as const, text: 'ㄱㄱ' }]
+  assert.equal(userNamed('gemini-4-argon', answer, [], argon), true)
 })
 
 test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {
