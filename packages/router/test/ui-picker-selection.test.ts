@@ -427,6 +427,8 @@ class SaveNode {
     this.parent.children[index] = node; node.parent = this.parent;
   }
   setAttribute(key: string, value: string) { this.attrs[key] = value; }
+  get readOnly(): boolean { return this.attrs.readonly !== undefined; }
+  get childElementCount(): number { return this.children.length; }
   querySelector(selector: string): SaveNode | undefined {
     return this.find(node => selector.startsWith('.') ? String(node.attrs.class ?? '').split(' ').includes(selector.slice(1)) : node.tag === selector);
   }
@@ -533,6 +535,64 @@ test('removing a provider keeps shared picker models owned by a different provid
   assert.deepEqual(ui.h.writes[0]!.cli.extraModels, [{ model: 'one' }]);
   assert.deepEqual(ui.h.writes[0]!.direct, [{ prefix: 'one', provider: 'q' }]);
   assert.equal(ui.h.writes[0]!.providers.p, undefined);
+});
+
+async function pickerWindowHarness(catalogWindows: Record<string, number>) {
+  const config = saveFixture();
+  config.providers.p = { type: 'chatgpt', models: [{ id: 'gpt-6.1-sol', contextWindow: 272000 }] };
+  config.providers.q = { type: 'openai-compatible', models: [{ id: 'other', contextWindow: 800000 }] };
+  config.cli.extraModels = [{ model: 'gpt-6.1-sol', contextWindow: 272000 }, { model: 'other', contextWindow: 700000 }];
+  const h = { config, catalogWindows, requests: [] as string[], box: new SaveNode('div'), card: new SaveNode('div') };
+  const ui = new Function('h', 'el', `
+    let currentConfig, pickerContextWindows = {catalogWindows:{}}, clientsLoaded, status = {};
+    const t = key => key;
+    const CHATGPT_MODELS = [], CSS = {escape: value => value};
+    const $ = selector => selector === '#client-picker-models-card' ? h.card : selector === '#client-picker-models' ? h.box
+      : h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === /data-model="([^"]+)"/.exec(selector)?.[1]);
+    const $all = () => h.box.children.flatMap(row => row.children[0].children.filter(node => node.type === 'checkbox' && node.checked));
+    const hint = text => el('small', {text}), saveClientPickerModels = () => {};
+    ${dashboardBlock('function modelsOf(', 'function presetById(')}
+    ${dashboardBlock('function discoveredContextWindow(', 'let currentConfig =')}
+    ${dashboardBlock('function renderClientPickerModels(', '// Claude Code picks these')}
+    ${dashboardBlock('function clientPickerSelections(', 'async function saveClientPickerModels(')}
+    const loadCatalogs = async () => {}, renderClients = () => renderClientPickerModels(true);
+    const api = async url => { h.requests.push(url); return url === '/api/config' ? h.config : {windows:h.catalogWindows,catalogWindows:h.catalogWindows}; };
+    const toast = message => { throw new Error(message); };
+    ${dashboardBlock('async function loadClients(', 'async function loadProviders(')}
+    return {load:loadClients, selections:clientPickerSelections};
+  `)(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { load(): Promise<void>; selections(): Entry[] };
+  await ui.load();
+  const field = (model: string) => h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === model)!;
+  return { h, field, selections: ui.selections };
+}
+
+test('the picker loads the resolved Codex window, makes it read-only and never saves its display as an override', async () => {
+  const ui = await pickerWindowHarness({ 'gpt-6.1-sol': 475000 });
+  assert.deepEqual(ui.h.requests, ['/api/config', '/api/context-windows']);
+  const field = ui.field('gpt-6.1-sol');
+  assert.equal(field.value, '475000');
+  assert.equal(field.readOnly, true);
+  assert.equal(field.attrs.title, 'slots.windowCodex');
+  assert.ok(ui.h.box.find(node => node.tag === 'small' && node.attrs.text === 'slots.windowCodex'), 'visible catalogue note');
+  field.value = '500000'; // Even a programmatic change is not an editable override.
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 272000, 'keep existing stored fallback unchanged');
+  ui.h.config.cli.extraModels[0] = { model: 'gpt-6.1-sol' };
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, undefined, 'no new stored override');
+  const other = ui.field('other');
+  assert.equal(other.value, '700000');
+  assert.equal(other.readOnly, false, 'another provider stays editable');
+  other.value = '900000';
+  assert.equal(ui.selections().find(entry => entry.id === 'other')?.contextWindow, 900000);
+});
+
+test('before a Codex window has been read the picker retains its stored editable fallback', async () => {
+  const ui = await pickerWindowHarness({});
+  const field = ui.field('gpt-6.1-sol');
+  assert.equal(field.value, '272000');
+  assert.equal(field.readOnly, false);
+  assert.equal(ui.h.box.find(node => node.attrs.text === 'slots.windowCodex'), undefined);
+  field.value = '300000';
+  assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 300000);
 });
 
 type SlotItem = { id: string; route: { provider: string; model: string } | null; effort: string };

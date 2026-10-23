@@ -179,9 +179,9 @@ function modelEffortTag(model) {
   if (!Array.isArray(model.effortLevels)) return null;
   return model.effortLevels.length ? t("providers.modelEffort") : t("providers.modelNoEffort");
 }
-// Routed models do not share a context window, so each picker entry carries its own. What the user
-// typed wins; otherwise whatever the vendor's /models reported (`context_length`); otherwise the
-// global cli.autoCompactWindow fallback. This is the model's real window, not a compaction point.
+// Routed models do not share a context window. ChatGPT's live effective window comes from the
+// router's shared resolver and is read-only; other providers keep the saved/discovered fallback.
+let pickerContextWindows = { windows: {}, catalogWindows: {} };
 function discoveredContextWindow(providerName, modelId) {
   const provider = currentConfig && currentConfig.providers && currentConfig.providers[providerName];
   const entry = provider && modelsOf(provider).find((item) => item.id === modelId);
@@ -892,17 +892,25 @@ function renderClientPickerModels(enabled) {
     input.dataset.name = labelOf(model);
     const discovered = discoveredContextWindow(group.name, model.id);
     const saved = savedContextWindow(model.id);
-    // Blank means "use the global fallback"; the placeholder says what that would be.
+    const catalogWindow = pickerContextWindows.catalogWindows[model.id];
+    // Blank means "use the fallback" except when the live catalogue owns the value.
     const windowField = el("input", {
       type: "number", class: "model-window", min: "1", step: "1000",
-      value: saved !== undefined ? String(saved) : "",
+      value: catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
       placeholder: discovered !== undefined ? String(discovered) : t("slots.windowGlobal"),
-      title: t("slots.windowHelp"),
+      title: t(catalogWindow !== undefined ? "slots.windowCodex" : "slots.windowHelp"),
+      readonly: catalogWindow !== undefined ? "" : undefined,
     });
+    const windowNote = catalogWindow !== undefined ? el("small", { text: t("slots.windowCodex"), style: "grid-row: 3; grid-column: 1 / -1" }) : null;
     windowField.hidden = !input.checked;
+    if (windowNote) windowNote.hidden = !input.checked;
     windowField.dataset.model = model.id;
     windowField.addEventListener("change", () => void saveClientPickerModels());
-    input.addEventListener("change", () => { windowField.hidden = !input.checked; void saveClientPickerModels(); });
+    input.addEventListener("change", () => {
+      windowField.hidden = !input.checked;
+      if (windowNote) windowNote.hidden = !input.checked;
+      void saveClientPickerModels();
+    });
     // Two lines: the name owns the first — on one line it was the thing that collapsed, down to
     // "GPT…" — and the provider and the window share the second. The field sits outside the
     // <label>, because inside it every click toggles the checkbox instead of reaching the field.
@@ -910,6 +918,7 @@ function renderClientPickerModels(enabled) {
       el("label", { class: "pm-main" }, [input, el("span", { text: labelOf(model) })]),
       el("small", { text: providerLabel(group.name, group.provider) }),
       windowField,
+      windowNote,
     ]));
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
@@ -1048,8 +1057,10 @@ async function saveModelSlots() {
 function clientPickerSelections() {
   return $all("#client-picker-models input[type=checkbox]:checked").map((input) => {
     const field = $(`#client-picker-models input.model-window[data-model="${CSS.escape(input.dataset.model)}"]`);
-    const typed = field && field.value.trim() ? Number(field.value) : NaN;
-    const contextWindow = Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : discoveredContextWindow(input.dataset.provider, input.dataset.model);
+    // A catalogue value is display-only, not a new override persisted by an unrelated checkbox.
+    const typed = field && !field.readOnly && field.value.trim() ? Number(field.value) : NaN;
+    const contextWindow = field && field.readOnly ? savedContextWindow(input.dataset.model)
+      : Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : discoveredContextWindow(input.dataset.provider, input.dataset.model);
     return { id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider, contextWindow };
   });
 }
@@ -2876,6 +2887,7 @@ async function loadClients() {
   try {
     await loadCatalogs();
     currentConfig = await api("/api/config");
+    pickerContextWindows = await api("/api/context-windows");
     if (!status) status = await api("/api/status");
     renderClients();
   } catch (error) { toast(t("common.loadFailed"), true, error.message); }

@@ -51,6 +51,7 @@ import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
+import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
 import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
@@ -1698,22 +1699,32 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
 }
 
 /**
- * Each model's context window, for a client that reads a session's context use without the CLI's own
- * figure (the phone, for a Claude app session). Claude's from Anthropic's catalog, the CLI's injected
- * models from their config (else `cli.autoCompactWindow`), providers' from theirs. Unknown is absent.
+ * Each model's context window for the phone and dashboard. ChatGPT-served models use the same
+ * effective catalogue window as bootstrap/picker; an explicit route window still wins. Without a
+ * catalogue window, the stored values retain their old precedence. Unknown is absent.
+ * `catalogWindows` identifies values the picker window editor must not offer to override.
  */
-async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number> }> {
+async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number> }> {
   const cfg = deps.config();
   const windows: Record<string, number> = {};
-  const put = (id: string, value: number | undefined): void => {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0 && windows[id] === undefined) windows[id] = Math.floor(value);
+  const catalogWindows: Record<string, number> = {};
+  const put = (id: string, fallback?: number): void => {
+    const base = id.split("@")[0]!;
+    const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
+    const live = chatgptModelWindow(cfg, id);
+    const value = route?.contextWindow ?? live ?? fallback;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
+    windows[id] = Math.floor(value);
+    if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
   };
   for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow);
   for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
   for (const provider of Object.values(cfg.providers)) {
     for (const model of ("models" in provider && provider.models) || []) put(model.id, model.contextWindow);
   }
-  return { windows };
+  for (const id of Object.keys(cfg.routes)) put(id);
+  for (const id of Object.keys(cfg.aliases)) put(id);
+  return { windows, catalogWindows };
 }
 
 function tailLines(file: string, n: number): string {
