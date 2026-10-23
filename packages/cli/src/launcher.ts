@@ -122,7 +122,8 @@ export function desktopEntry(rt: Runtime, home: string): string {
 
 export function windowsTrayLauncher(rt: Runtime, home: string): string {
   const log = path.join(home, "logs", "launcher.log");
-  return [
+  // -File is read by Windows PowerShell 5.1, which needs a BOM to recognise UTF-8.
+  return String.fromCharCode(0xFEFF) + [
     ...Object.entries(launchEnv(rt, home)).map(([k, v]) => `$env:${k} = ${ps(v)}`),
     `New-Item -ItemType Directory -Force -Path ${ps(path.dirname(log))} | Out-Null`,
     `& ${ps(rt.node)} ${ps(rt.cli)} tray --ensure *>> ${ps(log)}`,

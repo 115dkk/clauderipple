@@ -21,6 +21,8 @@ import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
+import { withCommandHelp } from "./help-gate.ts";
 import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
@@ -30,13 +32,6 @@ import { openBrowser } from "./browser.ts";
 import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
 import { dropPowerShellShim, installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
-
-function setPickerEnabled(enabled: boolean): void {
-  const file = configPath();
-  const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-  raw.picker = { ...((raw.picker as Record<string, unknown> | undefined) ?? {}), enabled };
-  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + "\n");
-}
 
 async function pickerOn(): Promise<void> {
   const home = homeDir();
@@ -220,7 +215,8 @@ async function install(): Promise<void> {
   // settings.json is written last, after the probe: from that write on, every new Claude Code
   // session sends everything to this router, so it must not point at one that never came up.
   // A foreign proxy is still refused here, before anything is registered.
-  checkProxyEnv({ proxyUrl, force: flag("force") });
+  const direct = fs.existsSync(path.join(home, "direct.json"));
+  if (!direct) checkProxyEnv({ proxyUrl, force: flag("force") });
 
   // Persist the single execution contract so the GUI, admin API, hooks, and supervisor all use
   // this installation's runtime rather than any Node installation on the user's PATH.
@@ -274,7 +270,7 @@ async function install(): Promise<void> {
     console.log(`${settingsPath()} was left as it was, so Claude Code does not depend on a router that is not answering. Fix the router, then run install again.`);
     return;
   }
-  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), ...(maxCtx ? { maxContextTokens: Number(maxCtx) } : {}), models: cfg.cli.models ?? {} });
+  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), ...(maxCtx ? { maxContextTokens: Number(maxCtx) } : {}), models: cfg.cli.models ?? {}, respectDirect: true });
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
   // Something to double-click for the menu-bar app, which is what offers repair when the router is
@@ -293,7 +289,7 @@ async function install(): Promise<void> {
   } catch {
     console.log("  the phone host was not restarted; if you use it, run: clauderipple remote install");
   }
-  console.log("\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
+  console.log(direct ? "\nDone. Claude stays on its default connection (direct on); run \"clauderipple direct off\" to go through ClaudeRipple." : "\nDone. New Claude Desktop Code sessions go through ClaudeRipple. Existing sessions pick up settings.json env changes on their next request.");
 }
 
 async function uninstall(): Promise<void> {
@@ -315,7 +311,8 @@ async function uninstall(): Promise<void> {
   } catch (e) {
     console.log(`  could not remove the menu-bar app launcher: ${(e as Error).message}`);
   }
-  const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem });
+  removeClientIntegrations(home);
+  const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem, ...(cfg.cli.models ? { models: cfg.cli.models } : {}) });
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
   if (flag("purge")) {
@@ -628,14 +625,9 @@ function help(): void {
 Home directory: ${homeDir()}  (override with CLAUDERIPPLE_HOME)`);
 }
 
-try {
+async function dispatchCommand(): Promise<void> {
   switch (cmd) {
     case "remote": {
-      if (args.slice(1).some(arg => arg === "--help" || arg === "-h")) {
-        const { REMOTE_USAGE } = await import("../../remote/src/usage.ts");
-        console.log(REMOTE_USAGE);
-        break;
-      }
       const sub = args[1];
       // Remote (SSH) hosts for Claude Desktop sessions; every other `remote` verb is the phone host's.
       if (sub === "add" || sub === "remove" || sub === "hosts") {
@@ -867,6 +859,10 @@ try {
     default:
       help();
   }
+}
+
+try {
+  await withCommandHelp(args, dispatchCommand, help);
 } catch (e) {
   console.error(`error: ${(e as Error).message}`);
   process.exit(1);

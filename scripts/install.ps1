@@ -127,6 +127,10 @@ Write-Host "Installing $Package..."
 & $node $npmCli install --global --prefix $Prefix --loglevel error $Package
 if ($LASTEXITCODE -ne 0) { throw "npm could not install $Package" }
 
+# Record the method even for --no-setup and a prefix chosen only for this invocation.
+$installRecord = @{ kind = 'script'; prefix = [System.IO.Path]::GetFullPath($Prefix) } | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText((Join-Path $Prefix 'clauderipple-install.json'), $installRecord, (New-Object System.Text.UTF8Encoding($false)))
+
 # npm's global prefix on Windows puts the commands at the prefix root, not in a bin subdirectory.
 $bin = $Prefix
 $cmd = Join-Path $bin 'clauderipple.cmd'
@@ -138,7 +142,10 @@ if (-not (Test-Path $cmd)) { throw "npm installed $Package but left no command i
 if ($node.StartsWith($Runtime, [StringComparison]::OrdinalIgnoreCase)) {
   $entry = Join-Path $Prefix 'node_modules\clauderipple\bin\clauderipple.js'
   if (-not (Test-Path $entry)) { throw "the installed package has no entry point at $entry" }
-  Set-Content -Path $cmd -Value "@`"$node`" `"$entry`" %*" -Encoding ASCII
+  # cmd.exe reads each line in the active console code page. Switch on an ASCII-only line
+  # before it reads the UTF-8 paths; no BOM (cmd would treat it as part of the first command).
+  $wrapper = "@echo off`r`nchcp 65001 >nul`r`n`"$node`" `"$entry`" %*`r`n"
+  [System.IO.File]::WriteAllText($cmd, $wrapper, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # PowerShell picks clauderipple.ps1 over clauderipple.cmd, and under the default execution policy

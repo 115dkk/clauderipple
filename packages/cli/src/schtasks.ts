@@ -134,7 +134,8 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
   const quoteArg = (arg: string): string => ps(`"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`);
   // No `$ErrorActionPreference = 'Stop'`: one failed Start-Process (a locked log file, say) would end
   // the loop and leave the router or host unsupervised; the loop retries instead.
-  return [
+  // Windows PowerShell 5.1 decodes -File as ANSI unless the UTF-8 BOM is present.
+  return String.fromCharCode(0xFEFF) + [
     ...Object.entries(env).map(([k, v]) => `$env:${k} = ${ps(v)}`),
     `$routerArgs = @(${opts.args.map(quoteArg).join(", ")})`,
     `$out = ${ps(path.join(logDir, "launcher.log"))}`,
@@ -150,7 +151,7 @@ export function renderLauncher(opts: { program: string; args: string[]; home: st
   ].join("\r\n") + "\r\n";
 }
 
-function writeLauncher(opts: { program: string; args: string[]; home: string; env?: Record<string, string>; name?: string }): string {
+export function writeLauncher(opts: { program: string; args: string[]; home: string; env?: Record<string, string>; name?: string }): string {
   const launcher = path.join(opts.home, `${opts.name ?? "clauderipple-router"}.ps1`);
   const logDir = path.join(opts.home, "logs");
   fs.mkdirSync(logDir, { recursive: true });

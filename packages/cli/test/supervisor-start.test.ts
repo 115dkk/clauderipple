@@ -37,13 +37,38 @@ test("a supervisor that says 'started' but leaves no router is caught, and the r
       up: () => false,
       fallback: () => 4242,
       alive: (pid) => pid === 4242,
+      healthy: () => true,
       now: c.now,
       sleep: c.sleep,
     },
-    { budgetMs: 1_000, onProgress: (m) => notes.push(m) },
+    { budgetMs: 2_000, onProgress: (m) => notes.push(m) },
   );
   assert.equal(out, "started-directly");
   assert.match(notes.join("\n"), /did not bring the router up; starting it directly/);
+});
+
+test("a direct child must survive startup and answer health within its budget", () => {
+  for (const scenario of ["exit42", "no-health", "healthy", "dies-during-health", "late-health"]) {
+    const c = clock();
+    let died = false;
+    let checked = 0;
+    const result = startRouter({
+      start: () => "failed",
+      up: () => false,
+      fallback: () => 42,
+      alive: () => !died && (scenario !== "exit42" || c.now() < 500),
+      healthy: (timeout) => {
+        checked++;
+        assert.ok(timeout > 0 && timeout <= 2_000 - c.now());
+        if (scenario === "dies-during-health") died = true;
+        if (scenario === "late-health") c.sleep(2_000);
+        return scenario !== "no-health";
+      },
+      ...c,
+    }, { budgetMs: 2_000 });
+    assert.equal(result, scenario === "healthy" ? "started-directly" : "failed", scenario);
+    if (scenario === "exit42") assert.equal(checked, 0, "a transient PID is not success");
+  }
 });
 
 test("when the direct start also produces nothing, the start is a failure", () => {

@@ -107,6 +107,9 @@ fi
 say "Installing ${PACKAGE}..."
 "$NODE" "$NPM_CLI" install --global --prefix "$PREFIX" --loglevel error "$PACKAGE"
 
+# Keep the install method with the prefix, even when CLAUDERIPPLE_PREFIX was set only once.
+"$NODE" -e 'const fs = require("node:fs"); const path = require("node:path"); const prefix = path.resolve(process.argv[1]); fs.writeFileSync(path.join(prefix, "clauderipple-install.json"), JSON.stringify({kind:"script", prefix}) + "\n");' "$PREFIX"
+
 BIN="$PREFIX/bin"
 [ -x "$BIN/clauderipple" ] || die "npm installed $PACKAGE but left no command in $BIN"
 

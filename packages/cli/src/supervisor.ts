@@ -55,6 +55,8 @@ export type StartOps = {
   fallback?: () => number | null;
   /** True while `pid` is alive. */
   alive(pid: number): boolean;
+  /** A bounded check of the router's admin API, used only for a direct fallback. */
+  healthy?(timeoutMs: number): boolean;
   now(): number;
   sleep(ms: number): void;
 };
@@ -83,7 +85,17 @@ export function startRouter(ops: StartOps, opts: { budgetMs?: number; pollMs?: n
   opts.onProgress?.(`the ${supervisorName()} did not bring the router up; starting it directly`);
   const pid = ops.fallback();
   if (pid === null) return "failed";
-  return waitUntil(ops, () => ops.alive(pid), opts) ? "started-directly" : "failed";
+  const startedAt = ops.now();
+  const deadline = startedAt + (opts.budgetMs ?? 20_000);
+  while (ops.now() < deadline) {
+    if (!ops.alive(pid)) return "failed";
+    const remaining = deadline - ops.now();
+    // An exit(42) child can exist at the first poll. Require a full second of survival, then
+    // an actual router response, and check survival again after that blocking health request.
+    if (ops.now() - startedAt >= 1_000 && ops.healthy?.(Math.min(3_000, remaining)) && ops.now() <= deadline && ops.alive(pid)) return "started-directly";
+    ops.sleep(Math.min(opts.pollMs ?? 500, Math.max(0, deadline - ops.now())));
+  }
+  return "failed";
 }
 
 function waitUntil(ops: Pick<StartOps, "now" | "sleep">, ok: () => boolean, opts: { budgetMs?: number; pollMs?: number }): boolean {
@@ -128,6 +140,15 @@ function realStartOps(): StartOps {
     // Only the Windows launcher stops for good after a drain (#80); the others relaunch the router.
     ...(isWindows ? { fallback: startRouterDirectly } : {}),
     alive: isAlive,
+    healthy: (timeoutMs) => {
+      try {
+        const rt = runtime();
+        execFileSync(rt.node, ["-e", `fetch(${JSON.stringify(adminUrl() + "/api/status")}, {signal: AbortSignal.timeout(${timeoutMs})}).then(async r => { const s = r.ok && await r.json(); process.exit(s && typeof s.version === 'string' ? 0 : 1); }).catch(() => process.exit(1));`], { env: { ...process.env, ...rt.env }, stdio: "ignore", windowsHide: true, timeout: timeoutMs });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     now: () => Date.now(),
     sleep: sleepSync,
   };

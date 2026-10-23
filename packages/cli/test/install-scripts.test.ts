@@ -13,6 +13,28 @@ import path from "node:path";
 const scripts = path.resolve(import.meta.dirname, "../../../scripts");
 const read = (name: string): string => fs.readFileSync(path.join(scripts, name), "utf8");
 
+test("the pinned-Node cmd wrapper switches to UTF-8 before non-ASCII paths, without a BOM", () => {
+  const ps1 = read("install.ps1");
+  const block = ps1.slice(ps1.indexOf("if ($node.StartsWith"), ps1.indexOf("# PowerShell picks"));
+  assert.match(block, /chcp 65001 >nul`r`n/);
+  assert.match(block, /WriteAllText\(\$cmd, \$wrapper, \(New-Object System.Text.UTF8Encoding\(\$false\)\)\)/);
+  assert.doesNotMatch(block, /-Encoding ASCII/);
+  assert.ok(block.indexOf("chcp 65001") < block.indexOf('`"$node`"'), "cmd changes code page on its own line before reading the path");
+});
+
+test("Windows npm build commands use a shell for npm.cmd", async () => {
+  const module = await import(path.join(scripts, "build-npm.mjs")) as { npmBuildSteps: (platform: NodeJS.Platform, run: (file: string, args: string[], opts: { shell: boolean }) => void) => void };
+  for (const platform of ["win32", "darwin"] as const) {
+    const calls: string[][] = [];
+    module.npmBuildSteps(platform, (file, args, opts) => {
+      assert.equal(file, platform === "win32" ? "npm.cmd" : "npm");
+      assert.equal(opts.shell, platform === "win32");
+      calls.push(args);
+    });
+    assert.equal(calls.length, 2, "both TypeScript and tray builds use the same execution policy");
+  }
+});
+
 test("install.ps1 inherits `install`'s failure and names the command that finishes the job", () => {
   const ps1 = read("install.ps1");
   const start = ps1.indexOf("& $cmd install");
