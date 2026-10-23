@@ -229,7 +229,7 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
         // A widget is something to look at, not activity: it stands on its own instead of folding away.
         if (isWidgetTool(tool.name)) {
           group = null;
-          result.push({ ...item, key: `${item.key}:${tool.id}`, text: "", images: [], streaming: false, tools: [tool] });
+          result.push({ ...item, key: `${item.key}:${tool.id}`, text: "", images: [], files: [], streaming: false, tools: [tool] });
           continue;
         }
         const worker = workers.get(tool.id);

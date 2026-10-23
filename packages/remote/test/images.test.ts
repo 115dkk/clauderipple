@@ -211,6 +211,10 @@ test("shared timeline preserves files on users, answers and tool results through
   assert.deepEqual(user.files, files); assert.deepEqual(assistant.files, files);
   assert.deepEqual(assistant.tools[0]?.files, files); assert.deepEqual(assistant.tools[0]?.result?.files, files);
   assert.ok(timelineItems(view).some(item => item.type === "assistant" && item.files?.length === 1));
+  const withWidget = reduce([...events, log.append({ kind: "assistant", msg: "widget", model: "test", text: "", files, tools: [{ id: "w", name: "show_widget", summary: "widget" }] })]);
+  const rows = timelineItems(withWidget).filter(item => item.type === "assistant" && item.key.startsWith("awidget"));
+  assert.equal(rows.length, 2);
+  assert.equal(rows.filter(item => item.type === "assistant" && item.files?.length).length, 1, "widget clones must not duplicate file cards");
 });
 
 test("the attachment folder is created 0700, not 0755", { skip: needsPosixModes }, t => {
