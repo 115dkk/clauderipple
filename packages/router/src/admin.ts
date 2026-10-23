@@ -63,7 +63,7 @@ import { desktopClaudeCodeDirs } from "../../cli/src/claude-auth.ts";
 import { statusModEnabled, syncModelSlots } from "../../cli/src/settings.ts";
 import { ClaudeOAuthSession, type ClaudeOAuthState } from "./providers/claude-oauth.ts";
 import { readClaudeAuthFile } from "./providers/anthropic-token-file.ts";
-import { listClaudeAccounts, removeClaudeAccount, renameClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
+import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount, renameClaudeAccount, setPreferredClaudeAccount } from "./providers/anthropic-accounts.ts";
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
@@ -184,6 +184,12 @@ export type AdminDeps = {
    * login, otherwise the account id `/api/claude-accounts` lists). Absent in tests.
    */
   claudeUsage?: () => Promise<Record<string, Record<string, unknown>>>;
+  /**
+   * The current Claude login's own account: its email and the pool's one-way subject hash, so a
+   * stored account that is the same person is not listed as a second one (`/api/claude-accounts`).
+   * Null when the login's identity is unknown. Absent in tests.
+   */
+  claudeIdentity?: () => Promise<{ email: string; subjectHash: string } | null>;
   /** The Claude models the signed-in account can use (`GET /v1/models`); null until one answer. Absent in tests. */
   claudeModels?: () => Promise<ClaudeModel[] | null>;
   /** An OpenCode Go provider's usage windows, for the status bar's limits row (`/api/limits`). Absent in tests. */
@@ -2226,9 +2232,29 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         const source = claudeAuthStore(deps).describeSource();
         let usage: Record<string, Record<string, unknown>> = {};
         if (hasClaudeSubscription(deps.config())) usage = (await deps.claudeUsage?.().catch(() => null)) ?? {};
+        // Only a known current login can point out a stored copy of itself; unknown adds nothing,
+        // so the response stays exactly what it was before there was an identity lookup.
+        const identity = source ? (await deps.claudeIdentity?.().catch(() => null)) ?? null : null;
+        const accounts = listClaudeAccountsWithSubject(homeDir()).map(({ subjectHash: hash, ...account }) => {
+          const same = identity !== null && (hash !== undefined
+            ? hash === identity.subjectHash
+            : account.email !== undefined && account.email.toLowerCase() === identity.email.toLowerCase());
+          return {
+            ...account,
+            ...(usage[account.id] ? { quota: usage[account.id] } : {}),
+            ...(same ? { sameAsCurrent: true } : {}),
+          };
+        });
         sendJson(res, 200, {
-          current: source ? { id: "current", label: "Current Claude login", source, external: true, ...(usage.current ? { quota: usage.current } : {}) } : null,
-          accounts: listClaudeAccounts(homeDir()).map((account) => (usage[account.id] ? { ...account, quota: usage[account.id] } : account)),
+          current: source ? {
+            id: "current",
+            label: "Current Claude login",
+            source,
+            external: true,
+            ...(identity ? { email: identity.email } : {}),
+            ...(usage.current ? { quota: usage.current } : {}),
+          } : null,
+          accounts,
         });
         return;
       }

@@ -52,6 +52,7 @@ import type { ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage } from "./providers/anthropic-usage.ts";
+import { ClaudeCurrentIdentity } from "./providers/anthropic-identity.ts";
 import { dropForeignThinking } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -249,6 +250,8 @@ export class Proxy {
   readonly claudeUsage: ClaudeUsage;
   /** The Claude models the signed-in account can use, from Anthropic's own list. */
   readonly claudeModels: ClaudeModelCatalog;
+  /** Who the current Claude login is (never a token), so admin can spot a stored copy of it. */
+  readonly claudeIdentity: ClaudeCurrentIdentity;
   /** Each OpenCode Go provider's usage windows, for the status bar's limits row (never a key). */
   private readonly opencodeUsage: OpenCodeUsage;
   private readonly deps: ProxyDeps;
@@ -506,6 +509,10 @@ export class Proxy {
       }
       socket.destroy();
     });
+      warn: (message) => deps.log.warn(message),
+    });
+    this.claudeIdentity = new ClaudeCurrentIdentity(this.claudeAccounts, {
+      upstream: () => this.deps.config().upstream,
     this.httpServer.on("upgrade", (req, socket, head) => this.upgrade(req, socket as net.Socket, head));
     this.server = net.createServer((sock) => this.onConnect(sock));
   }

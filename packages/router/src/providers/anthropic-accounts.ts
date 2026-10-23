@@ -143,7 +143,12 @@ function writeClaudeAccountsFile(home: string, accounts: ClaudeOAuthAccount[]): 
   if (legacyMigrationDurable(directoryDurable) && legacy?.source === "oauth") removeClaudeAuthFile(home);
 }
 
-function subjectHash(accountId: string | undefined): string | undefined {
+/**
+ * The one-way stand-in for an upstream account UUID. It is what identifies "the same human account"
+ * across a re-login, both for the pool and for telling the dashboard that a stored account is the
+ * current Claude login (anthropic-identity.ts).
+ */
+export function subjectHash(accountId: string | undefined): string | undefined {
   return accountId ? crypto.createHash("sha256").update(accountId).digest("hex") : undefined;
 }
 
@@ -286,4 +291,17 @@ export function summarize(account: ClaudeOAuthAccount): ClaudeAccountSummary {
 
 export function listClaudeAccounts(home: string): ClaudeAccountSummary[] {
   return readClaudeOAuthAccounts(home).map(summarize);
+}
+
+export type ClaudeAccountSummaryWithSubject = ClaudeAccountSummary & {
+  /** The same one-way id the pool stores. Only ever compared; the GUI is never shown it. */
+  subjectHash?: string;
+};
+
+/** `listClaudeAccounts` plus `subjectHash`, for deciding whether a stored account is the current login. */
+export function listClaudeAccountsWithSubject(home: string): ClaudeAccountSummaryWithSubject[] {
+  return readClaudeOAuthAccounts(home).map((account) => ({
+    ...summarize(account),
+    ...(account.subjectHash ? { subjectHash: account.subjectHash } : {}),
+  }));
 }

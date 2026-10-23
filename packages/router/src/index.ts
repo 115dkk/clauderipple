@@ -275,6 +275,7 @@ proxy
       modelCatalog: () => loadModelCatalog(),
       shutdown: () => beginDrain("shutdown requested"),
       remote: {
+      claudeIdentity: () => proxy.claudeIdentity.identify(),
         status: () => tunnels!.status(),
         reload: () => {
           tunnels!.reconcile(store.get().remote?.hosts ?? []);
