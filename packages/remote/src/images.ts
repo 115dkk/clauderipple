@@ -51,8 +51,27 @@ export function attachmentContent(cwd: string, text: string, attachments: Attach
 export type ImageSink = (base64: string) => string;
 /** Host-owned metadata only. Never construct roots from tool arguments, prompts or phone requests.
  * scratchpad is absent until the host has independently verified that exact session directory. */
-export interface SessionFileScope { cwd: string; additionalDirectories?: readonly string[]; scratchpad?: string }
+export interface SessionFileScope { cwd: string; additionalDirectories?: readonly string[]; scratchpad?: string; sessionId?: string }
 const MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * The session's own Claude temp folder, `<tmp>/claude-<uid>/<project slug>/<session id>`: a pasted
+ * image (`[Image: source: …/images/1.png]`) and a SendUserFile from the scratchpad live there. The
+ * host derives it from the session id and cwd, never from a path it was handed, and only under a
+ * `claude-<uid>` folder this user owns that nobody else can write to.
+ */
+export function claudeSessionTemp(scope: SessionFileScope): string[] {
+  const uid = process.getuid?.();
+  if (uid === undefined || process.platform === "win32" || !scope.sessionId || !SESSION_ID.test(scope.sessionId) || !path.isAbsolute(scope.cwd)) return [];
+  const slug = scope.cwd.replace(/[^A-Za-z0-9]/g, "-");
+  return ["/private/tmp", "/tmp"].flatMap(tmp => {
+    const base = path.join(tmp, `claude-${uid}`);
+    try {
+      const stat = fs.statSync(base);
+      return stat.isDirectory() && stat.uid === uid && (stat.mode & 0o022) === 0 ? [path.join(base, slug, scope.sessionId!)] : [];
+    } catch { return []; }
+  });
+}
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
@@ -108,8 +127,7 @@ function pathChain(root: string, file: string): Identity[] {
 function checkedPath(file: string, scope: SessionFileScope): { real: string; root: string; originalRoot: string; chain: Identity[] } {
   if (!file || file.includes("\0") || file.split(/[\\/]/).includes("..") || !path.isAbsolute(scope.cwd)) throw new Error("blocked");
   const absolute = path.resolve(scope.cwd, file);
-  if (secretPath(absolute)) throw new Error("blocked");
-  const roots = [scope.cwd, ...(scope.additionalDirectories ?? []), ...(scope.scratchpad ? [scope.scratchpad] : [])];
+  const roots = [scope.cwd, ...(scope.additionalDirectories ?? []), ...(scope.scratchpad ? [scope.scratchpad] : []), ...claudeSessionTemp(scope)];
   const forbidden = new Set([path.parse(absolute).root, os.homedir(), path.join(os.homedir(), ".claude"), "/tmp", "/private/tmp", os.tmpdir()].map(p => path.resolve(p)));
   for (const root of [...forbidden]) {
     try { forbidden.add(fs.realpathSync(root)); }
@@ -117,6 +135,8 @@ function checkedPath(file: string, scope: SessionFileScope): { real: string; roo
   }
   const originalRoot = roots.find(root => path.isAbsolute(root) && !forbidden.has(path.resolve(root)) && inside(path.resolve(root), absolute));
   if (!originalRoot || fs.lstatSync(originalRoot).isSymbolicLink()) throw new Error("blocked");
+  // Names below the allowed root only: a project folder called auth-service is not a secret.
+  if (secretPath(path.relative(path.resolve(originalRoot), absolute))) throw new Error("blocked");
   const root = fs.realpathSync(originalRoot);
   if (forbidden.has(root)) throw new Error("blocked");
   const real = path.join(root, path.relative(path.resolve(originalRoot), absolute));

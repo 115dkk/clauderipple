@@ -177,6 +177,8 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
   const r = record(line);
   const bodies: EventBody[] = [];
   if (!r) return { at: null, bodies };
+  // The session's own temp folder (pasted images, scratchpad) is derived from its id (images.ts).
+  const scope = { cwd, sessionId: str(r.sessionId) };
   const sidechain = r.isSidechain === true;
   if (sidechain && !subs?.allowSidechain) return { at: null, bodies };
   const state = subs?.state;
@@ -204,13 +206,13 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         state?.delete(toolUseId);
       }
     } else if (p && r.type === "user") {
-      const converted = messageContent(message?.content, sink, { cwd });
+      const converted = messageContent(message?.content, sink, scope);
       bodies.push({ kind: "user", ...converted, clientMsgId: str(r.uuid) });
     }
     for (const value of Array.isArray(message?.content) ? message.content : []) {
       const b = object(value);
       if (b?.type === "tool_result" && typeof b.tool_use_id === "string") {
-        const converted = messageContent(b.content, sink, { cwd });
+        const converted = messageContent(b.content, sink, scope);
         bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...converted });
         // A synchronous worker finishes at its tool result; an async one only launches here and ends at its notification.
         const running = state?.get(b.tool_use_id);
@@ -237,7 +239,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       const summary = summarize(b.name, input, cwd);
       tools.push({ id: b.id, name: b.name,
         summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
-        input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, { cwd }, sink) });
+        input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, scope, sink) });
       // Only a top-level worker opens its own log; sidechain records never carry their own subagent event.
       if (worker && !sidechain && state && resolve) {
         const info = resolve(b.id, input);
@@ -246,7 +248,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         bodies.push({ kind: "subagent", toolUseId: b.id, sub: `sub-${b.id}`, description: running.description, model: running.model, status: "running", steps: running.steps });
       }
     }
-    const body = messageContent(message.content, sink, { cwd });
+    const body = messageContent(message.content, sink, scope);
     body.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
     if (body.text || body.images.length || body.files.length || tools.length) bodies.push({ kind: "assistant", msg: str(r.uuid) || str(message.id), model: str(message.model), ...body, tools });
   } else if (r.type === "result") {

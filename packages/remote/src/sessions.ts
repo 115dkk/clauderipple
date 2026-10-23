@@ -1895,14 +1895,14 @@ export class Sessions {
           const streamedIndex = cur.thinkingBlocks[cur.nextThinkingBlock++] ?? index;
           this.append(r.id, { kind: "thinking", msg: id, block: streamedIndex, text: block.thinking });
         });
-        const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd });
+        const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
         if (converted.text) cur.text += (cur.text ? "\n\n" : "") + converted.text;
         cur.images = [...(cur.images ?? []), ...converted.images];
         cur.files = [...(cur.files ?? []), ...converted.files];
         for (const b of message.content ?? []) {
           if (b.type === "tool_use" && b.id && b.name) {
             const input = b.input ?? {};
-            const tool: ToolCall = { id: b.id, name: b.name, summary: summarize(b.name, input, r.cwd), input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, { cwd: r.cwd }, data => this.log(r.id).image(data)) };
+            const tool: ToolCall = { id: b.id, name: b.name, summary: summarize(b.name, input, r.cwd), input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => this.log(r.id).image(data)) };
             cur.tools.push(tool);
             cur.images.push(...fileImages(tool.files ?? []));
             if (b.name === "Task" || b.name === "Agent") {
@@ -1921,7 +1921,7 @@ export class Sessions {
       case "user": {
         const message = msg.message as { content?: unknown } | undefined;
         const blocks = Array.isArray(message?.content) ? (message!.content as { type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[]) : [];
-        const converted = messageContent(message?.content, data => this.log(r.id).image(data), { cwd: r.cwd });
+        const converted = messageContent(message?.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
         // SDK user echoes normally already have a phone event; retain attachment-bearing echoes only.
         if (converted.images.length || converted.files.length) {
           const body: EventBody = { kind: "user", ...converted, clientMsgId: typeof msg.uuid === "string" ? msg.uuid : randomUUID() };
@@ -1930,7 +1930,7 @@ export class Sessions {
         }
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
-          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd }) };
+          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }) };
           if (parent) { this.subLog(r.id, `sub-${parent}`)?.append(body); continue; }
           this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);
@@ -2049,8 +2049,8 @@ export class Sessions {
     (message.content ?? []).forEach((block, index) => {
       if (block.type === "thinking" && typeof block.thinking === "string") log.append({ kind: "thinking", msg: message.id ?? parent, block: index, text: block.thinking });
     });
-    const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd });
-    const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd }, data => log.image(data)) }));
+    const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
+    const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => log.image(data)) }));
     converted.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     const sub = live.subs.get(parent);

@@ -87,6 +87,36 @@ test("image references use the same session boundary, never all of .claude or a 
   assert.equal(messageContent(`[Image: source: ${cwd}/안녕.png]`, sink).files[0]?.status, "blocked");
 });
 
+test("a pasted image and a scratchpad file in the session's own Claude temp folder reach the phone", { skip: process.platform === "win32" }, t => {
+  const { cwd, sink } = fixture(t);
+  const uid = process.getuid!();
+  const base = path.join("/private/tmp", `claude-${uid}`);
+  const root = fs.existsSync("/private/tmp") ? base : path.join("/tmp", `claude-${uid}`);
+  if (!fs.existsSync(root)) { fs.mkdirSync(root, { mode: 0o700 }); t.after(() => fs.rmSync(root, { recursive: true, force: true })); }
+  const id = "0f0e0d0c-1111-4222-8333-944455556666", other = "0f0e0d0c-1111-4222-8333-999999999999";
+  const slug = path.join(root, cwd.replace(/[^A-Za-z0-9]/g, "-"));
+  t.after(() => fs.rmSync(slug, { recursive: true, force: true }));
+  for (const [session, folder] of [[id, "images"], [id, "scratchpad"], [other, "images"]] as const) {
+    fs.mkdirSync(path.join(slug, session, folder), { recursive: true });
+    fs.writeFileSync(path.join(slug, session, folder, "1.png"), png);
+  }
+  const pasted = messageContent(`[Image: source: ${path.join(slug, id, "images", "1.png")}]`, sink, { cwd, sessionId: id });
+  assert.equal(pasted.files[0]?.status, "ready");
+  assert.equal(pasted.images.length, 1);
+  assert.equal(sessionFiles([path.join(slug, id, "scratchpad", "1.png")], { cwd, sessionId: id }, sink)[0]?.status, "ready");
+  // Another session's folder, and any folder without the host's session id, stay closed.
+  assert.equal(sessionFiles([path.join(slug, other, "images", "1.png")], { cwd, sessionId: id }, sink)[0]?.status, "blocked");
+  assert.equal(sessionFiles([path.join(slug, id, "images", "1.png")], { cwd }, sink)[0]?.status, "blocked");
+  assert.equal(sessionFiles([path.join(slug, id, "images", "1.png")], { cwd, sessionId: "../x" }, sink)[0]?.status, "blocked");
+});
+
+test("a project folder whose own name looks secret still sends its ordinary files", t => {
+  const parent = directory(t), cwd = path.join(parent, "auth-service");
+  fs.mkdirSync(cwd);
+  fs.writeFileSync(path.join(cwd, "README.md"), "# Hello");
+  assert.equal(sessionFiles(["README.md"], { cwd }, () => "blob")[0]?.status, "ready");
+});
+
 test("secret names, credentials content and hard links are refused even when explicitly sent", t => {
   const { cwd, sink } = fixture(t);
   const names = [".env", ".env.production", "AuthKey.p8", "cert.pem", "release.jks", "key.key", "keys.p12", "token.json", "service-account.json", "google-services.json", "credentials", ".npmrc", "id_ed25519"];
