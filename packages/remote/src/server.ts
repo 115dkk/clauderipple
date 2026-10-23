@@ -118,6 +118,7 @@ export class HostServer {
       c.ws.terminate();
       this.clients.delete(c);
     }
+    this.syncWatches();
     this.uploads.clear();
     this.seenAt.clear();
     this.lastSeen.clear();
@@ -176,6 +177,12 @@ export class HostServer {
     }
   }
 
+  private syncWatches(): void {
+    const ids = new Set<string>();
+    for (const c of this.clients) if (c.authed && c.ws.readyState === c.ws.OPEN) for (const id of c.attached.keys()) ids.add(id);
+    this.opts.sessions.watchAttached(ids);
+  }
+
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
   private desktopTicks = 0;
@@ -183,9 +190,11 @@ export class HostServer {
   private pollDesktop(): void {
     // The desktop poll runs on its own timer even with no phone connected, so a Mac session that
     // finishes while nobody watches still appends its result — and the push for it goes out. Each
-    // tick also asks Remote Control for every live Mac session's state over the network, so with no
-    // phone looking it runs every fifth tick (15 s) rather than every 3 s, around the clock.
-    if (!this.someoneLooking() && this.desktopTicks++ % 5 !== 0) return;
+    // tick also asks Remote Control for every live Mac session's state over the network. Only
+    // when no phone is looking AND none is attached may it slow to every fifth tick (15 s).
+    // Hidden attached timelines still need the 3 s fallback when file notifications are lost.
+    const attached = [...this.clients].some(c => c.authed && c.ws.readyState === c.ws.OPEN && c.attached.size > 0);
+    if (!attached && !this.someoneLooking() && this.desktopTicks++ % 5 !== 0) return;
     void this.opts.sessions.pollDesktop().catch(error => {
       this.opts.log?.(`desktop poll failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -227,7 +236,8 @@ export class HostServer {
     for (const t of this.timers) clearInterval(t);
     if (this.sessionsTimer) clearTimeout(this.sessionsTimer);
     this.sessionsTimer = null;
-    for (const c of this.clients) c.ws.terminate();
+    for (const c of this.clients) { c.attached.clear(); c.ws.terminate(); }
+    this.syncWatches();
     return Promise.all([this.http, this.localHttp].filter((server): server is http.Server => server !== null)
       .map(server => new Promise<void>(resolve => server.close(() => resolve())))).then(() => {});
   }
@@ -238,7 +248,12 @@ export class HostServer {
 
   /** Called for every appended event: push it to every client attached to that session. */
   onEvent(session: string): void {
-    for (const c of this.clients) if (c.authed && c.attached.has(session)) this.pump(c, session);
+    const snapshot = this.opts.sessions.summaryOf(session)?.origin === "desktop";
+    for (const c of this.clients) {
+      if (!c.authed || !c.attached.has(session)) continue;
+      if (snapshot) this.attach(c, session, undefined, undefined);
+      else this.pump(c, session);
+    }
   }
 
   /** Session list changed (state, pending count, a new one). Coalesced; lists are small but frequent. */
@@ -285,6 +300,8 @@ export class HostServer {
       this.opts.log?.(`bridge sync failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     const log = this.opts.sessions.log(session);
+    c.attached.set(session, c.attached.get(session) ?? 0);
+    this.syncWatches();
     if (epoch === log.epoch && afterSeq !== undefined && afterSeq > 0 && afterSeq <= log.lastSeq) {
       // Resume by seq, unless the gap is so large that replaying it would be slower than starting from the tail.
       let cursor = afterSeq;
@@ -322,6 +339,7 @@ export class HostServer {
       clearTimeout(helloTimer);
       if (c.authed && c.clientId) this.lastSeen.set(c.clientId, c.lastRx);
       this.clients.delete(c);
+      this.syncWatches();
     });
     ws.on("error", () => { /* close follows */ });
   }
@@ -366,7 +384,7 @@ export class HostServer {
     switch (msg.t) {
       case "hello": return;
       case "attach": this.attach(c, msg.session, msg.epoch, msg.afterSeq); return;
-      case "detach": c.attached.delete(msg.session); return;
+      case "detach": c.attached.delete(msg.session); this.syncWatches(); return;
       case "seen": if (s.has(msg.session)) s.markSeen(msg.session); return;
       case "archive":
         try { s.setArchived(msg.session, msg.archived === true); }

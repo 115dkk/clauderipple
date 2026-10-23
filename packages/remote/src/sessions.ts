@@ -103,6 +103,8 @@ export interface SessionsOptions {
   desktopProcesses?: () => string;
   desktopRegistry?: () => Map<string, DesktopProcess>;
   bridgeClient?: BridgeClient;
+  /** Optional file-notification boundary; polling remains authoritative when unavailable. */
+  watchTranscript?: (id: string, changed: () => void, failed: (error: unknown) => void) => (() => void) | null;
 }
 
 /** An async iterable the SDK reads user messages from; a session's query lives as long as it. */
@@ -279,6 +281,13 @@ export class Sessions {
   private desktopModels = new Map<string, { model: string; effort: Effort | null }>();
   private bridge: BridgeClient;
   private bridgeStates = new Map<string, { at: number; state?: SessionState; pending?: Promise<void> }>();
+  /** Ignore cached/in-flight idle and eventual-consistency idle after an accepted send. A fresh
+   * running/waiting read or transcript result settles it. The 9 s bound covers the 3 s cache,
+   * 3 s poll and one scheduling margin, without leaving a never-started turn running forever. */
+  private bridgeRunning = new Map<string, number>();
+  private attached = new Set<string>();
+  private detachedWatches = new Set<string>();
+  private transcriptWatches = new Map<string, { close: (() => void) | null; timer: ReturnType<typeof setTimeout> | null }>();
   /** The last state seen per non-bridged Mac session, for the away-alert transitions. The first
    * sight of a session only seeds it: a host start must not push for turns that ended before it. */
   private macStates = new Map<string, { state: SessionState; permission: boolean }>();
@@ -290,7 +299,11 @@ export class Sessions {
   }
 
   private bridgeState(process: DesktopProcess): SessionState {
-    const cached = process.bridgeSessionId ? this.bridgeStates.get(process.bridgeSessionId)?.state : undefined;
+    const id = process.bridgeSessionId;
+    const sent = id ? this.bridgeRunning.get(id) : undefined;
+    if (sent !== undefined && this.now() - sent < 9000) return "running";
+    if (id) this.bridgeRunning.delete(id);
+    const cached = id ? this.bridgeStates.get(id)?.state : undefined;
     return cached ?? (process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running");
   }
 
@@ -304,6 +317,9 @@ export class Sessions {
     entry.pending = this.bridge.session(id).then(session => {
       this.noteBridge(id, null);
       const next: SessionState = session.worker_status === "requires_action" ? "waiting" : session.worker_status;
+      const sent = this.bridgeRunning.get(id);
+      // A request started before the send cannot confirm the new turn, even if it resolves later.
+      if (sent !== undefined && entry.at > sent && next !== "idle") this.bridgeRunning.delete(id);
       // Phones are told only when the state actually moved; every desktop poll re-reads this.
       if (entry.state !== next) { entry.state = next; changed = true; }
     }).catch(error => {
@@ -460,15 +476,8 @@ export class Sessions {
       }
       if (!r.desktopBridge) continue;
       try {
-        r.transcriptOffset = this.desktop.tail(r.sdkSessionId ?? r.id, r.transcriptOffset ?? 0, body => {
-          // Our own Remote Control echo: drop it from the bounded set and skip it, once.
-          if (body.kind === "user" && this.bridgeEchoes.delete(body.clientMsgId)) return;
-          if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) {
-            if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
-            this.append(r.id, body);
-          }
-        }, data => this.log(r.id).image(data));
-        this.save();
+        this.tailBridge(r);
+        // A folder move shows only in the app's registry, not as transcript growth: check every poll.
         this.refreshBridgeMeta(r);
         const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
         this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
@@ -482,8 +491,90 @@ export class Sessions {
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
       this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
     }
+    for (const id of this.attached) {
+      this.watchDesktop(id);
+      if (!this.records.get(id)?.desktopBridge) this.tailDesktop(id);
+    }
     this.pollMacFigures(sessions);
     this.drainQueues();
+  }
+
+  /** The server supplies the union across phones; one phone detaching must not close another's watch. */
+  watchAttached(ids: Set<string>): void {
+    for (const id of this.attached) if (!ids.has(id)) { this.detachedWatches.add(id); this.unwatchDesktop(id); }
+    this.attached = new Set(ids);
+    for (const id of ids) { this.detachedWatches.delete(id); this.watchDesktop(id); }
+  }
+
+  private watchDesktop(id: string): void {
+    const record = this.records.get(id);
+    const desktopId = record?.sdkSessionId ?? id;
+    if (this.shuttingDown || this.detachedWatches.has(id) || this.transcriptWatches.has(id) || (record && !record.desktopBridge) || !this.desktop?.has(desktopId)) return;
+    if (record?.desktopBridge && !this.desktop.liveProcess(desktopId)?.bridgeSessionId) return;
+    const entry = { close: null as (() => void) | null, timer: null as ReturnType<typeof setTimeout> | null };
+    this.transcriptWatches.set(id, entry);
+    const changed = () => {
+      if (this.transcriptWatches.get(id) !== entry || entry.timer) return;
+      // Fixed window rather than a trailing debounce: continuous writes cannot starve delivery.
+      entry.timer = setTimeout(() => {
+        entry.timer = null;
+        try { this.tailDesktop(id); }
+        catch (error) { (this.opts.log ?? console.error)(`[desktop tail] ${id}: ${String(error)}`); }
+      }, 80);
+    };
+    const failed = (error: unknown) => {
+      (this.opts.log ?? console.error)(`[desktop watch] ${id}: ${String(error)}; polling continues`);
+      this.unwatchDesktop(id);
+    };
+    entry.close = this.opts.watchTranscript
+      ? this.opts.watchTranscript(desktopId, changed, failed)
+      : this.desktop.watch(desktopId, changed, failed);
+    if (!entry.close) this.unwatchDesktop(id);
+  }
+
+  private unwatchDesktop(id: string): void {
+    const entry = this.transcriptWatches.get(id);
+    if (!entry) return;
+    this.transcriptWatches.delete(id);
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.close?.();
+  }
+
+  private tailDesktop(id: string): void {
+    const r = this.records.get(id);
+    if (r?.desktopBridge) { this.tailBridge(r); return; }
+    if (r || !this.desktop?.has(id)) return;
+    const before = this.desktop.snapshot(id);
+    const log = this.desktop.log(id);
+    if (before === log) return;
+    // Read-only desktop snapshots get a new epoch when rebuilt; the server sends a fresh tail.
+    const last = log.tail().events.at(-1);
+    if (last) this.opts.onEvent(id, last);
+    this.opts.onSessions();
+  }
+
+  private tailBridge(r: SessionRecord): void {
+    if (!this.desktop) return;
+    const desktopId = r.sdkSessionId ?? r.id;
+    const before = r.transcriptOffset ?? 0;
+    r.transcriptOffset = this.desktop.tail(desktopId, before, body => {
+      if (body.kind === "result") {
+        const bridgeId = this.desktop?.liveProcess(desktopId)?.bridgeSessionId;
+        if (bridgeId) this.bridgeRunning.delete(bridgeId);
+      }
+      // Our own Remote Control echo: drop it from the bounded set and skip it, once.
+      if (body.kind === "user" && this.bridgeEchoes.delete(body.clientMsgId)) return;
+      if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) {
+        if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
+        this.append(r.id, body);
+      }
+    }, data => this.log(r.id).image(data));
+    if (r.transcriptOffset !== before) {
+      this.save();
+      this.refreshBridgeMeta(r);
+      const process = this.desktop.liveProcess(desktopId);
+      this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
+    }
   }
 
   /**
@@ -1030,16 +1121,16 @@ export class Sessions {
       throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED);
     }
     this.noteBridge(bridgeId, null);
+    this.bridgeRunning.set(bridgeId, this.now());
     // The durable user event also deduplicates the desktop transcript's echo by uuid.
     this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
     this.rememberClientMsgId(id, clientMsgId);
-    // A turn the desktop app finished while no phone was polling left the record "running";
-    // without a fresh state event the phone would time this turn from that old one.
-    if (r.state === "running" || r.state === "waiting") this.setState(r, "idle");
-    // Phones time a turn from its turn event; a desktop transcript's last turn has no result
-    // event to end it, so without this one the clock would run from that earlier turn.
+    // A new turn event and running event reset the phone's clock even if the previous record
+    // was still running. Never synthesize idle between them: that also flashes a finished turn.
     this.append(id, { kind: "turn", model: r.model, effort: r.effort });
-    this.setState(r, "running");
+    if (r.state === "running") this.append(id, { kind: "state", state: "running" });
+    else this.setState(r, "running");
+    this.opts.onSessions();
     return id;
   }
 
@@ -1089,8 +1180,8 @@ export class Sessions {
   private ensureBridge(id: string, bridgeId: string) {
     const previous = this.bridges.get(id);
     // A failed stream is retried on the next poll or send rather than blocking the session for good.
-    if (previous?.bridgeId === bridgeId && !previous.failed) return previous;
-    this.closeBridge(id);
+    if (previous?.bridgeId === bridgeId && !previous.failed) { this.watchDesktop(id); return previous; }
+    this.closeBridge(id, previous?.bridgeId === bridgeId);
     const connection = { bridgeId, abort: new AbortController(), failed: false, permissions: new Map<string, { id: string; input: Record<string, unknown>; toolUseId: string }>() };
     this.bridges.set(id, connection);
     const replay = (): void => {
@@ -1102,12 +1193,16 @@ export class Sessions {
       if (!connection.abort.signal.aborted) this.bridgeFailure(id, error);
     });
     replay();
+    this.watchDesktop(id);
     return connection;
   }
 
-  private closeBridge(id: string): void {
+  private closeBridge(id: string, preserveRunning = false): void {
+    this.unwatchDesktop(id);
     const connection = this.bridges.get(id);
     if (!connection) return;
+    // Reconnecting the permission stream says nothing about whether an accepted turn started.
+    if (!preserveRunning) this.bridgeRunning.delete(connection.bridgeId);
     connection.abort.abort();
     this.opts.permissions.expireSession(id, "aborted");
     this.bridges.delete(id);
@@ -1462,6 +1557,8 @@ export class Sessions {
 
   shutdown(): void {
     this.shuttingDown = true;
+    for (const id of this.transcriptWatches.keys()) this.unwatchDesktop(id);
+    this.bridgeRunning.clear();
     for (const id of Array.from(this.live.keys())) this.stop(id);
     for (const id of this.bridges.keys()) this.closeBridge(id);
     for (const log of this.logs.values()) log.close();

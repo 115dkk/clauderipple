@@ -493,6 +493,21 @@ export class DesktopSessions {
     return !!this.liveProcess(id) || processHasSession(this.opts.processes?.() ?? processCommands(), id);
   }
 
+  /** Watch the parent, not the inode: Desktop may replace the transcript. Reads still pass open()'s
+   * containment checks. Watch failure is optional acceleration only; callers keep polling. */
+  watch(id: string, changed: () => void, failed: (error: unknown) => void): (() => void) | null {
+    const source = this.sources.get(id);
+    if (!source) return null;
+    let watcher: fs.FSWatcher;
+    try {
+      watcher = fs.watch(path.dirname(source.file), { persistent: false }, (_event, filename) => {
+        if (filename === null || filename.toString() === path.basename(source.file)) changed();
+      });
+    } catch (error) { failed(error); return null; }
+    watcher.on("error", error => { watcher.close(); failed(error); });
+    return () => watcher.close();
+  }
+
   /** Tail complete transcript lines into an existing host log; never write the transcript. */
   tail(id: string, offset: number, visit: (body: EventBody) => void, sink?: ImageSink): number {
     const source = this.sources.get(id);
