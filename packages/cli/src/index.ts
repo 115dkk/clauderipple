@@ -67,10 +67,15 @@ async function pickerOn(): Promise<void> {
   console.log("Then open the Code tab picker: entries from cli.extraModels should be there. `clauderipple status` shows the last injection.");
 }
 
+/** After a direct start: `repair` fixes the entry but leaves a router that answers alone (doctor.ts),
+ * so it is the restart afterwards that puts the router back under its supervisor (checked on
+ * Windows 11, 2026-10-23). */
+const resupervise = (): string => `Run \`clauderipple repair\`, then \`clauderipple restart\` to put it back under the ${supervisorName()}.`;
+
 function describeRestart(r: ReturnType<typeof restartAgent>): string {
   if (r === "drained") return "✓ router restarted (in-flight model calls were allowed to finish)";
   if (r === "kickstarted") return "✓ router restarted (hard restart: it did not exit on its own in time)";
-  if (r === "direct") return `! router restarted outside the ${supervisorName()}: its start did not bring one up. Run \`clauderipple repair\` to restore the ${supervisorName()}`;
+  if (r === "direct") return `! router restarted outside the ${supervisorName()}: its start did not bring one up. ${resupervise()}`;
   return "✗ router not restarted — run `clauderipple repair` (or `clauderipple install`)";
 }
 
@@ -239,7 +244,7 @@ async function install(): Promise<void> {
   const started = startAgent({ onProgress: (m) => console.log(`  ${m}`) });
   console.log(
     started === "failed" ? `✗ could not start the router (${supervisorName()})`
-    : started === "started-directly" ? `! router started without the ${supervisorName()}; run \`clauderipple repair\``
+    : started === "started-directly" ? `! router started without the ${supervisorName()}. ${resupervise()}`
     : `✓ router ${started === "already-running" ? "already running" : "started"}`,
   );
   // Running the installer again is how an update arrives, and it replaces files, not the process:
@@ -677,7 +682,7 @@ try {
       console.log(
         r === "already-running" ? "already running"
         : r === "started" ? "started"
-        : r === "started-directly" ? `started without the ${supervisorName()} (run \`clauderipple repair\`)`
+        : r === "started-directly" ? `started without the ${supervisorName()}. ${resupervise()}`
         : "start failed (is it installed?)",
       );
       if (r === "failed") process.exitCode = 1;
