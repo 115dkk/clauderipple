@@ -13,6 +13,7 @@ import type { RenderNode } from 'claude-code'
 
 import type { HandoffKind, Settings } from '../../types'
 import { CELL_PX, ROW_PX } from './art'
+import { DISPLAY, displayText } from './display'
 import { lookOf } from './look'
 import type { Sea, Tone } from './art'
 import { capsule, closeButton, pill, ripple, segmented as drawnSegmented, well } from './kit'
@@ -100,7 +101,7 @@ export function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
         key: 'judge',
         face: 'dazed',
         title: t(L, alert.network ? 'alerts.judgeNetworkTitle' : 'alerts.judgeTitle'),
-        body: t(L, 'alerts.judgeBody', { judge: t(L, JUDGE_NAME[alert.judge]), reason: alert.reason, fallback: t(L, alert.judge === 'haiku' ? 'alerts.keepEffort' : 'alerts.askHaiku') }),
+        body: t(L, 'alerts.judgeBody', { judge: t(L, JUDGE_NAME[alert.judge]), reason: displayText(alert.reason), fallback: t(L, alert.judge === 'haiku' ? 'alerts.keepEffort' : 'alerts.askHaiku') }),
         main: { key: 'settings', label: t(L, 'alerts.openSettings'), hotkey: 'o', onPress: a.openSettings },
         close: notNow,
       }
@@ -141,7 +142,7 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
   const close: Choice = { key: 'dismiss', label: t(L, 'alerts.dismiss'), hotkey: 'x', onPress: a.dismiss }
   switch (alert.stage) {
     case 'handingOff':
-      return { key: 'result', face: 'going', title: t(L, 'alerts.handingOff'), body: alert.detail ?? (alert.handoffKind === 'full' ? t(L, 'alerts.fullProgress') : t(L, 'alerts.quickProgress')) }
+      return { key: 'result', face: 'going', title: t(L, 'alerts.handingOff'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? (alert.handoffKind === 'full' ? t(L, 'alerts.fullProgress') : t(L, 'alerts.quickProgress')) }
     case 'handoffReady':
       return {
         key: 'result',
@@ -153,13 +154,13 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
         close: { key: 'dismiss', label: t(L, 'alerts.cancel'), hotkey: 'x', onPress: a.dismiss },
       }
     case 'handoffDone':
-      return { key: 'result', face: 'pleased', title: t(L, 'alerts.handoffDone'), body: alert.detail ?? t(L, 'alerts.summaryReady'), quiet: [{ key: 'copy', label: t(L, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }], close }
+      return { key: 'result', face: 'pleased', title: t(L, 'alerts.handoffDone'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.summaryReady'), quiet: [{ key: 'copy', label: t(L, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }], close }
     case 'compacting':
-      return { key: 'result', face: 'squeezing', title: t(L, 'alerts.compacting'), body: alert.detail ?? t(L, 'alerts.compactingBody') }
+      return { key: 'result', face: 'squeezing', title: t(L, 'alerts.compacting'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.compactingBody') }
     case 'compacted':
-      return { key: 'result', face: 'pleased', title: t(L, 'alerts.compacted'), body: alert.detail ?? t(L, 'alerts.compactedBody'), close }
+      return { key: 'result', face: 'pleased', title: t(L, 'alerts.compacted'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.compactedBody'), close }
     case 'failed':
-      return { key: 'result', face: 'sorry', title: t(L, 'alerts.failed'), body: alert.detail ?? t(L, 'alerts.unchanged'), close }
+      return { key: 'result', face: 'sorry', title: t(L, 'alerts.failed'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.unchanged'), close }
   }
 }
 
@@ -172,7 +173,7 @@ function extras(el: Els, frame: Frame, alert: AlertView, a: AlertActions): Rende
         key="note"
         label={t(frame.lang, 'alerts.keep')}
         placeholder={t(frame.lang, 'alerts.keepPlaceholder')}
-        value={alert.draft}
+        value={displayText(alert.draft, DISPLAY.conversation)}
         submitLabel={t(frame.lang, 'alerts.compactSubmit')}
         autoFocus
         onInput={(text: string) => a.noteInput(text)}
@@ -264,7 +265,7 @@ function drawnExtras(el: Els, frame: Frame, alert: AlertView, a: AlertActions, t
           <Field
             key="note"
             placeholder={placeholder}
-            value={alert.draft}
+            value={displayText(alert.draft, DISPLAY.conversation)}
             submitLabel={t(frame.lang, 'alerts.compactSubmit')}
             autoFocus
             onInput={(text: string) => a.noteInput(text)}

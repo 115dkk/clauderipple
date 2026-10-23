@@ -2,9 +2,10 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
+import { DISPLAY, displayText } from './display'
 import type { Lang } from '../i18n'
 
 export type Surface = 'terminal' | 'desktop' | 'vscode' | 'mobile'
@@ -60,7 +61,7 @@ export type DashboardView = {
     /** The judge's reason, a few words. */
     why?: string
     /** Who gave it. */
-    by?: Pick['by']
+    by?: EffortPick['by']
     /** When the judge started (deciding): keeps the glow's phase across redraws. */
     since?: number
   }
@@ -271,12 +272,12 @@ export function effortName(effort: Effort, lang: Lang): string {
 
 /** Route records can contain unknown effort ids; translate only the known display values. */
 export function effortLabel(value: string, lang: Lang): string {
-  return EFFORTS.includes(value as Effort) ? effortName(value as Effort, lang).toLowerCase() : value
+  return EFFORTS.includes(value as Effort) ? effortName(value as Effort, lang).toLowerCase() : displayText(value, DISPLAY.name)
 }
 
 /** "claude-opus-5-5[1m]" → "Opus 5.5"; ids it does not know pass through, trimmed. */
 export function modelName(id: string): string {
-  const bare = id.replace(/\[.*?\]/g, '').replace(/^claude-/, '')
+  const bare = displayText(id, DISPLAY.name).replace(/\[.*?\]/g, '').replace(/^claude-/, '')
   const m = /^(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?/.exec(bare)
   if (m) return m[1]!.charAt(0).toUpperCase() + m[1]!.slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
   // A bare alias ("sonnet") reads as its family's name.
@@ -300,7 +301,7 @@ export function targetOf(value: string): TierTarget {
  */
 export function targetLabel(target: TierTarget, lang?: Lang): string {
   if (target.model) return 'Claude ' + modelName(target.model)
-  return lang && target.agent === 'general-purpose' ? t(lang, 'workers.sessionModel') : target.agent
+  return lang && target.agent === 'general-purpose' ? t(lang, 'workers.sessionModel') : displayText(target.agent, DISPLAY.name)
 }
 
 type Usage = NonNullable<StatusRequest['usage']>
@@ -324,7 +325,7 @@ export function modelOf(record: StatusRequest): string {
   // the provider is named beside it.
   const bare = (id: string) => id.replace(/^.*\//, '')
   // A dated id of the same model (claude-haiku-5-5-20260815 for claude-haiku-5-5) says nothing new.
-  return source.startsWith(record.target) || record.target.startsWith(source) ? bare(record.target) : bare(record.target) + ' (' + bare(source) + ')'
+  return displayText(source.startsWith(record.target) || record.target.startsWith(source) ? bare(record.target) : bare(record.target) + ' (' + bare(source) + ')', DISPLAY.name)
 }
 
 export function routeOf(record: StatusRequest): RouteView {
@@ -413,7 +414,7 @@ export function resetsLabel(resetsAt: string | undefined, now: number, lang: Lan
 export function limitName(kind: string, lang: Lang): string {
   if (kind === 'five_hour') return t(lang, 'band.fiveHour')
   if (kind === 'seven_day') return t(lang, 'band.weekly')
-  return kind.replace(/_/g, ' ')
+  return displayText(kind.replace(/_/g, ' '), DISPLAY.name)
 }
 
 // ---- Limits row ----------------------------------------------------------------------------------
@@ -421,7 +422,7 @@ export function limitName(kind: string, lang: Lang): string {
 /** A plan window's short name as the limits row shows it: the window, or the model's own name. */
 export function limitItemName(item: Pick<LimitItem, 'kind' | 'label' | 'windowMinutes'>, lang: Lang): string {
   if (item.kind === 'five_hour' || item.kind === 'seven_day') return limitName(item.kind, lang)
-  if (item.kind === 'scoped') return item.label || item.kind
+  if (item.kind === 'scoped') return displayText(item.label || item.kind, DISPLAY.name)
   const minutes = item.windowMinutes
   if (minutes === 300) return limitName('five_hour', lang)
   if (minutes === 10080) return limitName('seven_day', lang)
@@ -430,7 +431,7 @@ export function limitItemName(item: Pick<LimitItem, 'kind' | 'label' | 'windowMi
     if (minutes % 60 === 0) return t(lang, 'units.hours', { n: minutes / 60 })
     return t(lang, 'units.minutes', { n: minutes })
   }
-  return item.label || item.kind.replace(/_/g, ' ')
+  return displayText(item.label || item.kind.replace(/_/g, ' '), DISPLAY.name)
 }
 
 /** One limits group as the row heads it: a provider's own, or one of its accounts ("GPT", "GPT 1", …). */
@@ -469,7 +470,7 @@ function groupTitle(group: Pick<LimitGroup, 'provider' | 'type' | 'title'>): str
 
 /** A group's head: "Claude", "GPT", "Gemini", or its config name; "GPT 1"/"GPT 2" when numbered. */
 export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'type' | 'title' | 'account'>, numbered: boolean): string {
-  const title = groupTitle(group)
+  const title = displayText(groupTitle(group), DISPLAY.name)
   return numbered ? title + ' ' + (group.account + 1) : title
 }
 

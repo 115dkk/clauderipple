@@ -39,6 +39,7 @@ import type { Word } from './look'
 import type { Sea, Tone } from './art'
 import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
+import { DISPLAY, displayText } from './display'
 import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
@@ -1088,8 +1089,24 @@ export function besideBand(frame: Frame): number {
   return isRich(frame) ? 5 : 2 + displayWidth('e: ' + t(frame.lang, 'band.effort')) + 2 + 1
 }
 
+/** Only display copies change; ids and state used by the actions remain untouched. */
+function bandDisplay(view: DashboardView): DashboardView {
+  return {
+    ...view,
+    model: view.model === null ? null : displayText(view.model, DISPLAY.name),
+    notice: view.notice === null ? null : displayText(view.notice),
+    effort: { ...view.effort, ...(view.effort.why ? { why: displayText(view.effort.why) } : {}) },
+    warm: { ...view.warm, ...(view.warm.stopped ? { stopped: displayText(view.warm.stopped) } : {}) },
+    ...(view.mode ? { mode: displayText(view.mode, DISPLAY.name) } : {}),
+    ...(view.delegationPin ? { delegationPin: displayText(view.delegationPin, DISPLAY.name) } : {}),
+    ...(view.delegationSaid ? { delegationSaid: displayText(view.delegationSaid) } : {}),
+    route: view.route ? { ...view.route, model: displayText(view.route.model, DISPLAY.name), provider: displayText(view.route.provider, DISPLAY.name), status: displayText(view.route.status, DISPLAY.name), ...(view.route.effort ? { effort: displayText(view.route.effort, DISPLAY.name) } : {}), ...(view.route.note ? { note: displayText(view.route.note) } : {}) } : null,
+  }
+}
+
 /** The dashboard band, `frame.columns` being its own width (see besideBand). */
 export function renderBand(el: Els, frame: Frame, view: DashboardView, actions: BandActions): RenderNode {
+  view = bandDisplay(view)
   if (!isRich(frame) || !('Svg' in el)) return bandText(el, frame, view, actions)
   return bandDrawn(el, frame, view, actions)
 }
@@ -1103,6 +1120,7 @@ export type FooterActions = Pick<BandActions, 'toggleAuto' | 'openSettings' | 'r
  * modes kept beside it. `engine` is what `next(e)` drew there.
  */
 export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions: FooterActions, engine?: RenderChildren): RenderNode {
+  view = bandDisplay(view)
   const { Box, Text } = el
   const tone = textTone(frame.appearance)
   const { level, mode } = view.effort

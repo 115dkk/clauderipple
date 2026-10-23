@@ -769,7 +769,7 @@ test('the Agents pane draws forty mixed real-world records on every surface, ski
     await denied.unmount()
   }
   expect(closes).toBe(12)
-  expect(errors.some(error => error.includes('제어 문자'))).toBe(true)
+  expect(errors.some(error => error.includes('결합 문자'))).toBe(true)
 })
 
 test('pictures tile at the SVG side limit without rescaling or restarting their artwork', async ($, on) => {
@@ -812,14 +812,17 @@ test('the Agents pane shows the latest finished agents and the rest behind more;
     for (const i of [2, 1, 0]) expect(await ui.find({ type: 'Text', text: 'Finished task ' + i }), surface + ' ' + i).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeDefined()
     await ui.press({ key: 'done' })
-    // The desktop presses a card anywhere on it (a blank press a row); the terminal has a button.
+    // The desktop's title and chevron are the presses; no width-sized space strips.
     await ui.press({ key: surface === 'terminal' ? 'open-a1' : 'open-a1-0' })
     const all = await mount($, 'agents-all', surface, 64)
     expect(await all.find({ type: 'Text', text: 'Finished task 0' }), surface).toBeDefined()
     expect(await all.find({ type: 'Text', text: 'failed' }) ?? await all.find({ type: 'Text', text: /^✕/ }), surface).toBeDefined()
-    if (surface === 'desktop') expect(await all.find({ type: 'Button', key: 'open-d0-2' }), surface).toBeDefined()
+    if (surface === 'desktop') {
+      expect(await all.find({ type: 'Button', key: 'open-d0-title' }), surface).toBeDefined()
+      await all.press({ key: 'open-d0-title' })
+    }
   }
-  expect(calls).toEqual(['done', 'open:["a1"]', 'done', 'open:["a1"]'])
+  expect(calls).toEqual(['done', 'open:["a1"]', 'done', 'open:["a1"]', 'open:["d0"]'])
 })
 
 test('an agent\'s conversation reads in the pane: the task, its words, its tools, the answer, and a way back', async ($, on) => {

@@ -27,6 +27,7 @@ import { renderSetup } from './ui/setup'
 import { renderAgents, renderAgentsFallback, talkOf } from './ui/agents'
 import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
+import { displayText } from './ui/display'
 import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
 import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
@@ -152,8 +153,9 @@ function effortOf(value: unknown): Effort | undefined {
 function reason(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-async function report($: EngineInterface, where: string, error: unknown): Promise<void> {
-  await $.ui.log(t(await read($, lang), 'commands.debugLog', { where, reason: reason(error) }), { to: 'debug' })
+async function report($: EngineInterface, where: string, error: unknown, language: Lang = 'en'): Promise<void> {
+  // Diagnostics cannot depend on the state read that may have just failed.
+  await $.ui.log(displayText(t(language, 'commands.debugLog', { where, reason: reason(error) }), 1800), { to: 'debug' })
 }
 async function userHome($: EngineInterface): Promise<string> {
   return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '~'
@@ -1506,8 +1508,26 @@ async function agentsRenderFailure($: EngineInterface, e: RenderInput, error: un
   // refused an answer, when no successful snapshot is available.
   const frame: Frame = context.frame ?? { surface: e.surface, columns: 'bodyColumns' in e.props ? e.props.bodyColumns : 80, maxRows: 30, now: 0, lang: 'en', appearance: 'auto', skin: 'flat' }
   const failure = reason(error)
-  $.ui.log(t(frame.lang, 'commands.debugLog', { where: 'agents render', reason: failure }), { to: 'debug' })
+  await report($, 'agents render', error, frame.lang)
   return renderAgentsFallback($.ui.resolve(e), frame, context.records ?? [], failure, { ...agentsActions($), close: () => $.ui.close({ id: AGENTS_PANE }) }, context.wasOpen ?? false) as RenderElement
+}
+
+/** State-independent last resort for every non-agent surface; never reads state or the clock. */
+async function renderFailure($: EngineInterface, e: RenderInput, error: unknown, language: Lang = 'en', engine?: RenderNode): Promise<RenderElement> {
+  const { Box, Text, Button } = $.ui.resolve(e)
+  const close = e.component === 'Pane' ? () => $.ui.close({ id: LOG_PANE }) : e.component === 'SessionMode' ? () => toggleBar($) : () => update($, panel, () => null)
+  await report($, e.component + ' render', error, language)
+  return (
+    <Box flexDirection="column" rowGap={1} width="100%">
+      <Box flexDirection="row" columnGap={1}>
+        <Text bold>{t(language, 'band.brand')}</Text>
+        <Button key="settings" plain label={t(language, 'band.settings')} onPress={() => openAllSettings($)} />
+        <Button key="close" plain role="dismiss" label={t(language, 'settings.close')} onPress={close} />
+      </Box>
+      <Text wrap="wrap">{displayText(reason(error))}</Text>
+      {engine ?? null}
+    </Box>
+  ) as RenderElement
 }
 
 export const register: Register = on => {
@@ -1877,8 +1897,9 @@ export const register: Register = on => {
     return next(e)
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    let language: Lang = 'en'
     try {
-      const language = await read($, lang)
+      language = await read($, lang)
       startTimers($)
       if (e.props.hasSurvey) return next(e)
       const which = await read($, panel)
@@ -1919,22 +1940,22 @@ export const register: Register = on => {
           </Box>
         </Box>
       )
-    } catch (error) { await report($, 'AbovePrompt render', error); return next(e) }
-  })
+    } catch (error) { return renderFailure($, e, error, language) }
+  }).catch(($, e, next) => renderFailure($, e, next.error.message ?? next.error.kind))
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const engine = await next(e)
     try {
       startTimers($)
       if ((await currentSettings($)).layout !== 'minimal' || await read($, bandHidden)) return engine
       return renderFooter($.ui.resolve(e), await frameOf($, e), await dashboard($, await read($, busy)), bandActions($, e.surface), engine) as RenderElement
-    } catch (error) { await report($, 'SessionMode render', error); return engine }
-  })
+    } catch (error) { return renderFailure($, e, error, 'en', engine) }
+  }).catch(async ($, e, next) => renderFailure($, e, next.error.message ?? next.error.kind, 'en', await next(e)))
   on('ui.render', { component: 'Pane', requestId: LOG_PANE }, async ($, e, next) => {
     try {
       startTimers($)
       return renderLog($.ui.resolve(e), await frameOf($, e), { rows: await read($, requests), mineOnly: await read($, onlySession), judges: await read($, judgeRuns) }, { toggleScope: async () => { await update($, onlySession, value => !value); await refreshRouter($) } }) as RenderElement
-    } catch (error) { await report($, 'log render', error); return next(e) }
-  })
+    } catch (error) { return renderFailure($, e, error) }
+  }).catch(($, e, next) => renderFailure($, e, next.error.message ?? next.error.kind))
   on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e) => {
     let frame: Frame | undefined
     let records: AgentRec[] = []

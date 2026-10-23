@@ -12,8 +12,8 @@
 // conversation (`$.session.messages({ agentId })`, register.tsx) and draws it here, a way back at
 // its head.
 //
-// The desktop draws the list in one capsule (kit.tsx), each agent a tile on it, the whole tile its
-// press. The conversation reads on the host's own page under its card's capsule: Markdown takes the
+// The desktop draws the list in one capsule (kit.tsx), each agent a tile on it, its title and
+// chevron the presses (Button takes Text children; Box has no press or Button size in 2.1.308). The conversation reads on the host's own page under its card's capsule: Markdown takes the
 // host's ink and no colour of ours, so on the deep's dark water it would vanish on a light app.
 //
 // 리플이 only where nothing redraws: the empty pane, and the list's head while nothing runs. Each
@@ -26,7 +26,8 @@ import type { RenderNode, SessionMessage } from 'claude-code'
 import type { AgentRec, Effort } from '../../types'
 import { bareTitle } from '../workers'
 import { CELL_PX, CONTROL_PX, METER_H, METER_W, SVG_MAX_PX } from './art'
-import { blank, capsule, pic, pill, press, ripple, rowsOf } from './kit'
+import { capsule, pic, pill, press, ripple, rowsOf } from './kit'
+import { DISPLAY, displayText } from './display'
 import { lookOf } from './look'
 import type { Look } from './look'
 import { GREET_SIZE, canDraw, speak, textButton } from './parts'
@@ -62,7 +63,7 @@ function live(agent: AgentRec): boolean {
 
 /** A title without the model tag the spawn put in front of it: the card names the model itself. */
 function titleOf(agent: AgentRec): string {
-  return bareTitle(agent.description ?? '').trim() || agent.id
+  return displayText(bareTitle(agent.description ?? '').trim() || agent.id)
 }
 
 /** A model id without its `@effort`. */
@@ -171,7 +172,7 @@ export function talkOf(messages: readonly SessionMessage[], place: Place = {}): 
 
 /** Cuts a long text at `max` characters, saying so. */
 function cut(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max).trimEnd() + ' …' : text
+  return displayText(text, max)
 }
 
 type Page = { first?: AgentEntry; dropped: number; shown: AgentEntry[]; answer?: string }
@@ -332,7 +333,7 @@ function cardTitle(agent: AgentRec, cells: number): string {
   return clipCh(titleOf(agent), TITLE_LINES * Math.max(10, cells) - 4)
 }
 
-/** Rows a card draws, about: for the presses laid over it and the capsule's water. */
+/** Rows a card draws, about, for the capsule's water. */
 export function cardRows(frame: Frame, agent: AgentRec, pressable = true): number {
   const layout = layoutOf(frame, agent, pressable)
   const head = Math.min(TITLE_LINES, linesOf(cardTitle(agent, layout.title), layout.title))
@@ -349,31 +350,13 @@ function mark(k: Look, agent: AgentRec): { glyph: string; color: string } {
   return { glyph: '✕', color: k.tone('red') }
 }
 
-/** The blank presses over a card, one a row: the host's button is one line high, a card several. */
-function cardPress(el: Els, frame: Frame, key: string, rows: number, onPress: () => void): RenderNode {
-  const { Box, Button } = el
-  const label = blank((frame.columns - 4) * CELL_PX)
-  const strips: RenderNode[] = []
-  for (let i = 0; i < Math.ceil(rows) + 1; i++) {
-    strips.push(
-      <Box key={'strip-' + i} height={1} flexShrink={0} alignItems="center" justifyContent="center" overflow="hidden">
-        <Button key={key + '-' + i} plain label={label} onPress={() => onPress()} />
-      </Box>,
-    )
-  }
-  return (
-    <Box position="absolute" top={0} bottom={0} left={0} right={0} flexDirection="column" overflow="hidden">
-      {strips}
-    </Box>
-  )
-}
-
 /**
  * A card's rows: the head (mark, title, time), the model and effort, the numbers, why. What it does
  * now is the conversation's (and the terminal's): a line that changed each step made the list jump.
  */
-function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable: boolean): RenderNode[] {
-  const { Box, Text } = el
+function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, onPress?: () => void): RenderNode[] {
+  const { Box, Text, Button } = el
+  const pressable = !!onPress
   const k = lookOf(frame)
   const L = frame.lang
   const m = mark(k, agent)
@@ -398,12 +381,12 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
         <Text color={m.color} bold>{m.glyph}</Text>
       </Box>
       <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
-        <Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text>
+        {onPress ? <Button key={'open-' + agent.id + '-title'} plain onPress={onPress}><Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text></Button> : <Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text>}
       </Box>
       {layout.side ? (
         <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.side}>
           {layout.timeOn === 'head' ? time : null}
-          {pressable ? <Text key="chev" {...k.mute}>›</Text> : null}
+          {onPress ? <Button key={'open-' + agent.id + '-0'} plain onPress={onPress}><Text key="chev" {...k.mute}>›</Text></Button> : null}
         </Box>
       ) : null}
     </Box>,
@@ -454,14 +437,13 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
   return rows
 }
 
-/** One agent's tile; pressed, its conversation. */
+/** One agent's tile; its title or chevron opens the conversation. */
 function card(el: Els, frame: Frame, agent: AgentRec, now: number, onPress?: () => void): RenderNode {
   const { Box } = el
   const k = lookOf(frame)
   return (
     <Box key={'card-' + agent.id} flexDirection="column" width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
-      {cardBody(el, frame, agent, now, !!onPress)}
-      {onPress ? cardPress(el, frame, 'open-' + agent.id, cardRows(frame, agent), onPress) : null}
+      {cardBody(el, frame, agent, now, onPress)}
     </Box>
   )
 }
@@ -1003,6 +985,18 @@ function agentsTree(el: Els, frame: Frame, view: AgentsView, actions: AgentsActi
  * The static element/prop shapes remain the engine harness's responsibility.
  */
 export function renderAgents(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions): RenderNode {
+  view = {
+    ...view,
+    agents: view.agents.map(agent => ({ ...agent,
+      ...(agent.type ? { type: displayText(agent.type, DISPLAY.name) } : {}),
+      ...(agent.model ? { model: displayText(agent.model, DISPLAY.name) } : {}),
+      ...(agent.answeredBy ? { answeredBy: displayText(agent.answeredBy, DISPLAY.name) } : {}),
+      ...(agent.effort ? { effort: displayText(String(agent.effort), DISPLAY.name) } : {}),
+      ...(agent.now ? { now: displayText(agent.now) } : {}),
+      ...(agent.pick ? { pick: { ...agent.pick, why: displayText(agent.pick.why), ...(agent.pick.fallbackReason ? { fallbackReason: displayText(agent.pick.fallbackReason) } : {}) } } : {}),
+    })),
+    ...(view.open ? { open: { ...view.open, talk: 'deny' in view.open.talk ? { deny: displayText(view.open.talk.deny) } : { entries: view.open.talk.entries.map(entry => entry.kind === 'tool' ? { ...entry, tool: displayText(entry.tool, DISPLAY.name), detail: displayText(entry.detail) } : { ...entry, text: displayText(entry.text, DISPLAY.conversation) }) } } } : {}),
+  }
   const tree = agentsTree(el, frame, view, actions)
   let nodes = 0
   const text = (value: string) => {
