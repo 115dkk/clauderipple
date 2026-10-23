@@ -221,6 +221,31 @@ test("mod options with a Claude account pool still follow the pool's own state",
   }, { credentials: () => ({ native: [row] }), modelScoresFetch: async () => new Response("{}") });
 });
 
+test("mod options take a spent Antigravity quota group's models out, not the provider", async () => {
+  const models = ['gemini-3.8-flash', 'claude-opus-5-5-medium', 'claude-sonnet-5-5-low'].map(id => ({ id }));
+  const cfg = makeCfg({ providers: { google: { type: 'google', auth: 'antigravity', models } } });
+  const ready = { id: 'a', label: 'a', email: 'a@example.test', projectId: 'p', expiresAt: 0, needsReauth: false, paused: false, state: 'ready', active: true } as GoogleAccountStatus;
+  let accounts: GoogleAccountStatus[] = [{ ...ready, quotaCooldowns: { '3p': 600 } }];
+  await withAdmin(cfg, async ({ port }) => {
+    const read = async () => (await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions).providers.find(p => p.name === 'google')!;
+    const google = await read();
+    assert.equal(google.usable, true, 'Gemini still answers, so the provider stays in the ladder');
+    assert.equal(google.reason, undefined);
+    assert.deepEqual(Object.keys(google.models ?? {}).sort(), ['claude-opus-5-5-medium', 'claude-sonnet-5-5-low']);
+    assert.equal(google.models?.['claude-opus-5-5-medium']?.reason, 'quota_exhausted');
+    assert.ok((google.models?.['claude-opus-5-5-medium']?.exhaustedUntil ?? 0) > Date.now() + 590_000);
+    // Only when every account in rotation rests the group: a second account with Claude quota keeps it.
+    accounts = [{ ...ready, quotaCooldowns: { '3p': 600 } }, { ...ready, id: 'b' }];
+    assert.equal((await read()).models, undefined);
+    // A cooling or paused account is not in rotation, so it neither keeps nor spends the group.
+    accounts = [{ ...ready, quotaCooldowns: { '3p': 600 } }, { ...ready, id: 'b', state: 'cooling', cooldownSeconds: 30 }];
+    assert.ok((await read()).models?.['claude-sonnet-5-5-low']);
+    // Cleared on the dashboard (or reset): the models are back at once.
+    accounts = [ready];
+    assert.equal((await read()).models, undefined);
+  }, { google: () => ({ accounts: () => ({ google: accounts }) }), modelScoresFetch: async () => new Response('{}') });
+});
+
 const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}/api/mod-settings`, {
   method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: MOD_SETTINGS_SCHEMA_VERSION, ...(body as Record<string, unknown>) }),
 });

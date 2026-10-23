@@ -2208,11 +2208,22 @@ function accountPoolActions(account, patch) {
   return actions;
 }
 
-/** Runtime use is independent of first place, pauses and cooldowns. */
+/** An Antigravity quota group as the limits row names it: "3P" for Claude/GPT models. */
+function quotaGroupLabel(group) {
+  return group === "3p" ? "3P" : group === "gemini" ? "Gemini" : group;
+}
+
+/**
+ * Runtime use is independent of first place, pauses and cooldowns. A resting quota group
+ * (`quotaCooldowns`, Antigravity) is shown beside the account's own state: the account still answers
+ * the other group.
+ */
 function accountPoolBadges(account) {
   return [
     account.preferred ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null,
     chatgptStateBadge(account),
+    ...Object.entries(account.quotaCooldowns || {}).map(([group, seconds]) =>
+      el("span", { class: "badge warn", text: `${quotaGroupLabel(group)} · ${t("pool.coolingFor", { duration: durationText(seconds) })}` })),
     account.inUse && account.state && account.state !== "ready" ? el("span", { class: "badge ok", text: t("providers.chatgptInUse") }) : null,
   ];
 }
@@ -2502,6 +2513,15 @@ function renderGoogleAccountRows(target, data, name, generation) {
       actions.push(link, recheck);
     }
     actions.push(...accountPoolActions(account, (change) => patchGoogleAccount(name, account.id, change)));
+    // The account answers while one quota group rests (`quotaCooldowns`), so the shared actions show
+    // no clear button for it; this one clears the account's resting groups.
+    if (account.state !== "cooling" && !(account.cooldownSeconds > 0)) {
+      for (const group of Object.keys(account.quotaCooldowns || {})) {
+        const clear = el("button", { class: "btn secondary compact", type: "button", text: `${quotaGroupLabel(group)} · ${t("providers.chatgptClearCooldown")}` });
+        clear.addEventListener("click", () => { clear.disabled = true; void patchGoogleAccount(name, account.id, { clearCooldown: true }); });
+        actions.push(clear);
+      }
+    }
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
     rename.addEventListener("click", () => {
       const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
@@ -4099,7 +4119,8 @@ function modChoices() {
     return {
       value: agent.name, label: agent.model, model: agent.model, provider: agent.provider,
       billing: /(?::|-)free$/i.test(agent.model) ? "free" : agent.billing || (info && info.billing) || null,
-      usable: !info || info.usable !== false,
+      // A spent quota group lists its models under `models` while the provider still answers others.
+      usable: !info || (info.usable !== false && !(info.models && info.models[agent.model])),
       efforts: Array.isArray(agent.efforts) ? agent.efforts : effortLevelsFor(agent.provider, agent.model),
     };
   });

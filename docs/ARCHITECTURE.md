@@ -1475,7 +1475,27 @@ They were not live-tested during the original implementation. Files are under `s
   credential refusal) gets one refresh and a replay, a fresh token refused with a 401 again
   marks the account for sign-in; 429/402 rest the account to its `retry-after` (or a default);
   another 403, 5xx or a connect failure rests it briefly; any other 4xx is the request's fault
-  and is not retried. The exception is the model-capacity 503 below, which rests nothing. Refresh is per account, single-flight per token generation, five minutes
+  and is not retried. The exception is the model-capacity 503 below, which rests nothing.
+  **A 429 that proves one quota group spent rests only that group** (`isGroupQuotaExhausted`:
+  an ErrorInfo `reason: "QUOTA_EXHAUSTED"` whose `metadata.model` is in the turn's group;
+  `antigravityQuotaScope`: `gemini` for gemini-*, `3p` for claude-*/gpt-oss*, the two groups
+  `retrieveUserQuotaSummary` reports, usage.ts). Measured 2026-10-23: one such 429 for
+  `claude-opus-5-5-low` ("Individual quota reached … Resets in 4h51m35s"), while the limits row read
+  the 3P weekly window at 100% and Gemini's at 0.3%, rested the whole account, so every
+  `gemini-3.8-flash` turn for the next five hours was refused "every signed-in account is at its
+  limit" without reaching Google, and the same 429 marked the provider exhausted, so the mod's
+  picker skipped the Gemini worker too. Now the pool keeps a per-account, per-group rest
+  (`CredentialPool` `scope`): a turn picks an account whose group has room, the account stays
+  `ready` for the other group (the dashboard shows the group's rest from `quotaCooldowns` and
+  offers its clear-cooldown button, which clears the groups too), and the refusal names the spent
+  group when the other still answers. Such a 429 is not reported as the provider's exhaustion;
+  `/api/mod-options` lists the group's models under `providers[].models` while every account in
+  rotation rests the group, and the picker skips only those models. A 429 without that proof (a
+  per-minute limit, the generic `RESOURCE_EXHAUSTED`, a detail naming no model), a 402, a refused
+  credential or a broken upstream still rests the whole account, and so does any 429 for a model
+  in no known group. Groups are per account, not per host: each host counts quota separately
+  (above), so a group spent on one host also rests that group's models on the other — narrower than
+  the whole account, still not exact. Refresh is per account, single-flight per token generation, five minutes
   ahead; only a structured `invalid_grant` marks an account for sign-in. Only the access token
   and the account email/project id are ever in memory; no token reaches a log or an API response.
 - **No capacity for the model (measured 2026-10-20, daily host, `gemini-3.8-flash-high`, router.log

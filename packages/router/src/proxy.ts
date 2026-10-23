@@ -1835,7 +1835,7 @@ export class Proxy {
       return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts);
     }
     if (provider.type === "chatgpt") return this.chatgpt(target.provider, provider).hasUsable();
-    if (provider.type === "google" && provider.auth === "antigravity") return this.google(target.provider, provider).hasUsable();
+    if (provider.type === "google" && provider.auth === "antigravity") return this.google(target.provider, provider).hasUsable(target.model);
     return this.pool.hasUsable(target.provider, this.credentialsOf(target.provider, provider));
   }
 

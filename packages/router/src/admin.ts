@@ -70,7 +70,7 @@ import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount,
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
-import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
+import { antigravityQuotaScope, googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
 import { isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import type { GrokWindow } from "./providers/grok/usage.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
@@ -646,12 +646,34 @@ export type ModOptions = {
   /** Each worker with its model's effort ladder (mod efforts only) and how it is paid for. */
   agents: (ReturnType<typeof generatedAgents>[number] & { efforts: Effort[]; billing: Billing })[];
   models: { model: string; provider: string; name: string; judgeOnly: boolean }[];
-  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing; reason?: string; exhaustedAt?: number; exhaustedUntil?: number }[];
+  providers: { name: string; type: Provider["type"]; usable: boolean; billing: Billing; reason?: string; exhaustedAt?: number; exhaustedUntil?: number; models?: Record<string, ModelUnavailable> }[];
   zen: { configured: boolean; model: string | null };
   scores: ReturnType<typeof buildModelScores>;
   /** Claude's own models' effort ladder, for the rungs that run Claude Code's own agent. */
   claudeEfforts: Effort[];
 };
+
+/** One model out while its provider still answers others: a spent quota group, until it resets. */
+export type ModelUnavailable = { reason: string; exhaustedUntil: number };
+
+/**
+ * An Antigravity provider's spent quota groups: a group resting on every account that is otherwise
+ * in rotation (`quotaCooldowns`, set only by a 429 that proves the group spent). Google counts Gemini
+ * and Claude/GPT models separately, so a spent group takes only its own models out of the ladder.
+ * The accounts are the one source, so clearing an account's cooldown or signing in a fresh one puts
+ * the models back at once.
+ */
+function antigravityGroupsOut(accounts: readonly GoogleAccountStatus[], now: number): Record<string, ModelUnavailable> {
+  const out: Record<string, ModelUnavailable> = {};
+  const ready = accounts.filter(a => a.state === "ready");
+  if (ready.length === 0) return out;
+  for (const group of new Set(ready.flatMap(a => Object.keys(a.quotaCooldowns ?? {})))) {
+    const waits = ready.map(a => a.quotaCooldowns?.[group] ?? 0);
+    if (waits.some(seconds => seconds <= 0)) continue;
+    out[group] = { reason: "quota_exhausted", exhaustedUntil: now + Math.min(...waits) * 1000 };
+  }
+  return out;
+}
 
 const MOD_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
 const modEfforts = (levels: readonly string[] | undefined): Effort[] => (levels ?? []).filter((level): level is Effort => MOD_EFFORTS.includes(level));
@@ -662,6 +684,13 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
   const google = deps.google?.().accounts() ?? {};
   const credentials = deps.credentials?.() ?? {};
   const health = deps.providerHealth?.() ?? {};
+  const catalog = effortLevels(cfg).providers;
+  const agents = generatedAgents(cfg, deps.agentDir, undefined, deps.log).map(a => ({
+    ...a,
+    efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
+    billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
+  }));
+  const now = Date.now();
   const providers = Object.entries(cfg.providers).map(([name, p]) => {
     let usable = true;
     if (p.type === "chatgpt") {
@@ -679,8 +708,18 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     }
     if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready" && !c.paused);
     const exhausted = health[name];
+    const modelsOut: Record<string, ModelUnavailable> = {};
+    if (p.type === "google" && p.auth === "antigravity") {
+      const groups = antigravityGroupsOut(google[name] ?? [], now);
+      const ids = new Set([...(p.models ?? []).map(m => m.id), ...agents.filter(a => a.provider === name).map(a => a.model)]);
+      for (const id of ids) {
+        const scope = antigravityQuotaScope(id);
+        if (scope && groups[scope]) modelsOut[id] = groups[scope];
+      }
+    }
     return { name, type: p.type, usable: usable && !exhausted, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
       ...(exhausted ? { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until } : {}),
+      ...(Object.keys(modelsOut).length ? { models: modelsOut } : {}),
     };
   });
   const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
@@ -692,12 +731,6 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     return url.hostname === "opencode.ai" && /^\/zen\/v1(?:\/|$)/.test(url.pathname);
   });
   const model = zen?.models?.find(m => isJudgeOnlyModel(m.id))?.id ?? null;
-  const catalog = effortLevels(cfg).providers;
-  const agents = generatedAgents(cfg, deps.agentDir, undefined, deps.log).map(a => ({
-    ...a,
-    efforts: modEfforts(catalog[a.provider]?.models?.[a.model] ?? catalog[a.provider]?.default),
-    billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
-  }));
   const scored = buildModelScores(cfg, await scores.get());
   const claudeEfforts = modEfforts(catalog.anthropic?.default);
   return { agents, models, providers, zen: { configured: model !== null, model }, scores: scored, claudeEfforts };
@@ -709,8 +742,9 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
  */
 function ladderChoices(options: ModOptions): LadderChoice[] {
   const usable = new Set(options.providers.filter(p => p.usable).map(p => p.name));
+  const modelOut = (a: { provider: string; model: string }): boolean => !!options.providers.find(p => p.name === a.provider)?.models?.[a.model];
   return [
-    ...options.agents.filter(a => usable.has(a.provider)).map(a => {
+    ...options.agents.filter(a => usable.has(a.provider) && !modelOut(a)).map(a => {
       const costs = (options.scores.models.find(m => m.model === a.model && m.provider === a.provider)?.variants ?? []).flatMap(v => typeof v.costPerTask === "number" ? [v.costPerTask] : []);
       return { target: { agent: a.name }, model: a.model, provider: a.provider, billing: a.billing, efforts: a.efforts, ...(costs.length ? { cost: Math.min(...costs) } : {}) };
     }),
