@@ -862,13 +862,14 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings, 
   const named = by === 'marker' || by === 'default' || by === 'session'
   await persistWorkerPick($, { type: 'pick', id, ...entry, at: new Date(now).toISOString(), verdict: rawVerdict, by: named ? by : 'judge', judge: named ? null : by, ...(tier ? { tier } : {}), ms, ...(judgeError ? { error: judgeError } : {}), promptChars: e.prompt.length })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
-  // Said once the tier has picked, and only when it picked something else: "not named, so by
-  // tier" ahead of a tier pick that landed on that very model read as a refusal of it (2026-10-23).
+  // A dropped model goes to the debug log only. The toast it had was noise to the owner, and it
+  // lied on a resumed worker (SendMessage), which keeps its own model whatever this pick says
+  // (2026-10-23: "not named, so Opus" over a Sonnet worker that went on as Sonnet).
   if (dropped) {
     const name = dropped.toLowerCase()
     const droppedModel = (files.get(name) ? agentModel(files.get(name)!) : name)?.replace(/@[^@]*$/, '')
     const same = selected.agent === name || model?.replace(/@[^@]*$/, '') === droppedModel
-    if (!same) await $.ui.toast(t(language, 'toasts.unnamedModel', { model: dropped, name: targetLabel(selected, language) }))
+    if (!same) await $.ui.log(t(language, 'toasts.unnamedModel', { model: dropped, name: targetLabel(selected, language) }), { to: 'debug' })
   }
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
