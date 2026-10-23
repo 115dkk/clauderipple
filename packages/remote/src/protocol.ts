@@ -272,6 +272,9 @@ export type ReqOp =
   | { op: "git"; path: string }
   | { op: "blob"; session: string; id: string; offset?: number }
   | { op: "sub"; session: string; sub: string; afterSeq?: number }
+  /** What changed in this session's own folder; the host reads the folder from the session, never
+   * from the phone. Read-only: a scope, a base branch, and one patch per file (see DiffView). */
+  | { op: "diff"; session: string }
   /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
   | { op: "commands"; session: string }
   /** Queue a message for when the running turn ends; attachments are uploads, as for `send`. A
@@ -299,6 +302,48 @@ export interface BrowseResult { path: string; parent: string | null; home: strin
 export interface GitInfo { isRepo: boolean; root: string | null; branch: string | null; branches: string[] }
 export interface BlobChunk { text: string; offset: number; next: number | null; bytes: number }
 export interface SubPage { events: SessionEvent[]; more: boolean }
+
+/**
+ * The session folder's changes, for the phone's diff pane (the official app's diff view). The answer
+ * to `op: "diff"`: which question the folder is asking (uncommitted work, or a branch ahead of its
+ * base), what the base branch is, and one unified patch per changed file. A phone shows it as a
+ * file list with each file's patch beneath; nothing here is fetched, checked out or written.
+ */
+export interface DiffView {
+  /** `uncommitted`: the folder has work that is not committed — staged and unstaged changes against
+   * HEAD plus untracked files, shown first so a mid-session thought is never hidden by a branch.
+   * `branch`: the folder is clean and its current branch is ahead of the base branch, so the view
+   * is merge-base..HEAD. `clean`: neither — the folder holds no change this session made. */
+  scope: "uncommitted" | "branch" | "clean";
+  /** The branch a `branch` view is measured against (`origin/main`, else `main`, else `master`);
+   * null in every other scope. */
+  base: string | null;
+  /** The folder's current branch; null when it is not on one (detached HEAD). */
+  branch: string | null;
+  /** Changed files in git's order, untracked ones last; cut to the size limits below. */
+  files: DiffFile[];
+  /** Something was left out: more than 300 files, a patch past 200 KB, 2 MB of patches in all, or
+   * more than one frame can carry. Counts in `files` are still complete. */
+  truncated: boolean;
+}
+
+/** One changed file. `added`/`removed` come from git's numstat, before any truncation, so a cut
+ * patch still says how big the change was. */
+export interface DiffFile {
+  /** path from the repository root, as git prints it */
+  path: string;
+  /** where the file was, for a rename */
+  oldPath?: string;
+  /** how it changed; `binary` is a file whose content cannot be a patch (a new binary is `binary`
+   * rather than `untracked`, since there is nothing to show) */
+  status: "added" | "modified" | "deleted" | "renamed" | "untracked" | "binary";
+  /** lines added */
+  added: number;
+  /** lines removed */
+  removed: number;
+  /** the unified diff text; empty for binary files and for a file the limits cut away */
+  patch: string;
+}
 
 // ---- host → client --------------------------------------------------------------------
 

@@ -10,6 +10,7 @@ import { tokenMatches } from "./config.ts";
 import type { Phone } from "./local-control.ts";
 import { browse, macConsent, makeFolder, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
+import { diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
 import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
@@ -516,6 +517,13 @@ export class HostServer {
         const log = s.subLog(op.session, op.sub);
         if (!log) throw new Error("no such subagent");
         return log.readAfter(op.afterSeq ?? 0);
+      }
+      /** The folder comes from the session (its record's cwd; a Claude app session's summary),
+       * never from the phone, so one connection can only ever read sessions it can already see. */
+      case "diff": {
+        const summary = s.summaryOf(op.session);
+        if (!summary) throw new Error("no such session");
+        return diffView(summary.cwd);
       }
       case "expo_push_subscribe":
         if (!this.opts.expoPush) throw new Error("native push is off on this host");
