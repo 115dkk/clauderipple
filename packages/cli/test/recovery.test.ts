@@ -17,6 +17,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { posixModes, posixPaths } from "../../../test/capabilities.ts";
+import { syncAgentFiles } from "../../router/src/agents.ts";
+import { DEFAULTS } from "../../router/src/config.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-recovery-"));
 const label = `com.clauderipple.check-${crypto.randomBytes(4).toString("hex")}`;
@@ -155,12 +157,25 @@ test("uninstall clears picker and Codex settings before purge, even if trust rem
   applyAppProxy(ctx.proxyUrl);
   codexOn(18793);
   try {
+    const modDir = path.join(ctx.home, "mod");
+    const otherMod = path.join(ctx.home, "other-plugin");
+    for (const [dir, name] of [[modDir, "ripple"], [otherMod, "someone-else"]] as const) {
+      fs.mkdirSync(path.join(dir, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(path.join(dir, ".claude-plugin", "plugin.json"), JSON.stringify({ name }));
+    }
+    fs.writeFileSync(ctx.settings, JSON.stringify({ env: { CLAUDE_CODE_PLUGIN_DIRS: [modDir, otherMod].join(path.delimiter), KEEP: "1" } }));
+    const agents = path.join(path.dirname(ctx.settings), "agents");
+    syncAgentFiles({ ...DEFAULTS, providers: { test: { type: "openai-compatible", url: "http://unused", models: [{ id: "owned-worker" }] } } }, agents, undefined, { manifestPath: path.join(ctx.home, "generated-agents.json") });
+    fs.writeFileSync(path.join(agents, "manual.md"), "hand-written worker");
     let untrusted = false;
     removeClientIntegrations(ctx.home, (ca) => {
       assert.equal(ca, ctx.ca);
       untrusted = true;
       throw new Error("confirmation declined");
-    });
+    }, { modDir, agentDir: agents });
+    assert.deepEqual(JSON.parse(fs.readFileSync(ctx.settings, "utf8")).env, { CLAUDE_CODE_PLUGIN_DIRS: otherMod, KEEP: "1" });
+    assert.equal(fs.existsSync(path.join(agents, "owned-worker.md")), false);
+    assert.equal(fs.readFileSync(path.join(agents, "manual.md"), "utf8"), "hand-written worker");
     assert.equal(currentAppProxy().egressProxyUrl, null);
     assert.equal(codexEnabled(), false);
     assert.equal(fs.existsSync(path.join(process.env.CODEX_HOME, "clauderipple.config.toml")), false);

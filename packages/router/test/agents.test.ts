@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { DEFAULTS, type Config, type Provider } from "../src/config.ts";
-import { agentAliases, agentNameFor, generatedAgents, retouchLater, syncAgentFiles, withAgentAliases } from "../src/agents.ts";
+import { agentAliases, agentNameFor, generatedAgents, removeGeneratedAgentFiles, retouchLater, syncAgentFiles, withAgentAliases } from "../src/agents.ts";
 
 function tmp(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cr-agents-"));
@@ -202,6 +202,32 @@ test("(f) agentFiles:false writes nothing and removes nothing", () => {
   fs.writeFileSync(manifest, JSON.stringify({ agents: ["model-a"] }));
   syncAgentFiles(cfg, dir, undefined, { manifestPath: manifest });
   assert.equal(fs.readFileSync(path.join(dir, "model-a.md"), "utf8"), "keep me");
+});
+
+test("uninstall removes only manifest-owned generated files, preserving renamed and manual definitions", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, "generated-agents.json");
+  syncAgentFiles(cfgWith({ p: p(["owned", "replaced"]) }), dir, undefined, { manifestPath: manifest });
+  fs.copyFileSync(path.join(dir, "owned.md"), path.join(dir, "my-copy.md"));
+  fs.writeFileSync(path.join(dir, "replaced.md"), "---\nname: replaced\nmodel: mine\n---\nhand-written\n");
+  removeGeneratedAgentFiles(dir, manifest);
+  assert.equal(fs.existsSync(path.join(dir, "owned.md")), false);
+  assert.ok(fs.existsSync(path.join(dir, "my-copy.md")));
+  assert.match(fs.readFileSync(path.join(dir, "replaced.md"), "utf8"), /hand-written/);
+  assert.equal(fs.existsSync(manifest), false);
+  removeGeneratedAgentFiles(dir, manifest);
+});
+
+test("uninstall refuses corrupt manifests and path traversal before removing any worker", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, "generated-agents.json");
+  syncAgentFiles(cfgWith({ p: p(["owned"]) }), dir, undefined, { manifestPath: manifest });
+  for (const content of ["{", JSON.stringify({ agents: ["owned", "../other"] }), JSON.stringify({ agents: [5] })]) {
+    fs.writeFileSync(manifest, content);
+    assert.throws(() => removeGeneratedAgentFiles(dir, manifest));
+    assert.ok(fs.existsSync(path.join(dir, "owned.md")));
+    assert.ok(fs.existsSync(manifest), "the ownership record survives a failure");
+  }
 });
 
 test("agentNameFor maps everything outside [a-z0-9-] to a dash", () => {

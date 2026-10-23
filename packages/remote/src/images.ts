@@ -1,5 +1,7 @@
 // Transcript/SDK boundary: session-scoped file snapshots and inline raster images.
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { windowsPowerShellEnv } from "../../cli/src/windows-powershell.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,9 +63,31 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
  * `claude-<uid>` folder this user owns that nobody else can write to.
  */
 export function claudeSessionTemp(scope: SessionFileScope): string[] {
-  const uid = process.getuid?.();
-  if (uid === undefined || process.platform === "win32" || !scope.sessionId || !SESSION_ID.test(scope.sessionId) || !path.isAbsolute(scope.cwd)) return [];
+  if (!scope.sessionId || !SESSION_ID.test(scope.sessionId) || !path.isAbsolute(scope.cwd)) return [];
   const slug = scope.cwd.replace(/[^A-Za-z0-9]/g, "-");
+  if (process.platform === "win32") {
+    // Observed with CLI 2.1.304: C:\\Users\\pbj → C--Users-pbj, under %TEMP%\\claude.
+    // Authorize only the exact host-owned scope. Reparse points in its ancestors and ACLs
+    // writable by another ordinary user fail closed; uid/mode bits cannot prove this on NTFS.
+    const temp = path.resolve(os.tmpdir());
+    const base = path.join(temp, "claude"), project = path.join(base, slug), session = path.join(project, scope.sessionId);
+    try {
+      const chain = [temp, base, project, session];
+      if (chain.some(dir => !fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) return [];
+      const before = chain.map(dir => fs.lstatSync(dir, { bigint: true }));
+      const quoted = chain.map(dir => `'${dir.replace(/'/g, "''")}'`).join(",");
+      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach($dir in @(${quoted})) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 1 }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } } }`;
+      const env = windowsPowerShellEnv();
+      execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, stdio: "ignore", timeout: 5000, windowsHide: true });
+      if (chain.some((dir, i) => {
+        const after = fs.lstatSync(dir, { bigint: true });
+        return after.isSymbolicLink() || !sameIdentity(before[i]!, after);
+      })) return [];
+      return [session];
+    } catch { return []; } // Unverifiable ACLs or missing/replaced folders are not trusted roots.
+  }
+  const uid = process.getuid?.();
+  if (uid === undefined) return [];
   return ["/private/tmp", "/tmp"].flatMap(tmp => {
     const base = path.join(tmp, `claude-${uid}`);
     try {

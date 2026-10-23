@@ -216,6 +216,25 @@ function readManifest(file: string): Manifest {
   return { agents: [] };
 }
 
+/** Uninstall: the manifest is the ownership boundary, never all of ~/.claude/agents. */
+export function removeGeneratedAgentFiles(dir: string, manifestPath: string): void {
+  if (!fs.existsSync(manifestPath)) return;
+  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { agents?: unknown };
+  if (!Array.isArray(parsed.agents) || !parsed.agents.every(name => typeof name === "string" && /^[a-z0-9-]+$/.test(name))) {
+    throw new Error("생성 워커 목록이 올바르지 않아 워커 파일을 제거하지 않았습니다.");
+  }
+  if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("워커 폴더가 심볼릭 링크이므로 제거하지 않았습니다.");
+  for (const name of parsed.agents) {
+    const file = path.join(dir, `${name}.md`);
+    if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) continue;
+    const fm = parseFrontmatter(fs.readFileSync(file, "utf8"));
+    // A recorded worker replaced by a person's own definition is no longer ours.
+    if (fm && fm.name === name && fm.description?.includes(GENERATED_DESCRIPTION)) fs.rmSync(file);
+  }
+  fs.rmSync(manifestPath);
+  cache.delete(dir);
+}
+
 export type GeneratedAgent = { name: string; model: string; provider: string };
 
 /** Owned files that still exist and name a configured worker, not hand-written agents. */

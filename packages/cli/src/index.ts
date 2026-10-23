@@ -34,6 +34,7 @@ import { electronPath, installTrayRuntime, startTray } from "./tray.ts";
 import { dropPowerShellShim, installKind, isNewer, latestVersion, PACKAGE, runUpdate } from "./update.ts";
 import { ClaudeOAuthSession } from "../../router/src/providers/claude-oauth.ts";
 import { requestHostUpdate } from "../../remote/src/host-update.ts";
+import { purgeHome } from "./purge.ts";
 
 async function pickerOn(): Promise<void> {
   const home = homeDir();
@@ -316,27 +317,22 @@ async function uninstall(): Promise<void> {
   } catch (e) {
     console.log(`  could not remove the menu-bar app launcher: ${(e as Error).message}`);
   }
-  removeClientIntegrations(home);
+  const integrationsRemoved = removeClientIntegrations(home);
+  if (!integrationsRemoved) process.exitCode = 1;
   const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem, ...(cfg.cli.models ? { models: cfg.cli.models } : {}) });
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
   if (flag("purge")) {
-    // Windows releases a file handle a moment after the process holding it exits; one immediate
-    // attempt can still lose the race, so the removal is retried briefly before it is reported.
-    let lastError: unknown = null;
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        fs.rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-        lastError = null;
-        break;
-      } catch (e) {
-        lastError = e;
-        const until = Date.now() + 300;
-        while (Date.now() < until) { /* the CLI is synchronous here; a short spin is the whole wait */ }
-      }
+    if (!integrationsRemoved) {
+      console.error("일부 등록을 제거하지 못해 설치 폴더를 보존했습니다. 오류를 해결한 뒤 다시 제거해 주세요.");
+      return;
     }
-    if (lastError) console.log(`  could not remove ${home}: ${(lastError as Error).message}`);
-    else console.log(`✓ removed ${home}`);
+    const result = await purgeHome(home);
+    if (result.status === "deferred") {
+      // Exit 0 would certify a deletion that cannot finish until this node.exe exits.
+      process.exitCode = 2;
+      console.log(`실행 중인 Node가 종료된 뒤 설치 폴더를 삭제합니다. 아직 완료되지 않았습니다. 종료 코드 2는 대기 상태이며, 최종 결과는 ${result.resultFile}에서 확인해 주세요 (exitCode 0: 완료, 1: 실패).`);
+    } else console.log(`설치 폴더를 삭제했습니다. ${home}`);
   } else console.log(`  kept ${home} (config, certs, logs). Add --purge to delete it.`);
 }
 

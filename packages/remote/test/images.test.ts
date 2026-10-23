@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { EventLog } from "../src/eventlog.ts";
 import { attachmentContent, messageContent, sessionFiles, sessionFileTool } from "../src/images.ts";
 import { transcriptEvents } from "../src/desktop.ts";
@@ -87,11 +88,10 @@ test("image references use the same session boundary, never all of .claude or a 
   assert.equal(messageContent(`[Image: source: ${cwd}/안녕.png]`, sink).files[0]?.status, "blocked");
 });
 
-test("a pasted image and a scratchpad file in the session's own Claude temp folder reach the phone", { skip: process.platform === "win32" }, t => {
+test("a pasted image and a scratchpad file in the session's own Claude temp folder reach the phone", t => {
   const { cwd, sink } = fixture(t);
-  const uid = process.getuid!();
-  const base = path.join("/private/tmp", `claude-${uid}`);
-  const root = fs.existsSync("/private/tmp") ? base : path.join("/tmp", `claude-${uid}`);
+  const root = process.platform === "win32" ? path.join(os.tmpdir(), "claude")
+    : path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : "/tmp", `claude-${process.getuid!()}`);
   if (!fs.existsSync(root)) { fs.mkdirSync(root, { mode: 0o700 }); t.after(() => fs.rmSync(root, { recursive: true, force: true })); }
   const id = "0f0e0d0c-1111-4222-8333-944455556666", other = "0f0e0d0c-1111-4222-8333-999999999999";
   const slug = path.join(root, cwd.replace(/[^A-Za-z0-9]/g, "-"));
@@ -108,6 +108,26 @@ test("a pasted image and a scratchpad file in the session's own Claude temp fold
   assert.equal(sessionFiles([path.join(slug, other, "images", "1.png")], { cwd, sessionId: id }, sink)[0]?.status, "blocked");
   assert.equal(sessionFiles([path.join(slug, id, "images", "1.png")], { cwd }, sink)[0]?.status, "blocked");
   assert.equal(sessionFiles([path.join(slug, id, "images", "1.png")], { cwd, sessionId: "../x" }, sink)[0]?.status, "blocked");
+});
+
+test("Windows session temp rejects writable ACLs and junctions without opening other temp folders", { skip: process.platform !== "win32" }, t => {
+  const { cwd, sink } = fixture(t), outside = directory(t);
+  const id = "0f0e0d0c-1111-4222-8333-944455556666";
+  const project = path.join(os.tmpdir(), "claude", cwd.replace(/[^A-Za-z0-9]/g, "-"));
+  const session = path.join(project, id), file = path.join(session, "safe.png");
+  fs.mkdirSync(session, { recursive: true }); fs.writeFileSync(file, png);
+  t.after(() => fs.rmSync(project, { recursive: true, force: true }));
+  assert.equal(sessionFiles([file], { cwd, sessionId: id }, sink)[0]?.status, "ready");
+  const icacls = path.join(process.env.SystemRoot!, "System32", "icacls.exe");
+  execFileSync(icacls, [session, "/grant", "*S-1-1-0:(OI)(CI)M"], { stdio: "ignore" });
+  try { assert.equal(sessionFiles([file], { cwd, sessionId: id }, sink)[0]?.status, "blocked"); }
+  finally { execFileSync(icacls, [session, "/remove:g", "*S-1-1-0"], { stdio: "ignore" }); }
+  fs.renameSync(session, session + "-saved");
+  fs.writeFileSync(path.join(outside, "safe.png"), png);
+  fs.symlinkSync(outside, session, "junction");
+  assert.equal(sessionFiles([file], { cwd, sessionId: id }, sink)[0]?.status, "blocked");
+  fs.unlinkSync(session);
+  fs.renameSync(session + "-saved", session);
 });
 
 test("a project folder whose own name looks secret still sends its ordinary files", t => {
@@ -237,7 +257,12 @@ test("same-handle writes during snapshot are blocked without losing the next fil
   let changed = false;
   const mock = t.mock.method(fs, "readSync", (...args: Parameters<typeof fs.readSync>) => {
     const n = read(...args);
-    if (!changed) { changed = true; fs.writeFileSync(path.join(cwd, "race.txt"), "after!"); }
+    if (!changed) {
+      changed = true;
+      fs.writeFileSync(path.join(cwd, "race.txt"), "after!");
+      // NTFS can coalesce timestamps of same-size writes in one timer tick.
+      const later = new Date(Date.now() + 1000); fs.utimesSync(path.join(cwd, "race.txt"), later, later);
+    }
     return n;
   });
   assert.deepEqual(sessionFiles(["race.txt", "safe.txt"], { cwd }, sink).map(file => file.status), ["blocked", "ready"]);
