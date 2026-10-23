@@ -502,7 +502,8 @@ export class StreamMapper {
   /** Latest `codex.rate_limits` payload, if the backend sent one. */
   rateLimits: Record<string, unknown> | null = null;
   /** Accumulated content for non-streaming responses. */
-  readonly content: ({ type: "text"; text: string } | { type: "thinking"; thinking: string; signature: string } | { type: "tool_use"; id: string; name: string; input: unknown; _args?: string })[] = [];
+  /** `_streamed`: some of a call's arguments already reached the client as input_json_delta. */
+  readonly content: ({ type: "text"; text: string } | { type: "thinking"; thinking: string; signature: string } | { type: "tool_use"; id: string; name: string; input: unknown; _args?: string; _streamed?: boolean })[] = [];
   stopReason: "end_turn" | "tool_use" | "max_tokens" = "end_turn";
   /**
    * How many reasoning items this response carried whole — the ones the client will replay. The
@@ -575,6 +576,17 @@ export class StreamMapper {
     return evs;
   }
 
+  /**
+   * A call whose arguments arrived only whole (on `.done`) still has to reach a streaming client:
+   * Claude Code builds a tool's input from input_json_delta alone and runs `{}` otherwise. Once per
+   * call, and never on top of deltas already sent, which would hand it the arguments twice.
+   */
+  private sendWholeArguments(call: { _streamed?: boolean }, args: string): AnthropicEvent[] {
+    if (call._streamed || !args || this.open?.kind !== "tool") return [];
+    call._streamed = true;
+    return [{ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "input_json_delta", partial_json: args } } }];
+  }
+
   private openBlock(kind: "text" | "thinking" | "tool", block: Record<string, unknown>, itemId?: string): AnthropicEvent[] {
     const evs = this.closeBlock();
     this.blockIndex++;
@@ -639,7 +651,7 @@ export class StreamMapper {
         this.rateLimits = ev;
         break;
       case "response.output_item.added": {
-        const item = ev.item as { type: string; call_id?: string; name?: string; id?: string; encrypted_content?: unknown; summary?: unknown };
+        const item = ev.item as { type: string; call_id?: string; name?: string; id?: string; encrypted_content?: unknown; summary?: unknown; arguments?: unknown };
         if (item.type === "function_call") {
           this.sawToolCall = true;
           const id = item.call_id ?? item.id ?? `call_${crypto.randomBytes(8).toString("hex")}`;
@@ -647,7 +659,8 @@ export class StreamMapper {
           const called = item.name ?? "tool";
           const name = this.toolNames.get(called) ?? called;
           this.lastCallId = id;
-          this.content.push({ type: "tool_use", id, name, input: {}, _args: "" });
+          // An item can arrive with its arguments already in it; kept for the item's end, like deltas.
+          this.content.push({ type: "tool_use", id, name, input: {}, _args: typeof item.arguments === "string" ? item.arguments : "" });
           out.push(...this.openBlock("tool", { type: "tool_use", id, name, input: {} }, item.id));
         } else if (item.type === "reasoning") {
           // The item's reasoning is held until it is complete and handed over whole (see
@@ -702,7 +715,10 @@ export class StreamMapper {
         const delta = String(ev.delta ?? "");
         const last = this.content[this.content.length - 1];
         if (last?.type === "tool_use") last._args = (last._args ?? "") + delta;
-        if (this.open?.kind === "tool") out.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "input_json_delta", partial_json: delta } } });
+        if (this.open?.kind === "tool" && delta) {
+          if (last?.type === "tool_use") last._streamed = true;
+          out.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.blockIndex, delta: { type: "input_json_delta", partial_json: delta } } });
+        }
         break;
       }
       case "response.function_call_arguments.done": {
@@ -715,11 +731,28 @@ export class StreamMapper {
             last.input = {};
           }
           delete last._args;
+          out.push(...this.sendWholeArguments(last, args));
         }
         break;
       }
       case "response.output_item.done": {
-        const done = ev.item as { type?: unknown; encrypted_content?: unknown; summary?: unknown } | undefined;
+        const done = ev.item as { type?: unknown; encrypted_content?: unknown; summary?: unknown; arguments?: unknown } | undefined;
+        // gpt-6.1-sol sends a call's arguments with no delta events at all (measured 2026-10-23: four
+        // parallel calls, every one reached Claude Code as `{}` and failed "required parameter
+        // file_path"), so the completed item is the last place they can come from.
+        const last = this.content[this.content.length - 1];
+        if (done?.type === "function_call" && last?.type === "tool_use" && this.open?.kind === "tool") {
+          const args = typeof done.arguments === "string" ? done.arguments : last._args ?? "";
+          if (last._args !== undefined) {
+            try {
+              last.input = args ? JSON.parse(args) : {};
+            } catch {
+              last.input = {};
+            }
+            delete last._args;
+          }
+          out.push(...this.sendWholeArguments(last, args));
+        }
         // The backend may put `encrypted_content` only on the completed item, so the seal is taken
         // here as well as from `response.output_item.added`, and the item is only handed over now
         // anyway — a half-assembled reasoning block must not reach the client.
@@ -788,7 +821,7 @@ export class StreamMapper {
   message(): Record<string, unknown> {
     const content = this.content.map((b) => {
       if (b.type === "tool_use") {
-        const { _args, ...rest } = b;
+        const { _args, _streamed: _, ...rest } = b;
         if (_args !== undefined) {
           try {
             rest.input = _args ? JSON.parse(_args) : {};

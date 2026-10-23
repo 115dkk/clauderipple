@@ -470,3 +470,35 @@ test("replay: false carries nothing and asks for nothing", () => {
   assert.equal(out.include, undefined);
   assert.equal(JSON.stringify(out.input).includes("encrypted_content"), false);
 });
+
+// gpt-6.1-sol sent four parallel calls with no argument deltas at all (2026-10-23); each reached
+// Claude Code as `{}` and failed "required parameter file_path". Whole arguments must still stream.
+test("a call whose arguments arrive only whole streams them once, on .done or on the completed item", () => {
+  const partial = (events: Record<string, unknown>[]) => {
+    const m = new StreamMapper("gpt-6.1-sol");
+    const out = events.flatMap((e) => m.feed(e));
+    const json = new Map<number, string>();
+    for (const e of out) {
+      if (e.event !== "content_block_delta") continue;
+      const d = e.data as { index: number; delta: { type: string; partial_json?: string } };
+      if (d.delta.type === "input_json_delta") json.set(d.index, (json.get(d.index) ?? "") + d.delta.partial_json);
+    }
+    return [...json.values()];
+  };
+  const added = (id: string) => ({ type: "response.output_item.added", item: { type: "function_call", call_id: `call_${id}`, id, name: "Read", arguments: "" } });
+  // Arguments only on function_call_arguments.done.
+  assert.deepEqual(partial([
+    added("fc_1"), { type: "response.function_call_arguments.done", arguments: '{"file_path":"/a"}', item_id: "fc_1" }, { type: "response.output_item.done", item: { type: "function_call", id: "fc_1", arguments: '{"file_path":"/a"}' } },
+    added("fc_2"), { type: "response.function_call_arguments.done", arguments: '{"file_path":"/b"}', item_id: "fc_2" }, { type: "response.output_item.done", item: { type: "function_call", id: "fc_2", arguments: '{"file_path":"/b"}' } },
+  ]), ['{"file_path":"/a"}', '{"file_path":"/b"}']);
+  // Arguments only on the completed item.
+  assert.deepEqual(partial([added("fc_1"), { type: "response.output_item.done", item: { type: "function_call", id: "fc_1", arguments: '{"command":"ls"}' } }]), ['{"command":"ls"}']);
+  // Deltas and a .done that repeats them: sent once, not twice.
+  assert.deepEqual(partial([
+    added("fc_1"),
+    { type: "response.function_call_arguments.delta", delta: '{"file_path"', item_id: "fc_1" },
+    { type: "response.function_call_arguments.delta", delta: ':"/a"}', item_id: "fc_1" },
+    { type: "response.function_call_arguments.done", arguments: '{"file_path":"/a"}', item_id: "fc_1" },
+    { type: "response.output_item.done", item: { type: "function_call", id: "fc_1", arguments: '{"file_path":"/a"}' } },
+  ]), ['{"file_path":"/a"}']);
+});
