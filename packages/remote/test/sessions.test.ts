@@ -414,6 +414,45 @@ for (const decision of ["allow", "allow_always", "deny"] as const) {
   });
 }
 
+for (const damage of ["duplicate-seq", "invalid-json", "unreadable"] as const) test(`recovery skips only a ${damage} session and preserves its files`, async t => {
+  const f = fixture(t);
+  const bad = await f.create("bad");
+  const good = await f.create("good");
+  await waitFor(() => f.sessions.list().every(s => s.state === "idle"));
+  const seq = f.sessions.log(bad).lastSeq;
+  f.permissions.request({ session: bad, tool: "Bash", title: "", summary: "ls", input: {} });
+  f.sessions.shutdown();
+  const file = path.join(f.dir, "sessions.json");
+  const records = JSON.parse(fs.readFileSync(file, "utf8")) as { id: string; state: string }[];
+  fs.writeFileSync(file, JSON.stringify(records.map(r => ({ ...r, state: r.id === good ? "running" : "idle" }))));
+  const segment = path.join(f.dir, "sessions", bad, "events-000001.jsonl");
+  if (damage === "duplicate-seq") {
+    fs.appendFileSync(segment, [
+      { seq: seq + 1, at: 1, kind: "notice", code: "host_restarted" },
+      { seq: seq + 2, at: 1, kind: "state", state: "stopped" },
+      { seq: seq + 1, at: 2, kind: "user", text: "original writer" },
+    ].map(e => JSON.stringify(e) + "\n").join(""));
+  } else if (damage === "invalid-json") fs.appendFileSync(segment, "invalid json\n{}\n");
+  else { fs.unlinkSync(segment); fs.mkdirSync(segment); }
+  const before = damage === "unreadable" ? null : fs.readFileSync(segment);
+  const lines: string[] = [];
+  const recovered = new Sessions({ dir: f.dir, router, permissions: PermissionQueue.open(f.permissionsFile),
+    queryFn: f.fake.queryFn, log: line => lines.push(line), onEvent: () => {}, onSessions: () => {} });
+  f.instances.push(recovered);
+  recovered.recover();
+  assert.deepEqual(recovered.list().map(s => [s.id, s.state]), [[good, "stopped"]]);
+  assert.equal(recovered.has(bad), false);
+  assert.throws(() => recovered.log(bad), /unreadable/);
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0]!.includes(bad) && lines[0]!.includes("session files preserved"));
+  await recovered.send(good, "continue-good", "continue");
+  await waitFor(() => recovered.summaryOf(good)?.state === "idle");
+  const saved = JSON.parse(fs.readFileSync(file, "utf8")) as { id: string }[];
+  assert.ok(saved.some(r => r.id === bad), "healthy saves retain the skipped record");
+  if (before) assert.deepEqual(fs.readFileSync(segment), before);
+  else assert.ok(fs.statSync(segment).isDirectory());
+});
+
 test("recover expires persisted permissions, stops a mid-turn session and resumes sdk-1", { timeout: 4500 }, async t => {
   const f = fixture(t);
   const id = await f.create();

@@ -248,6 +248,8 @@ const windowKey = (model: string): string => model.replace(/@[^@]*$/, "");
 export class Sessions {
   private opts: SessionsOptions;
   private records = new Map<string, SessionRecord>();
+  /** Unreadable sessions stay on disk but cannot participate in this host's work. */
+  private skippedRecords = new Map<string, SessionRecord>();
   private logs = new Map<string, EventLog>();
   private live = new Map<string, Live>();
   /** Slash commands per session (its init event), and the latest seen anywhere for sessions with none yet. */
@@ -423,6 +425,16 @@ export class Sessions {
 
   /** After a host restart: no query survived, so say so in every session that was mid-turn, and close what it was asking. */
   recover(): void {
+    // Validate even idle sessions: listing one also opens its log. Isolate failures before
+    // recovery appends anything, and retain their records when healthy sessions are saved.
+    for (const r of this.records.values()) {
+      try { this.log(r.id); }
+      catch (error) {
+        this.skippedRecords.set(r.id, r);
+        this.records.delete(r.id);
+        (this.opts.log ?? console.error)(`[session recovery] skipped ${r.id}: ${error instanceof Error ? error.message : String(error)}; session files preserved at ${path.join(this.opts.dir, "sessions", r.id)}`);
+      }
+    }
     for (const p of this.opts.permissions.expiredOnOpen) {
       if (this.records.has(p.session)) this.append(p.session, { kind: "permission_decided", id: p.id, decision: "expired", reason: "host_restarted" });
     }
@@ -436,7 +448,7 @@ export class Sessions {
 
   list(): SessionSummary[] {
     const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
-    const hostCliIds = new Set([...this.records.values()].flatMap(r => r.sdkSessionId ? [r.sdkSessionId] : []));
+    const hostCliIds = new Set([...this.records.values(), ...this.skippedRecords.values()].flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id]));
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
       const status = this.statusLine(s.id);
@@ -733,7 +745,7 @@ export class Sessions {
       .catch(error => (this.opts.log ?? console.error)(`[alert] ${id}: ${error instanceof Error ? error.message : String(error)}`));
   }
 
-  has(id: string): boolean { return this.records.has(id) || (this.desktop?.has(id) ?? false); }
+  has(id: string): boolean { return !this.skippedRecords.has(id) && (this.records.has(id) || (this.desktop?.has(id) ?? false)); }
 
   /** Archive/unarchive: only a flag. Transcripts and files are never deleted, just hidden by default. */
   setArchived(id: string, archived: boolean): boolean {
@@ -862,6 +874,7 @@ export class Sessions {
   }
 
   log(id: string): EventLog {
+    if (this.skippedRecords.has(id)) throw new Error("Session log is unreadable; session skipped during recovery");
     if (!this.records.has(id)) {
       const process = this.desktop?.liveProcess(id);
       if (process?.bridgeSessionId && this.desktop?.has(id)) {
@@ -896,7 +909,7 @@ export class Sessions {
   }
 
   private save(): void {
-    writeFileAtomic(this.file, JSON.stringify(Array.from(this.records.values()), null, 1));
+    writeFileAtomic(this.file, JSON.stringify([...this.records.values(), ...this.skippedRecords.values()], null, 1));
   }
 
   private saveListState(): void {
