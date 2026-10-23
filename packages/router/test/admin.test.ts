@@ -13,7 +13,7 @@ import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
-import { listClaudeAccounts, readClaudeAccountsFile, saveClaudeOAuthAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
+import { listClaudeAccounts, markClaudeAccountNeedsReauth, readClaudeAccountsFile, saveClaudeOAuthAccount, subjectHash } from "../src/providers/anthropic-accounts.ts";
 import { ObservedClaudeCodeAuth } from "../src/providers/anthropic-observed.ts";
 import type { ModOptions } from "../src/admin.ts";
 import type { ModSettingsSnapshot } from "../src/mod-settings.ts";
@@ -194,6 +194,31 @@ test("mod options and status expose runtime provider exhaustion and clear it on 
     assert.equal(recovered.providers[0]?.usable, true);
     assert.equal(recovered.providers[0]?.reason, undefined);
   }, { providerHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+});
+
+test("mod options count a stored Claude account as signed in when Claude Code's own login is not seen", async () => {
+  const cfg = makeCfg({ providers: { native: { type: "anthropic", auth: "claude-code" } } });
+  await withAdmin(cfg, async ({ port, home }) => {
+    const usable = async () => ((await (await fetch(`${base()}:${port}/api/mod-options`)).json()) as ModOptions).providers.find((p) => p.name === "native")?.usable;
+    // An access token already past its expiry still counts: the pool refreshes it before the turn.
+    const account = saveClaudeOAuthAccount(home, { accessToken: "mod-access", refreshToken: "mod-refresh", expiresAt: Date.now() - 1, accountId: "mod-account", email: "mod@example.test" });
+    assert.equal(await usable(), true);
+    markClaudeAccountNeedsReauth(home, account.id, "mod-refresh");
+    assert.equal(await usable(), false, "an account that must sign in again serves nothing");
+  }, { modelScoresFetch: async () => new Response("{}") });
+});
+
+test("mod options with a Claude account pool still follow the pool's own state", async () => {
+  const cfg = makeCfg({ providers: { native: { type: "anthropic", auth: "claude-code", accountPool: true } } });
+  let row = { id: "a", state: "ready", failures: 0, paused: false };
+  await withAdmin(cfg, async ({ port, home }) => {
+    const usable = async () => ((await (await fetch(`${base()}:${port}/api/mod-options`)).json()) as ModOptions).providers.find((p) => p.name === "native")?.usable;
+    // Expired but refreshable: the pool reports it ready, so the mod keeps the worker.
+    saveClaudeOAuthAccount(home, { accessToken: "pool-access", refreshToken: "pool-refresh", expiresAt: Date.now() - 1, accountId: "pool-account", email: "pool@example.test" });
+    assert.equal(await usable(), true);
+    row = { ...row, paused: true };
+    assert.equal(await usable(), false, "a paused pool serves nothing even with a stored account");
+  }, { credentials: () => ({ native: [row] }), modelScoresFetch: async () => new Response("{}") });
 });
 
 const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}/api/mod-settings`, {
