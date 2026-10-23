@@ -1471,9 +1471,13 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   return { ...e, effort: saving && EFFORTS.indexOf(p.effort) > EFFORTS.indexOf('medium') ? 'medium' : p.effort }
 }
 
-async function agentsRenderFailure($: EngineInterface, e: RenderInput, error: unknown): Promise<RenderElement> {
-  await report($, 'agents render', error)
-  return renderAgentsFallback($.ui.resolve(e), await frameOf($, e), await read($, agents), reason(error), { ...agentsActions($), close: () => $.ui.close({ id: AGENTS_PANE }) }, await read($, agentOpen) !== null) as RenderElement
+async function agentsRenderFailure($: EngineInterface, e: RenderInput, error: unknown, context: { frame?: Frame; records?: readonly AgentRec[]; wasOpen?: boolean } = {}): Promise<RenderElement> {
+  // Never re-read the failing state/clock here. This also serves the engine's .catch after it
+  // refused an answer, when no successful snapshot is available.
+  const frame: Frame = context.frame ?? { surface: e.surface, columns: 'bodyColumns' in e.props ? e.props.bodyColumns : 80, maxRows: 30, now: 0, lang: 'en', appearance: 'auto', skin: 'flat' }
+  const failure = reason(error)
+  $.ui.log(t(frame.lang, 'commands.debugLog', { where: 'agents render', reason: failure }), { to: 'debug' })
+  return renderAgentsFallback($.ui.resolve(e), frame, context.records ?? [], failure, { ...agentsActions($), close: () => $.ui.close({ id: AGENTS_PANE }) }, context.wasOpen ?? false) as RenderElement
 }
 
 export const register: Register = on => {
@@ -1893,15 +1897,19 @@ export const register: Register = on => {
     } catch (error) { await report($, 'log render', error); return next(e) }
   })
   on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e) => {
+    let frame: Frame | undefined
+    let records: AgentRec[] = []
+    let id: string | null = null
     try {
       startTimers($)
-      const frame = await frameOf($, e)
+      records = await read($, agents)
+      frame = await frameOf($, e)
       // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
       await read($, agentsTick)
-      const id = await read($, agentOpen)
+      id = await read($, agentOpen)
       const open = id === null ? undefined : { id, talk: await agentTalk($, id), runsOpen: await read($, agentRunsOpen) }
       if (open && 'deny' in open.talk) throw new Error(open.talk.deny)
-      return renderAgents($.ui.resolve(e), frame, { agents: await read($, agents), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
-    } catch (error) { return agentsRenderFailure($, e, error) }
+      return renderAgents($.ui.resolve(e), frame, { agents: records, now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
+    } catch (error) { return agentsRenderFailure($, e, error, { ...(frame ? { frame } : {}), records, wasOpen: id !== null }) }
   }).catch(($, e, next) => agentsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

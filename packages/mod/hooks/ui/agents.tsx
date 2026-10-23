@@ -45,10 +45,12 @@ const BY: Record<NonNullable<AgentRec['pick']>['by'], string> = { haiku: 'settin
 export const DONE_SHOWN = 4
 /**
  * Characters of the conversation drawn in all, about: a tree draws 100,000 characters (the engine's
- * cut), and the card and the page's chrome take some. Only a conversation past it loses its oldest
- * entries; any other shows whole, as the Claude app's chat does.
+ * cut), and the card and the page's chrome take some. The entry bound below also leaves room for
+ * the nodes of unfolded tools; past either bound the oldest entries are counted as omitted.
  */
 export const TALK_CHARS = 80_000
+/** Short entries also consume nodes: bound an unfolded tool history before constructing its tree. */
+export const TALK_ENTRIES = 512
 /** Characters of a text entry drawn. */
 const TEXT_MAX = 3000
 const PROMPT_MAX = 2400
@@ -94,8 +96,14 @@ function whyLine(frame: Frame, agent: AgentRec): string {
   const pick = agent.pick
   if (!pick) return ''
   const parts = [t(frame.lang, 'agents.by', { name: t(frame.lang, BY[pick.by]) }) + ' · ' + t(frame.lang, 'agents.domainLevel', { domain: t(frame.lang, 'workers.' + pick.domain), level: t(frame.lang, 'settings.' + pick.level) }) + (pick.rung ? ' · ' + (pick.rule ?? 'general') + '/' + t(frame.lang, 'workers.rung.' + pick.rung) : '')]
-  if (pick.why) parts.push('“' + pick.why + '”')
+  if (pick.why) parts.push('“' + cut(pick.why, 240) + '”')
   return parts.join(' · ')
+}
+
+/** The card's failure detail is a preview, not an unbounded number of full-card click strips. */
+function fallbackLine(frame: Frame, agent: AgentRec): string {
+  const reason = agent.pick?.fallbackReason
+  return reason ? t(frame.lang, 'agents.fallback', { reason: cut(reason, 240) }) : ''
 }
 
 /** How long it ran, or has run so far. */
@@ -177,8 +185,8 @@ function weight(entry: AgentEntry): number {
 /**
  * What the page shows: the first prompt always (what it was asked), every entry after it, and a
  * finished agent's last words as its answer. Every entry, with no "earlier" to press: the owner
- * read the agent's words behind it as hidden (2026-10-20). Only past TALK_CHARS do the oldest go,
- * counted in `dropped`.
+ * read the agent's words behind it as hidden (2026-10-20). Past TALK_CHARS or TALK_ENTRIES the
+ * oldest go, counted in `dropped`.
  */
 function pageOf(entries: readonly AgentEntry[], finished: boolean): Page {
   const first = entries[0]?.kind === 'prompt' ? entries[0] : undefined
@@ -188,7 +196,7 @@ function pageOf(entries: readonly AgentEntry[], finished: boolean): Page {
   if (answer !== undefined) rest = rest.slice(0, -1)
   let room = TALK_CHARS - (first ? weight(first) : 0) - Math.min(answer?.length ?? 0, ANSWER_MAX)
   let from = rest.length
-  while (from > 0 && room - weight(rest[from - 1]!) >= 0) room -= weight(rest[--from]!)
+  while (from > 0 && rest.length - from < TALK_ENTRIES && room - weight(rest[from - 1]!) >= 0) room -= weight(rest[--from]!)
   return { ...(first ? { first } : {}), dropped: from, shown: rest.slice(from), ...(answer !== undefined ? { answer } : {}) }
 }
 
@@ -329,7 +337,7 @@ export function cardRows(frame: Frame, agent: AgentRec, pressable = true): numbe
   const layout = layoutOf(frame, agent, pressable)
   const head = Math.min(TITLE_LINES, linesOf(cardTitle(agent, layout.title), layout.title))
   const nums = figureRows(cardFigures(frame, agent), layout.narrow).length
-  const fall = agent.pick?.fallbackReason ? linesOf(t(frame.lang, 'agents.fallback', { reason: agent.pick.fallbackReason }), layout.width - 2) : 0
+  const fall = linesOf(fallbackLine(frame, agent), layout.width - 2)
   return head + 1.2 + nums + fall + 1.3
 }
 
@@ -439,7 +447,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, pressable
   if (agent.pick?.fallbackReason) {
     rows.push(
       <Box key="fallback" paddingLeft={2} minWidth={0}>
-        <Text color={k.tone('amber')} wrap="wrap">{t(L, 'agents.fallback', { reason: agent.pick.fallbackReason })}</Text>
+        <Text color={k.tone('amber')} wrap="wrap">{fallbackLine(frame, agent)}</Text>
       </Box>,
     )
   }
@@ -801,7 +809,7 @@ function liveLines(el: Els, frame: Frame, agent: AgentRec, now: number, hotkey: 
     <Box key={'agent-' + agent.id} flexDirection="column">
       <Box key="title" flexDirection="row" alignItems="center" columnGap={1}>
         <Text color={waiting ? undefined : tone.accent} dimColor={waiting}>{waiting ? '○' : '●'}</Text>
-        <Text bold wrap="wrap">{titleOf(agent)}</Text>
+        <Text bold wrap="wrap">{cut(titleOf(agent), 240)}</Text>
         {textButton(el, 'open-' + agent.id, t(frame.lang, 'agents.open'), onOpen, hotkey)}
       </Box>
       <Box key="model" flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={2}>
@@ -814,7 +822,7 @@ function liveLines(el: Els, frame: Frame, agent: AgentRec, now: number, hotkey: 
       ) : null}
       {agent.pick?.fallbackReason ? (
         <Box key="fallback" paddingLeft={2}>
-          <Text color={tone.warn} wrap="wrap">{t(frame.lang, 'agents.fallback', { reason: agent.pick.fallbackReason })}</Text>
+          <Text color={tone.warn} wrap="wrap">{fallbackLine(frame, agent)}</Text>
         </Box>
       ) : null}
       <Box key="doing" flexDirection="row" flexWrap="wrap" columnGap={2} paddingLeft={2}>
@@ -834,7 +842,7 @@ function doneLine(el: Els, frame: Frame, agent: AgentRec, now: number, hotkey: s
   return (
     <Box key={'done-' + agent.id} flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={1}>
       <Text color={ok ? tone.ok : tone.bad}>{ok ? '✓' : '✕'}</Text>
-      <Text wrap="wrap">{titleOf(agent)}</Text>
+      <Text wrap="wrap">{cut(titleOf(agent), 240)}</Text>
       <Text dimColor>{modelLine(frame, agent)}</Text>
       <Text dimColor>{ranFor(agent, now, frame.lang)}</Text>
       {nums ? <Text dimColor>{nums}</Text> : null}
@@ -933,7 +941,7 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
     <Box flexDirection="column" rowGap={1} width="100%">
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
         {back}
-        <Text bold wrap="wrap">{titleOf(agent)}</Text>
+        <Text bold wrap="wrap">{cut(titleOf(agent), 240)}</Text>
       </Box>
       <Box flexDirection="column">
         <Text dimColor wrap="wrap">{[modelLine(frame, agent), ranFor(agent, view.now, L)].join(' · ')}</Text>
