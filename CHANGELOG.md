@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.11 — 2026-10-23
+
+### Added
+
+- **The Code tab's own panels reach the phone.** A Claude app session's task list shows above the
+  phone's composer, its closing box shows the recap, the question and reply buttons that answer
+  it, and its chapters divide the conversation. Needs Ripple Remote 1.0.4.
+- **A question waits for you.** When a Claude app turn ends on a question, the push says an answer
+  is needed (the question itself stays in the encrypted part), and the session moves to "needs
+  input". Sessions also carry the Claude app's own status line.
+- **A session's changes from the phone.** The host answers what changed in a session's folder:
+  uncommitted work, or the branch against its base. Read-only git; no configured program runs.
+- **Background workers open from the dock.** A background agent's task names its log, so the
+  phone can open its conversation.
+
+### Fixed
+
+- **Windows: an update no longer leaves Claude without a router** (#80, #62). A start counts only
+  once the router's process is up; when the scheduled task brings none, the router is started
+  directly and the CLI says so. `install.ps1`/`install.sh` exit non-zero over a failed setup, and
+  the tray's Electron fetch finds the Node running it.
+- **Remote Control questions are questions** (#82). AskUserQuestion and plan approvals from a
+  Claude app session card as they do for the host's own sessions, the answers go back, and a
+  request already answered never cards again.
+- **The phone sees a Claude app turn sooner.** A send shows the session running at once, and the
+  transcript is read on file change rather than every 3 s.
+
 ## 0.12.10 — 2026-10-23
 
 ### Added
