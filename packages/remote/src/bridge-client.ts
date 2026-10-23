@@ -218,9 +218,18 @@ export class BridgeClient {
    * must not close pending cards on it.
    */
   async openRequests(id: string): Promise<{ requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }[] | null> {
+    return (await this.requests(id))?.open ?? null;
+  }
+  /**
+   * The open requests, and the ids this read saw answered or withdrawn. A request merely missing
+   * from the list proves nothing (the list may not reach that far), so only `closed` may close a
+   * card the phone still shows.
+   */
+  async requests(id: string): Promise<{ open: { requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }[]; closed: Set<string> } | null> {
     const list = (await this.events(id)).data;
     if (!Array.isArray(list)) return null;
     const open = new Map<string, { requestId: string; tool: string; input: Record<string, unknown>; toolUseId: string }>();
+    const closed = new Set<string>();
     for (const value of list) {
       const item = object(value);
       const payload = object(item?.payload);
@@ -244,9 +253,10 @@ export class BridgeClient {
         // Any client's answer or withdrawal closes it: this host's own answer is stored with the
         // posting client's source, and it must still count as answered (issue #82).
         open.delete(requestId);
+        closed.add(requestId);
       }
     }
-    return [...open.values()];
+    return { open: [...open.values()], closed };
   }
   /** The newest durable event's number; the stream starts there instead of replaying the whole session. */
   private async latest(id: string, signal: AbortSignal): Promise<number> {

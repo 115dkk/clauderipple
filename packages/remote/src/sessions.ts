@@ -1201,17 +1201,19 @@ export class Sessions {
     // Cards opened after this read began may belong to a request the snapshot predates, so only
     // cards that already existed are closed on its word.
     const startedAt = this.now();
-    let open;
-    try { open = await this.bridge.openRequests(bridgeId); }
+    let requests;
+    try { requests = await this.bridge.requests(bridgeId); }
     catch (error) { this.bridgeFailure(id, error); return; }
-    if (open === null) return;
+    if (requests === null) return;
     if (this.bridges.get(id) !== connection) return;
-    const openIds = new Set(open.map(req => req.requestId));
-    // A card whose request is no longer open was answered or withdrawn somewhere else — the person
-    // used the Claude app. Leaving it pending kept a question on the phone that the app had already
-    // closed, and the next replay carded it again (issue #82).
+    const { open, closed } = requests;
+    // A card whose request this read saw answered or withdrawn was settled somewhere else — the
+    // person used the Claude app. Leaving it pending kept a question on the phone that the app had
+    // already closed, and the next replay carded it again (issue #82). A request merely missing from
+    // the list proves nothing: the list may not reach it, and closing on that would take a live
+    // question away from the phone.
     for (const [requestId, pending] of [...connection.permissions]) {
-      if (openIds.has(requestId)) continue;
+      if (!closed.has(requestId)) continue;
       const record = this.opts.permissions.get(pending.id);
       if (record?.state === "pending" && record.createdAt >= startedAt) continue;
       connection.permissions.delete(requestId);

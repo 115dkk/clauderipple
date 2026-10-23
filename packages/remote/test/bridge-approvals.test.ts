@@ -27,6 +27,20 @@ test("a card whose request left the Remote Control list closes, and a replay doe
   assert.equal(f.sessions.log(bridgeId).tail().events.filter(e => e.kind === "permission").length, 1);
 });
 
+test("a card whose request is merely missing from the Remote Control list stays open", async t => {
+  const f = bridgeFixture(t);
+  f.sessions.log(bridgeId);
+  await tick(); await tick();
+  f.emit(approval("req-live"));
+  await tick();
+  // The stored list does not reach this request (it holds only older events): no answer was seen,
+  // so the question is still the person's to answer from the phone.
+  f.history.push({ source: "worker", payload: approval("req-older") }, { source: "worker", payload: { type: "control_response", request_id: "req-older", response: { subtype: "success" } } });
+  f.advance();
+  await f.sessions.syncBridge(bridgeId);
+  assert.deepEqual(f.permissions.pending(bridgeId).length, 1);
+});
+
 test("an answered request stays answered when a replay lists it hours later", async t => {
   const f = bridgeFixture(t);
   f.sessions.log(bridgeId);
