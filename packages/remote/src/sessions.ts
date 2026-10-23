@@ -1274,7 +1274,7 @@ export class Sessions {
     if (connection && pending) {
       const sending = this.bridgeDecisions.get(permId);
       if (sending) return sending;
-      const answer = this.decideBridge(id, permId, decision, pending[0], pending[1], answers)
+      const answer = this.decideBridge(id, permId, decision, pending[0], pending[1], message, answers)
         .then(ok => { if (ok) this.clearPermissionAttention(id); return ok; })
         .finally(() => this.bridgeDecisions.delete(permId));
       this.bridgeDecisions.set(permId, answer);
@@ -1315,7 +1315,7 @@ export class Sessions {
     return { type: "control_response", uuid: randomUUID(), response: { subtype: "success", request_id: requestId, response: { behavior: decision, updatedInput, toolUseID: pending.toolUseId, ...(message ? { message } : {}) } } };
   }
 
-  private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }, answers?: Record<string, string>): Promise<boolean> {
+  private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }, message?: string, answers?: Record<string, string>): Promise<boolean> {
     const connection = this.bridges.get(id);
     if (!connection || connection.failed || this.opts.permissions.get(permId)?.state !== "pending") return false;
     if (decision === "allow_always") throw new Error("Remote Control supports allow once only.");
@@ -1331,8 +1331,10 @@ export class Sessions {
       }
     }
     const updatedInput = answers ? { ...pending.input, answers } : pending.input;
+    // A plan card's "keep planning" sends the person's feedback as the denial, as the host path does.
+    const denial = message || "The user denied this from their phone.";
     try {
-      await this.bridge.post(connection.bridgeId, this.bridgeDecisionPayload(requestId, pending, decision, decision === "deny" ? "The user denied this from their phone." : undefined, updatedInput));
+      await this.bridge.post(connection.bridgeId, this.bridgeDecisionPayload(requestId, pending, decision, decision === "deny" ? denial : undefined, updatedInput));
     } catch (error) { this.bridgeFailure(id, error); throw error; }
     connection.permissions.delete(requestId);
     this.rememberAnsweredBridge(id, requestId);
