@@ -41,6 +41,34 @@ test("background task list carries the launch description, command fallback and 
   ]);
 });
 
+test("the turn's task list follows update_plan as the app applies it, and the next message clears it", () => {
+  const tasks = new BackgroundTasks();
+  let n = 0;
+  const plan = (input: Record<string, unknown>, error = false) => {
+    const id = `p${++n}`;
+    tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "mcp__ccd_turn__update_plan", id, input }] } }));
+    tasks.accept(line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, ...(error ? { is_error: true } : {}), content: "Plan shown" }] } }));
+  };
+  const statuses = () => tasks.plan.map(step => step.status[0]).join("");
+  assert.deepEqual(tasks.plan, []);
+  plan({ advance: true });
+  assert.deepEqual(tasks.plan, [], "an advance with no list changes nothing");
+  plan({ scope: "first_task", items: [{ content: " Read the code ", status: "in_progress" }, { content: "", status: "pending" }, { content: "Fix it", status: "bogus" }, { content: "Test it", status: "pending" }] });
+  assert.deepEqual(tasks.plan, [{ text: "Read the code", status: "in_progress" }, { text: "Fix it", status: "pending" }, { text: "Test it", status: "pending" }]);
+  plan({ advance: true });
+  assert.equal(statuses(), "cip");
+  plan({ done: [2, 9], start: 3 }, true);
+  assert.equal(statuses(), "cip", "a refused call changes nothing");
+  plan({ done: [2], start: 3 });
+  assert.equal(statuses(), "cci");
+  plan({ advance: "true" });
+  assert.equal(statuses(), "ccc");
+  plan({ items: Array.from({ length: 15 }, (_, i) => ({ content: `step ${i}`, status: "pending" })), scope: "continuation" });
+  assert.equal(tasks.plan.length, 12);
+  tasks.accept(line({ type: "user", timestamp: "2026-10-23T01:00:00.000Z", origin: { kind: "human" }, message: { content: "next" } }));
+  assert.deepEqual(tasks.plan, []);
+});
+
 test("the main turn starts at the person's message, not a compaction summary or task notification", () => {
   const tasks = new BackgroundTasks();
   const user = (at: string, content: unknown, origin?: unknown) => tasks.accept(line({ type: "user", timestamp: at, ...(origin ? { origin } : {}), message: { content } }));

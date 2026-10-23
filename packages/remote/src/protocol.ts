@@ -180,6 +180,9 @@ export interface SessionSummary {
   turnStartedAt?: number | null;
   /** What those background tasks are, oldest first; absent on older hosts. */
   taskList?: BackgroundTask[];
+  /** The Code tab's task list for the running turn (its update_plan tool), in order; empty when the
+   * turn has none or the session is not working. Absent on older hosts. */
+  plan?: PlanStep[];
   /** The main turn is idle but background work (subagents, shells) still runs: the app's dark blink. */
   background?: boolean;
   /** open permission requests */
@@ -202,6 +205,7 @@ export interface SessionSummary {
 }
 
 export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null }
+export interface PlanStep { text: string; status: "pending" | "in_progress" | "completed" }
 
 /** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
 export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** why sending it failed; the queue is held */ error?: string }
