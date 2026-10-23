@@ -197,6 +197,17 @@ function questionInputs(input: Record<string, unknown>): Question[] {
   });
 }
 
+/**
+ * The card a Remote Control request deserves: a plan, a question the phone can answer, or a plain
+ * tool approval — the same split the host's own canUseTool makes. A question input the phone cannot
+ * render stays a tool card (the request is still answerable) rather than failing the stream.
+ */
+function bridgeRequest(tool: string, input: Record<string, unknown>): { requestKind: "tool" | "plan" | "question"; questions?: Question[] } {
+  if (tool === "ExitPlanMode") return { requestKind: "plan" };
+  if (tool !== "AskUserQuestion") return { requestKind: "tool" };
+  try { return { requestKind: "question", questions: questionInputs(input) }; } catch { return { requestKind: "tool" }; }
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** A stable v4-shaped UUID for a phone message id. */
 function uuidFrom(text: string): string {
@@ -1134,7 +1145,10 @@ export class Sessions {
     if (connection.permissions.has(req.requestId) || this.wasAnsweredBridge(id, req.requestId)) return;
     const { record, decision } = this.opts.permissions.request({ session: id, tool: req.tool, title: "", summary: summarize(req.tool, req.input, r.cwd), input: req.input }, connection.abort.signal);
     connection.permissions.set(req.requestId, { id: record.id, input: req.input, toolUseId: req.toolUseId });
-    this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, req.input, r.cwd), canAlways: false });
+    // Remote Control's can_use_tool carries the same input the host path gets, so a question or a
+    // plan is carded as one here too (a JSON tool approval cannot answer either, issue #82).
+    const card = bridgeRequest(req.tool, req.input);
+    this.append(id, { kind: "permission", id: record.id, tool: record.tool, title: "", summary: record.summary, input: permissionDetail(record.tool, req.input, r.cwd), canAlways: false, requestKind: card.requestKind, ...(card.questions ? { questions: card.questions } : {}) });
     this.setState(r, "waiting");
     void decision.then(answer => {
       // Shutdown expires every open request after its logs are closed; there is nobody left to read it.
@@ -1241,7 +1255,7 @@ export class Sessions {
     if (connection && pending) {
       const sending = this.bridgeDecisions.get(permId);
       if (sending) return sending;
-      const answer = this.decideBridge(id, permId, decision, pending[0], pending[1])
+      const answer = this.decideBridge(id, permId, decision, pending[0], pending[1], answers)
         .then(ok => { if (ok) this.clearPermissionAttention(id); return ok; })
         .finally(() => this.bridgeDecisions.delete(permId));
       this.bridgeDecisions.set(permId, answer);
@@ -1278,20 +1292,32 @@ export class Sessions {
   }
 
   /** The control_response the Remote Control side accepts for a permission answer (bridge-client.ts post). */
-  private bridgeDecisionPayload(requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }, decision: "allow" | "deny", message?: string): Record<string, unknown> {
-    return { type: "control_response", uuid: randomUUID(), response: { subtype: "success", request_id: requestId, response: { behavior: decision, updatedInput: pending.input, toolUseID: pending.toolUseId, ...(message ? { message } : {}) } } };
+  private bridgeDecisionPayload(requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }, decision: "allow" | "deny", message?: string, updatedInput: Record<string, unknown> = pending.input): Record<string, unknown> {
+    return { type: "control_response", uuid: randomUUID(), response: { subtype: "success", request_id: requestId, response: { behavior: decision, updatedInput, toolUseID: pending.toolUseId, ...(message ? { message } : {}) } } };
   }
 
-  private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }): Promise<boolean> {
+  private async decideBridge(id: string, permId: string, decision: "allow" | "allow_always" | "deny", requestId: string, pending: { input: Record<string, unknown>; toolUseId: string }, answers?: Record<string, string>): Promise<boolean> {
     const connection = this.bridges.get(id);
     if (!connection || connection.failed || this.opts.permissions.get(permId)?.state !== "pending") return false;
     if (decision === "allow_always") throw new Error("Remote Control supports allow once only.");
+    // The phone answers AskUserQuestion the way the host path does: every question filled in, and
+    // the answers merged into the tool input the Remote Control side is told to run (#82).
+    const record = this.opts.permissions.get(permId);
+    let questions: Question[] | null = null;
+    if (record?.tool === "AskUserQuestion" && decision !== "deny") {
+      try { questions = questionInputs(object(record.input) ?? {}); } catch { questions = null; }
+      if (questions) {
+        if (!answers || !questions.length || questions.some(q => typeof answers[q.question] !== "string" || !answers[q.question]!.trim())) throw new Error("Answer every question before submitting.");
+        if (Object.values(answers).some(value => typeof value !== "string")) throw new Error("Invalid question answers.");
+      }
+    }
+    const updatedInput = answers ? { ...pending.input, answers } : pending.input;
     try {
-      await this.bridge.post(connection.bridgeId, this.bridgeDecisionPayload(requestId, pending, decision, decision === "deny" ? "The user denied this from their phone." : undefined));
+      await this.bridge.post(connection.bridgeId, this.bridgeDecisionPayload(requestId, pending, decision, decision === "deny" ? "The user denied this from their phone." : undefined, updatedInput));
     } catch (error) { this.bridgeFailure(id, error); throw error; }
     connection.permissions.delete(requestId);
     this.rememberAnsweredBridge(id, requestId);
-    return this.opts.permissions.decide(permId, decision) !== null;
+    return this.opts.permissions.decide(permId, decision, undefined, answers) !== null;
   }
 
   /**
