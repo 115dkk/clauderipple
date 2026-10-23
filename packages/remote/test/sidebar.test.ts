@@ -144,3 +144,8 @@ test("a CLI id the app session has moved on from is not listed beside it", t => 
   const joined = f.sidebar.join([summary(id, "host"), summary(old, "host"), summary("phone", "host")], s => s);
   assert.deepEqual(joined.map(s => s.id), [id, "phone"]);
 });
+test("a /clear names no prior id: an app session's record that no app session holds is not listed", t => {
+  const f = fixture(t), cleared = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const joined = f.sidebar.join([{ ...summary(id, "host"), desktopBridge: true }, { ...summary(cleared, "host"), desktopBridge: true }, summary("phone", "host")], s => s);
+  assert.deepEqual(joined.map(s => s.id), [id, "phone"], "a phone session has no app row and stays");
+});
