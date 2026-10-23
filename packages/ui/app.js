@@ -2036,7 +2036,7 @@ async function removeProvider(name, provider) {
 
 function providerTabs(name, provider) {
   const tabs = [{ id: "overview", label: t("providers.overview") }];
-  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity")) tabs.push({ id: "accounts", label: t("providers.accounts") });
+  if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity") || isKeyProvider(provider)) tabs.push({ id: "accounts", label: t("providers.accounts") });
   tabs.push({ id: "models", label: t("providers.modelsTab") });
   return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
     const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
@@ -2228,14 +2228,19 @@ function anthropicAccountsPanel(name, provider) {
 function chatgptQuotaText(quota) {
   const limits = quota && quota.rate_limits;
   if (!limits) return "";
+  return quotaWindowsText([limits.primary, limits.secondary]);
+}
+/** The same line for any list of usage windows (`/api/limits` windows included). */
+function quotaWindowsText(windows) {
   const windowName = (w) => {
     const minutes = w.window_minutes;
     if (!minutes) return "";
+    if (minutes >= 28 * 24 * 60) return t("quota.windowMonth");
     if (minutes >= 7 * 24 * 60) return t("quota.windowWeek");
     if (minutes === 300) return t("quota.window5h");
     return t("quota.windowHours", { hours: Math.round(minutes / 60) });
   };
-  return [limits.primary, limits.secondary].filter((w) => w && typeof w.used_percent === "number").map((w) => {
+  return (windows || []).filter((w) => w && typeof w.used_percent === "number").map((w) => {
     const line = t("quota.line", { window: windowName(w), percent: Math.round(w.used_percent) }).trim();
     if (w.used_percent < 100) return line;
     const at = typeof w.reset_after_seconds === "number" ? Date.now() + w.reset_after_seconds * 1000 : typeof w.reset_at === "number" ? w.reset_at * 1000 : null;
@@ -2475,6 +2480,241 @@ function chatgptAccountsPanel(name) {
   return panel;
 }
 
+// ---- API-key accounts (openai-compatible / anthropic-compatible) ---------------------------------
+//
+// One key lives in `headers` alone. Two or more are `credentials`, each a full header set, with
+// `headers` kept equal to the first: probing, model discovery and the usage reader all read `headers`.
+
+/** The inline add/edit form that is open: `{ provider, id }`, `id` null while adding. */
+let keyForm = null;
+/** The last `/api/limits` answer, for the per-key usage line. */
+let keyLimits = null;
+
+function isKeyProvider(provider) { return Boolean(provider) && (provider.type === "openai-compatible" || provider.type === "anthropic-compatible"); }
+function isKeyHeader(header) { const lower = header.toLowerCase(); return lower === "authorization" || lower === "x-api-key"; }
+/** The header a provider takes its key in, decided the way openProviderForm decides it. */
+function keyHeaderKind(provider) {
+  const preset = provider.preset && presetById(provider.preset);
+  if (preset) return preset.authHeader === "authorization-bearer" ? "authorization-bearer" : "x-api-key";
+  return provider.type === "openai-compatible" || Object.keys(provider.headers || {}).some((key) => key.toLowerCase() === "authorization") ? "authorization-bearer" : "x-api-key";
+}
+function normalizeKey(value) { return String(value || "").replace(/^\s*bearer\s+/i, "").replace(/\s+/g, ""); }
+function keyOfHeaders(headers) {
+  const entries = Object.entries(headers || {});
+  const found = entries.find(([header]) => header.toLowerCase() === "authorization") || entries.find(([header]) => header.toLowerCase() === "x-api-key");
+  return found ? normalizeKey(found[1]) : "";
+}
+/** A key's header set: the provider's auth header plus the vendor extras of `base`. */
+function headersForKey(provider, key, base) {
+  const extras = Object.fromEntries(Object.entries(base || {}).filter(([header]) => !isKeyHeader(header)));
+  return keyHeaderKind(provider) === "authorization-bearer" ? { ...extras, authorization: `Bearer ${key}` } : { ...extras, "x-api-key": key };
+}
+/** Never the whole key: its first and last four characters, or nothing of a key too short to cut. */
+function maskKey(key) { return key.length > 8 ? `${key.slice(0, 4)}…${key.slice(-4)}` : "…"; }
+function keyPool(provider) {
+  if (Array.isArray(provider.credentials) && provider.credentials.length) return provider.credentials;
+  return provider.headers ? [{ id: "default", headers: provider.headers }] : [];
+}
+/** Back into the config shape: one key is `headers` only, two or more add `credentials`. */
+function writeKeyPool(provider, pool) {
+  if (pool.length > 1) {
+    provider.credentials = pool;
+    provider.headers = { ...pool[0].headers };
+    return;
+  }
+  delete provider.credentials;
+  if (pool[0]) provider.headers = { ...pool[0].headers };
+  else delete provider.headers;
+}
+/** A key left unnamed is called by its place in the list, in the language on screen; no name is saved for it. */
+function keyLabel(credential, index) { return credential.label || t("providers.keyDefaultLabel", { n: index + 1 }); }
+/** "k" and six random base36 characters; never derived from the key. */
+function newKeyId(pool) {
+  for (;;) {
+    const id = `k${Array.from(crypto.getRandomValues(new Uint8Array(6)), (byte) => (byte % 36).toString(36)).join("")}`;
+    if (!pool.some((credential) => credential.id === id)) return id;
+  }
+}
+
+function keyStateBadge(name, credential, single) {
+  // The router reports per-key state only for a pool; one key is the provider's own verdict.
+  if (single) {
+    const verdict = providerConnection(name);
+    return el("span", { class: `badge ${verdict.level}`, text: verdict.level === "ok" ? t("providers.keyStateReady") : verdict.text });
+  }
+  const entry = ((status && status.credentials && status.credentials[name]) || []).find((item) => item.id === credential.id);
+  if (!entry) return null;
+  if (entry.state === "quarantined") return el("span", { class: "badge bad", text: t("providers.keyStateRejected") });
+  if (entry.state === "cooling") return el("span", { class: "badge warn", text: t("providers.keyStateCooling", { minutes: Math.max(1, Math.ceil((entry.cooldownSeconds || 0) / 60)) }) });
+  return el("span", { class: "badge ok", text: t("providers.keyStateReady") });
+}
+
+function keyUsageText(name, index) {
+  const entry = ((keyLimits && keyLimits.providers) || []).find((item) => item.provider === name);
+  const account = entry && (entry.accounts || []).find((item) => item.account === index);
+  return account ? quotaWindowsText(account.windows) : "";
+}
+
+async function saveKeyPool(next) {
+  try {
+    await configRequest(next);
+    currentConfig = next;
+    keyForm = null;
+    renderProviderWorkspace();
+    toast(t("common.saved"));
+    void refreshHealth();
+    return true;
+  } catch (error) {
+    toast(t("common.saveFailed"), true, error.message);
+    return false;
+  }
+}
+
+/** Adds a key (`id` null) or changes one's label and key; an empty key field keeps the key. */
+async function saveKeyAccount(name, id, labelValue, keyValue, button) {
+  const key = normalizeKey(keyValue);
+  if (id === null && !key) { toast(t("providers.keyRequired"), true); return; }
+  button.disabled = true;
+  const next = clone(await latestConfig());
+  const target = next.providers[name];
+  if (!target) { button.disabled = false; return; }
+  const pool = clone(keyPool(target));
+  const index = id === null ? -1 : pool.findIndex((credential) => credential.id === id);
+  if (id !== null && index < 0) { button.disabled = false; return; }
+  if (key && pool.some((credential, at) => at !== index && keyOfHeaders(credential.headers) === key)) {
+    toast(t("providers.keyDuplicate"), true);
+    button.disabled = false;
+    return;
+  }
+  if (id === null) {
+    // The key that was there becomes the first entry under the id "default", so its health history stays.
+    const label = labelValue.trim();
+    pool.push({ id: newKeyId(pool), ...(label ? { label } : {}), headers: headersForKey(target, key, pool[0] && pool[0].headers) });
+  } else {
+    const entry = pool[index];
+    if (labelValue !== null) {
+      const label = labelValue.trim();
+      if (label) entry.label = label;
+      else delete entry.label;
+    }
+    if (key) entry.headers = headersForKey(target, key, entry.headers);
+  }
+  writeKeyPool(target, pool);
+  if (!(await saveKeyPool(next))) button.disabled = false;
+}
+
+async function removeKeyAccount(name, id, label) {
+  if (!confirm(t("providers.keyRemoveConfirm", { label }))) return;
+  const next = clone(await latestConfig());
+  const target = next.providers[name];
+  if (!target) return;
+  const before = keyPool(target);
+  const pool = clone(before).filter((credential) => credential.id !== id);
+  if (pool.length === before.length || pool.length < 1) return;
+  writeKeyPool(target, pool);
+  await saveKeyPool(next);
+}
+
+/** The inline form, in place of "Add" or of the row being edited. One key has no name to keep. */
+function keyAccountForm(name, credential, index, pool) {
+  const named = credential === null || pool.length > 1;
+  const labelInput = el("input", { maxlength: "60", placeholder: t("providers.keyAccountNamePlaceholder") });
+  const keyInput = el("input", { type: "password", autocomplete: "off", placeholder: credential ? t("providers.keyKeepCurrent") : t("providers.keyPlaceholder") });
+  // The page redraws under the form (a probe finishing, a save elsewhere), so what is typed lives in
+  // `keyForm` and comes back with the new inputs.
+  const draft = keyForm;
+  if (draft.label === undefined) draft.label = credential ? credential.label || "" : "";
+  labelInput.value = draft.label;
+  keyInput.value = draft.key || "";
+  labelInput.addEventListener("input", () => { draft.label = labelInput.value; });
+  keyInput.addEventListener("input", () => { draft.key = keyInput.value; });
+  labelInput.addEventListener("focus", () => { draft.focus = "label"; });
+  keyInput.addEventListener("focus", () => { draft.focus = "key"; });
+  const showKey = el("button", { class: "eye-button", type: "button", text: t("common.show") });
+  showKey.addEventListener("click", () => { const show = keyInput.type === "password"; keyInput.type = show ? "text" : "password"; showKey.textContent = show ? t("common.hide") : t("common.show"); });
+  const save = el("button", { class: "btn compact", type: "button", text: t("common.save") });
+  save.addEventListener("click", () => void saveKeyAccount(name, credential ? credential.id : null, named ? labelInput.value : null, keyInput.value, save));
+  const cancel = el("button", { class: "btn secondary compact", type: "button", text: t("common.cancel") });
+  cancel.addEventListener("click", () => { keyForm = null; renderProviderDetail(); });
+  for (const input of [labelInput, keyInput]) input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) save.click();
+    if (event.key === "Escape") cancel.click();
+  });
+  queueMicrotask(() => (named && draft.focus !== "key" ? labelInput : keyInput).focus());
+  return el("div", { class: "cell key-account-form" }, [
+    el("div", { class: "cell-text" }, [
+      named ? inputRow(t("providers.keyAccountName"), labelInput) : null,
+      el("div", { class: "form-field key-field" }, [el("span", { text: t("providers.keyAccountKey") }), el("div", { class: "key-control" }, [keyInput, showKey])]),
+      el("div", { class: "actions end" }, [cancel, save]),
+    ]),
+  ]);
+}
+
+function keyAccountRow(name, credential, index, pool) {
+  if (keyForm && keyForm.provider === name && keyForm.id === credential.id) return keyAccountForm(name, credential, index, pool);
+  const single = pool.length === 1;
+  const label = keyLabel(credential, index);
+  const key = keyOfHeaders(credential.headers);
+  const usage = keyUsageText(name, index);
+  const edit = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
+  edit.addEventListener("click", () => { keyForm = { provider: name, id: credential.id }; renderProviderDetail(); });
+  // The last key goes with the provider itself (개요 → 프로바이더 삭제), so it has no 삭제 here.
+  const remove = single ? null : el("button", { class: "btn danger compact", type: "button", text: t("common.remove") });
+  if (remove) remove.addEventListener("click", () => void removeKeyAccount(name, credential.id, label));
+  return el("article", { class: "cell account-card" }, [
+    el("div", { class: "cell-text account-card-copy" }, [
+      el("strong", { text: label }),
+      key ? el("span", { class: "small mono", text: maskKey(key) }) : null,
+      usage ? el("p", { class: "small account-quota", text: usage }) : null,
+      el("div", { class: "account-card-actions" }, [edit, remove]),
+    ]),
+    el("div", { class: "account-card-badges" }, [keyStateBadge(name, credential, single)]),
+  ]);
+}
+
+function renderKeyAccountRows(target, name) {
+  const provider = currentConfig && currentConfig.providers && currentConfig.providers[name];
+  if (!provider) return;
+  const pool = keyPool(provider);
+  const rows = pool.map((credential, index) => keyAccountRow(name, credential, index, pool));
+  target.replaceChildren(...(rows.length ? rows : [el("div", { class: "account-empty", text: t("providers.keyRequired") })]));
+  const countNode = $("#key-account-count");
+  if (countNode) countNode.textContent = t("providers.chatgptAccountCount", { count: pool.length });
+}
+
+async function refreshKeyAccountPanel(name) {
+  const generation = providerDetailGeneration;
+  // Status too: a key saved a moment ago has no state in the copy the five-second poll last brought.
+  const [fresh, limits] = await Promise.allSettled([api("/api/status"), api("/api/limits")]);
+  if (fresh.status === "fulfilled") status = fresh.value;
+  keyLimits = limits.status === "fulfilled" ? limits.value : null;
+  if (generation !== providerDetailGeneration || selectedProviderName !== name || providerDetailTab !== "accounts") return;
+  // A row being edited is left alone, so the usage arriving does not wipe what is being typed.
+  if (keyForm && keyForm.provider === name && keyForm.id !== null) return;
+  const target = $("#key-account-rows");
+  if (target) renderKeyAccountRows(target, name);
+}
+
+function keyAccountsPanel(name) {
+  const rows = el("div", { id: "key-account-rows", class: "group account-card-list" });
+  const adding = keyForm && keyForm.provider === name && keyForm.id === null;
+  const add = el("button", { class: "cell-button", type: "button", text: t("providers.addKeyAccount") });
+  add.addEventListener("click", () => { keyForm = { provider: name, id: null }; renderProviderDetail(); });
+  const panel = el("div", { class: "provider-panel" }, [
+    el("section", { class: "section" }, [
+      el("div", { class: "section-head" }, [el("h3", { class: "section-title", text: t("providers.keyAccountsTitle", { name }) }), el("span", { id: "key-account-count", class: "small" })]),
+      rows,
+      el("div", { class: "group stacked-add" }, [adding ? keyAccountForm(name, null, -1, []) : add]),
+      el("p", { class: "group-footer", text: t("providers.keyAccountsHelp") }),
+    ]),
+  ]);
+  queueMicrotask(() => {
+    renderKeyAccountRows(rows, name);
+    void refreshKeyAccountPanel(name);
+  });
+  return panel;
+}
+
 function renderProviderDetail() {
   const detail = $("#provider-detail");
   providerDetailGeneration += 1;
@@ -2498,6 +2738,7 @@ function renderProviderDetail() {
   if (providerDetailTab === "accounts" && provider.type === "anthropic" && provider.auth === "claude-code") content = anthropicAccountsPanel(name, provider);
   else if (providerDetailTab === "accounts" && provider.type === "chatgpt") content = chatgptAccountsPanel(name);
   else if (providerDetailTab === "accounts" && provider.type === "google" && provider.auth === "antigravity") content = googleAccountsPanel(name);
+  else if (providerDetailTab === "accounts" && isKeyProvider(provider)) content = keyAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
   detail.replaceChildren(back, header, providerTabs(name, provider), content, el("div", { class: "group provider-remove" }, [remove]));
@@ -3343,6 +3584,10 @@ function openProviderForm(options) {
       : ["type", "url", "identity", "limits", "instructionsAppend", "preset", "sessionHeader", "wire", "caps", "headers", "models"]);
     const kept = saved ? Object.fromEntries(Object.entries(saved).filter(([key]) => !formKeys.has(key))) : {};
     next.providers[providerName] = { ...kept, ...provider };
+    // A pooled provider's first key is `headers` and `credentials[0]` at once (the 계정 tab), so a
+    // key changed here must change both, or the pool keeps sending the old one.
+    const pooled = next.providers[providerName].credentials;
+    if (Array.isArray(pooled) && pooled.length && provider.headers) pooled[0] = { ...pooled[0], headers: { ...provider.headers } };
     // Read after `next.providers` has been updated, so an unticked model is already undeclared here
     // and falls out on its own, and a renamed provider answers to its new name.
     const existingSelections = pickerSelectionsExcept(next, providerName);
