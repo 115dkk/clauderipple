@@ -60,7 +60,7 @@ function live(agent: AgentRec): boolean {
 
 /** A title without the model tag the spawn put in front of it: the card names the model itself. */
 function titleOf(agent: AgentRec): string {
-  return bareTitle(agent.description)
+  return bareTitle(agent.description ?? '').trim() || agent.id
 }
 
 /** A model id without its `@effort`. */
@@ -73,7 +73,7 @@ export function modelOf(agent: AgentRec, lang: Frame['lang']): string {
   // A hosted id's vendor path ("deepseek-ai/") goes, as in the agent's title (workers.ts titleName).
   if (agent.answeredBy) return modelName(base(agent.answeredBy)).replace(/^.*\//, '')
   if (agent.model && agent.model !== 'inherit') return modelName(base(agent.model)).replace(/^.*\//, '')
-  return agent.pick ? targetLabel(agent.pick.target, lang) : agent.type
+  return agent.pick ? targetLabel(agent.pick.target, lang) : agent.type ?? ''
 }
 
 /** The effort it ran at: what its last step was sent at, else the pick's, else its model id's `@effort`. */

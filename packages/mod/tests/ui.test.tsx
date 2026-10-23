@@ -19,6 +19,8 @@ import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
+import { pic } from '../hooks/ui/kit'
+import { SVG_MAX_PX, svg } from '../hooks/ui/art'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
@@ -102,7 +104,7 @@ function drawPane(on: On, id: string, draw: Draw) {
   on('ui.render', { component: 'Pane', requestId: id }, ($, e) => draw($.ui.resolve(e), e.surface) as RenderElement)
 }
 
-function mount($: Engine, id: string, surface: (typeof SURFACES)[number], columns = 140) {
+function mount<S extends Surface>($: Engine, id: string, surface: S, columns = 140) {
   return $.ui.mount({ plugin: PRESSER, surface, component: 'Pane', requestId: id, props: paneProps(columns), viewport: { columns, rows: 40 } })
 }
 
@@ -520,6 +522,33 @@ test('every skin draws the band, the quick settings and a card on the desktop; f
   }
 })
 
+test('band, settings and log pictures stay within the SVG limit on every surface and theme', async ($, on) => {
+  const cases: { id: string; columns: number }[] = []
+  const logRows: StatusRequest[] = Array.from({ length: 40 }, (_, i) => ({ at: new Date(NOW - i * 1000).toISOString(), source: 'gpt-6.1-sol', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 100 }))
+  for (const skin of SKINS) for (const appearance of ['light', 'dark'] as const) for (const columns of [40, 600]) {
+    const frame = (surface: Surface): Frame => ({ ...frameOf(surface, columns, 12, skin), appearance })
+    const variants: [string, Draw][] = [
+      ['band', (el, surface) => renderBand(el, frame(surface), { ...DASH, effortMenu: true }, BAND_ACTIONS)],
+      ['settings', (el, surface) => renderSettings(el, frame(surface), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
+      ['log', (el, surface) => renderLog(el, frame(surface), { rows: logRows, mineOnly: false }, { toggleScope: () => undefined })],
+    ]
+    for (const [name, draw] of variants) {
+      const id = [name, skin, appearance, columns].join('-')
+      drawPane(on, id, draw)
+      cases.push({ id, columns })
+    }
+  }
+  for (const { id, columns } of cases) for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await mount($, id, surface, columns)
+    expect((await ui.findAll({ type: 'Text' })).length > 0, id + ' ' + surface).toBe(true)
+    for (const picture of await ui.findAll({ type: 'Svg' })) {
+      expect(Number(picture.props.width) <= SVG_MAX_PX, id + ' width').toBe(true)
+      expect(Number(picture.props.height) <= SVG_MAX_PX, id + ' height').toBe(true)
+    }
+    await ui.unmount()
+  }
+})
+
 test('Jev key and Test row appear only for TypeSafe Jev with no known key', async ($, on) => {
   const sources: JevState['source'][] = [null, 'zen', 'env', 'file', 'pasted']
   for (const judge of ['haiku', 'jev', 'model'] as const) {
@@ -633,6 +662,71 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
     expect(await empty.find({ type: 'Text', text: 'No agents yet' }), "empty { type: 'Text', text: 'No agents yet' } " + surface).toBeDefined()
   }
   expect(calls).toEqual([])
+})
+
+test('the Agents pane draws forty agents at once, and a record missing its title or type', async ($, on) => {
+  // 2026-10-23: a session of dozens of workers left the pane on the engine's "Nothing to show yet":
+  // the list's capsule asked for a sea taller than the 4096 px an Svg may be, and the engine refused
+  // the whole tree. The store keeps the latest 40.
+  const forty: AgentRec[] = Array.from({ length: 40 }, (_, i): AgentRec => ({ ...AGENTS[0]!, id: 'w' + i, description: 'cheongju:송수아 ' + i, ...(i < 31 ? {} : { state: 'done', endedAt: NOW - i * 1000, now: undefined, toolSince: undefined }) }))
+  // A record as an older mod or the engine may leave it: no description, no type, no model.
+  const bare: AgentRec = { id: 'bare', state: 'done', startedAt: NOW - 5000, endedAt: NOW - 1000, cost: 0 }
+  const cases: { id: string; columns: number }[] = []
+  for (const skin of SKINS) for (const appearance of ['light', 'dark'] as const) for (const columns of [40, 64]) {
+    const id = [skin, appearance, columns].join('-')
+    const frame = (surface: Surface) => ({ ...frameOf(surface, columns, 12, skin), appearance })
+    drawPane(on, 'forty-' + id, (el, surface) => renderAgents(el, frame(surface), { agents: forty, now: NOW, showDone: true }, AGENT_NOOP))
+    drawPane(on, 'bare-' + id, (el, surface) => renderAgents(el, frame(surface), { agents: [AGENTS[0]!, bare], now: NOW, showDone: true }, AGENT_NOOP))
+    cases.push({ id, columns })
+  }
+  for (const { id, columns } of cases) {
+    for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+      const ui = await mount($, 'forty-' + id, surface, columns)
+      for (const i of [0, 30, 31, 39]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
+      const pictures = await ui.findAll({ type: 'Svg' })
+      if (surface === 'terminal' || surface === 'mobile') expect(pictures).toHaveLength(0)
+      else {
+        const tiles = pictures.filter(p => String(p.props.source).includes('viewBox="0 4096 '))
+        expect(tiles.length > 0, surface + ' ' + id + ' continuation').toBe(true)
+        for (const picture of pictures) {
+          expect(Number(picture.props.width) <= SVG_MAX_PX).toBe(true)
+          expect(Number(picture.props.height) <= SVG_MAX_PX).toBe(true)
+        }
+      }
+      await ui.unmount()
+      const one = await mount($, 'bare-' + id, surface, columns)
+      expect(await one.find({ type: 'Text', text: 'Port the request log renderer' }), surface + ' ' + id).toBeDefined()
+      expect(await one.find({ type: 'Text', text: 'bare' }), surface + ' ' + id).toBeDefined()
+      await one.unmount()
+    }
+  }
+})
+
+test('pictures tile at the SVG side limit without rescaling or restarting their artwork', async ($, on) => {
+  for (const size of [4095, 4096, 4097, 8200]) {
+    const source = svg(size, size, '<rect width="' + size + '" height="' + size + '" fill="#262523"/>')
+    drawPane(on, 'tiles-' + size, el => pic(el, 'tiles', source, 'whole', size, size))
+  }
+  for (const size of [4095, 4096, 4097, 8200]) {
+    const source = svg(size, size, '<rect width="' + size + '" height="' + size + '" fill="#262523"/>')
+    for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
+      const ui = await mount($, 'tiles-' + size, surface)
+      const pictures = await ui.findAll({ type: 'Svg' })
+      const across = Math.ceil(size / SVG_MAX_PX)
+      expect(pictures).toHaveLength(across * across)
+      for (const [i, picture] of pictures.entries()) {
+        const x = (i % across) * SVG_MAX_PX
+        const y = Math.floor(i / across) * SVG_MAX_PX
+        const width = Math.min(SVG_MAX_PX, size - x)
+        const height = Math.min(SVG_MAX_PX, size - y)
+        expect(picture.props.width).toBe(width)
+        expect(picture.props.height).toBe(height)
+        expect(String(picture.props.source)).toContain('viewBox="' + [x, y, width, height].join(' ') + '"')
+        expect(String(picture.props.source).slice(String(picture.props.source).indexOf('><style>'))).toBe(source.slice(source.indexOf('><style>')))
+      }
+      await ui.unmount()
+    }
+  }
 })
 
 test('the Agents pane shows the latest finished agents and the rest behind more; a card opens its conversation', async ($, on) => {

@@ -257,9 +257,10 @@ export type AgentState = 'running' | 'waiting' | 'done' | 'failed'
 
 export type AgentRec = {
   id: string
-  description: string
-  /** The agent type that ran. */
-  type: string
+  /** Workflow agents and records from older mods may have no title or type. */
+  description?: string
+  /** The agent type that ran, when recorded. */
+  type?: string
   model?: string
   pick?: WorkerPick
   state: AgentState
