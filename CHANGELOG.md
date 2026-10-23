@@ -1,5 +1,104 @@
 # Changelog
 
+## 0.12.13 — 2026-10-23
+
+### Added
+
+- **A provider can hold more than one API key.** OpenAI-compatible providers such as OpenCode Go now
+  rotate keys the way Anthropic-compatible ones do: a conversation stays on its key while it works,
+  so its prompt cache holds, and a 429, 402 or rejected key is retried on the next one before
+  anything reaches the client. The dashboard gains an accounts tab on these providers to add a key
+  with a name, see each key's state and OpenCode Go usage, and rename, replace or remove it. Keys
+  are shown masked.
+- **Every account pool takes the same controls.** Claude, ChatGPT, Google and API-key accounts can
+  each be made first, paused or resumed, have their cooldown cleared, and show which one a new
+  conversation gets now. A conversation already on an account stays there, so its prompt cache
+  stays. The dashboard offers those controls on every panel, and a first-choice change on API keys
+  clears the others in the same save.
+- **The dashboard knows which Claude account is signed in.** It asks Claude once per token and marks
+  a stored copy of the same person, so someone with one account no longer sees two, or a stale row
+  asking to sign in again. Providers also take a display name now: renaming one keeps its key and
+  changes only the label shown in the list, status, mappings and logs.
+- **A pairing QR opens the app instead of a browser.** The relay can answer the app-link files that
+  let the phone claim its link, once it is deployed with the Play signing key's fingerprint
+  configured. Until then the Android file answers 404, so a phone does not cache "no app".
+
+### Fixed
+
+- **Windows: a phone session hands off again** (#83). Windows had no desktop handoff runner, so a
+  session driven from the phone stayed pending after its writer exited. The handoff now uses the OS
+  headless console and waits for the real SDK process before opening another writer, stores the
+  error, and retries at most three later idle turns. `--desktop` is supported on x64 Windows only.
+- **Gemini 4 Argon sends the thinking level you ask for** (#85). The Google translator recognized
+  only Gemini 3 and 2.5, so `@high` was silently dropped on both AI Studio and OpenCode Go.
+- **Google's monthly spending cap counts as billing exhaustion** (#85). A project past its cap
+  stayed usable, so each new delegation picked the same exhausted API. A plain rate limit, a bare
+  `RESOURCE_EXHAUSTED` and a relay's own failure are still not billing.
+- **A provider named in Korean keeps the worker you named** (#85). A model or provider named in
+  Korean was not recognized, and naming OpenCode could not tell its worker from the Google API
+  worker. The generated agent's provider is read in both the spawn and marker checks, a source name
+  is honored, and a model-only request stays valid on either source.
+- **A GPT model's context window is the one Codex runs with.** The router, the dashboard picker and
+  `/api/context-windows` now share Codex's own catalogue: 6.1 Sol is 475000, and a window Codex
+  reports without a percentage takes Codex's 95%. The dashboard shows such a window read-only with a
+  note, since an edit there would be a number the router ignores.
+- **Two dashboard windows no longer overwrite each other.** Nine saving defects from today's review
+  are fixed: a provider saved without a new key keeps its auth header and first key, a model map
+  keeps each slot's fallbacks and context window, and a save that conflicts re-applies only its own
+  changes onto the newer config. A change made while a save is in flight is saved after it, late
+  model lists no longer undo ticks, and removing a provider drops only its own picks. The admin API
+  also requires a loopback `Host` on every request, so a DNS-rebinding page cannot read your keys.
+- **Translated routes deliver tool calls, images and documents intact.** Ten wire defects fixed:
+  parallel tool calls are tracked per call instead of all landing on the last, calls whose arguments
+  arrive whole reach Claude Code with their input instead of `{}`, interleaved Chat Completions
+  calls no longer break their JSON, and Gemini user text, attachments and images in tool results are
+  passed. Text and base64 documents survive every translated wire, a token-limit ending with a tool
+  call reports `max_tokens`, and schema normalisation no longer strips `pattern`. A later turn of a
+  translated worker is refused here rather than sent on as a 404, and the mod draws it as one quiet
+  line.
+- **A retry, a continue and a relay's refusal are judged by what happened.** A credential retry
+  after a 403 resets its error state, so the second answer is not wrapped in the first error. A
+  continue after a vendor's own message id is refused and resent stateless instead of drawing a
+  404 every turn, a marker naming a target reachable only by a `direct` rule applies that target's
+  rules, and a relay's transient 402 is read from its body rather than taken for billing. A
+  replaced key drops the old key's quarantine, and stickiness is kept per provider and
+  conversation, so one turn elsewhere no longer costs the cache.
+- **Install and the CLI no longer break your setup.** `--help` anywhere prints usage and runs
+  nothing (before, `uninstall --purge --help` ran the uninstall), CA trust is checked by
+  fingerprint so a reinstalled certificate is trusted, and uninstall takes off the Desktop proxy,
+  picker flag, Codex provider and CA trust each on its own. Install and update keep `direct on`,
+  direct off restores the port configured now, and an update fails when its download fails.
+  Windows launchers handle a non-ASCII folder. Generated worker agent files also come back after
+  `uninstall --purge` and a reinstall instead of counting as hand-written.
+- **A phone session keeps its messages.** A queued message goes as soon as the registry says the
+  session is idle, Stop holds the queue before interrupting, and a message taken back keeps its
+  attachments. Messages the SDK already read survive a restart, an archived session reaches the
+  phone's archive, a plan approval that loses to cancellation rolls the permission mode back, and a
+  bridged session picks up a model change. The host also survives a second instance that fails to
+  bind and one unreadable session log.
+- **macOS starts the tray at login.** `Open at Login` registered Electron.app itself, so every login
+  opened a bare Electron window and no tray. A LaunchAgent now runs the router's own ClaudeRipple
+  bundle, the old login item is removed and an existing start-at-login moves over, and the
+  background bundle no longer changes on each install, so macOS stops announcing a new item.
+  Uninstall removes it.
+- **The mods' Agents pane draws every agent.** A 31-agent Workflow asked for a picture taller than
+  the 4096 px an Svg may be, and the engine refused the whole tree. A picture past the limit is now
+  tiled, a record missing a description, type or model renders by its id, and a judge pick without
+  a label no longer throws. If drawing still fails, the pane shows a plain list of the last 40
+  agents with the reason instead of the engine's blank page.
+- **A Workflow agent shows the model it actually runs on.** One Workflow ran 31 Sol workers while
+  the task list said Opus 5.5 for all of them, and every later turn lost the marker it was routed
+  by. The spawn hook now gives such an agent the worker's model, so it shows as Sol and routes by
+  model name each turn; `ripple:auto`'s Workflow note says the model goes in `agentType`.
+- **A model named while a turn runs counts, and the notice waits.** A prompt typed mid-turn is
+  absorbed into the running turn, so a model named in it was read as unnamed and the marker was
+  dropped. The mod now keeps the last two submitted prompts. The "not the model you named" notice
+  also used to appear before the tier picked, sometimes naming the very model that then ran; it now
+  waits for the pick and stays silent when they match.
+- **Small labels say what they do.** The model picker's effort tag read as a button that sets the
+  effort, and it now says the model accepts a reasoning-effort setting. The Google accounts button
+  says it adds an account, as the other panels do.
+
 ## 0.12.12 — 2026-10-23
 
 ### Fixed
