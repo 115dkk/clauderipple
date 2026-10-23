@@ -19,6 +19,7 @@ export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple picks the 
   'After the tier, add ui when the work is screens, visual design or UX, or backend when it is server, API or database work, as in [[ripple: standard ui]]; add nothing for anything else. ' +
   'Name a model only when the user named it in this conversation: [[ripple: opus@high]] for a Claude model (opus, sonnet, haiku), or [[ripple: <worker agent name>@<effort>]]. ' +
   'It then runs as named, past every ClaudeRipple rule. A model the user did not name is ignored and the task goes by tier, and so is calling a worker agent directly or giving general-purpose a model; never start a model another way, such as claude -p. ' +
+  'In a Workflow script ClaudeRipple does not see agent(): give a named model as agentType: \'<worker agent name>\', not this agent with a marker, so the task list shows that model and every turn goes to it. ' +
   'A brief states the scope, what must not be touched, the done criteria and how to verify them. Read the report for whether it did what was asked before using it. ' +
   'Continue a worker with SendMessage only within 5 minutes of its last reply; later its cache has lapsed, so start a new one with a summary of what is done and what is left.'
 
