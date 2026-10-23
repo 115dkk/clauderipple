@@ -266,6 +266,49 @@ test("worker text and images use the existing session-scoped blob operation for 
   }
 });
 
+test("session file blobs use capped chunks, reject foreign sessions and never accept a path as an id", async t => {
+  const f = await fixture(t);
+  const id = await f.create(), foreign = await f.create("foreign-files");
+  const { sessionFiles } = await import("../src/images.ts");
+  const bytes = Buffer.from("한글 파일 내용\n".repeat(12_000));
+  fs.writeFileSync(path.join(f.cwd, "보고서.txt"), bytes);
+  const log = f.sessions.log(id);
+  const [file] = sessionFiles(["보고서.txt"], { cwd: f.cwd }, value => log.image(value));
+  assert.ok(file?.blob);
+  log.append({ kind: "assistant", msg: "delivered-file", model: "test", text: "완료", tools: [{ id: "files", name: "SendUserFile", summary: "보고서.txt", files: [file] }] });
+  const peer = await f.auth();
+  peer.send({ t: "attach", session: id });
+  const events = await peer.take("events");
+  const delivered = events.msg.events.find(event => event.kind === "assistant" && event.msg === "delivered-file");
+  assert.ok(delivered?.kind === "assistant");
+  assert.deepEqual(delivered.tools[0]?.files, [file]);
+  assert.ok(!JSON.stringify(delivered).includes(f.cwd));
+  fs.unlinkSync(path.join(f.cwd, "보고서.txt"));
+  let offset: number | null = 0, combined = "", chunks = 0;
+  while (offset !== null) {
+    const reqId = `file-${++chunks}`;
+    peer.send({ t: "req", reqId, op: { op: "blob", session: id, id: file.blob, offset } });
+    const frame = await peer.take("res", msg => msg.reqId === reqId);
+    assert.ok(frame.msg.ok && frame.bytes <= FRAME_CAP);
+    const chunk = frame.msg.data as BlobChunk;
+    combined += chunk.text; offset = chunk.next;
+  }
+  assert.ok(chunks > 1);
+  assert.deepEqual(Buffer.from(combined, "base64"), bytes);
+  const requests = [
+    { op: "blob" as const, session: foreign, id: file.blob },
+    { op: "blob" as const, session: id, id: path.join(f.cwd, "보고서.txt") },
+    { op: "blob" as const, session: id, id: file.blob, offset: -1 },
+    { op: "blob" as const, session: id, id: file.blob, offset: 0.5 },
+    { op: "blob" as const, session: id, id: file.blob, offset: combined.length + 1 },
+  ];
+  for (const [index, op] of requests.entries()) {
+    const reqId = `reject-file-${index}`;
+    peer.send({ t: "req", reqId, op });
+    assert.equal((await peer.take("res", msg => msg.reqId === reqId)).msg.ok, false);
+  }
+});
+
 test("set_mode returns correlated success/error and broadcasts the mode event", async t => {
   const f = await fixture(t);
   const id = await f.create();
@@ -439,7 +482,7 @@ test("hello denies and closes a wrong token, and returns ready with sessions for
   right.send({ t: "hello", token, clientId: "right-client" });
   const ready = (await right.take("ready")).msg;
   // `queue`: this host keeps what the phone queues, so the app hands it over instead of holding it.
-  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true, queue: true });
+  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true, queue: true, capabilities: { sessionFiles: true } });
   assert.deepEqual(ready.sessions, f.sessions.list());
   assert.equal(ready.sessions[0]?.id, id);
 });

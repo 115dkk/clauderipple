@@ -9,8 +9,8 @@ import path from "node:path";
 import { EventLog } from "./eventlog.ts";
 import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
-import { attachmentContent, messageContent, sendUserFileImages, type InputBlock } from "./images.ts";
-import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SendBehavior } from "./protocol.ts";
+import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
+import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type SessionFile, type SendBehavior } from "./protocol.ts";
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
@@ -73,7 +73,7 @@ interface Live {
   buffer: { msg: string; text: string; thinking?: { block: number; text: string } } | null;
   flushTimer: ReturnType<typeof setTimeout> | null;
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
-  current: { msg: string; text: string; images?: ImagePart[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
+  current: { msg: string; text: string; images?: ImagePart[]; files?: SessionFile[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
   /** Task/Agent tool ids → their subagent while it runs */
   subs: Map<string, { description: string; model: string | null; steps: number }>;
   turnStart: number;
@@ -922,13 +922,6 @@ export class Sessions {
     return this.desktop?.workerBlob(desktopId, blob) ?? this.sendQueue.editingBlob(id, blob);
   }
 
-  private attachmentData(id: string, blob: string): string | null {
-    const data = this.blob(id, blob);
-    // A draft can outlive a desktop rebase; copy it into this epoch before releasing its files.
-    if (data !== null) this.log(id).image(data);
-    return data;
-  }
-
   recentSources(): { path: string; lastUsed: number; model: string }[] {
     return Array.from(this.records.values()).map((r) => ({ path: r.cwd, lastUsed: r.updatedAt, model: r.model }));
   }
@@ -1241,7 +1234,7 @@ export class Sessions {
     id = r.id;
     if (this.seen(id, clientMsgId)) return id;
     this.personMessage(id);
-    const converted = attachmentContent(r.cwd, text, attachments, blob => this.attachmentData(id, blob));
+    const converted = attachmentContent(r.cwd, text, attachments, blob => this.blob(id, blob), data => this.log(id).image(data));
     this.opts.permissions.denySession(id, "superseded by a new message from the user");
     this.append(id, { kind: "user", text, clientMsgId, images: converted.images });
     this.rememberClientMsgId(id, clientMsgId);
@@ -1267,7 +1260,7 @@ export class Sessions {
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId, true);
     // Rebase deletes this log's blobs too: validate and retain the bytes before it can run.
-    const converted = attachmentContent(r.cwd, text, attachments, blob => this.attachmentData(id, blob));
+    const converted = attachmentContent(r.cwd, text, attachments, blob => this.blob(id, blob), data => this.log(id).image(data));
     if (Array.isArray(converted.content)) {
       const blocks = converted.content;
       const images = blocks.filter(block => block.type === "image");
@@ -1902,13 +1895,16 @@ export class Sessions {
           const streamedIndex = cur.thinkingBlocks[cur.nextThinkingBlock++] ?? index;
           this.append(r.id, { kind: "thinking", msg: id, block: streamedIndex, text: block.thinking });
         });
-        const converted = messageContent(message.content, data => this.log(r.id).image(data));
+        const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd });
         if (converted.text) cur.text += (cur.text ? "\n\n" : "") + converted.text;
-        cur.images = [...(cur.images ?? []), ...converted.images, ...sendUserFileImages(message.content, r.cwd, data => this.log(r.id).image(data))];
+        cur.images = [...(cur.images ?? []), ...converted.images];
+        cur.files = [...(cur.files ?? []), ...converted.files];
         for (const b of message.content ?? []) {
           if (b.type === "tool_use" && b.id && b.name) {
             const input = b.input ?? {};
-            cur.tools.push({ id: b.id, name: b.name, summary: summarize(b.name, input, r.cwd), input: JSON.stringify(input, null, 2) });
+            const tool: ToolCall = { id: b.id, name: b.name, summary: summarize(b.name, input, r.cwd), input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, { cwd: r.cwd }, data => this.log(r.id).image(data)) };
+            cur.tools.push(tool);
+            cur.images.push(...fileImages(tool.files ?? []));
             if (b.name === "Task" || b.name === "Agent") {
               const sub = { description: summarize(b.name, input, r.cwd), model: typeof input.model === "string" ? input.model : null, steps: 0 };
               live.subs.set(b.id, sub);
@@ -1919,22 +1915,22 @@ export class Sessions {
         if (message.model) cur.model = message.model;
         // Thinking-only SDK block completions must not reserve the answer's position
         // before subsequent thinking blocks have arrived.
-        if (cur.text || cur.images.length || cur.tools.length) this.append(r.id, { kind: "assistant", msg: cur.msg, model: cur.model, text: cur.text, images: cur.images, tools: cur.tools });
+        if (cur.text || cur.images.length || cur.files.length || cur.tools.length) this.append(r.id, { kind: "assistant", msg: cur.msg, model: cur.model, text: cur.text, images: cur.images, files: cur.files, tools: cur.tools });
         return;
       }
       case "user": {
         const message = msg.message as { content?: unknown } | undefined;
         const blocks = Array.isArray(message?.content) ? (message!.content as { type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[]) : [];
-        const converted = messageContent(message?.content, data => this.log(r.id).image(data));
-        // SDK user echoes normally already have a phone event; retain image-bearing echoes only.
-        if (converted.images.length) {
+        const converted = messageContent(message?.content, data => this.log(r.id).image(data), { cwd: r.cwd });
+        // SDK user echoes normally already have a phone event; retain attachment-bearing echoes only.
+        if (converted.images.length || converted.files.length) {
           const body: EventBody = { kind: "user", ...converted, clientMsgId: typeof msg.uuid === "string" ? msg.uuid : randomUUID() };
           if (parent) this.subLog(r.id, `sub-${parent}`)?.append(body);
           else this.append(r.id, body);
         }
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
-          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data)) };
+          const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd }) };
           if (parent) { this.subLog(r.id, `sub-${parent}`)?.append(body); continue; }
           this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);
@@ -2053,9 +2049,9 @@ export class Sessions {
     (message.content ?? []).forEach((block, index) => {
       if (block.type === "thinking" && typeof block.thinking === "string") log.append({ kind: "thinking", msg: message.id ?? parent, block: index, text: block.thinking });
     });
-    const converted = messageContent(message.content, data => this.log(r.id).image(data));
-    converted.images.push(...sendUserFileImages(message.content, r.cwd, data => this.log(r.id).image(data)));
-    const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b) => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2) }));
+    const converted = messageContent(message.content, data => this.log(r.id).image(data), { cwd: r.cwd });
+    const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd }, data => log.image(data)) }));
+    converted.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
     const sub = live.subs.get(parent);
     if (!sub) return;

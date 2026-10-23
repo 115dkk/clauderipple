@@ -1,12 +1,12 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
-import type { PermissionContent, Effort, Figures, ImagePart, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
+import type { PermissionContent, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
 
-export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[] } }
+export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
 
 export type Item =
-  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; at: number; queued?: "pending" | "sending" }
-  | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
+  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending" }
+  | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
   | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; reason?: string; at: number })
@@ -58,7 +58,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         seenUser.add(e.clientMsgId);
         // The app counts "working for" from the person's message; Mac sessions have no turn event to say so.
         turnStartedAt = e.at;
-        put({ type: "user", key: `u${e.clientMsgId}`, ver: `u${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), at: e.at });
+        put({ type: "user", key: `u${e.clientMsgId}`, ver: `u${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}), at: e.at });
         break;
       case "turn":
         model = e.model; effort = e.effort; turnStartedAt = e.at;
@@ -82,7 +82,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         const previous = byKey.has(key) ? items[byKey.get(key)!] : undefined;
         const results = new Map(previous?.type === "assistant" ? previous.tools.map(tc => [tc.id, tc.result]) : []);
         const tools: ToolView[] = e.tools.map(tc => ({ ...tc, ...(results.get(tc.id) ? { result: results.get(tc.id)! } : {}) }));
-        put({ type: "assistant", key, ver: `f${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), streaming: false, tools, model: e.model, at: e.at });
+        put({ type: "assistant", key, ver: `f${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}), streaming: false, tools, model: e.model, at: e.at });
         const idx = byKey.get(key)!;
         tools.forEach((tc, i) => toolOwner.set(tc.id, { item: idx, tool: i }));
         break;
@@ -92,7 +92,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         const item = owner ? items[owner.item] : undefined;
         if (owner && item?.type === "assistant") {
           const tools = item.tools.slice();
-          tools[owner.tool] = { ...tools[owner.tool]!, result: { ok: e.ok, text: e.text, ...(e.images ? { images: e.images } : {}) } };
+          tools[owner.tool] = { ...tools[owner.tool]!, result: { ok: e.ok, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}) } };
           items[owner.item] = { ...item, tools, ver: `${item.ver}r${e.seq}` };
         }
         break;
@@ -209,7 +209,7 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
       continue;
     }
     if (item.type === "assistant") {
-      if (typeof item.text !== "string" || item.text.trim() || item.images?.length || item.streaming) {
+      if (typeof item.text !== "string" || item.text.trim() || item.images?.length || item.files?.length || item.streaming) {
         group = null;
         result.push({ ...item, tools: [] });
       }

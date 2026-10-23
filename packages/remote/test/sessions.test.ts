@@ -271,7 +271,7 @@ test("phone images reach SDK blocks and files are written under cwd", async t =>
 
 test("a live SDK SendUserFile image joins the assistant event through the blob transport", async t => {
   const f = fixture(t, { sendFile: "shot.png" });
-  const bytes = Buffer.from("live shot bytes");
+  const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   fs.writeFileSync(path.join(f.cwd, "shot.png"), bytes);
   const id = await f.create();
   await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
@@ -282,6 +282,43 @@ test("a live SDK SendUserFile image joins the assistant event through the blob t
   assert.equal(image.mediaType, "image/png");
   assert.equal(f.sessions.log(id).blob(image.blob!), bytes.toString("base64"));
   assert.equal(assistant.tools.find(tool => tool.name === "SendUserFile")?.summary, "shot.png, shot");
+});
+
+test("SDK main and worker file deliveries share the session boundary and never drop surrounding events", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  fs.writeFileSync(path.join(f.cwd, "결과.md"), "# 결과\n\n완료");
+  fs.writeFileSync(path.join(f.cwd, ".env"), "API_TOKEN=private");
+  fs.writeFileSync(path.join(f.dir, "outside.txt"), "outside");
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const content = [
+    { type: "text", text: "파일을 확인해 주세요." },
+    { type: "tool_use", id: "files", name: "SendUserFile", input: { files: ["결과.md", ".env", path.join(f.dir, "outside.txt")], additionalDirectories: [f.dir] } },
+  ];
+  for (const parent of [null, "worker"]) query.emit({ type: "assistant", parent_tool_use_id: parent, message: { id: parent ?? "main", model: "test", content } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "files", content: `kept [Image: source: ${f.dir}/outside.txt]` }] } });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const main = f.sessions.log(id).readAfter(0).events;
+  const worker = f.sessions.subLog(id, "sub-worker")!.readAfter(0).events;
+  for (const events of [main, worker]) {
+    const assistant = events.find(event => event.kind === "assistant");
+    assert.ok(assistant?.kind === "assistant");
+    assert.equal(assistant.text, "파일을 확인해 주세요.");
+    const files = assistant.tools[0]!.files!;
+    assert.deepEqual(files.map(file => file.status), ["ready", "blocked", "blocked"]);
+    assert.equal(files[0]!.name, "결과.md");
+    assert.equal(files[0]!.mediaType, "text/markdown");
+    assert.equal(Buffer.from(f.sessions.blob(id, files[0]!.blob!)!, "base64").toString(), "# 결과\n\n완료");
+    assert.ok(!JSON.stringify(assistant.tools[0]).includes(f.dir));
+  }
+  const result = main.find(event => event.kind === "tool_result");
+  assert.ok(result?.kind === "tool_result");
+  assert.equal(result.text, "kept ");
+  assert.equal(result.files?.[0]?.status, "blocked");
+  assert.ok(main.some(event => event.kind === "result" && event.ok));
 });
 
 test("clear and new create an empty fresh session with identical settings", async t => {
@@ -984,6 +1021,30 @@ test("taking a queued message back restores upload-shaped attachments and retain
   assert.equal(f.sessions.log(id).blob(attachments[0]!.blob), photo, "the event keeps its own image bytes");
   await waitFor(() => f.permissions.pending(id).length === 1);
   f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+});
+
+test("an edited photo retained across a new epoch is published under its new snapshot id", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  const photo = Buffer.from("retained photo").toString("base64");
+  const old = f.sessions.log(id);
+  const blob = old.image(photo);
+  f.sessions.enqueue(id, "edit-across-epoch", "original", [{ blob, name: "photo.png", mediaType: "image/png" }]);
+  const edited = f.sessions.removeQueued(id, "edit-across-epoch")!;
+  f.sessions.stop(id);
+  await nextTick();
+  f.sessions.shutdown();
+  fs.rmSync(path.join(f.dir, "sessions", id), { recursive: true, force: true });
+  const { recovered } = reopen(t, f);
+  recovered.recover();
+  assert.notEqual(recovered.log(id).epoch, old.epoch);
+  await recovered.send(id, "edited-in-new-epoch", edited.text, edited.attachments);
+  const event = recovered.log(id).tail().events.find(e => e.kind === "user" && e.clientMsgId === "edited-in-new-epoch");
+  assert.ok(event?.images?.[0]?.blob);
+  assert.notEqual(event.images[0].blob, blob);
+  assert.equal(recovered.blob(id, event.images[0].blob), photo);
+  assert.equal(recovered.blob(id, blob), null, "the old draft id is released after the accepted send");
 });
 
 test("send-now puts a queued message into the running turn; the queue survives a host restart", { timeout: 4500 }, async t => {

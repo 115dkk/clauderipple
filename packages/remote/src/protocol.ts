@@ -69,14 +69,17 @@ export type Text = string | BlobRef;
 
 /** Image bytes are base64 in the existing chunked blob transport, never in an event. */
 export interface ImagePart { type: "image"; blob?: string; mediaType: string; width?: number; height?: number }
-export interface MessageImages { images?: ImagePart[] }
+export interface SessionFile { id: string; name: string; mediaType: string; bytes: number; status: "ready" | "blocked" | "missing" | "too_large"; blob?: string }
+export interface MessageImages { images?: ImagePart[]; files?: SessionFile[] }
+export const SESSION_FILE_TOTAL = 32 * 1024 * 1024;
+export const SESSION_FILE_NAME = 160;
 export const ATTACHMENT_CAP = 8 * 1024 * 1024;
 export const ATTACHMENT_COUNT = 8;
 export interface Attachment { blob: string; name: string; mediaType: string }
 export type SendBehavior = "steer" | "interrupt";
 export function defaultEffort(efforts: Effort[]): Effort | null { return efforts.includes("high") ? "high" : efforts[0] ?? null; }
 
-export interface ToolCall { id: string; name: string; /** one line a person reads: a command, a path */ summary: string; input?: Text; /** Computed before a large input becomes a blob. Counts describe supplied edits, not unseen file context. */ changes?: { added: number; removed: number } }
+export interface ToolCall { id: string; name: string; files?: SessionFile[]; /** one line a person reads: a command, a path */ summary: string; input?: Text; /** Computed before a large input becomes a blob. Counts describe supplied edits, not unseen file context. */ changes?: { added: number; removed: number } }
 
 export type EventBody = MessageImages & (
   | { kind: "user"; text: string; clientMsgId: string }
@@ -232,6 +235,7 @@ export interface FolderEntry { path: string; name: string; lastUsed?: number; mo
 export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string;
   /** The host keeps queued messages (ReqOp enqueue/queue_*); an older host leaves the queue to the phone. */
   queue?: boolean;
+  capabilities?: { sessionFiles: boolean };
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 

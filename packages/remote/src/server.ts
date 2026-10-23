@@ -142,7 +142,7 @@ export class HostServer {
   constructor(opts: ServerOptions) {
     this.opts = opts;
     const desktopProblem = opts.sessions.desktopProblem?.();
-    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, ...(desktopProblem ? { desktopProblem } : {}) };
+    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, capabilities: { sessionFiles: true }, ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
     this.http.on("upgrade", (req, socket, head) => {
@@ -509,7 +509,8 @@ export class HostServer {
         if (!s.has(op.session)) throw new Error("no such session");
         const text = s.blob(op.session, op.id);
         if (text === null) throw new Error("no such blob");
-        const offset = Math.max(0, op.offset ?? 0);
+        const offset = op.offset ?? 0;
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) throw new Error("Invalid blob offset.");
         const end = Math.min(text.length, offset + BLOB_CHUNK_CHARS);
         const chunk: BlobChunk = { text: text.slice(offset, end), offset, next: end < text.length ? end : null, bytes: Buffer.byteLength(text) };
         return chunk;
