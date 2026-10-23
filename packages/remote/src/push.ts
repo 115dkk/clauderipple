@@ -76,9 +76,10 @@ const clip = (s: string, n: number): string => (s.length > n ? s.slice(0, n - 1)
 const folderOf = (cwd: string): string => path.basename(cwd) || cwd;
 
 /** The push for an event or Mac-session alert, or null if it is not one of those moments.
- * Metadata only: the session title plus fixed state words — except a question, which is the person's
- * own words from the closing box (`ask`) and is what they must answer. Neither Expo/Apple nor the
- * web push service ever receives assistant text, tool input, or error detail. */
+ * The session title plus fixed state words — and for a question, the closing box's `ask`, which is
+ * what the person must answer. That is the model's text, so it goes only where the payload is
+ * encrypted end to end (this web push, RFC 8291; Expo's `e`): neither Expo/Apple nor the web push
+ * service ever reads assistant text, tool input, or error detail. */
 export function pushFor(event: PushEvent, s: Pick<SessionSummary, "id" | "title" | "cwd">, lang: "ko" | "en"): PushPayload | null {
   const c = COPY[lang];
   const title = clip(s.title || folderOf(s.cwd), 140);

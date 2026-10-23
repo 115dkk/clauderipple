@@ -179,7 +179,8 @@ test("the question push says what it is and carries the ask in the person's word
   const s = { id, title: "Leak hunt", cwd: "/synthetic/project" };
   assert.deepEqual(pushFor(event, s, "ko"), { title: "Leak hunt", body: "답변이 필요합니다 · Run the tests now?", session: id, tag: `ask-${id}` });
   assert.equal(pushFor(event, s, "en")!.body, "Answer needed · Run the tests now?");
-  assert.equal(expoBody(event, "ko"), "답변이 필요합니다 · Run the tests now?");
+  // The Expo body travels in the clear beside the encrypted content: fixed words, never the question.
+  assert.equal(expoBody(event, "ko"), "답변이 필요합니다");
   assert.equal(pushContent(event, "ko", { title: "Leak hunt" }, "x").body, "답변이 필요합니다 · Run the tests now?");
   assert.equal(expoBody({ kind: "result", ok: true }, "en"), "Work finished", "the old moments read as before");
 });

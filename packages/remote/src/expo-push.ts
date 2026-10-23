@@ -39,7 +39,9 @@ export const validExpoToken = (token: string): boolean => /^(ExponentPushToken|E
 
 export function expoBody(event: PushEvent, lang: "ko" | "en"): string | null {
   if (event.kind === "permission") return lang === "ko" ? "승인을 기다립니다" : "Waiting for approval";
-  if (event.kind === "question") return `${lang === "ko" ? "답변이 필요합니다" : "Answer needed"} · ${event.ask}`;
+  // Fixed words only: this body travels in the clear beside the encrypted content (iOS `body`, the
+  // Android fallback), and the question itself is the model's text — it goes only inside `e`.
+  if (event.kind === "question") return lang === "ko" ? "답변이 필요합니다" : "Answer needed";
   if (event.kind !== "result") return null;
   if (event.ok) return lang === "ko" ? "작업을 마쳤습니다" : "Work finished";
   return lang === "ko" ? "작업이 실패했습니다" : "Work failed";
