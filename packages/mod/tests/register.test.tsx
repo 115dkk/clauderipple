@@ -924,9 +924,10 @@ test('a session pin survives later prompts, authorizes only its model, and relea
   await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: 'Review again.' })
   expect(sent.slice(0, 2).map(spawn => spawn.subagentType)).toEqual(['gpt-6-1-sol', 'gpt-6-1-sol'])
   expect(judges.length).toBe(0)
+  // Another model the main chat names runs too: since 2026-10-24 a named model is honored.
   await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra]]\nOther model.' })
-  expect(sent[2]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', prompt: 'Other model.' })
-  expect(judges.length).toBe(1)
+  expect(sent[2]).toMatchObject({ subagentType: 'gpt-6-astra' })
+  expect(judges.length).toBe(0)
   await ui.press({ key: 'release-pin' })
   expect(await ui.find({ key: 'delegation-pin' })).toBeUndefined()
   await submit($, '다음 작업')
@@ -971,38 +972,34 @@ test('an explicit marker on ripple:auto bypasses its judge', async ($, on) => {
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' })
 })
 
-// 2026-10-22: asked twice for Gemini proofreading, a session went on to give Gemini an implementation
-// task on its own. A model the user did not name is ignored and the tier decides.
-test('an explicit marker the user did not name is dropped; the judge decides, or a tier marker under it', async ($, on) => {
+// From 2026-10-22 a model the user had not named in their last messages was dropped for the tier.
+// The guess of who named it missed far more often than a session chose on its own ("오푸스시켜",
+// a pin a few messages back), so on 2026-10-24 the owner had the main chat's named model honored.
+test('an explicit marker runs as named even when the user did not repeat it lately', async ($, on) => {
   const b = boundaries(on)
-  http(on)
-  const judges = judgeStub(on, JSON.stringify({ domain: 'general', level: 'light', kind: 'do', effort: 'low', sure: 0.9, why: 'judged' }))
-  const sent = spawnStub(on)
-  await start($)
-  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nReview this.' })
-  expect(judges.length).toBe(1)
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', prompt: 'Review this.' })
-  // Dropped silently: the owner found the toast noise, and it was false over a resumed worker.
-  expect(b.toasts.some(text => text.includes('by tier'))).toBe(false)
-  const row =JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())
-  expect(row.by).not.toBe('marker')
-})
-
-for (const [label, spawn] of [
-  ['a worker agent called directly', { subagentType: 'gpt-6-1-sol', prompt: '[[ripple: hard]]\nFix the race.' }],
-  ['general-purpose given a model', { subagentType: 'general-purpose', model: 'sonnet', prompt: '[[ripple: hard]]\nFix the race.' }],
-  ['a model marker on another agent', { subagentType: 'general-purpose', prompt: '[[ripple: gpt-6-1-sol@high]]\n[[ripple: hard]]\nFix the race.' }],
-] as const) test(`${label}, not named by the user, goes through the ladder`, async ($, on) => {
-  const b = boundaries(on, { agentAuto: 'auto' })
   http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, ...spawn })
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nReview this.' })
   expect(judges.length).toBe(0)
-  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Fix the race.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' })
   expect(b.toasts.some(text => text.includes('by tier'))).toBe(false)
-  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())).toMatchObject({ by: 'session', tier: 'hard', rung: 'hard' })
+  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim()).by).toBe('marker')
+})
+
+for (const [label, spawn, expected] of [
+  ['a worker agent called directly', { subagentType: 'gpt-6-1-sol', prompt: '[[ripple: hard]]\nFix the race.' }, { subagentType: 'gpt-6-1-sol' }],
+  ['general-purpose given a model', { subagentType: 'general-purpose', model: 'sonnet', prompt: '[[ripple: hard]]\nFix the race.' }, { subagentType: 'general-purpose', model: 'sonnet' }],
+] as const) test(`${label} runs as the main chat picked it`, async ($, on) => {
+  boundaries(on, { agentAuto: 'auto' })
+  http(on)
+  judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, ...spawn })
+  expect(sent[0]).toMatchObject(expected)
+  expect(sent[0]?.subagentType).not.toBe('gpt-6-astra')
 })
 
 test("a Workflow's ripple:auto whose marker names a worker runs on that worker's model; a tier marker or none is left alone", async ($, on) => {

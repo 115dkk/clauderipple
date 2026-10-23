@@ -9,7 +9,7 @@ import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
-import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinAllows, pinInstruction, pinSaid, rivalProviders, userNamed } from './worker'
+import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid, userNamed } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
@@ -498,30 +498,6 @@ async function spawnProvider($: EngineInterface, subagentType: string, model: st
   if (/^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(id)) return 'anthropic'
   return (await read($, routerModels)).find(m => m.value === id)?.provider
 }
-/**
- * The model the main chat chose by name outside ripple:auto, or null: a worker agent called
- * directly, general-purpose given a model, or a model marker on any other agent (the router obeys
- * it wherever it sits at the top). ripple:auto's own marker is checked in requestPick.
- */
-async function sessionPickedModel($: EngineInterface, e: AgentSpawnInput): Promise<string | null> {
-  if (['ripple:auto', 'auto'].includes(e.subagentType)) return null
-  if ((await workerFiles($)).has(e.subagentType)) return e.subagentType
-  if (e.subagentType === 'general-purpose' && e.model && e.model !== 'inherit') return e.model
-  const marker = readMarker(e.prompt)
-  return marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) ? marker.name : null
-}
-/** Check the user's model/source choice using the generated file, not a guess from its id. */
-async function userNamedPick($: EngineInterface, name: string, files: ReadonlyMap<string, string>): Promise<boolean> {
-  const id = name.replace(/@[^@]*$/, '').toLowerCase()
-  const file = files.get(id) ?? [...files.values()].find(f => agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === id)
-  const models = await read($, routerModels)
-  const provider = file ? agentProvider(file) : /^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(id) ? 'anthropic' : models.find(m => m.value.toLowerCase() === id)?.provider
-  const model = file ? agentModel(file)! : name
-  const sources = [...files.values()].flatMap(f => { const m = agentModel(f), p = agentProvider(f); return m && p ? [{ model: m, provider: p }] : [] }).concat(models.map(m => ({ model: m.value, provider: m.provider })))
-  const providers = rivalProviders(model, sources)
-  if (pinAllows(await read($, delegationPin), model, provider)) return true
-  return userNamed(model, await $.session.messages(), await read($, heardPrompts), { ...(provider ? { provider } : {}), providers })
-}
 async function releaseDelegationPin($: EngineInterface): Promise<void> {
   if (!await read($, delegationPin)) return
   await update($, delegationPin, () => null)
@@ -790,22 +766,18 @@ async function testJudge($: EngineInterface): Promise<void> {
   }
 }
 
-/** `dropped`: a model the main chat named that the user did not, already taken off the prompt. */
-async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings, dropped?: string): Promise<{ input: AgentSpawnInput; pick: WorkerPick } | { deny: string }> {
+async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings): Promise<{ input: AgentSpawnInput; pick: WorkerPick } | { deny: string }> {
   const language = await read($, lang)
   const files = await workerFiles($)
   try { await refreshModels($) } catch (error) { await report($, 'worker catalogue', error) }
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
   const pinnedCandidates = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
-  let marker = readMarker(e.prompt)
-  // A model the user did not name is not the main chat's to pick: the marker goes, and the tier
-  // decides as if it had never been written (worker.ts userNamed).
-  if (marker && !tierOf(marker) && !['auto', 'ripple'].includes(marker.name) && !await userNamedPick($, marker.name, files)) {
-    dropped = marker.name
-    e = { ...e, prompt: e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
-    marker = readMarker(e.prompt)
-  }
+  // A model the main chat names is honored. From 10-22 a marker the user had not named in their
+  // last messages was dropped, but the guess of who named it missed far more often than the main
+  // chat picked on its own ("오푸스시켜", "앞으로 솔로" a few messages back), so the owner turned
+  // the check off (2026-10-24).
+  const marker = readMarker(e.prompt)
   const tier = tierOf(marker)
   const explicit = marker && !tier && !['auto', 'ripple'].includes(marker.name) ? marker : null
   const id = (await $.clock.now()).toString(36) + Math.random().toString(36).slice(2, 8)
@@ -868,15 +840,6 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings, 
   const named = by === 'marker' || by === 'default' || by === 'session'
   await persistWorkerPick($, { type: 'pick', id, ...entry, at: new Date(now).toISOString(), verdict: rawVerdict, by: named ? by : 'judge', judge: named ? null : by, ...(tier ? { tier } : {}), ms, ...(judgeError ? { error: judgeError } : {}), promptChars: e.prompt.length })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
-  // A dropped model goes to the debug log only. The toast it had was noise to the owner, and it
-  // lied on a resumed worker (SendMessage), which keeps its own model whatever this pick says
-  // (2026-10-23: "not named, so Opus" over a Sonnet worker that went on as Sonnet).
-  if (dropped) {
-    const name = dropped.toLowerCase()
-    const droppedModel = (files.get(name) ? agentModel(files.get(name)!) : name)?.replace(/@[^@]*$/, '')
-    const same = selected.agent === name || model?.replace(/@[^@]*$/, '') === droppedModel
-    if (!same) await $.ui.log(t(language, 'toasts.unnamedModel', { model: dropped, name: targetLabel(selected, language) }), { to: 'debug' })
-  }
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
   return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
@@ -1732,18 +1695,8 @@ export const register: Register = on => {
       const teammate = 'isTeammate' in e && !!e.isTeammate
       if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
-      const picked = !workflow && !teammate && !e.fork && s.agentAuto !== 'off' ? await sessionPickedModel($, e) : null
-      if (picked && !await userNamedPick($, picked, await workerFiles($))) {
-        // A worker or model the main chat picked by name, the user never having named it, goes
-        // through the ladder like any delegation (userNamed in worker.ts says why).
-        const marker = readMarker(e.prompt)
-        const { model: _model, ...rest } = e
-        const prompt = marker && !tierOf(marker) ? e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') : e.prompt
-        const routed = await requestPick($, { ...rest, subagentType: 'ripple:auto', prompt }, s, picked)
-        if ('deny' in routed) return routed
-        input = routed.input
-        chosen = routed.pick
-      } else if (!workflow && !teammate && takesOver(e, s)) {
+      // A worker or model the main chat picks by name runs as picked (requestPick says why).
+      if (!workflow && !teammate && takesOver(e, s)) {
         const routed = await requestPick($, e, s)
         if ('deny' in routed) return routed
         input = routed.input
