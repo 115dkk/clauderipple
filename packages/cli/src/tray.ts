@@ -137,6 +137,24 @@ function npmCli(): string | null {
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
+/**
+ * The environment for npm children that fetch Electron. npm runs package lifecycle scripts through
+ * a shell, and Electron's `node install.js` needs a bare `node` on PATH — the machines the tray is
+ * for are exactly the ones where ClaudeRipple's own Node is the only Node, so the fetch failed with
+ * "'node' is not recognized" (#80). The Node running us goes first; Windows spells the variable
+ * `Path` or `PATH`, so either spelling is the one fixed.
+ */
+export function npmEnv(base: NodeJS.ProcessEnv = process.env, nodeDir = path.dirname(process.execPath)): NodeJS.ProcessEnv {
+  const out = { ...base };
+  const names = Object.keys(out).filter((name) => name.toUpperCase() === "PATH");
+  const name = names[0] ?? "PATH";
+  // Both spellings would be two variables in the child's environment block; keep the one and drop.
+  for (const other of names.slice(1)) delete out[other];
+  const current = out[name];
+  out[name] = current ? `${nodeDir}${path.delimiter}${current}` : nodeDir;
+  return out;
+}
+
 /** Fetches Electron into this installation so the tray can run. Prints npm's own progress. */
 export function installTrayRuntime(): TrayStart {
   if (electronPath()) return { ok: true, message: "✓ Electron is already installed" };
@@ -146,6 +164,7 @@ export function installTrayRuntime(): TrayStart {
   fs.mkdirSync(target, { recursive: true });
   const result = spawnSync(process.execPath, [cli, "install", "--prefix", target, "--no-package-lock", "--loglevel", "error", `electron@${ELECTRON_RANGE}`], {
     cwd: target,
+    env: npmEnv(),
     stdio: "inherit",
   });
   if (result.status !== 0) return { ok: false, message: `npm could not install Electron into ${target}` };
