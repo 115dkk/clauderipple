@@ -19,7 +19,7 @@ const frame = (surface: Frame['surface'], columns = 100): Frame => ({ surface, c
 const BAND: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, releaseDelegationPin: noop }
 const ALERT: AlertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
 const QUICK: SettingsActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, close: noop }
-const DASH: DashboardView = { effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null, warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null, auto: true, agents: { live: 0, total: 0 }, compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, swampAt: 50, hide: [], extras: [], isWorking: false }
+const DASH: DashboardView = { effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null, warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null, auto: true, agents: { live: 0, total: 0 }, compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, hide: [], extras: [], isWorking: false }
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 const HUGE = '긴 내용'.repeat(30_000)
 const CONTROL = '앞\x1b[31m빨강\x1b[0m\x00\x07\x7f\x85뒤'

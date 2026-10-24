@@ -36,12 +36,12 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specifi
 // The user naming the workers a test spawns by name (worker.ts userNamed).
 const NAMED: SessionMessage[] = [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[] } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
   const storeReads: string[] = []
-  let router: ModSettingsSnapshot = { settings: normalizeSettings({ setupDone: true, ...patch }), revision: 1, stored: true }
+  let router: ModSettingsSnapshot = { settings: normalizeSettings({ setupDone: true, ...patch }), revision: 1, stored: true, ...(options.compactAt !== undefined ? { compactAt: options.compactAt } : {}) }
   let offline = false
   let conflict: Settings | null = null
   let alwaysConflict = false
@@ -119,7 +119,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('session.id', () => ({ value: 'session-test' }))
   on('session.model', () => ({ value: model }))
   on('session.messages', ($, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages(e.agentId) : options.messages ?? MESSAGES }))
-  on('session.usage', () => ({ value: { startedAt: NOW, context: { percent, tokens: 40000, window: 200000 }, rateLimits: options.limits ?? [] } }))
+  on('session.usage', () => ({ value: { startedAt: NOW, context: { percent, tokens: options.tokens ?? 40000, window: options.window ?? 200000 }, rateLimits: options.limits ?? [] } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
@@ -1328,6 +1328,28 @@ test('Haiku compaction returns replacement messages and forwards the keep note',
   expect(engine).toBe(0)
 })
 
+test('the compaction model is the chosen one, with an @effort split off for the router', async ($, on) => {
+  boundaries(on, { compactModel: 'gpt-6.1-sol@high' })
+  http(on)
+  const calls = judgeStub(on, 'Verified continuation summary. '.repeat(20))
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  const out = await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  expect(calls[0]).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' })
+  expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
+})
+
+test('the band measures context against the compaction window, not the whole model window', async ($, on) => {
+  // 40k of a 1M model is 4%; with Claude Code compacting at 400k it is 10%, and that is the share.
+  const b = boundaries(on, { extras: ['context'] }, { window: 1_000_000, tokens: 40_000, compactAt: 400_000 })
+  http(on)
+  await start($)
+  await b.clock.advance(15_000)
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: '10%' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('failed Haiku compaction falls back; precompute skips; subagent stays with engine', async ($, on) => {
   const b = boundaries(on)
   http(on)
@@ -1345,7 +1367,7 @@ test('failed Haiku compaction falls back; precompute skips; subagent stays with 
 })
 
 test('the Compact icon counts the main chat\'s finished compactions; /clear zeroes it', async ($, on) => {
-  boundaries(on, { compactWith: 'session' })
+  boundaries(on, { compactModel: 'session' })
   http(on)
   on('session.compact', () => ({ messages: MESSAGES }))
   await start($)
@@ -1375,7 +1397,7 @@ test('the Compact icon counts the main chat\'s finished compactions; /clear zero
 const BURN = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { ...DEFAULTS.rules.general.rungs, light: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'low' }] }, delegation: 'eager' }])
 
 test('an eager mode notes every prompt, whether or not it follows a compaction; its tiers route spawns and each pick names it', async ($, on) => {
-  const b = boundaries(on, { modes: BURN, activeMode: 'burn', activeSince: NOW, compactWith: 'session' })
+  const b = boundaries(on, { modes: BURN, activeMode: 'burn', activeSince: NOW, compactModel: 'session' })
   http(on)
   judgeStub(on)
   const sent = spawnStub(on)

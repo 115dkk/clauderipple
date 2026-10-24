@@ -41,7 +41,6 @@ const DASH: DashboardView = {
   logOpen: false,
   agentsOpen: false,
   effortMenu: false,
-  swampAt: 50,
   hide: [],
   extras: ['context'],
   isWorking: false,
@@ -239,7 +238,7 @@ const CONTEXT: SessionContextBreakdown = (() => {
     autoCompactThreshold: 144_000, isAutoCompactEnabled: true, apiUsage: null,
   }
 })()
-const CONTEXT_VIEW: ContextView = { breakdown: CONTEXT, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/me' }, swampAt: 50 }
+const CONTEXT_VIEW: ContextView = { breakdown: CONTEXT, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/me' } }
 
 const SCENES: Scene[] = [
   // The Context pane the band's context chip opens (2026-10-24): an estimate, a precise count under

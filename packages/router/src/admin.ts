@@ -36,7 +36,7 @@ import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem,
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeModSettings } from "./mod-settings.ts";
+import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
@@ -1963,11 +1963,26 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         try { parsed = JSON.parse(bytes.toString("utf8")); }
         catch { throw new ModSettingsInputError("invalid JSON"); }
         validateSettingsSchema(parsed);
-        const body = parsed as { settings?: unknown };
+        const body = parsed as { settings?: unknown; compactAt?: unknown };
+        // The compaction point lives in Claude Code's own settings.json, not the mod's store: a
+        // dashboard save writes the same key `/autocompact` does, or removes it for the default.
+        if (body && typeof body === "object" && body.compactAt !== undefined) {
+          if (body.compactAt !== null && typeof body.compactAt !== "number") throw new ModSettingsInputError("compactAt must be a number of tokens or null");
+          writeAutoCompactWindow(body.compactAt);
+        }
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
           validateSettings(body.settings);
           body.settings = await withFilledLadder(deps, scores, normalizeSettings(body.settings));
+        }
+        if (!body || typeof body !== "object" || body.settings === undefined) {
+          if (body && typeof body === "object" && body.compactAt !== undefined) {
+            // A compaction-point-only save: its answer is the same snapshot shape the dashboard reads.
+            const snapshot = readModSettings();
+            sendJson(res, 200, { ...snapshot, settings: await withFilledLadder(deps, scores, snapshot.settings) });
+            return;
+          }
+          throw new ModSettingsInputError("settings must be a JSON object");
         }
         const result = writeModSettings(parsed);
         sendJson(res, result.stale ? 409 : 200, result.current);

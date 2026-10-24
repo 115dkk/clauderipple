@@ -9,7 +9,7 @@ const view: DashboardView = {
   effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null,
   warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null,
   auto: true, agents: { live: 0, total: 0 }, compactions: 0,
-  logOpen: false, agentsOpen: false, effortMenu: false, swampAt: 50, hide: [], extras: [], isWorking: false,
+  logOpen: false, agentsOpen: false, effortMenu: false, hide: [], extras: [], isWorking: false,
 }
 const props: RenderPropsOf['Pane'] = { title: 'pin', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } as RenderPropsOf['Pane']
 

@@ -220,7 +220,7 @@ export function cacheFact(frame: Frame, view: DashboardView): Fact | null {
 export function contextFact(frame: Frame, view: DashboardView): Fact | null {
   const ctx = view.context
   if (!ctx || !view.extras.includes('context')) return null
-  const tone = contextTone(ctx.percent, view.swampAt)
+  const tone = contextTone(ctx.percent)
   const rich = isRich(frame)
   // Desktop: "Context 38%" in the facts' idiom; the terminal keeps its short "ctx 38%".
   const text = rich ? Math.round(ctx.percent) + '%' : t(frame.lang, 'band.footerContext', { percent: Math.round(ctx.percent) })
@@ -446,7 +446,7 @@ function contextDrawn(el: Els, frame: Frame, view: DashboardView, onPress?: () =
   const ctx = view.context
   if (!ctx || !view.extras.includes('context')) return null
   const { Box, Text } = el
-  const tone = contextTone(ctx.percent, view.swampAt)
+  const tone = contextTone(ctx.percent)
   const card = contextFact(frame, view)?.card ?? []
   const tip = [...card, ...(onPress ? [t(frame.lang, 'band.contextOpen')] : [])].join(' · ') || undefined
   const cells = Math.ceil((16 + CELL_PX + textPx('100%')) / CELL_PX)
@@ -1132,7 +1132,7 @@ export function renderFooter(el: Els, frame: Frame, view: DashboardView, actions
   const effortText =
     mode === 'deciding' ? t(frame.lang, 'band.decidingText') : (idx >= 0 ? RIPPLE_CHAR[idx]! : '○') + ' ' + (level ? effortName(level, frame.lang).toLowerCase() : '—') + (mode === 'auto' ? '' : mode === 'paused' ? t(frame.lang, 'band.footerPaused') : mode === 'off' ? t(frame.lang, 'band.footerOff') : t(frame.lang, 'band.footerManual'))
   const left = view.cache ? view.cache.expiresAt - frame.now : 0
-  const ctxTone = view.context ? contextTone(view.context.percent, view.swampAt) : 'ink'
+  const ctxTone = view.context ? contextTone(view.context.percent) : 'ink'
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={2} alignItems="center">
       <Text color={mode === 'deciding' || mode === 'auto' ? tone.accent : undefined} dimColor={mode === 'paused' || mode === 'off'}>

@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
@@ -60,6 +60,8 @@ const warm = atom({ plugin: 'ripple', key: 'warm' } as const, { pings: 0, cost: 
 const warmHere = atom({ plugin: 'ripple', key: 'warmHere' } as const, null)
 const lastRealReplyAt = atom({ plugin: 'ripple', key: 'lastRealReplyAt' } as const, null)
 const context = atom({ plugin: 'ripple', key: 'context' } as const, null)
+/** Claude Code's own compaction point (settings.json `autoCompactWindow`), tokens or null. */
+const compactAt = atom({ plugin: 'ripple', key: 'compactAt' } as const, null as number | null)
 const hot = atom({ plugin: 'ripple', key: 'hot' } as const, null)
 const limit = atom({ plugin: 'ripple', key: 'limit' } as const, null)
 const limits = atom({ plugin: 'ripple', key: 'limits' } as const, null)
@@ -302,7 +304,8 @@ async function installSettings($: EngineInterface, s: Settings): Promise<void> {
 function settingsSnapshot(text: string): ModSettingsSnapshot {
   const value = object(JSON.parse(text))
   if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 0 || typeof value.stored !== 'boolean' || !value.settings || typeof value.settings !== 'object' || Array.isArray(value.settings)) throw new Error('invalid router settings snapshot')
-  return { settings: normalizeSettings(value.settings), revision: Number(value.revision), stored: value.stored }
+  const at = value.compactAt
+  return { settings: normalizeSettings(value.settings), revision: Number(value.revision), stored: value.stored, compactAt: typeof at === 'number' && Number.isFinite(at) && at > 0 ? at : null }
 }
 async function routerSettingsDown($: EngineInterface, error: unknown): Promise<void> {
   const notice = t(await read($, lang), 'band.routerDown')
@@ -334,6 +337,10 @@ async function syncSettings($: EngineInterface, admin: string): Promise<void> {
   const response = await $.http.fetch(`${admin}/api/mod-settings`)
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   const snapshot = settingsSnapshot(response.text)
+  // Claude Code writes `/autocompact` to settings.json itself, so this can change without a
+  // settings revision: the band reads it on every poll.
+  const at = snapshot.compactAt ?? null
+  if (at !== await read($, compactAt)) await update($, compactAt, () => at)
   let sync = await read($, settingsSync)
   // Session atoms survive reloads. Old pending paths/drafts cannot prove user intent
   // under this format; discard them rather than granting an old overwrite a new version.
@@ -1084,12 +1091,15 @@ async function refreshLimits($: EngineInterface): Promise<void> {
 async function refreshUsage($: EngineInterface): Promise<void> {
   const usage = await $.session.usage()
   const c = usage.context
-  const percent = c.percent ?? (c.tokens !== undefined && c.window > 0 ? c.tokens / c.window * 100 : undefined)
-  const ctx = c.tokens !== undefined && percent !== undefined ? { tokens: c.tokens, percent, window: c.window } : null
+  // The share is of the window compaction acts on: Claude Code's own point when it is below the
+  // model's window, else the model's window (what /autocompact and the Context pane speak of).
+  const window = contextWindow(c.window, await read($, compactAt))
+  const percent = c.tokens !== undefined && window > 0 ? c.tokens / window * 100 : undefined
+  const ctx = c.tokens !== undefined && percent !== undefined ? { tokens: c.tokens, percent, window } : null
   if (JSON.stringify(ctx) !== JSON.stringify(await read($, context))) await update($, context, () => ctx)
   // Below the line again (a compact, a clear), the next crossing shows the heavy-context band once.
   const putOff = await read($, swampHidden)
-  if (putOff !== null && (putOff > 100 || !ctx || ctx.percent < (await currentSettings($)).swampAt)) await update($, swampHidden, () => null)
+  if (putOff !== null && (putOff > 100 || !ctx || ctx.percent < HEAVY_PERCENT)) await update($, swampHidden, () => null)
   // The host can leave the plan windows out though the replies carried them; on a Claude chat the
   // router's figure for the same login stands in.
   const own = usage.rateLimits.some(l => ['five_hour', 'seven_day'].includes(l.kind))
@@ -1231,7 +1241,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     agents: counts,
     compactions: await read($, compactions),
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
-    swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
+    hide: s.hide, extras: s.extras, isWorking: working,
     ...(activeModeOf(s) ? { mode: activeModeOf(s)!.name } : {}),
     ...(pinned ? { delegationPin: titleName(pinned.model, await read($, routerModels)), ...(pinned.said ? { delegationSaid: pinned.said } : {}) } : {}),
   }
@@ -1259,7 +1269,7 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!result,
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
-    swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
+    swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c), await read($, swampHidden))) })
   if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
   if (which === 'clear') return { kind: 'clear' }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
@@ -1716,11 +1726,16 @@ export const register: Register = on => {
       // The summary drops what was noted; the note itself goes with every prompt while eager
       // (modes.ts eagerNote), so this is bookkeeping only.
       if (!e.agentId && e.trigger !== 'precompute' && await read($, modeNoted) !== null) await update($, modeNoted, () => null)
-      if (e.agentId || (await currentSettings($)).compactWith !== 'haiku') return next(e).then(counted)
+      if (e.agentId || (await currentSettings($)).compactModel === 'session') return next(e).then(counted)
       if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }
       const transcript = serializeTranscript(e.messages.length ? e.messages : await $.session.messages())
       if (!transcript) throw new Error(t(language, 'toasts.transcriptEmpty'))
-      const answer = await $.model.complete({ model: HAIKU, system: COMPACT_SYSTEM, prompt: transcript + (e.instructions ? `\n\nKeep especially:\n${e.instructions}` : ''), maxTokens: 16000, timeoutMs: 240000, effort: 'medium' })
+      // A chosen model may carry its effort (`id@effort`), as a worker's does: the router takes the
+      // effort on its own field, so the two are split here.
+      const choice = (await currentSettings($)).compactModel
+      const at = choice.lastIndexOf('@')
+      const effort = at > 0 && EFFORTS.includes(choice.slice(at + 1) as Effort) ? choice.slice(at + 1) as Effort : 'medium'
+      const answer = await $.model.complete({ model: at > 0 ? choice.slice(0, at) : choice, system: COMPACT_SYSTEM, prompt: transcript + (e.instructions ? `\n\nKeep especially:\n${e.instructions}` : ''), maxTokens: 16000, timeoutMs: 240000, effort })
       if (!answer.isAnswered || answer.text.trim().length <= 200) throw new Error(t(language, 'toasts.summaryEmpty'))
       await update($, cache, () => null)
       await update($, context, () => null)
@@ -1879,7 +1894,7 @@ export const register: Register = on => {
       const error = full && !full.busy && full.basis === (live?.tokens ?? null) ? full.error : undefined
       return renderContext($.ui.resolve(e), frame, {
         breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, ...(error ? { error } : {}),
-        open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) }, swampAt: (await currentSettings($)).swampAt,
+        open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) },
       }, contextActions($)) as RenderElement
     } catch (error) { return contextRenderFailure($, e, error, frame) }
   }).catch(($, e, next) => contextRenderFailure($, e, next.error.message ?? next.error.kind))

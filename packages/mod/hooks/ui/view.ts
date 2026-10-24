@@ -87,8 +87,6 @@ export type DashboardView = {
   agentsOpen: boolean
   /** The manual effort row is open. */
   effortMenu: boolean
-  /** Context percent at which the swamp colour starts (settings.swampAt). */
-  swampAt: number
   /** Band parts switched off: 'timer' | 'reason' | 'route'. */
   hide: readonly string[]
   /** Optional chips switched on: 'context' | 'limits'. */

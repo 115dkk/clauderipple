@@ -274,7 +274,7 @@ test("admin mod-settings keeps ten exact previous files and refuses unsupported 
 
 test("admin mod-settings returns full defaults before storage, normalizes writes and persists revisions", async () => {
   await withAdmin(makeCfg(), async ({ port, home }) => {
-    const defaults = { settings: normalizeSettings(null), revision: 0, stored: false };
+    const defaults = { settings: normalizeSettings(null), revision: 0, stored: false, compactAt: null };
     assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), defaults);
     const input = { effortAuto: false, judge: "invalid", layout: "invalid", language: "invalid", keepWarmMinTokens: 1234, rules: { general: { mode: "auto", allow: [] } }, future: [1, null, { nested: true }] };
     // Auto is a ladder with no rung set; saving fills it from the connected models (here only Claude's own).
@@ -282,7 +282,7 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
     const settings = normalizeSettings({ ...input, rules: { general: { mode: "ladder", rungs: { light: claude("haiku", "low"), standard: claude("sonnet", "medium"), hard: claude("opus", "high"), plan: claude("opus", "high") } } } });
     const saved = await putModSettings(port, { settings: input, revision: 0 });
     assert.equal(saved.status, 200);
-    const snapshot = { settings, revision: 1, stored: true };
+    const snapshot = { settings, revision: 1, stored: true, compactAt: null };
     assert.deepEqual(await saved.json(), snapshot);
     assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), snapshot);
     assert.equal(settings.judge, defaults.settings.judge);
@@ -290,7 +290,7 @@ test("admin mod-settings returns full defaults before storage, normalizes writes
     assert.equal(settings.language, defaults.settings.language);
     assert.equal(settings.keepWarmMinTokens, 1234);
     const file = path.join(home, "mod-settings.json");
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), snapshot);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { settings, revision: 1, stored: true });
     if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.equal((await (await putModSettings(port, { settings })).json() as ModSettingsSnapshot).revision, 2);
     assert.deepEqual(fs.readdirSync(home).filter(name => /mod-settings.*(tmp|lock)/.test(name)), []);
@@ -301,7 +301,7 @@ test("admin mod-settings empty-store conflicts include normalized defaults and s
   await withAdmin(makeCfg(), async ({ port, home }) => {
     const response = await putModSettings(port, { settings: { language: "ko" }, revision: 1 });
     assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), { settings: normalizeSettings(null), revision: 0, stored: false });
+    assert.deepEqual(await response.json(), { settings: normalizeSettings(null), revision: 0, stored: false, compactAt: null });
     assert.equal(fs.existsSync(path.join(home, "mod-settings.json")), false);
   });
 });
@@ -311,7 +311,7 @@ test("admin mod-settings normalizes legacy stored settings on GET without rewrit
     const old = { settings: { layout: "invalid", language: "pt", tiers: { light: { agent: "legacy" } } }, revision: 7 };
     const file = path.join(home, "mod-settings.json");
     fs.writeFileSync(file, JSON.stringify(old));
-    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(old.settings), revision: 7, stored: true });
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(old.settings), revision: 7, stored: true, compactAt: null });
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), old);
   });
 });
@@ -373,7 +373,7 @@ test("admin fills Base and mode domain ladders even when every general rung is a
     assert.equal(Object.hasOwn(saved.settings.modes[1]!, 'domainRules'), false);
     assert.equal(saved.legacy, undefined);
     assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), saved);
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'mod-settings.json'), 'utf8')), saved);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'mod-settings.json'), 'utf8')), { settings: saved.settings, revision: saved.revision, stored: saved.stored });
   });
 });
 
@@ -436,7 +436,7 @@ test("admin mod-settings refuses nonobjects, invalid revisions and secrets at an
     for (const revision of [-1, 0.5, null, "0"]) assert.equal((await putModSettings(port, { settings: {}, revision })).status, 400);
     const malformed = await fetch(`${base()}:${port}/api/mod-settings`, { method: "PUT", body: "{" });
     assert.equal(malformed.status, 400);
-    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(null), revision: 0, stored: false });
+    assert.deepEqual(await (await fetch(`${base()}:${port}/api/mod-settings`)).json(), { settings: normalizeSettings(null), revision: 0, stored: false, compactAt: null });
     // A count named for tokens is a setting the mod has, not a credential.
     assert.equal((await putModSettings(port, { settings: { keepWarmMinTokens: 30000, rules: { general: { mode: "pin" } } } })).status, 200);
   });

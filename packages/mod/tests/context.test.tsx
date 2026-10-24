@@ -76,7 +76,7 @@ const BREAKDOWN: SessionContextBreakdown = {
   apiUsage: null,
 }
 
-const VIEW: ContextView = { breakdown: BREAKDOWN, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/test' }, swampAt: 50 }
+const VIEW: ContextView = { breakdown: BREAKDOWN, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/test' } }
 
 function frameOf(surface: Surface, lang: Frame['lang'] = 'en', skin: Skin = 'deep', columns = 68): Frame {
   return { surface, columns, maxRows: 30, now: NOW, appearance: 'auto', skin, lang }
@@ -189,7 +189,7 @@ const BAND: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, c
 const DASH: DashboardView = {
   effort: { level: 'high', mode: 'auto' }, model: 'Opus 5.5', context: { percent: 38, tokens: 76_000, window: 200_000 }, cache: null,
   warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null, auto: true, agents: { live: 0, total: 0 },
-  compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, swampAt: 50, hide: [], extras: ['context'], isWorking: false,
+  compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, hide: [], extras: ['context'], isWorking: false,
 }
 
 test('the band\'s context chip is a press that opens the pane, its tip saying so; without the pane it is a figure', async ($, on) => {

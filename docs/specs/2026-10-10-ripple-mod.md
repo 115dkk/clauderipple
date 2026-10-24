@@ -200,13 +200,19 @@ prose when they disagree.
 - **Limits:** `rateLimits` `five_hour` / `seven_day` (max shown); ≥ 80 % shows the hot band with
   Save mode (caps Auto at medium until the window resets).
 - **Bands** (priority): settings → compact note → setup → judge down → hot →
-  result cards → cold (cache expired on a ≥ 150k chat) → swamp (context ≥ `swampAt`, default 50 %)
-  → dashboard. Each alert dismisses until it worsens.
-- **Compact with Haiku:** `session.compact` for the main chat (not subagents, not `precompute`,
-  which is skipped): serialize the transcript (last 6 messages' tool I/O 20k chars, older inputs
-  400 / results 2k; 2.4M char budget, then tighter, then engine fallback), Haiku 5.5, 16k tokens,
-  240 s; success needs > 200 chars; failure falls back to the engine's own compaction with a toast.
-  Setting `compactWith: haiku | session`.
+  result cards → cold (cache expired on a ≥ 150k chat) → swamp (context at or past 80 % of the
+  compaction window) → dashboard. Each alert dismisses until it worsens.
+- **Compaction:** `session.compact` for the main chat (not subagents, not `precompute`, which is
+  skipped): serialize the transcript (last 6 messages' tool I/O 20k chars, older inputs
+  400 / results 2k; 2.4M char budget, then tighter, then engine fallback), run the summary on
+  `compactModel` (default Claude Haiku 5.5, 16k tokens, 240 s; `'session'` means the engine's own
+  compactor; a router model id runs by name, with an optional `@effort` split off); success needs
+  > 200 chars; failure falls back to the engine's own compaction with a toast. The context share
+  and the heavy band are measured against the compaction window: Claude Code's own
+  `autoCompactWindow` (settings.json, the same value `/autocompact` writes) when it is below the
+  model's window, else the model's window. The dashboard's Compaction card picks the model
+  (the app's compactor / Claude Haiku·Sonnet·Opus / router models by provider) and the point
+  (400k / 500k / 600k / a typed value in k / model default).
 - **Stats** (`/ripple stats`): Auto-steered prompts by effort, weighted cost (input 1, write 1.25,
   read 0.1, output 5), judge counts/time/tokens, worker picks by tier, keep-warm pings and cost.
 
@@ -220,7 +226,7 @@ prose when they disagree.
   current tool, elapsed, cost).
 - **Settings panel** (cards): Effort · Workers (tier → agent selects, fallback, agentAuto) · Judge
   (Haiku / Jev with key + Test / router model) · Cache (keep warm, hours, min tokens) · Compaction
-  (engine, heavy-context threshold) · Look (dashboard/minimal, appearance auto/dark/light).
+  (model, compaction window) · Look (dashboard/minimal, appearance auto/dark/light).
 - **First run:** a short setup (judge, worker tiers, keep warm) opens once.
 - Colours: ClaudeRipple accent `#6a56d6` (from packages/ui), provider hues from the existing
   `providerColor`; status green/amber/red stay semantic.

@@ -55,8 +55,6 @@ export type ContextView = {
   open: readonly ContextSection[]
   /** The session's folder and home, to say a memory file's path short. */
   place: Place
-  /** Settings' heavy-context line (swampAt), where the share turns amber. */
-  swampAt: number
 }
 
 export type ContextActions = {
@@ -233,7 +231,7 @@ const DIAL_PX = 64
  * The share as a dial: each used category an arc in its colour, clockwise from the top, the
  * compaction reserve hatched at the end of the turn, the share in the middle in its tone.
  */
-export function dialArt(frame: Frame, b: SessionContextBreakdown, swampAt: number): string {
+export function dialArt(frame: Frame, b: SessionContextBreakdown): string {
   const s = DIAL_PX
   const c = s / 2
   const rad = c - 6
@@ -257,7 +255,7 @@ export function dialArt(frame: Frame, b: SessionContextBreakdown, swampAt: numbe
     at += length
   }
   if (buffer > 0) body += arc(room, turn - room, 'url(#h)')
-  const tone = contextTone(b.percentage, swampAt)
+  const tone = contextTone(b.percentage)
   const ink = tone === 'bad' ? (flat ? textTone(frame.appearance).bad : '#fda9b4') : tone === 'warn' ? (flat ? textTone(frame.appearance).warn : '#fcd77a') : flat ? 'var(--ink)' : INK
   const figure = Math.round(b.percentage) + '%'
   body += '<text x="' + c + '" y="' + r(c + 5) + '" text-anchor="middle" font-size="' + (figure.length > 3 ? 14 : 16) + '" font-weight="680" style="fill:' + ink + '">' + figure + '</text>'
@@ -368,7 +366,7 @@ function headDrawn(el: Els, frame: Frame, view: ContextView, b: SessionContextBr
   const about = model && chOf(model + ' · ' + basis) > sayCells ? [model, basis] : [[model, basis].filter(Boolean).join(' · ')]
   return (
     <Box key="context-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
-      {pic(el, 'context-dial', dialArt(frame, b, view.swampAt), t(L, 'band.contextAlt', { value: Math.round(b.percentage) + '%', window: compactNumber(b.rawMaxTokens), tokens: compactNumber(b.totalTokens) }), DIAL_PX, DIAL_PX)}
+      {pic(el, 'context-dial', dialArt(frame, b), t(L, 'band.contextAlt', { value: Math.round(b.percentage) + '%', window: compactNumber(b.rawMaxTokens), tokens: compactNumber(b.totalTokens) }), DIAL_PX, DIAL_PX)}
       <Box key="context-say" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
         <Text bold {...k.ink}>{t(L, 'context.title')}</Text>
         <Box flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
@@ -586,7 +584,7 @@ function contextText(el: Els, frame: Frame, view: ContextView, actions: ContextA
     )
   }
   const kinds = new Map(b.categories.map(c => [c.name, c.kind] as const))
-  const ctx = contextTone(b.percentage, view.swampAt)
+  const ctx = contextTone(b.percentage)
   const width = Math.max(20, frame.columns)
   const grid = b.gridRows.map((row, y) => (
     <Text key={'grid-' + y}>

@@ -192,9 +192,11 @@ export type Settings = {
   keepWarm: boolean
   keepWarmHours: 1 | 2 | 4 | 8
   keepWarmMinTokens: number
-  compactWith: 'haiku' | 'session'
-  /** Context percent at which the context reads heavy (and the swamp band shows, when on). */
-  swampAt: number
+  /**
+   * The model that writes a compaction summary: 'session' for the engine's own compactor, else a
+   * model id (a Claude id or a router id) with an optional `@effort`. Defaults to Haiku.
+   */
+  compactModel: string
   /** The heavy-context band; off unless switched on. */
   swampAlert: boolean
   layout: 'dashboard' | 'minimal'
@@ -214,6 +216,12 @@ export type ModSettingsSnapshot = {
   settings: Settings
   revision: number
   stored: boolean
+  /**
+   * Claude Code's own `autoCompactWindow` from ~/.claude/settings.json, in tokens (what
+   * `/autocompact <n>` writes); null when the model's default stands. The one source the dashboard,
+   * the band and a session's `/autocompact` share.
+   */
+  compactAt?: number | null
   /** The stored settings still held field overrides or Auto, which the four workers replaced; true until the next save. */
   legacy?: boolean
 }
@@ -382,6 +390,8 @@ declare module 'claude-code' {
       /** Keep-warm for this chat alone, set by the band's flame; null follows Settings. */
       warmHere: boolean | null
       context: { percent: number; tokens: number; window: number } | null
+      /** Claude Code's own compaction point (settings.json `autoCompactWindow`), tokens or null. */
+      compactAt: number | null
       hot: Hot | null
       hotHidden: number | null
       /** The window the hot card was put off for: the put-off lasts until that window moves on. */

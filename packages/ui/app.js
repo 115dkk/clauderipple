@@ -3804,12 +3804,18 @@ const MOD_DEFAULTS = {
   allow: [], allowKnown: [], modes: [], delegation: "normal", providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
-  compactWith: "haiku",
-  swampAt: 50, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
+  compactModel: "claude-haiku-5-5",
+  swampAlert: false, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
 
+// The compaction point presets, in tokens (Claude Code's own `autoCompactWindow`), and its range.
+const MOD_COMPACT_PRESETS = [400000, 500000, 600000];
+const MOD_COMPACT_MIN = 100000;
+const MOD_COMPACT_MAX = 1000000;
+
 // `base` is the router's copy `settings` was edited from: what differs between them is this page's own change.
-let modState = { settings: null, base: null, revision: 0, options: null, retiredNote: false };
+// `compactAt` is Claude Code's own compaction window (settings.json `autoCompactWindow`), saved apart.
+let modState = { settings: null, base: null, revision: 0, options: null, compactAt: null, retiredNote: false };
 let modSaveTimer = null;
 let modSaving = false;
 let modSaveAgain = false;
@@ -3893,6 +3899,7 @@ function modAdopt(snapshot, drop) {
   modState.base = modNormalize(snapshot.settings);
   modState.settings = modApply(modState.base, changes);
   modState.revision = Number(snapshot.revision) || 0;
+  modState.compactAt = typeof snapshot.compactAt === "number" && Number.isFinite(snapshot.compactAt) ? snapshot.compactAt : null;
 }
 
 function modCap(text) { return text ? text.charAt(0).toLocaleUpperCase() + text.slice(1) : text; }
@@ -4017,6 +4024,26 @@ async function saveMod() {
     modSaving = false;
     if (modSaveAgain) { modSaveAgain = false; void saveMod(); }
   }
+}
+/**
+ * Claude Code's compaction point is `autoCompactWindow` in settings.json, a file of its own: saving
+ * it here writes the same key `/autocompact <n>` does (or removes it for the model's default), so a
+ * session and this page always agree. It is not part of the mod's settings revision.
+ */
+async function saveCompactAt(value) {
+  const previous = modState.compactAt;
+  modState.compactAt = value;
+  modRefresh();
+  modStatus(t("slots.saving"));
+  try {
+    const out = await api("/api/mod-settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ schemaVersion: 1, compactAt: value }) });
+    modState.compactAt = out && typeof out.compactAt === "number" && Number.isFinite(out.compactAt) ? out.compactAt : null;
+    modStatus(t("mod.saved"));
+  } catch (error) {
+    modState.compactAt = previous;
+    modStatus(`${t("common.saveFailed")} ${error.message}`, true);
+  }
+  modRefresh();
 }
 async function loadMod() {
   // A save on its way brings back the router's copy itself.
@@ -4510,11 +4537,55 @@ function modCacheCard() {
   ], [t("mod.warmCost")])]);
 }
 
+/**
+ * The compaction model choices: the app's own compactor, Claude's three models, then the router's
+ * models grouped by provider. Values are model ids, as a worker's are.
+ */
+function modCompactModelItems() {
+  const claude = ["haiku", "sonnet", "opus"].map((name) => ({ value: MOD_CLAUDE_IDS[name], label: `Claude ${modCap(name)}` }));
+  const seen = new Set(claude.map((item) => item.value));
+  const groups = new Map();
+  for (const model of (modState.options && modState.options.models) || []) {
+    if (!model || model.judgeOnly || typeof model.model !== "string" || !model.model || seen.has(model.model)) continue;
+    seen.add(model.model);
+    if (!groups.has(model.provider)) groups.set(model.provider, []);
+    groups.get(model.provider).push({ value: model.model, label: model.name || model.model });
+  }
+  return [
+    { value: "session", label: t("mod.compactSession") },
+    { group: "Claude", items: claude },
+    ...[...groups].map(([provider, items]) => ({ group: provider, items })),
+  ];
+}
+
 function modCompactCard() {
   const s = modState.settings;
+  const at = modState.compactAt;
+  const choice = at === null ? "default" : MOD_COMPACT_PRESETS.includes(at) ? String(at) : "custom";
+  const preset = modSegmented("compact-at", [
+    ...MOD_COMPACT_PRESETS.map((tokens) => ({ value: String(tokens), label: `${tokens / 1000}k` })),
+    { value: "default", label: t("mod.compactAtDefault") },
+  ], choice, t("mod.compactAt"), (value) => { void saveCompactAt(value === "default" ? null : Number(value)); });
+  const custom = el("input", {
+    type: "number", class: "text-field", "data-key": "compact-at-custom",
+    min: String(MOD_COMPACT_MIN / 1000), max: String(MOD_COMPACT_MAX / 1000), step: "10",
+    value: at !== null && choice === "custom" ? String(at / 1000) : "",
+    placeholder: t("mod.compactAtCustom"), "aria-label": t("mod.compactAtCustom"),
+  });
+  custom.addEventListener("change", () => {
+    const tokens = Math.round(Number(custom.value) * 1000);
+    if (!custom.value.trim() || !Number.isFinite(tokens) || tokens < MOD_COMPACT_MIN || tokens > MOD_COMPACT_MAX) {
+      modStatus(t("mod.compactAtRange"), true);
+      custom.value = at !== null && choice === "custom" ? String(at / 1000) : "";
+      return;
+    }
+    void saveCompactAt(tokens);
+  });
+  const outOfRange = at !== null && (at < MOD_COMPACT_MIN || at > MOD_COMPACT_MAX);
+  const hint = outOfRange ? t("mod.compactAtRange") : modCap(t("mod.compactAtHint"));
   return modCard("compact", t("mod.compaction"), t("mod.compactionBlurb"), [modSection(null, [
-    cell(t("mod.compactWith"), modSegmented("compact-with", [{ value: "haiku", label: t("mod.haiku") }, { value: "session", label: t("mod.sessionCompactor") }], s.compactWith, t("mod.compactWith"), (compactWith) => modPatch({ compactWith })), null, "wide"),
-    cell(t("mod.heavyAt"), modSegmented("swamp-at", [40, 50, 60, 70].map((n) => ({ value: n, label: `${n}%` })), s.swampAt, t("mod.heavyAt"), (n) => modPatch({ swampAt: Number(n) })), modCap(t("mod.context")), "wide"),
+    cell(t("mod.compactModel"), modSelect("compact-model", modCompactModelItems(), s.compactModel, t("mod.compactModel"), (compactModel) => modPatch({ compactModel })), null, "wide"),
+    cell(t("mod.compactAt"), el("div", { class: "mode-until compact-at" }, [preset, custom]), el("span", { class: outOfRange ? "cell-sub warn-text" : undefined, text: hint }), "wide"),
   ])]);
 }
 

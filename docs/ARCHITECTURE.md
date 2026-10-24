@@ -264,9 +264,21 @@ request went, and a `Pane` holds the request log.
 
 The router is the single source of the mod's settings, persisted in
 `<homeDir()>/mod-settings.json`. `GET /api/mod-settings` returns
-`{settings:<full normalized Settings>, revision, stored:boolean}`. Before the first
-write it returns normalized defaults, revision 0 and `stored:false`, without creating
-storage. `PUT` accepts `{settings, revision?}`, normalizes with the mod's own pure
+`{settings:<full normalized Settings>, revision, stored:boolean, compactAt:number|null}`.
+`compactAt` is Claude Code's own compaction point, read from `autoCompactWindow`
+in `~/.claude/settings.json` (`CLAUDE_SETTINGS_PATH` overrides the path): the
+top-level key, else the one value `/autocompact <n>` saved under
+`modelSettings.<model>` (a per-model value outranks the top-level one, per the
+2.1.304 settings schema); null means the model's default stands, or models
+disagree. A dashboard save also drops the per-model values, which would
+otherwise hide it. Compaction fires about 33k tokens before the window
+(20k output reserve + 13k buffer), not at it. Before the first write it returns normalized defaults, revision 0 and
+`stored:false`, without creating storage. `PUT` accepts `{settings, revision?,
+compactAt?}`: a `compactAt` writes or removes that settings.json key directly
+(100k–1M tokens, previous bytes backed up, atomic replace, every other key
+kept), so the dashboard and a session's `/autocompact` always agree; a
+`compactAt`-only save returns the same read snapshot instead of touching the
+mod's revision. `settings` is normalized with the mod's own pure
 `hooks/settings.ts:normalizeSettings` (type-only imports, no `claude-code` runtime),
 increments the revision under the account stores' `withFileLock` and `writeJsonAtomic`
 helpers (0600), and returns `{settings, revision, stored:true}`. A stale supplied
@@ -280,7 +292,8 @@ Corrupt storage is an error, never an empty store to overwrite.
 
 The mod reads this endpoint at `session.start` and every 3-second router poll, even
 when its band is hidden. A changed revision replaces the settings atom and redraws
-readers. Only when `stored:false` does it read legacy plugin-store `settings` and
+readers; every read also refreshes `compactAt`, which `/autocompact` changes without
+a revision, and the band measures its context share against it. Only when `stored:false` does it read legacy plugin-store `settings` and
 `setupDone` and migrate them with a revision-checked PUT; a racing first writer wins
 instead of being overwritten. Afterwards settings are never read from or saved to the
 plugin store; unrelated keys such as picks and band visibility remain.
