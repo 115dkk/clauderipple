@@ -1332,7 +1332,17 @@ function alertActions($: EngineInterface, view: AlertView): AlertActions {
 function agentsActions($: EngineInterface): AgentsActions {
   return {
     toggleDone: () => update($, agentsShowDone, value => !value),
-    open: async id => { await update($, agentRunsOpen, () => []); await update($, agentOpen, () => id) },
+    // Opened, a conversation shows its newest: the pane goes to its end, and `end` keeps up with the
+    // tree as the agent adds to it until the person scrolls away (UiScrollTarget). A surface that
+    // cannot scroll leaves it where it is; the conversation opens all the same.
+    open: async id => {
+      await update($, agentRunsOpen, () => [])
+      await update($, agentOpen, () => id)
+      try {
+        const moved = await $.ui.scroll({ in: AGENTS_PANE, to: 'end' })
+        if (moved.deny) await report($, 'agents scroll', moved.deny)
+      } catch (error) { await report($, 'agents scroll', error) }
+    },
     // Back on the list, the runs unfolded in that conversation fold again: it opens folded next time.
     back: async () => { await update($, agentRunsOpen, () => []); await update($, agentOpen, () => null) },
     toggleRun: id => update($, agentRunsOpen, ids => ids.includes(id) ? ids.filter(i => i !== id) : [...ids, id]),
@@ -1801,6 +1811,15 @@ export const register: Register = on => {
       if (full && !full.busy) await update($, contextFull, () => null)
     } catch (error) { await report($, 'context close', error) }
     return next(e)
+  })
+  // Scrolled back down to the end of an open conversation, the pane follows it again as it grows.
+  // Asked after the move and not awaited: the follow is a move of its own.
+  on('ui.scroll', { requestId: AGENTS_PANE }, async ($, e, next) => {
+    const moved = await next(e)
+    try {
+      if (e.origin.kind === 'person' && e.offset >= e.contentRows - e.bodyRows && await read($, agentOpen) !== null) void $.ui.scroll({ in: AGENTS_PANE, to: 'end' }).catch(() => undefined)
+    } catch (error) { await report($, 'agents scroll', error) }
+    return moved
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     let language: Lang = 'en'

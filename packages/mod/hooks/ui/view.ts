@@ -208,8 +208,8 @@ export type AgentEntry =
   | { kind: 'prompt'; text: string }
   /** Its own words. */
   | { kind: 'text'; text: string }
-  /** A tool it called: the tool, a short line of its input, and how it stands. */
-  | { kind: 'tool'; id: string; tool: string; detail: string; state: 'running' | 'ok' | 'error' }
+  /** A tool it called: the tool, a short line of its input, how it stands, and an edit's lines added and removed. */
+  | { kind: 'tool'; id: string; tool: string; detail: string; state: 'running' | 'ok' | 'error'; added?: number; removed?: number }
 
 /** An agent's conversation as read (`$.session.messages({ agentId })`), or why it could not be. */
 export type AgentTalk = { entries: readonly AgentEntry[] } | { deny: string }
@@ -219,7 +219,10 @@ export type AgentsView = {
   now: number
   /** Every finished agent, not only the latest few. */
   showDone: boolean
-  /** The agent whose conversation is open, what of it was read, and the runs of calls unfolded. */
+  /**
+   * The agent whose conversation is open, what of it was read, and what is unfolded: runs of calls
+   * by their first call's id, long prompts by `prompt:<n>` (agents.tsx).
+   */
   open?: { id: string; talk: AgentTalk; runsOpen?: readonly string[] }
 }
 
@@ -229,7 +232,7 @@ export type AgentsActions = {
   open: (id: string) => void
   /** Back to the list. */
   back: () => void
-  /** Folds or unfolds a run of tool calls, named by its first call's id. */
+  /** Folds or unfolds a run of tool calls, named by its first call's id, or a long prompt (`prompt:<n>`). */
   toggleRun: (id: string) => void
 }
 

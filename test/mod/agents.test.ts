@@ -67,7 +67,11 @@ test('long fallback reasons do not create an unbounded SVG sea or thousands of c
   assert.ok(all.filter(n => n.type === 'Button').length < 2000)
   const chars = all.reduce((n, node) => n + node.children.reduce((sum, child) => sum + (typeof child === 'string' ? child.length : 0), 0) + ['label', 'text', 'alt'].reduce((sum, key) => sum + (typeof node.props[key] === 'string' ? node.props[key].length : 0), 0), 0)
   assert.ok(chars < 90_000, 'rendered characters including blank press strips: ' + chars)
-  assert.ok(textOf(tree).includes('사용 한도를 초과했습니다.'))
+  // The list row holds the model and tokens only (the Claude app's task list); the reason is on
+  // the open conversation's card, cut.
+  const opened = renderAgents(el, frame, { agents: records, now: frame.now, showDone: true, open: { id: 'w0', talk: { entries: [] } } }, actions)
+  assert.ok(textOf(opened).includes('사용 한도를 초과했습니다.'))
+  assert.ok(!textOf(opened).includes(agent.pick!.fallbackReason!))
   assert.ok(!textOf(tree).includes(agent.pick!.fallbackReason!))
   for (const svg of all.filter(n => n.type === 'Svg')) {
     assert.ok(Number(svg.props.width) <= 4096)
@@ -76,13 +80,13 @@ test('long fallback reasons do not create an unbounded SVG sea or thousands of c
   }
 })
 
-test('48 mixed workers including 31 Workflow workers keep their cards, Korean titles and SVG bounds', () => {
+test('48 mixed workers including 31 Workflow workers keep their rows, Korean titles and SVG bounds', () => {
   const agents = Array.from({ length: 48 }, (_, i): AgentRec => ({ ...base, id: 'w' + i, description: '검토 ' + i + ' · 긴 한국어 설명'.repeat(200), state: i < 31 ? 'running' : 'done', endedAt: frame.now - i }))
   for (const skin of ['deep', 'flat'] as const) for (const appearance of ['light', 'dark'] as const) {
     const tree = renderAgents(el, { ...frame, skin, appearance }, { agents, now: frame.now, showDone: true }, actions)
     const all = nodes(tree)
-    assert.equal(all.filter(n => n.props.key === 'card-w0').length, 1)
-    assert.equal(all.filter(n => n.props.key === 'card-w47').length, 1)
+    assert.equal(all.filter(n => n.props.key === 'row-w0').length, 1)
+    assert.equal(all.filter(n => n.props.key === 'row-w47').length, 1)
     assert.ok(textOf(tree).includes('검토 47'))
     for (const svg of all.filter(n => n.type === 'Svg')) {
       assert.ok(Number(svg.props.width) <= 4096)

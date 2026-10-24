@@ -177,6 +177,30 @@ const TALK_TOOLS: AgentEntry[] = talkOf([
   ] },
 ], { cwd: '/Users/pbj/Documents/tabripple', home: '/Users/pbj' })
 
+/**
+ * The owner's side-by-side of 2026-10-24: a worker removing a feature, its long delegated prompt,
+ * a run of twenty commands and fifteen reads, then seven commands, nine edits and three reads.
+ */
+const NATIVE_PROMPT = [
+  'Remove the "handoff" feature from the mod entirely — its settings and its functions. Compaction stays (it will be reworked in a later step, so keep `compactWith` and the heavy-context `swampAt`/`swampAlert` settings as they are for now).',
+  '',
+  'Remove:',
+  '- `hooks/handoff.ts` and its test',
+  '- the band\'s handoff button and its advised state (`band.tsx`, `alerts.tsx`)',
+  '- Dashboard (packages/ui/app.js, packages/ui/i18n.js): `modHandoffCard` becomes a compaction card; remove the handoff rows, defaults and unused i18n keys in every language.',
+  '- Docs: where docs/ARCHITECTURE.md, docs/specs/*, README or docs/HANDOFF mention it.',
+].join('\n')
+const step = (prefix: string, n: number, tool: string, extra: Partial<AgentEntry> = {}): AgentEntry[] =>
+  Array.from({ length: n }, (_, i) => ({ kind: 'tool', id: prefix + i, tool, detail: tool === 'Bash' ? 'grep -rn handoff packages/mod' : 'packages/mod/hooks/file' + i + '.ts', state: 'ok', ...extra }) as AgentEntry)
+const TALK_NATIVE: AgentEntry[] = [
+  { kind: 'prompt', text: NATIVE_PROMPT },
+  { kind: 'text', text: 'I’ll start by mapping every handoff reference.' },
+  ...step('a', 20, 'Bash'), ...step('b', 15, 'Read'),
+  { kind: 'text', text: 'Now I’ll make the changes. First, remove the handoff module and its test.' },
+  ...step('c', 7, 'Bash'), ...step('d', 9, 'Edit', { added: 6, removed: 42 }), ...step('e', 3, 'Read'),
+]
+const NATIVE_AGENT: AgentRec = { ...HOSTED, id: 'n1', description: 'deepseek-v4.1-flash·high · Remove the handoff feature from the mod', state: 'running', startedAt: NOW - 252_000, tools: 54, usage: { input: 22_000, cached: 410_000, cacheWrite: 0, output: 9_100 }, effort: 'high' }
+
 const AGENT_ACTIONS = { toggleDone: () => undefined, open: () => undefined, back: () => undefined, earlier: () => undefined, toggleRun: () => undefined }
 
 /** The AbovePrompt site as register.tsx composes it on the desktop: the band, its × inside. */
@@ -338,6 +362,11 @@ const SCENES: Scene[] = [
   { name: 'agents-tools-open-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK_TOOLS }, earlier: 0, runsOpen: ['r1', 's1'] } }, AGENT_ACTIONS) },
   { name: 'flat-agents-live', columns: PANE, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
   { name: 'flat-agents-talk', columns: PANE, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false, open: { id: 'g1', talk: { entries: TALK }, earlier: 0 } }, AGENT_ACTIONS) },
+  // The conversation as the Claude app draws an agent's (2026-10-24): folded, unfolded, scrolled, flat.
+  { name: 'agents-native', columns: 50, draw: (el, f) => renderAgents(el, f, { agents: [NATIVE_AGENT], now: NOW, showDone: false, open: { id: 'n1', talk: { entries: TALK_NATIVE } } }, AGENT_ACTIONS) },
+  { name: 'agents-native-open', columns: 50, draw: (el, f) => renderAgents(el, f, { agents: [NATIVE_AGENT], now: NOW, showDone: false, open: { id: 'n1', talk: { entries: TALK_NATIVE }, runsOpen: ['prompt:first', 'c0'] } }, AGENT_ACTIONS) },
+  { name: 'agents-native-scrolled', columns: 50, draw: (el, f) => renderAgents(el, { ...f, offset: 6 }, { agents: [NATIVE_AGENT], now: NOW, showDone: false, open: { id: 'n1', talk: { entries: TALK_NATIVE } } }, AGENT_ACTIONS) },
+  { name: 'flat-agents-native', columns: 50, skin: 'flat', draw: (el, f) => renderAgents(el, f, { agents: [NATIVE_AGENT], now: NOW, showDone: false, open: { id: 'n1', talk: { entries: TALK_NATIVE } } }, AGENT_ACTIONS) },
   { name: 'log', columns: 90, draw: (el, f) => renderLog(el, f, { rows: [], mineOnly: true }, noop) },
 ]
 

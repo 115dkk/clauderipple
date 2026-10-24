@@ -1,6 +1,6 @@
 // A subagent's tool calls as the Agents pane words them: one short line of each call's input, and a
-// run of calls headed in one line the way the Claude app heads it ("명령어 7개 실행함, 파일 1개를
-// 편집함"). Pure, so the tests can call it.
+// run of calls headed in one line the way the Claude app heads it ("실행됨 명령 7개, 편집함 파일
+// 1개"), with the lines its edits added and removed. Pure, so the tests can call it.
 //
 // The phone app's host words a run the same way (packages/remote/src/tool-details.ts
 // `activitySummary`). The mod cannot import it: Claude Code loads the mod as its own folder
@@ -14,8 +14,8 @@ import type { Lang } from '../i18n.ts'
 /** Where the session runs and the user's home, to say paths short: relative to the one, `~` for the other. */
 export type Place = { cwd?: string; home?: string }
 
-/** One tool call as the pane holds it (view.ts AgentEntry's tool kind). */
-export type ToolCall = { id: string; tool: string; detail: string; state: 'running' | 'ok' | 'error' }
+/** One tool call as the pane holds it (view.ts AgentEntry's tool kind); an edit's lines added and removed. */
+export type ToolCall = { id: string; tool: string; detail: string; state: 'running' | 'ok' | 'error'; added?: number; removed?: number }
 
 type Activity = 'command' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'other'
 
@@ -101,6 +101,87 @@ export function toolDetail(tool: string, input: Readonly<Record<string, unknown>
   if (path) return shortPath(firstLine(path), place)
   const detail = input.command ?? input.pattern ?? input.query ?? input.url ?? input.description ?? input.prompt ?? ''
   return shortPaths(firstLine(text(detail)), place)
+}
+
+/** A text's lines, a newline that ends it closing the last rather than opening another. */
+function linesOfText(value: unknown): string[] {
+  const body = typeof value === 'string' ? value : ''
+  if (!body) return []
+  const lines = body.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
+/**
+ * Lines `after` adds and `before` loses, as the phone app's diff counts them: walk both, and where
+ * they part, skip to the nearest line they share again (fewest lines skipped on both sides).
+ */
+function changed(before: unknown, after: unknown): { added: number; removed: number } {
+  const a = linesOfText(before)
+  const b = linesOfText(after)
+  const where = new Map<string, number[]>()
+  b.forEach((line, at) => { const list = where.get(line); if (list) list.push(at); else where.set(line, [at]) })
+  let i = 0
+  let j = 0
+  let added = 0
+  let removed = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue }
+    let best: { i: number; j: number; skip: number } | undefined
+    for (let k = i; k < a.length; k++) {
+      if (best && k - i > best.skip) break
+      const list = where.get(a[k]!)
+      if (!list) continue
+      // The first place at or past j: a repeated line may occur thousands of times.
+      let lo = 0
+      let hi = list.length
+      while (lo < hi) { const mid = (lo + hi) >>> 1; if (list[mid]! < j) lo = mid + 1; else hi = mid }
+      const next = list[lo]
+      if (next === undefined) continue
+      const skip = k - i + next - j
+      if (!best || skip < best.skip) best = { i: k, j: next, skip }
+    }
+    if (!best) break
+    removed += best.i - i
+    added += best.j - j
+    i = best.i
+    j = best.j
+  }
+  return { added: added + b.length - j, removed: removed + a.length - i }
+}
+
+/**
+ * Lines an edit adds and removes, from what the model sent it (a subagent's transcript keeps no
+ * result to read a patch from): an Edit's old and new text, a MultiEdit's every pair, a Write's
+ * whole content as added. Nothing for any other tool.
+ */
+export function editLines(tool: string, input: Readonly<Record<string, unknown>>): { added: number; removed: number } | undefined {
+  if (tool === 'Edit') return changed(input.old_string, input.new_string)
+  if (tool === 'Write') return { added: linesOfText(input.content).length, removed: 0 }
+  if (tool === 'MultiEdit' && Array.isArray(input.edits)) {
+    let added = 0
+    let removed = 0
+    for (const edit of input.edits) {
+      if (!edit || typeof edit !== 'object') continue
+      const one = changed((edit as Record<string, unknown>).old_string, (edit as Record<string, unknown>).new_string)
+      added += one.added
+      removed += one.removed
+    }
+    return { added, removed }
+  }
+  return undefined
+}
+
+/** The lines a run's answered edits added and removed; nothing when it changed none. */
+export function runDiff(run: readonly ToolCall[]): { added: number; removed: number } | undefined {
+  let added = 0
+  let removed = 0
+  for (const call of run) {
+    if (call.state !== 'ok') continue
+    added += call.added ?? 0
+    removed += call.removed ?? 0
+  }
+  return added || removed ? { added, removed } : undefined
 }
 
 /** A run's head in one line, and how many of its calls failed. */

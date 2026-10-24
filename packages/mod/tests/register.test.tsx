@@ -1824,7 +1824,7 @@ test('known agents show waiting after an eight-second tool and finish with cost'
 
 test('an agent keeps the API\'s token counts, its tools and the effort it was sent at; its card opens its conversation and goes back', async ($, on) => {
   const reads: string[] = []
-  boundaries(on, {}, { agentMessages: id => {
+  const b = boundaries(on, {}, { agentMessages: id => {
     reads.push(id)
     return [{ role: 'user', text: 'Rename one local variable and verify it.', toolUses: [] }, { role: 'assistant', text: 'Renamed it.', toolUses: [{ tool_use_id: 't1', tool: 'Bash', input: { command: 'npm test' }, text: 'ok' }] }]
   } })
@@ -1857,6 +1857,10 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   expect(reads).toEqual([])
   await ui.press({ key: 'open-worker-1' })
   expect(reads).toContain('worker-1')
+  // Opened, the pane is asked to go to the conversation's end, its newest words. The test engine
+  // scrolls nothing ("no implementation"): the refusal goes to the debug log and the conversation
+  // opens all the same.
+  expect(b.logs.filter(log => log.includes('agents scroll'))).toEqual(['ClaudeRipple agents scroll: no implementation for ui.scroll'])
   expect(await ui.find({ type: 'Text', text: 'Renamed it.' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'npm test' })).toBeDefined()
   await ui.press({ key: 'back' })
