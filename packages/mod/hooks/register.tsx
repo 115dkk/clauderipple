@@ -1,7 +1,7 @@
 // Engine wiring lives here: imported logic and drawings never receive the engine interface.
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
-import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerJudgeInput, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { debugText, langFrom, t } from './i18n'
@@ -454,12 +454,12 @@ async function toggleContext($: EngineInterface): Promise<void> {
 }
 /**
  * The token-count API's count of the context (`full`, one request per tool and memory file), kept
- * against the context's tokens when it was asked for: the next step makes it stale, and the pane
- * shows the local estimate again.
+ * against the last response's tokens when it was asked for: the next step makes it stale, and the
+ * pane (and the band, contextShare) shows the local estimate again.
  */
 async function countContext($: EngineInterface): Promise<void> {
   if ((await read($, contextFull))?.busy) return
-  const basis = (await read($, context))?.tokens ?? null
+  const basis = (await read($, context))?.basis ?? null
   await update($, contextFull, () => ({ basis, busy: true }))
   try {
     const breakdown = (await $.session.usage({ breakdown: 'full' })).context.breakdown
@@ -1087,14 +1087,33 @@ async function refreshLimits($: EngineInterface): Promise<void> {
     if (!same(items, await read($, limits))) await update($, limits, () => items)
   } catch (error) { await report($, 'limits', error) }
 }
+/** The estimate the band's share was last worked out from, and what it was worked out at. */
+let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null = null
+/**
+ * The context share the band shows: the Context pane's own figure, /context's count against the
+ * window compaction measures by (`rawMaxTokens`). The band divided the last response's tokens by
+ * settings.json's `autoCompactWindow`, which the running session had not taken up (2026-10-24:
+ * settings said 500k, the session compacted at 400k; the band said 66%, the pane 83%). The
+ * pane's precise count stands while it is fresh; else the local estimate, worked out once a
+ * response, model or setting. With no breakdown (no session bound), those tokens over that setting.
+ */
+async function contextShare($: EngineInterface, c: SessionContextUsage): Promise<{ percent: number; tokens: number; window: number; basis: number } | null> {
+  if (c.tokens === undefined) return null
+  const at = await read($, compactAt)
+  const full = await read($, contextFull)
+  let b = full?.breakdown && full.basis === c.tokens ? full.breakdown : null
+  if (!b) {
+    const key = [c.tokens, c.window, at, await $.session.model()].join('|')
+    if (shareMemo?.key !== key) shareMemo = { key, breakdown: (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null }
+    b = shareMemo.breakdown
+  }
+  if (b && b.rawMaxTokens > 0) return { tokens: b.totalTokens, percent: b.percentage, window: b.rawMaxTokens, basis: c.tokens }
+  const window = contextWindow(c.window, at)
+  return window > 0 ? { tokens: c.tokens, percent: c.tokens / window * 100, window, basis: c.tokens } : null
+}
 async function refreshUsage($: EngineInterface): Promise<void> {
   const usage = await $.session.usage()
-  const c = usage.context
-  // The share is of the window compaction acts on: Claude Code's own point when it is below the
-  // model's window, else the model's window (what /autocompact and the Context pane speak of).
-  const window = contextWindow(c.window, await read($, compactAt))
-  const percent = c.tokens !== undefined && window > 0 ? c.tokens / window * 100 : undefined
-  const ctx = c.tokens !== undefined && percent !== undefined ? { tokens: c.tokens, percent, window } : null
+  const ctx = await contextShare($, usage.context)
   if (JSON.stringify(ctx) !== JSON.stringify(await read($, context))) await update($, context, () => ctx)
   // Below the line again (a compact, a clear), the next crossing shows the heavy-context band once.
   const putOff = await read($, swampHidden)
@@ -1964,11 +1983,11 @@ export const register: Register = on => {
       // until then.
       const live = await read($, context)
       const full = await read($, contextFull)
-      const fresh = full?.breakdown && full.basis === (live?.tokens ?? null) ? full : null
+      const fresh = full?.breakdown && full.basis === (live?.basis ?? null) ? full : null
       // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
       const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null
       const cwd = await $.session.cwd().catch(() => undefined)
-      const error = full && !full.busy && full.basis === (live?.tokens ?? null) ? full.error : undefined
+      const error = full && !full.busy && full.basis === (live?.basis ?? null) ? full.error : undefined
       return renderContext($.ui.resolve(e), frame, {
         breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, ...(error ? { error } : {}),
         open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) },

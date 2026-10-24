@@ -36,7 +36,7 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specifi
 // The user naming the workers a test spawns by name (worker.ts userNamed).
 const NAMED: SessionMessage[] = [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
@@ -119,7 +119,9 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('session.id', () => ({ value: 'session-test' }))
   on('session.model', () => ({ value: model }))
   on('session.messages', ($, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages(e.agentId) : options.messages ?? MESSAGES }))
-  on('session.usage', () => ({ value: { startedAt: NOW, context: { percent, tokens: options.tokens ?? 40000, window: options.window ?? 200000 }, rateLimits: options.limits ?? [] } }))
+  // `engineWindow`: the window the session's own breakdown measures against, as /context gives it.
+  const breakdown = (tokens: number, raw: number) => ({ categories: [], totalTokens: tokens, maxTokens: raw, rawMaxTokens: raw, autocompactSource: 'clientdata' as const, percentage: Math.round(tokens / raw * 100), gridRows: [], model: model, memoryFiles: [], mcpTools: [], agents: [], isAutoCompactEnabled: true, apiUsage: null })
+  on('session.usage', ($, e) => ({ value: { startedAt: NOW, context: { percent, tokens: options.tokens ?? 40000, window: options.window ?? 200000, ...(e.breakdown && options.engineWindow ? { breakdown: breakdown(options.tokens ?? 40000, options.engineWindow) } : {}) }, rateLimits: options.limits ?? [] } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
@@ -1451,6 +1453,18 @@ test('the band measures context against the compaction window, not the whole mod
   await b.clock.advance(15_000)
   const ui = await band($, 'desktop')
   expect(await ui.find({ type: 'Text', text: '10%' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the band shows the session\'s own compaction window, as the Context pane does, over settings.json', async ($, on) => {
+  // settings.json says 500k but the running session compacts at 400k: 200k is 50%, not 40%.
+  const b = boundaries(on, { extras: ['context'] }, { window: 1_000_000, tokens: 200_000, compactAt: 500_000, engineWindow: 400_000 })
+  http(on)
+  await start($)
+  await b.clock.advance(15_000)
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: '50%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '40%' })).toBeUndefined()
   await ui.unmount()
 })
 

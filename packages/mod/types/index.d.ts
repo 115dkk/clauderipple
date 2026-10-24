@@ -425,7 +425,11 @@ declare module 'claude-code' {
       warm: WarmState
       /** Keep-warm for this chat alone, set by the band's flame; null follows Settings. */
       warmHere: boolean | null
-      context: { percent: number; tokens: number; window: number } | null
+      /**
+       * The context share the band and the Context pane both show (register.tsx `contextShare`);
+       * `basis`, the last response's input tokens, is what a precise count is kept against.
+       */
+      context: { percent: number; tokens: number; window: number; basis?: number } | null
       /** Claude Code's own compaction point (settings.json `autoCompactWindow`), tokens or null. */
       compactAt: number | null
       hot: Hot | null
