@@ -194,7 +194,7 @@ export function isAutoModeClassifier(body: unknown): boolean {
  * `stop_sequences: ["</block>"]`. The second stage is `8192 + n` with no stop, the server's fast mode
  * (whose "yes" blocks outright) `256 + n` with no stop, and the severity score stops at `</severity>`.
  * `n` is the same on both stages, so the bound never takes in a second stage, and any other shape
- * keeps the main target. Call only on a body `isAutoModeClassifier` accepted.
+ * goes with the rest. Call only on a body `isAutoModeClassifier` accepted.
  */
 export function isClassifierStage1(body: unknown): boolean {
   const request = body as { stop_sequences?: unknown; max_tokens?: unknown } | null;
