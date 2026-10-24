@@ -19,7 +19,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { GoogleProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
-import { providerExhaustion, type ProviderExhaustion } from "../../health.ts";
+import { exhaustionHeaders, providerExhaustion, type ProviderExhaustion } from "../../health.ts";
 import { CredentialPool, retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
@@ -498,8 +498,10 @@ export class GoogleAdapter {
       const out = mapHttpError(upstream.status, safeText);
       this.log.warn(`google ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
       res.off("close", onClose);
-      res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
-      return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion: providerExhaustion(upstream.status, text, retryAfterMs(Object.fromEntries(upstream.headers)) ?? googleRetryDelayMs(text)) };
+      // A spending cap or a used-up quota: the client is told not to retry, in the same answer.
+      const exhaustion = providerExhaustion(upstream.status, text, retryAfterMs(Object.fromEntries(upstream.headers)) ?? googleRetryDelayMs(text));
+      res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(out.body);
+      return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion };
     }
 
     return this.streamBack(res, upstream, transport, json, model, wantStream, key, startInput, controller, onClose);
@@ -575,10 +577,13 @@ export class GoogleAdapter {
         retryAfterSeconds = sent.retryAfterSeconds;
         note = `upstream ${sent.status}`;
       }
-      res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}) }).end(err.body);
+      const exhaustion = sent.kind === "refused"
+        ? providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000)
+        : undefined;
+      res.writeHead(err.status, { "content-type": "application/json", ...(retryAfterSeconds ? { "retry-after": String(retryAfterSeconds) } : {}), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(err.body);
       return { status: err.status, bytes: Buffer.byteLength(err.body), note,
         ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
-        ...(sent.kind === "refused" ? { exhaustion: providerExhaustion(sent.status, sent.text, sent.retryAfterSeconds === undefined ? undefined : sent.retryAfterSeconds * 1000) } : {}),
+        ...(exhaustion ? { exhaustion } : {}),
       };
     }
 
@@ -654,17 +659,18 @@ export class GoogleAdapter {
 
     const failure = mapper.failure;
     const failedStatus = failureStatus(failure);
+    const exhaustion = failure ? providerExhaustion(429, failure.message, retryAfterMs(Object.fromEntries(upstream.headers))) : undefined;
     if (!wantStream) {
       const body = failure ? anthropicError(failedStatus, failure.type, failure.message).body : JSON.stringify(mapper.message());
       bytes = Buffer.byteLength(body);
-      res.writeHead(failure ? failedStatus : 200, { "content-type": "application/json", "content-length": String(bytes) }).end(body);
+      res.writeHead(failure ? failedStatus : 200, { "content-type": "application/json", "content-length": String(bytes), ...(exhaustion && failedStatus === 429 ? exhaustionHeaders(exhaustion) : {}) }).end(body);
     } else if (!res.writableEnded) {
       res.end();
     }
     const usage = mapper.usage;
     return {
       status: failure ? failedStatus : 200,
-      exhaustion: failure ? providerExhaustion(429, failure.message, retryAfterMs(Object.fromEntries(upstream.headers))) : undefined,
+      exhaustion,
       bytes,
       note: failure
         ? `${wantStream ? "mid-stream " : ""}${failure.type}: ${failure.message} (in=${usage.input_tokens} cached=${usage.cache_read_input_tokens} out=${usage.output_tokens})`

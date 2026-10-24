@@ -22,7 +22,7 @@ import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
 import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
-import { ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
+import { exhaustionHeaders, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
@@ -1487,7 +1487,11 @@ export class Proxy {
         // must not be charged to the credential — that is what made one working key answer every turn
         // with an authentication error for a minute (2026-09-21). Every other status is judged from
         // the status alone, and its body is left for the forward below, untouched.
-        if (status === 403) {
+        // 402 and 429 are read ahead as well: a definite billing/quota exhaustion must be answered
+        // with `x-should-retry: false` before the headers go out, and only its body says whether a
+        // 429 is exhausted or an ordinary rate limit (#89). A bootstrap response is never a model
+        // turn and is forwarded as it arrives.
+        if (status === 403 || (!isBootstrap && (status === 402 || status === 429))) {
           bufferBody(upRes, ERROR_HEAD_MAX).then((whole) => onUpstreamJudged(upRes, status, whole)).catch((e: Error) => {
             log.warn(`upstream ${status}: could not read the body: ${e.message}`);
             finish(String(status), 0, `upstream ${status}: body read failed`);
@@ -1504,7 +1508,8 @@ export class Proxy {
        * A 403's meaning is in its body and cannot be judged before it arrives, so the bytes are read
        * and handed back as the head: `unshift` after a stream has ended throws, and reading a head and
        * forwarding the rest mid-flow is where a body can be lost to a pause nothing resumes. A 403 is
-       * a refusal, so its body is small.
+       * a refusal, so its body is small. A 402/429 is read the same way, because the headers that tell
+       * the client to stop retrying must be decided before they go out (#89).
        *
        * What is returned is the body **decoded for reading**, because the judgement is about what the
        * body says. The bytes themselves are kept in `errRaw` for the client: a compressed body is
@@ -1631,6 +1636,24 @@ export class Proxy {
           });
           return;
         }
+        // A definite exhaustion (a spending cap, a used-up quota) is not worth asking again in the
+        // same minute, and a worker that does retries the plain 429 for about two and a half minutes
+        // before failing (#89, 2026-10-24). Its body was read ahead for 402/429, so the answer is
+        // known before the headers go out; a bare rate limit is left exactly as it was.
+        if (headFilled) {
+          const exhaustion = providerExhaustion(status, errBody, retryAfterMs(upRes.headers));
+          if (exhaustion) {
+            for (let i = outHeaders.length - 2; i >= 0; i -= 2) {
+              const name = outHeaders[i]!.toLowerCase();
+              if (name === "retry-after" || name === "x-should-retry") outHeaders.splice(i, 2);
+            }
+            for (const [name, value] of Object.entries(exhaustionHeaders(exhaustion))) outHeaders.push(name, value);
+          }
+          // The stream forward below cannot reach its own end handler when the body is already here.
+          if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
+            this.providerHealth.observe(route.provider, status, exhaustion);
+          }
+        }
         res.writeHead(status, outHeaders);
         // This observer is deliberately side-band: it sees the exact chunks after they are written
         // to the client, retains only a 64 KiB line/object fragment, and never changes backpressure.
@@ -1643,10 +1666,10 @@ export class Proxy {
         // code was recorded (2026-09-15).
         const errorHead: Buffer[] = [];
         let errorHeadBytes = 0;
-        // The 403 body was read to judge it, so it is written here instead of read again from a
-        // stream that has already ended. The bytes go back exactly as they arrived, so a compressed
-        // body still matches the `content-encoding` and `content-length` the upstream stated; only a
-        // truncated one is sent decoded, and both headers were dropped above for it.
+        // A buffered body (a 403, or a 402/429 read for its verdict) is written here instead of read
+        // again from a stream that has already ended. The bytes go back exactly as they arrived, so a
+        // compressed body still matches the `content-encoding` and `content-length` the upstream
+        // stated; only a truncated one is sent decoded, and both headers were dropped above for it.
         if (headFilled) {
           const body = errTruncated ? Buffer.from(errBody, "utf8") : errRaw;
           bytes = body.length;
