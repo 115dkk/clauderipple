@@ -1857,14 +1857,34 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   expect(reads).toEqual([])
   await ui.press({ key: 'open-worker-1' })
   expect(reads).toContain('worker-1')
-  // Opened, the pane is asked to go to the conversation's end, its newest words. The test engine
-  // scrolls nothing ("no implementation"): the refusal goes to the debug log and the conversation
-  // opens all the same.
+  // The app's own agent view is asked first; the test engine draws no main view, so the refusal
+  // goes to the debug log and the conversation is read here. Opened, the pane is asked to go to
+  // the conversation's end, its newest words; the test engine scrolls nothing either.
+  expect(b.logs.filter(log => log.includes('agents view'))).toEqual(['ClaudeRipple agents view: no implementation for ui.view'])
   expect(b.logs.filter(log => log.includes('agents scroll'))).toEqual(['ClaudeRipple agents scroll: no implementation for ui.scroll'])
   expect(await ui.find({ type: 'Text', text: 'Renamed it.' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'npm test' })).toBeDefined()
   await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Text', text: 'Renamed it.' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'open-worker-1' })).toBeDefined()
+})
+
+test('an agent\'s card takes the app to the agent\'s own view, and the pane stays on its list', async ($, on) => {
+  const reads: string[] = []
+  boundaries(on, {}, { agentMessages: id => { reads.push(id); return [] } })
+  http(on)
+  judgeStub(on)
+  spawnStub(on)
+  stepStub(on, { input_tokens: 300, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })
+  const viewed: unknown[] = []
+  on('ui.view', ($, e) => { viewed.push(e); return { value: {} } })
+  await start($)
+  await $.agent.spawn(SPAWN)
+  await step($, 'deepseek-v4.1-flash@low', 'high', 'worker-1')
+  const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  await ui.press({ key: 'open-worker-1' })
+  expect(viewed).toEqual([{ agentId: 'worker-1' }])
+  expect(reads).toEqual([])
   expect(await ui.find({ type: 'Button', key: 'open-worker-1' })).toBeDefined()
 })
 

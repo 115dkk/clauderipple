@@ -1332,10 +1332,17 @@ function alertActions($: EngineInterface, view: AlertView): AlertActions {
 function agentsActions($: EngineInterface): AgentsActions {
   return {
     toggleDone: () => update($, agentsShowDone, value => !value),
-    // Opened, a conversation shows its newest: the pane goes to its end, and `end` keeps up with the
-    // tree as the agent adds to it until the person scrolls away (UiScrollTarget). A surface that
-    // cannot scroll leaves it where it is; the conversation opens all the same.
+    // The app's own agent view first, as the person's pick from its task list opens it (2026-10-24:
+    // ours, drawn after it, did not read like it). One the host refuses (a workflow's agent no list
+    // names, a host with no main view) is read here instead. Opened, a conversation shows its newest:
+    // the pane goes to its end, and `end` keeps up with the tree as the agent adds to it until the
+    // person scrolls away (UiScrollTarget). A surface that cannot scroll leaves it where it is.
     open: async id => {
+      try {
+        const viewed = await $.ui.view({ agentId: id })
+        if (!viewed.deny) return
+        await report($, 'agents view', viewed.deny)
+      } catch (error) { await report($, 'agents view', error) }
       await update($, agentRunsOpen, () => [])
       await update($, agentOpen, () => id)
       try {
