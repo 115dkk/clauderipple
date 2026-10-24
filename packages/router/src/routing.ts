@@ -76,14 +76,19 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
   // so the target is chosen here. Match the classifier's system prompt, never quoted conversation
   // text. Its decision and wire format remain the engine's; only the inference target changes.
   if (cfg.autoModeClassifier && isAutoModeClassifier(body)) {
-    const stage1 = cfg.autoModeClassifier.stage1 !== undefined && isClassifierStage1(body);
-    const target = stage1 ? cfg.autoModeClassifier.stage1! : cfg.autoModeClassifier;
-    return {
-      provider: target.provider,
-      model: target.model,
-      effort: target.effort,
-      tag: `${model}->${target.model} (auto-mode classifier${stage1 ? ", stage 1" : ""})`,
-    };
+    const settings = cfg.autoModeClassifier;
+    const stage1 = settings.stage1 !== undefined && isClassifierStage1(body);
+    const target = stage1 ? settings.stage1 : settings;
+    // A side left out, or a first stage set to "native", falls through to the ordinary routing
+    // below, exactly as if the setting were absent.
+    if (target !== "native" && target?.provider !== undefined && target.model !== undefined) {
+      return {
+        provider: target.provider,
+        model: target.model,
+        effort: target.effort,
+        tag: `${model}->${target.model} (auto-mode classifier${stage1 ? ", stage 1" : ""})`,
+      };
+    }
   }
   let base = model;
   let effort: string | undefined;
