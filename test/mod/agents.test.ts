@@ -85,8 +85,8 @@ test('48 mixed workers including 31 Workflow workers keep their rows, Korean tit
   for (const skin of ['deep', 'flat'] as const) for (const appearance of ['light', 'dark'] as const) {
     const tree = renderAgents(el, { ...frame, skin, appearance }, { agents, now: frame.now, showDone: true }, actions)
     const all = nodes(tree)
-    assert.equal(all.filter(n => n.props.key === 'row-w0').length, 1)
-    assert.equal(all.filter(n => n.props.key === 'row-w47').length, 1)
+    assert.equal(all.filter(n => n.props.key === 'card-w0').length, 1)
+    assert.equal(all.filter(n => n.props.key === 'card-w47').length, 1)
     assert.ok(textOf(tree).includes('검토 47'))
     for (const svg of all.filter(n => n.type === 'Svg')) {
       assert.ok(Number(svg.props.width) <= 4096)
