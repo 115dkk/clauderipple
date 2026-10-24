@@ -1461,6 +1461,10 @@ test('a run is one quiet line in the app\'s words, its edits\' lines in a chip a
   drawPane(on, 'chip-open', el => renderAgents(el, { ...frameOf('desktop', 64), lang: 'ko' }, { agents: [done], now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, runsOpen: ['c0'] } }, AGENT_NOOP))
   const ui = await mount($, 'chip-ko', 'desktop', 64)
   expect(await ui.find({ type: 'Text', text: '실행됨 명령 7개, 편집함 파일 9개, 읽음 파일 3개' })).toBeDefined()
+  // Under the pointer the quiet words take the page's ink, as the app's line does; nothing lit behind.
+  const lit: unknown[] = []
+  walk(await ui.drawn(), n => { if (n.type === 'Text' && (n.children ?? []).join('') === '실행됨 명령 7개, 편집함 파일 9개, 읽음 파일 3개') lit.push((n as { hover?: unknown }).hover) })
+  expect(lit).toEqual([expect.objectContaining({ color: 'inherit' })])
   const chip = await svgByAlt(ui, '52줄 추가, 380줄 삭제')
   expect(chip).toBeDefined()
   expect(String(chip?.props.source)).toContain('+52')
