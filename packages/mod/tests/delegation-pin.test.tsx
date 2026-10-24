@@ -4,11 +4,11 @@ import { renderBand, renderFooter } from '../hooks/ui/band'
 import type { BandActions, DashboardView, Frame } from '../hooks/ui/view'
 
 const noop = () => undefined
-const actions: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+const actions: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
 const view: DashboardView = {
   effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null,
   warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null,
-  auto: true, handoff: 'off', agents: { live: 0, total: 0 }, compactions: 0,
+  auto: true, agents: { live: 0, total: 0 }, compactions: 0,
   logOpen: false, agentsOpen: false, effortMenu: false, swampAt: 50, hide: [], extras: [], isWorking: false,
 }
 const props: RenderPropsOf['Pane'] = { title: 'pin', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } as RenderPropsOf['Pane']

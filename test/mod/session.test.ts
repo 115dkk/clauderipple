@@ -91,7 +91,7 @@ test('dismissed hot returns at +10 points and swamp at +15 points of context, in
 
 test('band priority is exactly panels, failure, hot, results, cold, swamp, kept, dashboard', () => {
   const all = { judgeDown: true, hot: true, result: true, cold: true, swamp: true, kept: true }
-  for (const panel of ['settings', 'compact', 'handoff', 'setup'] as const) assert.equal(bandPriority({ ...all, panel }), panel)
+  for (const panel of ['settings', 'compact', 'setup'] as const) assert.equal(bandPriority({ ...all, panel }), panel)
   assert.equal(bandPriority(all), 'judgeDown')
   assert.equal(bandPriority({ ...all, judgeDown: false }), 'hot')
   assert.equal(bandPriority({ ...all, judgeDown: false, hot: false }), 'result')

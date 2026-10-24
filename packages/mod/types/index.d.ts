@@ -193,9 +193,6 @@ export type Settings = {
   keepWarmHours: 1 | 2 | 4 | 8
   keepWarmMinTokens: number
   compactWith: 'haiku' | 'session'
-  handoffSkill: string
-  handoffAfter: 'continue' | 'confirm' | 'copy'
-  handoffButton: 'advised' | 'always'
   /** Context percent at which the context reads heavy (and the swamp band shows, when on). */
   swampAt: number
   /** The heavy-context band; off unless switched on. */
@@ -352,11 +349,8 @@ export type Stats = {
   warm: { pings: number; cost: number }
 }
 
-export type HandoffKind = 'quick' | 'full'
-/** `ready`: written, waiting on Confirm first's card; `opened`: a new session was opened with it. */
-export type HandoffStage = 'writing' | 'clearing' | 'done' | 'ready' | 'opened' | 'copied' | 'failed'
 export type SetupStep = 1 | 2 | 3 | 4
-export type ResultStage = 'handingOff' | 'handoffReady' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'compacting' | 'compacted' | 'failed'
 export type JevState = {
   source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
@@ -397,9 +391,7 @@ declare module 'claude-code' {
       coldHidden: boolean
       kept: { pings: number; tokens: number } | null
       judgeDown: string | null
-      advice: string | null
-      handoff: { stage: HandoffStage; kind: HandoffKind; text?: string } | null
-      panel: 'settings' | 'setup' | 'compact' | 'clear' | 'handoff' | null
+      panel: 'settings' | 'setup' | 'compact' | 'clear' | null
       busy: boolean
       decidingSince: number | null
       heldPick: Pick | null
@@ -409,12 +401,6 @@ declare module 'claude-code' {
       lastSpawn: WorkerPick | null
       lastRealReplyAt: number | null
       stats: Stats
-      promptCount: number
-      adviceQueue: string | null
-      handoffQueued: boolean
-      handoffWaiting: boolean
-      handoffChoiceKind: HandoffKind
-      handoffChoiceAfter: 'continue' | 'confirm' | 'copy'
       result: { stage: ResultStage; detail?: string } | null
       settingsDraft: Settings | null
       setupStep: SetupStep

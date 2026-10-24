@@ -308,7 +308,7 @@ test('legacy settings and setup completion migrate once; unrelated store keys su
   b.remote({ settings: normalizeSettings(null), revision: 0, stored: false })
   b.saved.set('settings', { language: 'pt', keepWarm: true, tiers: { light: { agent: 'old-worker' } } })
   b.saved.set('setupDone', true)
-  b.saved.set('handoffChoice', { kind: 'full', after: 'copy' })
+  b.saved.set('bandLayout', { density: 'compact' })
   http(on)
   await start($)
   expect(b.router().settings).toMatchObject({ language: 'pt', keepWarm: true, setupDone: true, rules: { general: { mode: 'ladder', rungs: { light: [{ target: { agent: 'old-worker' } }] } } } })
@@ -320,7 +320,7 @@ test('legacy settings and setup completion migrate once; unrelated store keys su
   expectLanguage(b, 'pt')
   expect(b.storeReads.filter(key => key === 'settings').length).toBe(1)
   expect(b.storeWrites).not.toContain('settings')
-  expect(b.saved.get('handoffChoice')).toEqual({ kind: 'full', after: 'copy' })
+  expect(b.saved.get('bandLayout')).toEqual({ density: 'compact' })
 })
 
 test('a quick change retries a stale revision once and preserves remote sibling fields', async ($, on) => {
@@ -1855,67 +1855,6 @@ test('an agent\'s run of tool calls unfolds on press, its paths short against th
   expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
 })
 
-/** The claude:// link a handoff opened, and its query. */
-function opened(b: { processes: { argv: readonly string[] }[] }): URLSearchParams | undefined {
-  const link = b.processes.map(p => p.argv.at(-1) ?? '').find(arg => arg.startsWith('claude://code/new?'))
-  return link ? new URLSearchParams(link.slice('claude://code/new?'.length)) : undefined
-}
-
-// 2026-10-13: "Confirm first" cleared the chat at once (it only told the new chat to wait), and
-// the owner lost the chat to it. A handoff now never clears: it opens a new session in the folder.
-test('full handoff with Ask first stops on a card, then opens a new session in the folder without clearing', async ($, on) => {
-  const b = boundaries(on, { handoffSkill: 'custom-handoff', handoffAfter: 'confirm' })
-  http(on)
-  const commands: string[] = []
-  on('command.run', { command: 'custom-handoff' }, () => { commands.push('skill'); return {} })
-  on('command.run', { command: 'clear' }, () => { commands.push('clear'); return {} })
-  await start($)
-  await command($, 'handoff full')
-  await b.clock.advance(15000)
-  expect(commands).toEqual(['skill'])
-  await complete($, undefined, 'Saved /work/HANDOFF.md; verify the pending tests.')
-  await b.clock.advance(15000)
-  expect(opened(b)).toBeUndefined()
-  const ui = await band($, 'desktop')
-  expect(await ui.find({ type: 'Text', text: 'Handoff ready' })).toBeDefined()
-  await ui.press({ key: 'open-new' })
-  const query = opened(b)
-  expect(query?.get('folder')).toBe('/work')
-  expect(query?.get('q')).toContain('First read the saved handoff files')
-  expect(query?.get('q')).toContain('verify the pending tests')
-  expect(commands).toEqual(['skill'])
-  // Nothing is sent here: the continuation waits in the new session's prompt box.
-  expect(b.submitted).toEqual([])
-})
-
-test('quick handoff with New session now opens the new session at once, this chat kept', async ($, on) => {
-  const b = boundaries(on, { handoffAfter: 'continue' })
-  http(on)
-  const commands: string[] = []
-  on('command.run', { command: 'clear' }, () => { commands.push('clear'); return {} })
-  on('model.fork', () => ({ value: { isAnswered: true, text: 'Resume: the band fix is half done.', usage: { input_tokens: 1, output_tokens: 1 } } }) as never)
-  await start($)
-  await command($, 'handoff')
-  await b.clock.advance(15000)
-  expect(opened(b)?.get('q')).toContain('the band fix is half done')
-  expect(commands).toEqual([])
-})
-
-test('failed quick fork uses an ordinary summary turn and copy falls back to prompt fill', async ($, on) => {
-  const b = boundaries(on, { handoffAfter: 'copy' })
-  http(on)
-  on('model.fork', () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }))
-  on('ui.copy', () => ({ value: { isCopied: false, reason: 'no-clipboard' } }))
-  await start($)
-  await command($, 'handoff')
-  await b.clock.advance(15000)
-  expect(b.submitted[0]).toContain('Prepare a concise resume note')
-  await complete($, undefined, 'The pending work is in /work.')
-  await b.clock.advance(15000)
-  expect(b.filled[0]).toContain('The pending work is in /work.')
-  expect(b.toasts.some(t => t.includes('clipboard unavailable'))).toBe(true)
-})
-
 test('a restored manual pick yields to the first app effort, but a fresh manual pick applies', async ($, on) => {
   const b = boundaries(on, { effortAuto: false })
   b.saved.set('pick', { effort: 'max', by: 'manual', why: 'old chat', at: 0 })
@@ -1986,58 +1925,25 @@ test('Save caps an existing high pick without another judge and records sent eff
 })
 
 test('fork aggregate usage wins over the last step without main cost contamination', async ($, on) => {
-  const b = boundaries(on, { handoffAfter: 'copy' })
+  const b = boundaries(on, { keepWarm: true })
   http(on)
+  judgeStub(on)
   stepStub(on)
+  let forks = 0
   on('model.fork', async () => {
+    forks++
     await step($)
     await step($)
-    return { value: { isAnswered: true, text: 'Resume the verified work.', usage: { input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 80000, cache_creation_input_tokens: 0 } } }
+    return { value: { isAnswered: true, text: 'ok', usage: { input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 80000, cache_creation_input_tokens: 0 } } }
   })
-  on('ui.copy', () => ({ value: { isCopied: true } }))
   await start($)
-  await command($, 'handoff')
-  await b.clock.advance(15000)
+  await step($)
+  await complete($)
+  await b.clock.advance(3375000)
+  expect(forks).toBe(1)
   const out = await command($, 'stats')
   expect(out.text).toContain('Auto: 0 prompts, 0 requests')
   expect(out.text).toContain('Warm: 1 pings, 8300 weighted tokens')
-})
-
-test('handoff advice counts eligible prompts, not short followups', async ($, on) => {
-  const b = boundaries(on, { effortAuto: false })
-  b.setPercent(35)
-  http(on)
-  const calls = judgeStub(on, '{"handoff":"A different task starts now"}')
-  await start($)
-  await b.clock.advance(1)
-  await submit($)
-  await complete($)
-  await submit($, 'go')
-  await complete($)
-  await b.clock.advance(15000)
-  expect(calls.length).toBe(0)
-  await submit($, 'Start the separate implementation task next.')
-  await complete($)
-  await b.clock.advance(15000)
-  expect(calls.length).toBe(1)
-  const ui = await band($)
-  expect(await ui.find({ key: 'handoff' })).toBeDefined()
-})
-
-test('quick handoff runs on the timer and copies without clearing', async ($, on) => {
-  const b = boundaries(on, { handoffAfter: 'copy' })
-  http(on)
-  let copied = ''
-  let forks = 0
-  on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'Pending: verify the changed files.', usage: USAGE } } })
-  on('ui.copy', ($, e) => { copied = e.text; return { value: { isCopied: true } } })
-  await start($)
-  await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'handoff' })
-  expect(forks).toBe(0)
-  await b.clock.advance(15000)
-  expect(forks).toBe(1)
-  expect(copied).toContain('Pending: verify the changed files.')
-  expect(copied).toContain('Continue with the justified next action')
 })
 
 // ---- Regressions of 2026-10-10 (setup step 2, the band) ----------------------------------------

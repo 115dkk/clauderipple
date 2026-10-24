@@ -321,7 +321,7 @@ export function extraHoverArt(widthPx: number): string {
 export type PillLook = 'primary' | 'ghost'
 
 /** Glyphs a button may lead with, drawn on a 12 px square. */
-export type Glyph = 'open' | 'close' | 'gear' | 'back' | 'next' | 'copy' | 'save' | 'compact' | 'handoff'
+export type Glyph = 'open' | 'close' | 'gear' | 'back' | 'next' | 'copy' | 'save' | 'compact'
 
 export const GLYPH: Record<Glyph, string> = {
   open: '<path d="M7 2.2h2.8V5M9.8 2.2L5.6 6.4M8.8 7.4v2.4H2.2V3.2h2.4"/>',
@@ -332,7 +332,6 @@ export const GLYPH: Record<Glyph, string> = {
   copy: '<rect x="4" y="4" width="6" height="6" rx="1.2"/><path d="M8 4V2.8A.8.8 0 0 0 7.2 2H2.8a.8.8 0 0 0-.8.8v4.4a.8.8 0 0 0 .8.8H4"/>',
   save: '<path d="M6 1.5v9M2.5 7l3.5 3.5L9.5 7"/>',
   compact: '<path d="M3.5 1.8L6 4.3l2.5-2.5M3.5 10.2L6 7.7l2.5 2.5M1.8 6h8.4"/>',
-  handoff: '<path d="M1.8 6h6.4M5.8 3.4L8.4 6 5.8 8.6M10.4 2.2v7.6"/>',
 }
 
 /**

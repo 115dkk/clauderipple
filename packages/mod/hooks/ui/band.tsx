@@ -24,9 +24,8 @@
 //   native button over each (kit.tsx); a state is in the drawing (a switch's track, a lit flame).
 //
 // No item's width depends on its value: each fact has a slot sized for the widest value its
-// language can show; the route is counted at a fixed room and takes what the row leaves; Handoff
-// is counted whether it shows or not. The controls sit at the right end with the one
-// that comes and goes (Handoff) first, so a changing value never moves a neighbour.
+// language can show; the route is counted at a fixed room and takes what the row leaves. The
+// controls sit at the right end, so a changing value never moves a neighbour.
 
 import { t } from '../i18n'
 import type { Lang } from '../i18n'
@@ -37,7 +36,7 @@ import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB,
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
-import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
+import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
 import { DISPLAY, displayText } from './display'
 import type { Els } from './parts'
@@ -288,8 +287,8 @@ export function routeFact(frame: Frame, view: DashboardView, room: number, onPre
 // ---- Controls ----------------------------------------------------------------------------------
 
 /**
- * A control: its label, the hotkey, and whether it is on (a toggle that is on, an open pane, the
- * advised Handoff). The terminal says it in the label (● / ○), as its plain Buttons take no colour.
+ * A control: its label, the hotkey, and whether it is on (a toggle that is on, an open pane). The
+ * terminal says it in the label (● / ○), as its plain Buttons take no colour.
  */
 type Control = { key: string; label: string; hotkey: string; onPress: () => void; on: boolean; count?: string }
 
@@ -297,11 +296,6 @@ function controls(frame: Frame, view: DashboardView, actions: BandActions): Cont
   const L = frame.lang
   const mark = (on: boolean) => (on ? ' ●' : ' ○')
   const out: Control[] = []
-  // Handoff comes and goes; first in the row, it moves nothing when it does.
-  if (view.handoff !== 'off') {
-    const advised = view.handoff === 'advised'
-    out.push({ key: 'handoff', label: t(L, 'band.handoff') + (!isRich(frame) && advised ? ' ◆' : ''), hotkey: 'h', onPress: actions.handoff, on: advised })
-  }
   out.push(
     { key: 'auto', label: t(L, 'band.auto') + mark(view.auto), hotkey: 'a', onPress: actions.toggleAuto, on: view.auto },
     { key: 'warm', label: t(L, 'band.warm') + mark(view.warm.on), hotkey: 'w', onPress: actions.toggleWarm, on: view.warm.on },
@@ -323,9 +317,9 @@ function controlCells(frame: Frame, c: Control): number {
   return cells(frame, c.label) + PAD + (c.count !== undefined ? COUNT_CELLS : 0)
 }
 
-/** Every control's cells, Handoff counted whether shown or not, so the route's room stays put. */
+/** Every control's cells, so the route's room stays put. */
 function controlsCells(frame: Frame, view: DashboardView, actions: BandActions): number {
-  const list = controls(frame, { ...view, handoff: 'advised' }, actions)
+  const list = controls(frame, view, actions)
   return list.reduce((n, c) => n + controlCells(frame, c), 0) + CTRL_GAP * (list.length - 1) * (isRich(frame) ? 1 : 2)
 }
 
@@ -339,8 +333,8 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
     (f): f is Fact => f !== null && !drop.includes(f.key),
   )
   const left = room - span(fixed) - (fixed.length ? GAP : 0)
-  // The desktop's route is a flex item: it takes what the row really leaves (the room counted here
-  // keeps Handoff's place, which it mostly does not need) and the host cuts its name past that.
+  // The desktop's route is a flex item: it takes what the row really leaves and the host cuts its
+  // name past that.
   const route = drop.includes('route') ? null : routeFact(frame, view, isRich(frame) ? Math.max(left, RICH_ROUTE_MIN) : left, actions.toggleLog)
   return route ? [...fixed, route] : fixed
 }
@@ -353,8 +347,8 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 // it, left to right: the effort as five bars rising shallow to deep and its word; a rule; the
 // context ring, the cache clock, the plan limit and the mode when on; a rule; the last route (its
 // model the way into the log); the judge's reason in what is left. Then the controls, each lit
-// under the pointer: Handoff when advised, Auto's switch, keep-warm's flame, the agents, settings,
-// and the way out. Pointing at a fact shows what it means in the reason's place.
+// under the pointer: Auto's switch, keep-warm's flame, the agents, settings, and the way out.
+// Pointing at a fact shows what it means in the reason's place.
 // With the `limits` extra on and any window known, a second row under the first (starting where
 // the effort does) gauges every plan window — Claude's, then each ChatGPT account's — and the
 // first row's limit fact steps aside for the route.
@@ -363,7 +357,7 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 export const BAND_RIPPLE = 24
 /** 리플이's slot at the row's start, in cells: 24 px and its air. */
 export const CREST_CELLS = 4
-/** The row's height, px: a pill's, whether or not one shows, so Handoff never moves the band. */
+/** The row's height, px: a pill's, whether or not one shows, so nothing moves the band. */
 const ROW_H = 26
 // Fact and control widths alone decide the row, never a value, so a changing figure never moves its
 // neighbours. The air between facts and between controls is trimmed below what reads as a whole cell
@@ -769,12 +763,6 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   const out: DrawnControl[] = []
   const k = lookOf(frame)
   const state = (on: boolean) => t(L, on ? 'band.on' : 'band.off')
-  if (view.handoff !== 'off') {
-    const advised = view.handoff === 'advised'
-    const label = t(L, 'band.handoff')
-    const look = advised ? 'primary' : 'ghost'
-    out.push({ key: 'handoff', cells: k.art.pill(label, look, 'violet').cells + 1, node: pill(el, frame, 'handoff', label, look, actions.handoff, 'violet'), tip: t(L, 'alerts.handoffTitle') })
-  }
   // Auto's word is the control (art.ts `wordArt`): lit violet while on, a quiet ghost while off,
   // pulsing while the judge decides. No switch: the state is in the word's own light (2026-10-14).
   const autoLabel = t(L, 'band.auto')
@@ -907,12 +895,11 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
   // spare words (the icons' beside it) go first when the row narrows.
   let words: readonly string[] = [...WORDLESS]
-  // Counted with Handoff in its place whether it shows or not, and the route at a fixed room
-  // (a long model name is cut, a short one leaves air): what the band holds never depends on a value.
-  // The air between controls is the row's own columnGap (a fraction of a cell, as the facts' air),
-  // and the hide button a half-separator of its own.
+  // Counted at a fixed room (a long model name is cut, a short one leaves air): what the band holds
+  // never depends on a value. The air between controls is the row's own columnGap (a fraction of a
+  // cell, as the facts' air), and the hide button a half-separator of its own.
   const counted = (w: readonly string[]) => {
-    const list = controlsDrawn(el, frame, { ...view, handoff: 'advised' }, actions, w)
+    const list = controlsDrawn(el, frame, view, actions, w)
     return list.reduce((n, c) => n + c.cells, 0) + 0.15 * (list.length - 1) + (actions.hide ? 0.15 : 0)
   }
   let controlCells = counted(words)
@@ -925,7 +912,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // Narrow, things go in this order until the row fits: the icons' words (clear, compact,
   // settings, agents, keep-warm), the rules, then the route draws in to its least, then the mode
   // and the context chip, last the cache. The limit and the new icons stay (2026-10-14: the band
-  // sits at its ~100-column maximum and must hold everything there, Handoff with the rest).
+  // sits at its ~100-column maximum and must hold everything there).
   for (const drop of [...WORDLESS, 'rules', 'route', 'mode', 'context', 'cache']) {
     if (need(facts) <= cols) break
     if ((WORDLESS as readonly string[]).includes(drop)) {
@@ -938,7 +925,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const controls = controlsDrawn(el, frame, view, actions, words)
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
   if (limitsRow) for (const tip of limitsRow.tips) tips.push(tip)
-  for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
+  for (const c of controls) tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
     <Box key="band-crest" width={CREST_CELLS} flexShrink={0} alignItems="center">

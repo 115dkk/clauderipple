@@ -90,11 +90,17 @@ test('only the general ladder survives loading: Auto is a ladder to fill, field 
   assert.deepEqual(normalizeSettings({ allow: ['gpt-6-1-sol', 'gpt-6-1-sol', 3], rules: { general: { mode: 'auto', allow: ['ignored'] } } }).allow, ['gpt-6-1-sol'])
 })
 test('unrelated valid settings survive and invalid values retain defaults', () => {
-  const s = normalizeSettings({ effortAuto: false, judge: 'jev', judgeModel: ' custom ', bias: 2, floor: 'max', ceiling: 'low', agentAuto: 'all', keepWarmHours: 8, handoffSkill: ' /handoff ', hide: ['route', 'bogus', 'timer', 'route', 4], fallback: { agent: 'custom', model: ' opus ' } })
-  assert.equal(s.effortAuto, false); assert.equal(s.judgeModel, 'custom'); assert.equal(s.handoffSkill, 'handoff')
+  const s = normalizeSettings({ effortAuto: false, judge: 'jev', judgeModel: ' custom ', bias: 2, floor: 'max', ceiling: 'low', agentAuto: 'all', keepWarmHours: 8, hide: ['route', 'bogus', 'timer', 'route', 4], fallback: { agent: 'custom', model: ' opus ' } })
+  assert.equal(s.effortAuto, false); assert.equal(s.judgeModel, 'custom')
   assert.deepEqual(s.hide, ['route', 'timer']); assert.deepEqual(s.fallback, { agent: 'custom', model: 'opus' })
   assert.deepEqual(normalizeSettings({ bias: '2', jevSource: 'bad', rules: [], providers: [], autoTieBand: -1 }), DEFAULTS)
   for (const n of [-1, 101, NaN, Infinity]) assert.equal(normalizeSettings({ swampAt: n }).swampAt, 50)
+})
+
+test('a stored settings file that still names handoff settings loads without them', () => {
+  const s = normalizeSettings({ effortAuto: true, handoffSkill: ' /handoff ', handoffAfter: 'copy', handoffButton: 'always' })
+  for (const key of ['handoffSkill', 'handoffAfter', 'handoffButton']) assert.equal(Object.hasOwn(s, key), false, key)
+  assert.deepEqual(s, normalizeSettings(null))
 })
 test('allow-lists name workers; provider names from old settings migrate to that provider\'s workers', async () => {
   const { allowedWorkers, migrateAllow, toggleAllow } = await import('../../packages/mod/hooks/settings.ts')

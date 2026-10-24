@@ -7,7 +7,7 @@ import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normali
 import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
-import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, isShortFollowUp, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
+import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
 import { AUTO_DESCRIPTION, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, markerDomain, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, TIER_MARKERS, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid, userNamed } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
@@ -17,7 +17,6 @@ import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
 import { bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
-import { ADVICE_SYSTEM, FULL_PROMPT, QUICK_PROMPT, adviceDue, adviceInput, parseAdvice, wrapForNewChat } from './handoff'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
@@ -74,14 +73,6 @@ const judgeSeen = atom({ plugin: 'ripple', key: 'judgeSeen' } as const, [])
 const judgeRuns = atom({ plugin: 'ripple', key: 'judgeRuns' } as const, [])
 // The standing judge failure was a dropped connection or a timeout: the card blames the network, not the judge.
 const judgeDownNetwork = atom({ plugin: 'ripple', key: 'judgeDownNetwork' } as const, false)
-const advice = atom({ plugin: 'ripple', key: 'advice' } as const, null)
-const adviceQueue = atom({ plugin: 'ripple', key: 'adviceQueue' } as const, null)
-const promptCount = atom({ plugin: 'ripple', key: 'promptCount' } as const, 0)
-const handoff = atom({ plugin: 'ripple', key: 'handoff' } as const, null)
-const handoffQueued = atom({ plugin: 'ripple', key: 'handoffQueued' } as const, false)
-const handoffWaiting = atom({ plugin: 'ripple', key: 'handoffWaiting' } as const, false)
-const handoffChoiceKind = atom({ plugin: 'ripple', key: 'handoffChoiceKind' } as const, 'quick')
-const handoffChoiceAfter = atom({ plugin: 'ripple', key: 'handoffChoiceAfter' } as const, 'continue')
 const resultCard = atom({ plugin: 'ripple', key: 'result' } as const, null)
 const panel = atom({ plugin: 'ripple', key: 'panel' } as const, null)
 const busy = atom({ plugin: 'ripple', key: 'busy' } as const, false)
@@ -921,85 +912,6 @@ async function finishSetup($: EngineInterface, skip = false): Promise<void> {
   await update($, settingsBase, () => null)
   await $.ui.toast(t(await read($, lang), saved ? 'toasts.settingsSaved' : 'band.routerDown'))
 }
-async function openHandoff($: EngineInterface): Promise<void> {
-  const active = await read($, handoff)
-  if (active && ['writing', 'clearing'].includes(active.stage)) return
-  const choice = object(await $.store.get('handoffChoice'))
-  await update($, handoffChoiceKind, () => choice.kind === 'full' ? 'full' : 'quick')
-  const after = ['continue', 'confirm', 'copy'].includes(String(choice.after)) ? choice.after as Settings['handoffAfter'] : (await currentSettings($)).handoffAfter
-  await update($, handoffChoiceAfter, () => after)
-  await update($, panel, value => value === 'handoff' ? null : 'handoff')
-}
-async function queueHandoff($: EngineInterface, kind?: 'quick' | 'full'): Promise<void> {
-  const active = await read($, handoff)
-  if (active && ['writing', 'clearing'].includes(active.stage)) return
-  const selected = kind ?? await read($, handoffChoiceKind)
-  const after = kind ? (await currentSettings($)).handoffAfter : await read($, handoffChoiceAfter)
-  await update($, handoffChoiceKind, () => selected)
-  await update($, handoffChoiceAfter, () => after)
-  await $.store.set('handoffChoice', { kind: selected, after })
-  await update($, handoff, () => ({ stage: 'writing', kind: selected }))
-  await update($, panel, () => null)
-  await update($, advice, () => null)
-  await update($, handoffQueued, () => true)
-}
-async function copyHandoff($: EngineInterface): Promise<void> {
-  const language = await read($, lang)
-  const value = await read($, handoff)
-  if (!value?.text) return
-  const text = wrapForNewChat(value.text, 'continue', value.kind, !!(await currentSettings($)).handoffSkill)
-  try {
-    const copied = await $.ui.copy({ text })
-    if (!copied.isCopied) throw new Error(copied.reason)
-  } catch (error) {
-    await $.prompt.fill({ text, mode: 'replace' })
-    await $.ui.toast(t(language, 'toasts.clipboardFallback'))
-    await report($, 'copy fallback', error)
-  }
-  await update($, handoff, () => ({ ...value, stage: 'copied' }))
-}
-/**
- * The summary is written: Copy only copies it; Confirm first stops on a card that asks before
- * moving; Continue moves to a new session at once. This chat is never cleared (2026-10-13: the
- * owner read "Confirm first" as asking before the clear, and lost the chat to it).
- */
-async function finishHandoff($: EngineInterface): Promise<void> {
-  const value = await read($, handoff)
-  if (!value?.text || value.stage !== 'writing') return
-  const after = await read($, handoffChoiceAfter)
-  if (after === 'copy') { await copyHandoff($); return }
-  if (after === 'confirm') { await update($, handoff, () => ({ ...value, stage: 'ready' })); return }
-  await moveToNewSession($)
-}
-/** A summary longer than this goes to a file the new session reads; the app takes ~14k characters in a link. */
-const LINK_TEXT = 12_000
-/**
- * Opens a new Code session in this session's folder with the handoff in its prompt box
- * (claude://code/new?folder=…&q=…, the desktop app's own link: it fills the box and waits for
- * Enter, never sends by itself). A long summary is saved under ~/.clauderipple/handoffs and the box
- * says to read it. Where no link can be opened, the text is copied instead.
- */
-async function moveToNewSession($: EngineInterface): Promise<void> {
-  const value = await read($, handoff)
-  if (!value?.text) return
-  const language = await read($, lang)
-  let text = wrapForNewChat(value.text, 'continue', value.kind, !!(await currentSettings($)).handoffSkill)
-  try {
-    if (text.length > LINK_TEXT) {
-      const path = `${await rippleHome($)}/handoffs/handoff-${await $.clock.now()}.md`
-      await $.fs.write(path, text + '\n')
-      text = t(language, 'alerts.readHandoffFile', { path })
-    }
-    const folder = await $.session.cwd()
-    const url = 'claude://code/new?' + new URLSearchParams({ ...(folder ? { folder } : {}), q: text, source: 'services' }).toString()
-    await openUrl($, url)
-    await update($, handoff, () => ({ ...value, stage: 'opened' }))
-  } catch (error) {
-    await report($, 'open new session', error)
-    await copyHandoff($)
-    await $.ui.toast(t(language, 'toasts.newSessionFallback'))
-  }
-}
 async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult | null> {
   const epoch = generation
   forking = true
@@ -1018,41 +930,9 @@ async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult
     return answer
   } finally { forking = false; forkUsage = null }
 }
-async function driveHandoff($: EngineInterface): Promise<void> {
-  const language = await read($, lang)
-  const value = await read($, handoff)
-  if (!value || value.stage !== 'writing' || await read($, busy)) return
-  if (!value.text && !await read($, handoffQueued)) return
-  try {
-    if (value.text) { await finishHandoff($); return }
-    await update($, handoffQueued, () => false)
-    if (value.kind === 'quick') {
-      let answer: ModelForkResult | null = null
-      try { answer = await fork($, QUICK_PROMPT) }
-      catch (error) { await report($, 'quick fork fallback', error) }
-      if (answer?.isAnswered && answer.text.trim()) {
-        await update($, handoff, () => ({ ...value, text: answer.text }))
-        await finishHandoff($)
-        return
-      }
-    }
-    await update($, handoffWaiting, () => true)
-    const s = await currentSettings($)
-    if (value.kind === 'full' && s.handoffSkill) {
-      const [command, ...args] = s.handoffSkill.split(/\s+/)
-      await $.command.run({ command: command!, args: args.join(' ') })
-    } else await $.prompt.submit({ text: value.kind === 'full' ? FULL_PROMPT : QUICK_PROMPT })
-  } catch (error) {
-    await update($, handoff, () => ({ ...value, stage: 'failed' }))
-    await update($, handoffWaiting, () => false)
-    await $.ui.toast(t(language, 'toasts.handoffFailed'))
-    await report($, 'handoff', error)
-  }
-}
 async function runCompact($: EngineInterface, note = ''): Promise<void> {
   const language = await read($, lang)
   await update($, panel, () => null)
-  await update($, advice, () => null)
   await update($, resultCard, () => ({ stage: 'compacting' }))
   try {
     await $.command.run({ command: 'compact', args: note })
@@ -1228,13 +1108,6 @@ async function tick($: EngineInterface): Promise<void> {
     }
     await countAgents($)
     await scheduleCountdown($)
-    if (await read($, handoff)) await driveHandoff($)
-    const queued = await read($, adviceQueue)
-    if (queued && !await read($, busy)) {
-      await update($, adviceQueue, () => null)
-      const answer = await $.model.complete({ model: HAIKU, system: ADVICE_SYSTEM, prompt: queued, effort: 'low', maxTokens: 60, timeoutMs: 8000 })
-      if (answer.isAnswered) await update($, advice, () => parseAdvice(answer.text))
-    }
     const s = { ...await currentSettings($) }
     s.keepWarm = await keepWarmOn($, s)
     const decision = shouldPing({ settings: s, memo: await read($, cache), warm: await read($, warm), now: await $.clock.now(), idle: !await read($, busy) && !await read($, deciding) && !forking,
@@ -1309,7 +1182,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     context: await read($, context), cache: await read($, cache), warm: { ...w, on: await keepWarmOn($, s), ...(await read($, warmHere) !== null ? { here: true } : {}) },
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
     limits: await read($, limits) ?? [],
-    auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
+    auto: s.effortAuto,
     agents: counts,
     compactions: await read($, compactions),
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
@@ -1334,26 +1207,19 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
   const c = await read($, context)
   const m = await read($, cache)
   const h = await read($, hot)
-  const writing = await read($, handoff)
   const result = await read($, resultCard)
   const downReason = await read($, judgeDown)
   const d = await read($, demo)
   const which = bandPriority({ panel: await read($, panel), judgeDown: d === 'down' || (!!downReason && downReason !== await read($, judgeDownHidden)),
-    hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!writing || !!result,
+    hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!result,
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c, s.swampAt), await read($, swampHidden))) })
   if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
   if (which === 'clear') return { kind: 'clear' }
-  if (which === 'handoff') return { kind: 'handoffChoice', handoffKind: await read($, handoffChoiceKind), after: await read($, handoffChoiceAfter) }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
-  if (which === 'result') {
-    if (!writing) return { kind: 'result', ...result! }
-    const stage = ['writing', 'clearing'].includes(writing.stage) ? 'handingOff' : writing.stage === 'failed' ? 'failed' : writing.stage === 'ready' ? 'handoffReady' : 'handoffDone'
-    const detail = writing.stage === 'copied' ? t(language, 'alerts.copied') : writing.stage === 'opened' ? t(language, 'alerts.openedBody') : undefined
-    return { kind: 'result', stage, handoffKind: writing.kind, ...(detail ? { detail } : {}) }
-  }
+  if (which === 'result') return { kind: 'result', ...result! }
   if (which === 'cold') return { kind: 'cold', tokens: d === 'cold' ? 180000 : c!.tokens, idleMinutes: m ? Math.round((now - m.lastReplyAt) / 60000) : 61 }
   if (which === 'kept') {
     const k = d === 'kept' ? { pings: 2, tokens: 312000 } : (await read($, kept)) ?? { pings: 0, tokens: 0 }
@@ -1381,11 +1247,11 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
   else if (view.kind === 'kept') await update($, kept, () => null)
   else if (view.kind === 'swamp') await update($, swampHidden, () => view.percent)
   else if (view.kind === 'judgeDown') await update($, judgeDownHidden, () => view.reason)
-  else if (view.kind === 'result') { await update($, resultCard, () => null); await update($, handoff, () => null) }
+  else if (view.kind === 'result') await update($, resultCard, () => null)
   else await update($, panel, () => null)
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
-  return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), handoff: () => openHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
+  return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
     toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
@@ -1405,8 +1271,8 @@ function setupActions($: EngineInterface): SetupActions {
     back: () => update($, setupStep, step => Math.max(1, step - 1) as 1 | 2 | 3 | 4), next: () => update($, setupStep, step => Math.min(4, step + 1) as 1 | 2 | 3 | 4), finish: () => finishSetup($), skip: () => finishSetup($, true) }
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
-  return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, handoff: () => openHandoff($), dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
-    noteInput: text => update($, compactNote, () => text), setHandoffKind: kind => update($, handoffChoiceKind, () => kind), setHandoffAfter: after => update($, handoffChoiceAfter, () => after), go: () => queueHandoff($), copy: () => copyHandoff($), openNew: () => moveToNewSession($) }
+  return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
+    noteInput: text => update($, compactNote, () => text) }
 }
 function agentsActions($: EngineInterface): AgentsActions {
   return {
@@ -1606,15 +1472,6 @@ export const register: Register = on => {
         if (eager.noted !== noted) await update($, modeNoted, () => eager.noted)
         note = eager.note
       }
-      if (human && !hostCommand && (e.text.trim() || e.attachments?.length) && (!isShortFollowUp(e.text) || !!e.attachments?.length)) {
-        const count = await read($, promptCount) + 1
-        await update($, promptCount, () => count)
-        const c = await read($, context)
-        if (c && adviceDue(count, c.percent)) {
-          const warmCache = ((await read($, cache))?.expiresAt ?? 0) > await $.clock.now()
-          await update($, adviceQueue, () => adviceInput({ messages, next: e.text, contextPercent: c.percent, warm: warmCache }))
-        }
-      }
       if (shouldJudge({ text: e.text, origin: e.origin.kind, auto: s.effortAuto, modelId: model, hostCommand, current, attachments: e.attachments, assistantTail: assistant })) {
         const now = await $.clock.now()
         await update($, decidingSince, () => now)
@@ -1671,7 +1528,6 @@ export const register: Register = on => {
   })
   on('turn.complete', async ($, e, next) => {
     try {
-      const language = await read($, lang)
       if (e.agentId) {
         const now = await $.clock.now()
         const before = (await read($, agents)).find(a => a.id === e.agentId)
@@ -1687,15 +1543,6 @@ export const register: Register = on => {
         const held = await read($, heldPick)
         if (held && (await currentSettings($)).effortAuto) await installPick($, held)
         await update($, heldPick, () => null)
-        const value = await read($, handoff)
-        if (value?.stage === 'writing' && await read($, handoffWaiting)) {
-          await update($, handoffWaiting, () => false)
-          if (e.reason === 'answer' && e.answer.trim()) await update($, handoff, () => ({ ...value, text: e.answer }))
-          else {
-            await update($, handoff, () => ({ ...value, stage: 'failed' }))
-            await $.ui.toast(t(language, 'toasts.handoffEmpty'))
-          }
-        }
       }
     } catch (error) { await report($, 'turn.complete', error) }
     return next(e)
@@ -1826,14 +1673,13 @@ export const register: Register = on => {
   on('command.run', { command: 'ripple' }, async ($, e, next) => {
     try {
       const language = await read($, lang)
-      const [sub = 'settings', arg] = e.args.trim().toLowerCase().split(/\s+/)
+      const [sub = 'settings'] = e.args.trim().toLowerCase().split(/\s+/)
       if (sub === 'stats') return { text: formatStats(await read($, stats), language) }
       if (sub === 'debug') return { text: debugText(language, { judge: (await currentSettings($)).judge, judgeModel: (await currentSettings($)).judgeModel, pick: await read($, pick), paused: await read($, paused), cache: await read($, cache), warm: await read($, warm), lastSpawn: await read($, lastSpawn), lastRequest: await read($, lastRequest), model: await $.session.model(), limit: await read($, limit), hostRateLimits: (await $.session.usage()).rateLimits }) }
       if (sub === 'settings' || sub === 'setup') await startPanel($, sub)
       else if (sub === 'auto') await toggleAuto($)
       else if (sub === 'warm') await toggleWarm($)
       else if (sub === 'save') await toggleSave($)
-      else if (sub === 'handoff') await queueHandoff($, arg === 'full' ? 'full' : 'quick')
       else if (sub === 'log') await toggleLog($)
       else if (sub === 'agents') await toggleAgents($)
       else if (sub === 'bar') await toggleBar($)
@@ -1878,7 +1724,7 @@ export const register: Register = on => {
       const frame = await frameOf($, e)
       const el = $.ui.resolve(e)
       if (which === 'settings') return renderSettings(el, frame, await settingsView($), settingsActions($)) as RenderElement
-      if (which === 'compact' || which === 'clear' || which === 'handoff') {
+      if (which === 'compact' || which === 'clear') {
         const choice = await alertView($, frame.now)
         if (choice) return renderAlert(el, frame, choice, alertActions($, choice)) as RenderElement
       }

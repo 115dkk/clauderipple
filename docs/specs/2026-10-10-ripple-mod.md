@@ -3,7 +3,7 @@
 The status mod in `packages/mod` grows into ClaudeRipple's in-session control surface: it picks
 the reasoning effort for every prompt, picks the worker for every delegated task, can keep the
 prompt cache warm, and carries the session tools a heavy Claude Code user needs (context, cache,
-limits, compact/handoff). The open-source mod "effortless" (HeyCubit, MIT) proved most of the
+limits, compact). The open-source mod "effortless" (HeyCubit, MIT) proved most of the
 main-chat ideas; it is a **behavioral reference only** — no code is copied from it, as with the
 other reference implementations (project CLAUDE.md).
 
@@ -199,7 +199,7 @@ prose when they disagree.
 - **Context:** `$.session.usage().context` (percent, tokens, window); unknown shows nothing.
 - **Limits:** `rateLimits` `five_hour` / `seven_day` (max shown); ≥ 80 % shows the hot band with
   Save mode (caps Auto at medium until the window resets).
-- **Bands** (priority): settings → compact note → handoff choice → setup → judge down → hot →
+- **Bands** (priority): settings → compact note → setup → judge down → hot →
   result cards → cold (cache expired on a ≥ 150k chat) → swamp (context ≥ `swampAt`, default 50 %)
   → dashboard. Each alert dismisses until it worsens.
 - **Compact with Haiku:** `session.compact` for the main chat (not subagents, not `precompute`,
@@ -207,10 +207,6 @@ prose when they disagree.
   400 / results 2k; 2.4M char budget, then tighter, then engine fallback), Haiku 5.5, 16k tokens,
   240 s; success needs > 200 chars; failure falls back to the engine's own compaction with a toast.
   Setting `compactWith: haiku | session`.
-- **Handoff:** Quick (fork writes a resumable summary; fallback: ordinary turn) or Full (configured
-  skill, else an ordinary turn that checks git and writes `HANDOFF.md`); then continue (clear +
-  resume), confirm (clear + state + wait) or copy. Haiku advice from 30 % context, every second
-  real prompt, turns Compact into a lit Handoff when a fresh chat clearly pays.
 - **Stats** (`/ripple stats`): Auto-steered prompts by effort, weighted cost (input 1, write 1.25,
   read 0.1, output 5), judge counts/time/tokens, worker picks by tier, keep-warm pings and cost.
 
@@ -218,13 +214,13 @@ prose when they disagree.
 
 - **Band (desktop, SVG-drawn):** effort (Deciding glow / Paused / Off) · model · context ring ·
   cache countdown (with a keep-warm mark) · limits · last route (provider colour, cache hit) ·
-  Auto · Warm · Compact/Handoff · Log · Agents · ⚙. Terminal: the same in text with hotkeys.
+  Auto · Warm · Compact · Log · Agents · ⚙. Terminal: the same in text with hotkeys.
   Minimal layout: footer controls only.
 - **Panes:** Log (existing request log) and Agents (each subagent: tier/agent/effort/why, state,
   current tool, elapsed, cost).
 - **Settings panel** (cards): Effort · Workers (tier → agent selects, fallback, agentAuto) · Judge
-  (Haiku / Jev with key + Test / router model) · Cache (keep warm, hours, min tokens) · Compact &
-  Handoff · Look (dashboard/minimal, appearance auto/dark/light).
+  (Haiku / Jev with key + Test / router model) · Cache (keep warm, hours, min tokens) · Compaction
+  (engine, heavy-context threshold) · Look (dashboard/minimal, appearance auto/dark/light).
 - **First run:** a short setup (judge, worker tiers, keep warm) opens once.
 - Colours: ClaudeRipple accent `#6a56d6` (from packages/ui), provider hues from the existing
   `providerColor`; status green/amber/red stay semantic.

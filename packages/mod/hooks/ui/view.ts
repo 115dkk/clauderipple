@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, HandoffKind, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import { DISPLAY, displayText } from './display'
@@ -80,8 +80,6 @@ export type DashboardView = {
   /** A line from the router side ("router not answering"), shown in place of the route. */
   notice: string | null
   auto: boolean
-  /** Compact turns into a lit Handoff when advice says so, or always with handoffButton 'always'. */
-  handoff: 'off' | 'advised' | 'always'
   agents: { live: number; total: number }
   /** Times this chat was compacted (manual, automatic or by the band), shown on the Compact icon. */
   compactions: number
@@ -109,7 +107,6 @@ export type BandActions = {
   toggleWarm: () => void
   compact: () => void
   clear: () => void
-  handoff: () => void
   toggleLog: () => void
   toggleAgents: () => void
   openSettings: () => void
@@ -125,7 +122,7 @@ export type BandActions = {
 
 // ---- Alerts and cards ------------------------------------------------------------------------
 
-export type ResultStage = 'handingOff' | 'handoffReady' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'compacting' | 'compacted' | 'failed'
 
 export type AlertView =
   /** The cache expired on a big chat: the next prompt re-reads it all. */
@@ -138,32 +135,21 @@ export type AlertView =
   | { kind: 'hot'; limitKind: string; percent: number; resetsAt?: string; save: boolean }
   /** The judge failed and Auto fell back. */
   | { kind: 'judgeDown'; judge: JudgeKind; reason: string; network?: boolean }
-  | { kind: 'result'; stage: ResultStage; handoffKind?: HandoffKind; detail?: string }
+  | { kind: 'result'; stage: ResultStage; detail?: string }
   /** Compact with an optional note of what to keep. */
   | { kind: 'compactNote'; draft: string }
   /** The band's Clear asks before the conversation is started over. */
   | { kind: 'clear' }
-  /** Quick or full handoff, and what happens after. */
-  | { kind: 'handoffChoice'; handoffKind: HandoffKind; after: Settings['handoffAfter'] }
 
 export type AlertActions = {
   compact: (note?: string) => void
   /** Runs the conversation's clear, from the Clear confirm card. */
   clear: () => void
-  /** Opens the handoff choice bar. */
-  handoff: () => void
   dismiss: () => void
   toggleSave: () => void
   openSettings: () => void
   /** Each change of the compact note's field. */
   noteInput: (text: string) => void
-  setHandoffKind: (kind: HandoffKind) => void
-  setHandoffAfter: (after: Settings['handoffAfter']) => void
-  go: () => void
-  /** Copies a handoff's text again (result card, after: copy). */
-  copy: () => void
-  /** Opens a new session in this folder with the written handoff (Confirm first's card). */
-  openNew: () => void
 }
 
 // ---- Settings and setup ----------------------------------------------------------------------

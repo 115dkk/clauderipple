@@ -283,7 +283,7 @@ when its band is hidden. A changed revision replaces the settings atom and redra
 readers. Only when `stored:false` does it read legacy plugin-store `settings` and
 `setupDone` and migrate them with a revision-checked PUT; a racing first writer wins
 instead of being overwritten. Afterwards settings are never read from or saved to the
-plugin store; unrelated keys such as picks, band visibility and handoff choices remain.
+plugin store; unrelated keys such as picks and band visibility remain.
 Panel/setup saves PUT the last seen revision. On 409 the mod takes the server copy,
 reapplies only the user's changed paths (including sibling rule/provider fields), and
 retries once. A panel keeps its opening baseline so a poll while it is open cannot

@@ -3804,7 +3804,7 @@ const MOD_DEFAULTS = {
   allow: [], allowKnown: [], modes: [], delegation: "normal", providers: {},
   fallback: { agent: "general-purpose", model: "sonnet" },
   keepWarm: false, keepWarmHours: 2, keepWarmMinTokens: 30000,
-  compactWith: "haiku", handoffSkill: "", handoffAfter: "continue", handoffButton: "advised",
+  compactWith: "haiku",
   swampAt: 50, layout: "dashboard", appearance: "auto", skin: "deep", language: "auto", hide: ["reason"], extras: [], setupDone: false,
 };
 
@@ -4049,7 +4049,7 @@ document.addEventListener("visibilitychange", () => {
 function modRefresh() {
   if (!modState.settings) return;
   renderModNotice();
-  modRedraw($("#mod-content"), [modEffortCard(), modWorkersCard(), modJudgeCard(), modCacheCard(), modHandoffCard(), modLookCard()]);
+  modRedraw($("#mod-content"), [modEffortCard(), modWorkersCard(), modJudgeCard(), modCacheCard(), modCompactCard(), modLookCard()]);
 }
 /** Settings for a mod that is switched off do nothing until it is on; the switch lives in Clients. */
 function renderModNotice() {
@@ -4510,15 +4510,10 @@ function modCacheCard() {
   ], [t("mod.warmCost")])]);
 }
 
-function modHandoffCard() {
+function modCompactCard() {
   const s = modState.settings;
-  const skill = el("input", { type: "text", class: "text-field", value: s.handoffSkill, placeholder: t("mod.noSkill"), spellcheck: "false", autocomplete: "off", "data-key": "handoff-skill", "aria-label": t("mod.fullHandoff") });
-  skill.addEventListener("change", () => modPatch({ handoffSkill: skill.value.trim() }));
-  return modCard("handoff", t("mod.handoff"), t("mod.handoffBlurb"), [modSection(null, [
+  return modCard("compact", t("mod.compaction"), t("mod.compactionBlurb"), [modSection(null, [
     cell(t("mod.compactWith"), modSegmented("compact-with", [{ value: "haiku", label: t("mod.haiku") }, { value: "session", label: t("mod.sessionCompactor") }], s.compactWith, t("mod.compactWith"), (compactWith) => modPatch({ compactWith })), null, "wide"),
-    cell(t("mod.afterHandoff"), modSegmented("handoff-after", [{ value: "continue", label: t("mod.continue") }, { value: "confirm", label: t("mod.confirm") }, { value: "copy", label: t("mod.copy") }], s.handoffAfter, t("mod.afterHandoff"), (handoffAfter) => modPatch({ handoffAfter })), null, "wide"),
-    cell(t("mod.handoffButton"), modSegmented("handoff-button", [{ value: "advised", label: t("mod.whenAdvised") }, { value: "always", label: t("mod.always") }], s.handoffButton, t("mod.handoffButton"), (handoffButton) => modPatch({ handoffButton })), null, "wide"),
-    cell(t("mod.fullHandoff"), skill, null, "wide"),
     cell(t("mod.heavyAt"), modSegmented("swamp-at", [40, 50, 60, 70].map((n) => ({ value: n, label: `${n}%` })), s.swampAt, t("mod.heavyAt"), (n) => modPatch({ swampAt: Number(n) })), modCap(t("mod.context")), "wide"),
   ])]);
 }

@@ -16,10 +16,10 @@ const noop = () => undefined
 const SETTINGS = normalizeSettings({ setupDone: true, language: 'ko', judge: 'jev', jevSource: 'typesafe' })
 const PROPS: RenderPropsOf['Pane'] = { title: '경계', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} }
 const frame = (surface: Frame['surface'], columns = 100): Frame => ({ surface, columns, maxRows: 30, now: 1_000_000, lang: 'ko', skin: 'deep', appearance: 'auto' })
-const BAND: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, releaseDelegationPin: noop }
-const ALERT: AlertActions = { compact: noop, clear: noop, handoff: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, setHandoffKind: noop, setHandoffAfter: noop, go: noop, copy: noop, openNew: noop }
+const BAND: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, releaseDelegationPin: noop }
+const ALERT: AlertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
 const QUICK: SettingsActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, close: noop }
-const DASH: DashboardView = { effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null, warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null, auto: true, handoff: 'off', agents: { live: 0, total: 0 }, compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, swampAt: 50, hide: [], extras: [], isWorking: false }
+const DASH: DashboardView = { effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null, warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null, auto: true, agents: { live: 0, total: 0 }, compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, swampAt: 50, hide: [], extras: [], isWorking: false }
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 const HUGE = '긴 내용'.repeat(30_000)
 const CONTROL = '앞\x1b[31m빨강\x1b[0m\x00\x07\x7f\x85뒤'
