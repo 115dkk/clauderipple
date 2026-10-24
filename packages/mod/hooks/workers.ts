@@ -21,7 +21,8 @@ export const AUTO_DESCRIPTION = 'Delegate tasks here. Put the tier, and a domain
   '[[ripple: light]], [[ripple: standard]], [[ripple: hard]] or [[ripple: max]]; light = lookups, mechanical edits, one small fix; ' +
   'standard = carry out a designed change (even across several files), research, summarize, read-only review; ' +
   'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning or architecture where the deliverable is the decision itself. ' +
-  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Add ui for screens, visual design or UX, or backend for server, API or database work, as in [[ripple: standard ui]]. ' +
+  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Add ui only when the work needs visual judgment: visual design, a new screen\'s layout, or UX decisions, as in [[ripple: standard ui]]; ' +
+  'restoring, porting, wiring or translating existing UI code takes no domain word. Add backend for server, API or database work. ' +
   'With no marker the task runs as general standard. The owner\'s ladder picks the model for the tier. ' +
   'Name a model instead only when the user asked for it for this task, or a written rule (CLAUDE.md, a memory file) assigns it to this step: ' +
   'put [[ripple: <worker agent name or opus/sonnet/haiku>@<effort>]] on the first line and on the second line "Model reason: user \\"<the user\'s exact words>\\"" or "Model reason: rule <file> — <the rule>". ' +
