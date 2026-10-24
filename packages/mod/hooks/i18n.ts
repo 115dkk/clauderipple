@@ -467,7 +467,7 @@ const EN = {
   'agents.nothingYet': 'Nothing in its conversation yet.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'ClaudeRipple Context',
-  'band.contextOpen': 'Click to see what fills the context',
+  'band.contextOpen': '{tokens} of {window} tokens · Click for details',
   'context.title': 'Context breakdown',
   'context.of': '/ {max} tokens',
   'context.estimate': 'Local estimate',
@@ -990,7 +990,7 @@ const KO: Record<Key, string> = {
   'agents.nothingYet': '아직 대화 내용이 없습니다.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': '리플 컨텍스트',
-  'band.contextOpen': '눌러서 컨텍스트 구성 보기',
+  'band.contextOpen': '{tokens} / {window} 토큰 · 눌러서 자세히 보기',
   'context.title': '컨텍스트 구성',
   'context.of': '/ {max} 토큰',
   'context.estimate': '로컬 추정치',
@@ -1511,7 +1511,7 @@ const ZH: Record<Key, string> = {
   'agents.nothingYet': '对话中还没有内容。',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'ClaudeRipple 上下文',
-  'band.contextOpen': '点击查看上下文构成',
+  'band.contextOpen': '{tokens} / {window} token · 点击查看详情',
   'context.title': '上下文构成',
   'context.of': '/ {max} token',
   'context.estimate': '本地估算',
@@ -2032,7 +2032,7 @@ const JA: Record<Key, string> = {
   'agents.nothingYet': '会話はまだありません。',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'ClaudeRipple コンテキスト',
-  'band.contextOpen': 'クリックでコンテキストの内訳を表示',
+  'band.contextOpen': '{tokens} / {window} トークン · クリックで詳細',
   'context.title': 'コンテキストの内訳',
   'context.of': '/ {max} トークン',
   'context.estimate': 'ローカル推定',
@@ -2553,7 +2553,7 @@ const ES: Record<Key, string> = {
   'agents.nothingYet': 'Aún no hay nada en su conversación.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'Contexto de ClaudeRipple',
-  'band.contextOpen': 'Haz clic para ver qué ocupa el contexto',
+  'band.contextOpen': '{tokens} de {window} tokens · Clic para ver más',
   'context.title': 'Desglose del contexto',
   'context.of': '/ {max} tokens',
   'context.estimate': 'Estimación local',
@@ -3074,7 +3074,7 @@ const PT: Record<Key, string> = {
   'agents.nothingYet': 'Ainda não há nada na conversa.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'Contexto do ClaudeRipple',
-  'band.contextOpen': 'Clique para ver o que ocupa o contexto',
+  'band.contextOpen': '{tokens} de {window} tokens · Clique para ver mais',
   'context.title': 'Composição do contexto',
   'context.of': '/ {max} tokens',
   'context.estimate': 'Estimativa local',

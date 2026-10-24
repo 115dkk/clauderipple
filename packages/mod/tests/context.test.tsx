@@ -192,7 +192,7 @@ const DASH: DashboardView = {
   compactions: 0, logOpen: false, agentsOpen: false, effortMenu: false, hide: [], extras: ['context'], isWorking: false,
 }
 
-test('the band\'s context chip is a press that opens the pane, its tip saying so; without the pane it is a figure', async ($, on) => {
+test('the band\'s context chip and its tip are presses that open the pane; without the pane it is a figure', async ($, on) => {
   let opened = 0
   on('ui.render', { component: 'Pane', requestId: 'band-plain' }, ($, e) => renderBand($.ui.resolve(e), frameOf(e.surface, 'ko', 'deep', 100), DASH, BAND) as RenderElement)
   const skins = ['deep', 'flat'] as const
@@ -205,15 +205,20 @@ test('the band\'s context chip is a press that opens the pane, its tip saying so
     const button = await ui.find({ type: 'Button', key: 'context' })
     expect(String(button?.props.label ?? 'x').trim(), skin).toBe('')
     expect(await ui.find({ type: 'Text', text: '38%' }), skin).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /눌러서 컨텍스트 구성 보기$/ }), skin).toBeDefined()
+    // The tip leaves out the share the chip shows, so it fits its room; drawn over the chip, it
+    // presses the same.
+    expect(await ui.find({ type: 'Text', text: '76k / 200k 토큰 · 눌러서 자세히 보기' }), skin).toBeDefined()
     await ui.press({ key: 'context' })
+    await ui.press({ key: 'tip-context' })
     await ui.unmount()
   }
   const plain = await $.ui.mount({ plugin: 'test', surface: 'desktop', component: 'Pane', requestId: 'band-plain', props: paneProps(100), viewport: { columns: 100, rows: 40 } })
   expect(await plain.find({ type: 'Button', key: 'context' })).toBeUndefined()
+  expect(await plain.find({ type: 'Button', key: 'tip-context' })).toBeUndefined()
   expect(await plain.find({ type: 'Text', text: '38%' })).toBeDefined()
+  expect(await plain.find({ type: 'Text', text: /^컨텍스트 38% \/ 200k/ })).toBeDefined()
   await plain.unmount()
-  expect(opened).toBe(2)
+  expect(opened).toBe(4)
 })
 
 test('register.tsx draws the pane from the session\'s summary breakdown and counts precisely on press', async ($, on) => {

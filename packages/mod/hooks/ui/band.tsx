@@ -389,7 +389,8 @@ function bandSea(mood: BandMood): Omit<Sea, 'at'> {
 /** A fact's hover group: pointing at it shows its tip in the reason's place. */
 const tipScope = (key: string) => 'ripple-tip-' + key
 
-type DrawnFact = { key: string; cells: number; node: RenderNode; tip?: string }
+/** `press`: the fact is a button, and its tip, laid over it while shown, presses the same. */
+type DrawnFact = { key: string; cells: number; node: RenderNode; tip?: string; press?: () => void }
 
 function drawnFact(el: Els, key: string, cells: number, children: RenderNode[], tip?: string): DrawnFact {
   const { Box } = el
@@ -439,32 +440,25 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
 
 /**
  * The context ring and its share. With the Context pane to open it is a button (the app dropped the
- * breakdown its own ring under the composer opened, 2026-10-24): our ring and words, lit under the
- * pointer, a blank press laid over them, as the route is (a host Button inks its Text since then).
+ * breakdown its own ring under the composer opened, 2026-10-24): our ring and words, a blank press
+ * laid over them, and a tip that presses the same. The tip is drawn over the chip, so in the app a
+ * press on the chip under it reached the tip and nothing opened; and the chip's own light showed
+ * round the tip's plate, and the full card ran past the tip's room (2026-10-24). The pressable
+ * tip leaves out the share the chip already shows.
  */
 function contextDrawn(el: Els, frame: Frame, view: DashboardView, onPress?: () => void): DrawnFact | null {
   const ctx = view.context
   if (!ctx || !view.extras.includes('context')) return null
-  const { Box, Text } = el
+  const { Text } = el
   const tone = contextTone(ctx.percent)
-  const card = contextFact(frame, view)?.card ?? []
-  const tip = [...card, ...(onPress ? [t(frame.lang, 'band.contextOpen')] : [])].join(' · ') || undefined
+  const tip = onPress
+    ? t(frame.lang, 'band.contextOpen', { tokens: compactNumber(ctx.tokens), window: compactNumber(ctx.window) })
+    : contextFact(frame, view)?.card?.join(' · ') || undefined
   const cells = Math.ceil((16 + CELL_PX + textPx('100%')) / CELL_PX)
   const ring = pic(el, 'ring', lookOf(frame).art.ring(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16)
   const value = <Text key="ctx-value" {...figure(frame, tone)}>{Math.round(ctx.percent) + '%'}</Text>
   if (!onPress) return drawnFact(el, 'context', cells, [ring, value], tip)
-  return {
-    key: 'context',
-    cells,
-    tip,
-    node: (
-      <Box key="fact-context" position="relative" flexDirection="row" alignItems="center" columnGap={1} width={cells} flexShrink={0} {...hoverLight(frame, tipScope('context'))}>
-        {ring}
-        {value}
-        {press(el, 'context', cells * CELL_PX, onPress)}
-      </Box>
-    ),
-  }
+  return { ...drawnFact(el, 'context', cells, [ring, value, press(el, 'context', cells * CELL_PX, onPress)], tip), press: onPress }
 }
 
 function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
@@ -731,11 +725,13 @@ function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAct
  * pointer could never be over it), so each tip reveals through its own `hover.scope`, which the
  * fact's or control's hover lights.
  */
-function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], at: number, right: number): RenderNode[] {
+function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string; press?: () => void }[], at: number, right: number, cols: number): RenderNode[] {
   const { Box, Text } = el
   // Placed Box offsets are whole cells; a tip starts at the first cell past 리플이 and the effort.
   const left = Math.ceil(at)
   const width = Math.max(40, frame.columns) * CELL_PX
+  // A press's blank label wider than the tip is cut with an ellipsis that shows.
+  const room = (cols - left - Math.ceil(right)) * CELL_PX
   return tips.map(tip => (
     <Box position="absolute" top={0} bottom={0} left={left} right={Math.ceil(right)} display="none" hover={{ scope: tipScope(tip.key), display: 'flex' }} overflow="hidden">
       <Box position="absolute" top={0} left={0}>
@@ -745,6 +741,7 @@ function whyDrawn(el: Els, frame: Frame, tips: { key: string; text: string }[], 
         {lift(el)}
         <Text {...lookOf(frame).ink} wrap="truncate">{tip.text}</Text>
       </Box>
+      {tip.press ? press(el, 'tip-' + tip.key, room, tip.press) : null}
     </Box>
   ))
 }
@@ -940,7 +937,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
     else facts = facts.filter(f => f.key !== drop)
   }
   const controls = controlsDrawn(el, frame, view, actions, words)
-  const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip! }))
+  const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip!, ...(f.press ? { press: f.press } : {}) }))
   if (limitsRow) for (const tip of limitsRow.tips) tips.push(tip)
   for (const c of controls) tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
@@ -970,7 +967,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
         </Box>
       ) : null}
       <Box key="band-free" flexGrow={1} flexShrink={1} minWidth={0} />
-      {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP, controlCells + close + 0.5)}
+      {whyDrawn(el, frame, tips, CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP, controlCells + close + 0.5, cols)}
       <Box key="band-controls" flexDirection="row" alignItems="center" columnGap={0.15} flexShrink={0} marginLeft={0.5}>
         {controls.map(c => c.node)}
         {actions.hide ? closeButton(el, frame, 'hide', t(frame.lang, 'band.hideBand'), () => actions.hide!(), tipScope('hide')) : null}
