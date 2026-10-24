@@ -18,10 +18,8 @@ import type { DelegationPin } from '../types/index.d.ts'
  */
 export const MARKER = /\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?(?:\s+([A-Za-z]+))?\s*\]\]/
 
-// A model the main chat picks by name runs past every ladder, so it must be one the user named. On
-// 2026-10-22 a session that had been asked for Gemini twice (Korean proofreading) went on to give it
-// an implementation task on its own, by marker; 22 such picks in the two days after the explicit
-// marker was described, nearly none before.
+// The session's model markers no longer authorize a worker (2026-10-24). The judge reads one-shot
+// delegation intent; these name helpers remain for the user's explicit standing pin.
 /** The words in a model id that name it: `gemini-3.8-flash` → gemini; `gpt-6.1-sol` → gpt, sol. */
 const GENERIC = new Set(['flash', 'free', 'pro', 'mini', 'max', 'lite', 'preview', 'latest', 'contributor', 'spark', 'code', 'chat', 'instruct', 'claude', 'turbo', 'high', 'low', 'medium', 'xhigh'])
 /** How the user says them in Korean. */

@@ -103,15 +103,21 @@ test('Jev effort body has only the specified root/state/questions and all effort
   assert.equal(empty.state.current_effort, null)
 })
 
-test('Jev worker body asks domain, level, kind and effort, not model, and truncates prompt to 3000', () => {
+test('Jev worker body asks domain, level, kind, effort and user-requested model, and truncates the brief', () => {
   const body = jevWorkerRequest({ description: 'Review', prompt: 'a'.repeat(3000) + 'omitted' })
   assert.equal(body.model, 'jev-latest')
-  assert.deepEqual(Object.keys(body.questions), ['effort', 'domain', 'level', 'kind'])
+  assert.deepEqual(Object.keys(body.questions), ['effort', 'domain', 'level', 'kind', 'model'])
   assert.deepEqual(Object.keys(body.questions.level.criteria), ['light', 'standard', 'deep'])
   assert.deepEqual(Object.keys(body.questions.kind.criteria), ['plan', 'do'])
   assert.equal(body.questions.domain.type, 'choice')
   assert.equal(body.questions.kind.type, 'choice')
   assert.ok(!body.state.next_message.includes('omitted'))
+  const named = jevWorkerRequest({ description: 'Review', prompt: 'Use Astra', words: ['솔한테 시켜', 'w'.repeat(500), '확인해'], models: [{ name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', title: 'Sol' }] })
+  assert.deepEqual(Object.keys(named.questions.model.criteria), ['none', 'gpt-6-1-sol'])
+  assert.equal(named.questions.model.type, 'choice')
+  assert.match(named.questions.model.criteria['gpt-6-1-sol']!, /gpt-6\.1-sol, also called Sol/)
+  assert.match(named.questions.model.instructions, /Mere discussion/)
+  for (const text of ['솔한테 시켜', 'w'.repeat(500), '확인해']) assert.ok(named.state.recent_conversation.includes(text))
 })
 
 test('Jev parses direct/nested answers and confidence fallback, keeps a plausible current effort only below .5', () => {
@@ -133,6 +139,12 @@ test('Jev worker needs every choice; only the level confidence is its sureness, 
   assert.deepEqual(parseJevWorker({ answers: { domain: { choice: 'backend', confidence: 0.3 }, level: { choice: 'standard', confidence: 0.8 }, kind: { choice: 'plan', confidence: 0.2 }, effort: { choice: 'high', confidence: 0.4 } } }), { domain: 'backend', level: 'standard', kind: 'plan', effort: 'high', sure: 0.8, odds: { domain: 0.3, level: 0.8, kind: 0.2, effort: 0.4 }, why: '' })
   assert.equal(parseJevWorker({ answers: { domain: { choice: 'general' }, level: { choice: 'light' }, kind: { choice: 'think' }, effort: { choice: 'low' } } })?.kind, 'do')
   for (const json of [null, {}, { answers: { tier: { choice: 'bad' }, effort: { choice: 'high' } } }, { answers: { tier: { choice: 'deep' } } }]) assert.equal(parseJevWorker(json), undefined)
+})
+
+test('Jev worker model is optional, none and malformed choices do not override', () => {
+  const answers = { domain: { choice: 'general' }, level: { choice: 'light' }, effort: { choice: 'low' } }
+  for (const choice of ['gpt-6-1-sol', 'opus']) assert.equal(parseJevWorker({ answers: { ...answers, model: { choice } } })?.model, choice)
+  for (const choice of ['none', null, 42]) assert.equal(parseJevWorker({ answers: { ...answers, model: { choice } } })?.model, undefined)
 })
 
 test('Jev usage is top-level and failures give readable status-specific reasons', () => {

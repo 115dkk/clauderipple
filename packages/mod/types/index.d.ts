@@ -56,6 +56,13 @@ export type JudgeInput = {
   midTurn?: boolean
 }
 
+/** Worker judges read the person's words separately from the session's brief (2026-10-24). */
+export type WorkerJudgeInput = {
+  description: string; prompt: string
+  words?: readonly string[]
+  models?: readonly { name: string; model: string; title: string }[]
+}
+
 /** Who judges: Haiku on the person's Claude login, TypeSafe's Jev, or a model through the router. */
 export type JudgeKind = 'haiku' | 'jev' | 'model'
 /**
@@ -83,7 +90,7 @@ export type Level = 'light' | 'standard' | 'deep'
 export type Kind = 'plan' | 'do'
 /**
  * The worker ladder's rungs (docs/specs/2026-10-11-worker-ladder.md): the judge's level picks
- * light, standard or hard regardless of kind; only an explicit max tier selects plan.
+ * light, standard or hard for execution; standard/deep planning selects plan (2026-10-24).
  */
 export type Rung = 'light' | 'standard' | 'hard' | 'plan'
 /** One rung: what runs there and how hard it thinks. */
@@ -150,7 +157,7 @@ export type Settings = {
   bias: -2 | -1 | 0 | 1 | 2
   floor: Effort
   ceiling: Effort
-  /** off: never; auto: spawns of ripple:auto; all: also general-purpose spawns with no model. */
+  /** off: never; auto: ripple:auto/auto; all: non-plugin workers except host helpers and native Explore/Plan (2026-10-24). */
   agentAuto: 'off' | 'auto' | 'all'
   jevSource: 'typesafe' | 'zen'
   /** Only the general ladder: the four workers replaced the per-field rules (2026-10-12). */
@@ -238,6 +245,8 @@ export type Pick = Verdict & { by: JudgeKind | 'manual' | 'followup'; at: number
 /** A judge's answer for a delegated task; a judge that names no kind means do. */
 export type WorkerVerdict = {
   domain: Domain; level: Level; kind?: Kind; effort: Effort
+  /** Only the judge reads a one-shot model request from the user's words (2026-10-24). */
+  model?: string
   /** Confidence in the level, the one that moves a task up the ladder. */
   sure?: number
   /** Jev's confidence in each answer, kept in the pick log so a rubric change can be compared. */
@@ -255,8 +264,8 @@ export type WorkerPick = WorkerVerdict & {
   position?: number
   skipped?: { rung: Rung; position: number; model: string; reason: string }[]
   target: TierTarget
-  /** Who named the tier: the judge, the main chat's tier marker (`session`), a model marker, or the default. */
-  by: JudgeKind | 'session' | 'marker' | 'default'
+  /** The judge, the user's model choice, or the default; old records retain marker/session. */
+  by: JudgeKind | 'user' | 'session' | 'marker' | 'default'
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string
@@ -460,7 +469,7 @@ declare module 'claude-code' {
       contextFull: { basis: number | null; breakdown?: import('claude-code').SessionContextBreakdown; busy?: boolean; error?: string } | null
       /** The Context pane's sections shown whole. */
       contextShowAll: ('memory' | 'mcp' | 'skills' | 'agents')[]
-      /** The person's last two prompts as submitted, mid-turn ones included (userNamed). */
+      /** The person's last two prompts as submitted, mid-turn ones included for the judge (2026-10-24). */
       heardPrompts: string[]
       delegationPin: DelegationPin | null
       jev: JevState

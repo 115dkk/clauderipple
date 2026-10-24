@@ -48,7 +48,7 @@ import { cachePercent, compactNumber, effortIndex, effortLabel, elapsed, modelNa
 
 // Every `by` a pick can carry: a missing one handed t() no key, which threw and left the whole pane
 // undrawn ("Nothing to show yet") once a worker ran on the session's model (2026-10-16).
-const BY: Record<NonNullable<AgentRec['pick']>['by'], string> = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', judge: 'settings.judge', marker: 'agents.marker', default: 'agents.default', session: 'agents.session', tier: 'toasts.yourPick' }
+const BY: Record<NonNullable<AgentRec['pick']>['by'], string> = { haiku: 'settings.haiku', jev: 'settings.jev', model: 'agents.routerModel', judge: 'settings.judge', marker: 'agents.marker', default: 'agents.default', session: 'agents.session', tier: 'toasts.yourPick', user: 'toasts.yourPick' }
 
 /** Finished agents the list shows before "more". */
 export const DONE_SHOWN = 4

@@ -1,4 +1,4 @@
-import type { Domain, Effort, JudgeInput, Kind, Level, Pick, Settings, Verdict, WorkerVerdict } from '../types'
+import type { Domain, Effort, JudgeInput, Kind, Level, Pick, Settings, Verdict, WorkerJudgeInput, WorkerVerdict } from '../types'
 import { DOMAINS, LEVELS } from './settings.ts'
 import { t } from './i18n.ts'
 import type { Lang } from './i18n.ts'
@@ -164,13 +164,19 @@ export function jevEffortRequest(input: JudgeInput) {
   return jevBody(input, EFFORT_JUDGE_SYSTEM)
 }
 
-/** Capability and kind of work are independent; the judge never chooses a provider. */
-export function jevWorkerRequest(input: { description: string; prompt: string }) {
-  const body = jevBody({ messages: [], next: `${input.description}\n${input.prompt.slice(0, 3000)}` }, 'Choose the domain, capability level, kind of work and reasoning effort for a delegated coding task. Judge scope and risk independently of the domain.')
+/** Only the person's delegation request can name a model; the session's brief cannot (2026-10-24). */
+export function jevWorkerRequest(input: WorkerJudgeInput) {
+  const body = jevBody({ messages: [{ role: 'user', text: (input.words ?? []).join('\n') }], next: `${input.description}\n${input.prompt.slice(0, 3000)}` }, 'Choose the domain, capability level, kind of work and reasoning effort for a delegated coding task. Judge scope and risk independently of the domain. Model choices read only the user\'s recent words, never the session\'s brief or markers.')
+  // Keep all three human messages, not the effort judge's 400-character latest-message excerpt.
+  body.state.recent_conversation = (input.words ?? []).map(text => `user: ${text}`).join('\n')
   return { ...body, questions: { ...body.questions,
     domain: { type: 'choice' as const, instructions: 'Select the domain of this task.', criteria: { ...domainCriteria } },
     level: { type: 'choice' as const, instructions: 'Select the capability level needed.', criteria: { ...levelCriteria } },
     kind: { type: 'choice' as const, instructions: 'Select whether this task decides what to build or carries it out.', criteria: { ...kindCriteria } },
+    model: { type: 'choice' as const, instructions: 'Select a model only if the user explicitly asks to delegate or run this task on it. Mere discussion of a model does not count.', criteria: {
+      none: 'The user did not explicitly request an available model for this delegation; a name only in discussion or in the session brief is not a request.',
+      ...Object.fromEntries((input.models ?? []).map(m => [m.name, `The user asks to delegate or run this task on ${m.name}, model id ${m.model}, also called ${m.title}, or the equivalent name in the user's language. Mere mention without a delegation request does not count.`])),
+    } },
   } }
 }
 
@@ -209,7 +215,8 @@ export function parseJevWorker(json: unknown): WorkerVerdict | undefined {
   const kind = kindOf(kindAnswer?.choice) ?? 'do'
   const odds = { domain: answerSure(domainAnswer), level: answerSure(levelAnswer), kind: kindAnswer ? answerSure(kindAnswer) : undefined, effort: answerSure(effortAnswer) }
   const known = Object.fromEntries(Object.entries(odds).filter(([, score]) => score !== undefined)) as WorkerVerdict['odds']
-  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, kind, effort: selectedEffort, ...(odds.level !== undefined ? { sure: odds.level } : {}), ...(Object.keys(known!).length ? { odds: known } : {}), why: '' }
+  const model = record(reply?.model)?.choice
+  return { domain: domainAnswer.choice as Domain, level: levelAnswer.choice as Level, kind, effort: selectedEffort, ...(typeof model === 'string' && model !== 'none' ? { model } : {}), ...(odds.level !== undefined ? { sure: odds.level } : {}), ...(Object.keys(known!).length ? { odds: known } : {}), why: '' }
 }
 
 export function jevUsage(json: unknown): number {

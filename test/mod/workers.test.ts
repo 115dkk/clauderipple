@@ -32,6 +32,15 @@ test('judge separates domain and level, rejects mixed-tier legacy verdicts', () 
   assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"ponder","effort":"high"}')?.kind, 'do')
   for (const text of ['', '{}', '{"tier":"design","effort":"high"}', '{"domain":"bad","level":"light","effort":"low"}']) assert.equal(parseWorkerVerdict(text), undefined)
 })
+test('worker judge reads user words and available names; model replies remain optional', () => {
+  const input = workerJudgeInput({ description: 'Review', prompt: 'Task brief', words: ['솔한테 시켜', '확인해'], models: [{ name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', title: 'Sol' }] })
+  assert.match(input, /User's recent words:\n솔한테 시켜\n확인해/)
+  assert.match(input, /gpt-6-1-sol \(gpt-6\.1-sol; Sol\)/)
+  const base = { domain: 'general', level: 'light', effort: 'low' }
+  assert.equal(parseWorkerVerdict(JSON.stringify({ ...base, model: 'gpt-6-1-sol' }))?.model, 'gpt-6-1-sol')
+  for (const model of ['none', null, 42]) assert.equal(parseWorkerVerdict(JSON.stringify({ ...base, model }))?.model, undefined)
+})
+
 test('judge reserves plan for pure planning deliverables, never implementation after reading a spec', () => {
   assert.match(WORKER_JUDGE_SYSTEM, /deliverable is a decision, design, specification, or review verdict, NOT implemented code/)
   assert.match(WORKER_JUDGE_SYSTEM, /implemented code, files, builds or fixes is do/)
@@ -410,7 +419,13 @@ test('spawn suffix and takeover retain named-worker and fork boundaries', () => 
   // The tier agents are gone (2026-10-12): a stale session's ripple:low runs as Claude Code spawns it.
   assert.equal(takesOver({ subagentType: 'ripple:low', fork: false }, DEFAULTS), false)
   assert.equal(takesOver({ subagentType: 'general-purpose', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), true)
-  assert.equal(takesOver({ subagentType: 'general-purpose', model: 'sonnet', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), false)
+  assert.equal(takesOver({ subagentType: 'general-purpose', model: 'sonnet', fork: false }, { ...DEFAULTS, agentAuto: 'all' }), true)
+  for (const subagentType of ['gpt-6-1-sol', 'opus-xhigh', 'custom-worker']) {
+    assert.equal(takesOver({ subagentType, fork: false }, { ...DEFAULTS, agentAuto: 'all' }), true)
+    assert.equal(takesOver({ subagentType, fork: false }, { ...DEFAULTS, agentAuto: 'auto' }), false)
+    assert.equal(takesOver({ subagentType, fork: true }, { ...DEFAULTS, agentAuto: 'all' }), false)
+  }
+  for (const subagentType of ['Explore', 'Plan', 'statusline-setup', 'claude-code-guide', 'plugin:worker']) assert.equal(takesOver({ subagentType, fork: false }, { ...DEFAULTS, agentAuto: 'all' }), false)
 })
 
 test('allow-lists pick by worker agent, so one model from two providers is told apart; provider names still match', () => {

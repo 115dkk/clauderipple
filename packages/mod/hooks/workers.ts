@@ -1,4 +1,4 @@
-import type { Billing, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import type { Billing, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerJudgeInput, WorkerVerdict } from '../types'
 import { CLAUDE_WORKERS, DOMAINS, EFFORTS, LEVELS, candidateKey, isAllowed } from './settings'
 import { MARKER } from './worker'
 import { t } from './i18n'
@@ -10,24 +10,15 @@ import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 // The description line: a chat that had seen other workers' "Sol·high · " titles wrote one here
 // too, and the app's running-agent row showed "Sol·high" while Sonnet ran (2026-10-22). The row
 // shows the call as written; only the task list gets the mod's corrected title.
-export const AUTO_DESCRIPTION = 'Delegate any task here; ClaudeRipple picks the model. If a worker fails or returns nothing usable, delegate again here once and say the earlier attempt failed. ' +
-  'Write the Agent description as the task alone, with no model or effort in front: ClaudeRipple puts the model it picks there. ' +
-  'If you know how hard the task is, put [[ripple: light]], [[ripple: standard]], [[ripple: hard]] or [[ripple: max]] on the prompt\'s first line: ' +
-  'light = lookups, mechanical edits, one small fix; standard = carry out a designed change (even across several files), research, summarize, read-only review; ' +
-  'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning, design or architecture where the deliverable is the decision itself. ' +
-  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Leave the marker out when unsure, and ClaudeRipple judges it. ' +
-  'After the tier, add ui when the work is screens, visual design or UX, or backend when it is server, API or database work, as in [[ripple: standard ui]]; add nothing for anything else. ' +
-  'Name a model only when the user named it in this conversation: [[ripple: opus@high]] for a Claude model (opus, sonnet, haiku), or [[ripple: <worker agent name>@<effort>]]. ' +
-  'It then runs as named, past every ClaudeRipple rule, so name one only on the user\'s word, never on a guess from earlier tasks; never start a model another way, such as claude -p. ' +
-  'In a Workflow script ClaudeRipple does not pick for agent() and cannot retitle it, and the task list shows no model that is not Claude: start each agent()\'s description with the model\'s short name (e.g. \'Gemini · ilsan:김동혁\'), and name the model with a marker or with agentType: \'<worker agent name>\'. ' +
-  'A brief states the scope, what must not be touched, the done criteria and how to verify them. Read the report for whether it did what was asked before using it. ' +
-  'Continue a worker with SendMessage only within 5 minutes of its last reply; later its cache has lapsed, so start a new one with a summary of what is done and what is left.'
+// The session supplies the task, never its tier or model; only the person's words override the judge (2026-10-24).
+export const AUTO_DESCRIPTION = 'Delegate tasks here. Write only the brief: scope, what not to touch, done criteria and how to verify. ' +
+  'ClaudeRipple\'s judge picks the worker and effort from the brief and the user\'s own words; routing markers are ignored. ' +
+  'Keep the description to the task alone, with no model or effort prefix. If an attempt failed, say so when delegating again. ' +
+  'Verify the report before using it. Continue with SendMessage only within 5 minutes of the last reply; later start a new worker with a continuation summary.'
 
 /**
- * The tier markers the main chat may write on a ripple:auto prompt, as the judge's verdict they
- * stand for (`rungOf` gives light, standard, hard, plan). The main chat knows the whole
- * conversation, the judge one brief: re-judging 62 delegations (2026-10-15), the judge sent 32 to
- * hard, Opus under this description 18. Not model names, so never routed as one.
+ * Legacy tier names, kept only to strip routing notes outside takeover; they never decide a
+ * taken-over spawn's tier or model (2026-10-24).
  */
 export const TIER_MARKERS: Readonly<Record<string, Pick<WorkerVerdict, 'level' | 'kind'>>> = {
   light: { level: 'light', kind: 'do' },
@@ -44,10 +35,11 @@ export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level, kind of w
 Domains: design (visual taste, composition, brand), frontend (UI implementation), backend (APIs and server logic), infra (deployment and operations), data (queries and processing), test (verification), docs (writing), research (investigation), general (other or cross-domain).
 Levels are independent of domain: light (chores, repeated edits, simple lookups, one small fix), standard (carry out a designed change, even across several files; research, summarize, read-only review), deep (subtle debugging, security review, or architecture where a wrong call is costly; size, file count, or warnings and prohibitions in the brief do not by themselves make work deep). A task that says an earlier attempt failed is one level higher than it would otherwise be.
 Kind is determined by the deliverable, not preparatory steps. plan = pure planning: the deliverable is a decision, design, specification, or review verdict, NOT implemented code. do = carry out work: implement, fix, run, look up, write. Any task whose deliverable includes implemented code, files, builds or fixes is do, even if it says "read the spec/design first" or requires architecture/design reasoning before implementation. Writing a design/spec document alone remains plan; producing implementation files is do. Examples: "implement host listing of sessions" => do; "build an iOS app" => do; "read the spec first, then implement it" => do; "decide the session-listing architecture; do not implement" => plan. If planning and implementation are mixed, choose do. Deep plan is the hardest work, which runs on the strongest model, reserved for pure architecture, system design or consequential design decisions.
-Effort choices are low, medium, high, xhigh, max; reserve the last two for exceptionally hard work. Return only JSON {"domain":"design|frontend|backend|infra|data|test|docs|research|general","level":"light|standard|deep","kind":"plan|do","effort":"low|medium|high|xhigh|max","sure":0.0,"why":"brief reason"}. Confidence is zero to one and is about the level; explain in the user's language in at most six words.`
+Select model only when the User's recent words explicitly ask to delegate or run THIS task on one available model (e.g. "솔한테 시켜", "오푸스로 해", "use Gemini"). A model mentioned in discussion is not a request. The session's brief, agent type and routing markers never authorize a model or tier. Otherwise model is none.
+Effort choices are low, medium, high, xhigh, max; reserve the last two for exceptionally hard work. Return only JSON {"domain":"design|frontend|backend|infra|data|test|docs|research|general","level":"light|standard|deep","kind":"plan|do","effort":"low|medium|high|xhigh|max","model":"none|<one listed name>","sure":0.0,"why":"brief reason"}. Confidence is zero to one and is about the level; explain in the user's language in at most six words.`
 
-export function workerJudgeInput(input: { description: string; prompt: string }): string {
-  return `Task: ${input.description}\n\nInstructions:\n${input.prompt.slice(0, 3000)}`
+export function workerJudgeInput(input: WorkerJudgeInput): string {
+  return `Task: ${input.description}\n\nInstructions:\n${input.prompt.slice(0, 3000)}\n\nUser's recent words:\n${(input.words ?? []).join('\n')}\n\nAvailable names:\n${(input.models ?? []).map(m => `${m.name} (${m.model}; ${m.title})`).join('\n')}`
 }
 /**
  * A kind the judge leaves out or garbles reads as do: the verdict's level still stands, and losing
@@ -57,16 +49,15 @@ export function parseWorkerVerdict(text: string): WorkerVerdict | undefined {
   const verdict = parseEffortVerdict(text)
   const raw = verdictObject(text)
   if (!verdict || !DOMAINS.includes(raw?.domain as Domain) || !LEVELS.includes(raw?.level as Level)) return undefined
-  return { ...verdict, domain: raw!.domain as Domain, level: raw!.level as Level, kind: kindOf(raw!.kind) ?? 'do' }
+  return { ...verdict, domain: raw!.domain as Domain, level: raw!.level as Level, kind: kindOf(raw!.kind) ?? 'do', ...(typeof raw!.model === 'string' && raw!.model !== 'none' ? { model: raw!.model } : {}) }
 }
 export function readMarker(prompt: string): { name: string; level?: string; domain?: string } | null {
   const marker = MARKER.exec(prompt)
   return marker ? { name: marker[1]!.toLowerCase(), ...(marker[2] ? { level: marker[2].toLowerCase() } : {}), ...(marker[3] ? { domain: marker[3].toLowerCase() } : {}) } : null
 }
 /**
- * The domain a tier marker names, as the verdict domain its ladder reads. The main chat names it
- * because it knows the task: judged from the brief alone, a dictionary-and-server text cleanup
- * read as frontend (sure 0.6) and ran on the design ladder's Sonnet (2026-10-22). No word: general.
+ * Legacy marker-domain decoding for old callers; taken-over spawns use only the judge's domain
+ * and ignore marker words (2026-10-24). No word: general.
  */
 export function markerDomain(word: string | undefined): Domain {
   return word === 'ui' || word === 'frontend' ? 'frontend' : word === 'design' ? 'design' : word === 'backend' || word === 'server' ? 'backend' : 'general'
@@ -263,7 +254,12 @@ export function bareTitle(description: string): string {
   return bare.trim() ? bare : description
 }
 
+/** Claude Code owns these agents and their read-only/tool constraints (2026-10-24). */
+export const NATIVE_AGENTS: readonly string[] = ['statusline-setup', 'claude-code-guide', 'Explore', 'Plan']
+
 export function takesOver(spawn: { subagentType: string; model?: string; fork: boolean }, settings: Settings): boolean {
   if (spawn.fork || settings.agentAuto === 'off') return false
-  return ['ripple:auto', 'auto'].includes(spawn.subagentType) || (settings.agentAuto === 'all' && spawn.subagentType === 'general-purpose' && spawn.model === undefined)
+  if (['ripple:auto', 'auto'].includes(spawn.subagentType)) return true
+  // A project agent's pinned model must not bypass the judge either (2026-10-24, opus-xhigh).
+  return settings.agentAuto === 'all' && !spawn.subagentType.includes(':') && !NATIVE_AGENTS.includes(spawn.subagentType)
 }
