@@ -7,6 +7,24 @@ Revised 2026-10-12: the main chat no longer names a tier. It only decides whethe
 always to `ripple:auto`; the judge picks among all four tiers, `max` included (deep + plan). The
 four tier agents (`ripple:low/medium/high/max`) are no longer registered.
 
+**Superseded 2026-10-24: there is no worker judge.** Who names a worker's model had changed three
+times in two days (4000c3f the owner's settings only, 28ae836 the session's marker, e9876fc the
+judge reading the owner's last few messages). Each fix closed the last incident and opened another:
+the session carried "솔 시켜" over to later tasks; the judge gave a render step's "딥시크" to the
+translation before it and could not see the written rule that translation runs on Opus. Now:
+
+- The session writes the tier and domain marker (`[[ripple: standard ui]]`); none is general
+  standard. The owner's ladder names the model. No model call is made to route a worker.
+- A model is named only with its source on the line after the marker: `Model reason: user "<the
+  owner's exact words>"` or `Model reason: rule <file> — <rule>`. The mod checks, never reads as
+  language: no reason, a quote the owner did not say, or an unknown name is refused.
+- Order: the owner's words for this task, then a standing pin, then a written rule, then the ladder.
+- Nothing usable on the rung or the one above is refused; the session's own model no longer runs it.
+- The effort judge for the main session stays.
+
+Principle (Astra's review, adopted by the owner): a wrong call is fixed in the criteria or the
+review; the decision does not move again. The sections below are history where they differ.
+
 ## Why
 
 The ladder was still too much to set: presets, four rungs × model × effort × backup, two field

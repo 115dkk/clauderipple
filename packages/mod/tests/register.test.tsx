@@ -513,7 +513,7 @@ test('dashboard language changes re-resolve auto from current host settings', as
   await ui.unmount()
 })
 
-test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung\'s effort, and the pick is logged', async ($, on) => {
+test('ripple:auto with no tier marker runs general standard on the owner\'s ladder, unjudged, and the pick is logged', async ($, on) => {
   const b = boundaries(on)
   const urls = http(on)
   const judges = judgeStub(on)
@@ -521,16 +521,18 @@ test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung
   await start($)
   const result = await $.agent.spawn(SPAWN)
   expect(result.agentId).toBe('worker-1')
-  // The default ladder runs light work on DeepSeek at max, whatever effort the judge named.
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max' })
-  expect(judges[0]?.model).toBe('claude-haiku-5-5')
+  // The owner's ladder runs general standard on Sol at medium; nothing judged the task.
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
+  expect(judges.length).toBe(0)
+  // Provider health is still read at request time; no judge is asked, by any route.
   expect(urls).toContain('http://127.0.0.1:9992/api/status')
+  expect(urls.some(url => url.includes('typesafe') || url.includes('opencode'))).toBe(false)
   // The only debug line is the pick itself: no error was reported on the way.
   expect(b.logs.length).toBe(1)
   expect(b.logs[0]!.startsWith('ClaudeRipple worker pick: ')).toBe(true)
   expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toEqual({
-    task: 'Rename variable', domain: 'general', level: 'light', kind: 'do', sure: 0.9, rule: 'general', rung: 'light', position: 1, skipped: [],
-    target: { agent: 'deepseek-v4-1-flash' }, model: 'deepseek-v4.1-flash@max', effort: 'max', by: 'haiku',
+    task: 'Rename variable', domain: 'general', level: 'standard', kind: 'do', rule: 'general', rung: 'standard', position: 1, skipped: [],
+    target: { agent: 'gpt-6-1-sol' }, model: 'gpt-6.1-sol@medium', effort: 'medium', by: 'default',
   })
   const persisted = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!
   expect(persisted.endsWith('\n')).toBe(true)
@@ -539,14 +541,15 @@ test('ripple:auto is judged and rewritten to the light rung\'s agent at the rung
   expect(typeof row.id).toBe('string')
   expect(row).toEqual({
     ...JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length)),
-    type: 'pick', id: row.id, at: new Date(NOW).toISOString(), by: 'judge', judge: 'haiku', ms: 0, promptChars: SPAWN.prompt.length,
-    verdict: { domain: 'general', level: 'light', kind: 'do', effort: 'low', sure: 0.9, why: 'small rename' },
+    type: 'pick', id: row.id, at: new Date(NOW).toISOString(), promptChars: SPAWN.prompt.length,
   })
+  // The worker judge is gone: its keys no longer reach a pick row.
+  for (const key of ['verdict', 'judge', 'ms', 'error', 'sure', 'tier']) expect(row).not.toHaveProperty(key)
   const stats = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'stats' })
-  expect(stats.text).toContain('light 1')
+  expect(stats.text).toContain('standard 1')
 })
 
-test('worker pick persistence keeps the last 3,000 lines and concurrent marker picks, never the prompt', async ($, on) => {
+test('worker pick persistence keeps the last 3,000 lines and concurrent reasoned picks, never the prompt', async ($, on) => {
   const b = boundaries(on, {}, { env: { CLAUDERIPPLE_HOME: '/custom/ripple' }, messages: NAMED })
   http(on)
   const judges = judgeStub(on)
@@ -554,22 +557,25 @@ test('worker pick persistence keeps the last 3,000 lines and concurrent marker p
   const path = '/custom/ripple/logs/worker-picks.jsonl'
   b.files.set(path, Array.from({ length: 3005 }, (_, n) => JSON.stringify({ old: n })).join('\n') + '\n')
   await start($)
-  await Promise.all(['first', 'second'].map(label => $.agent.spawn({ ...SPAWN, description: label + 'x'.repeat(220), prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nPRIVATE_TASK_PROMPT' })))
+  const prompt = '[[ripple: gpt-6-1-sol@xhigh]]\nModel reason: user "Use Sol, Astra"\nPRIVATE_TASK_PROMPT'
+  await Promise.all(['first', 'second'].map(label => $.agent.spawn({ ...SPAWN, description: label + 'x'.repeat(220), prompt })))
   const text = b.files.get(path)!
   const rows = text.trim().split('\n').map(line => JSON.parse(line))
   expect(rows.length).toBe(3000)
   expect(rows[0]).toEqual({ old: 7 })
   expect(rows.slice(-2).map(row => row.task).sort()).toEqual(['first' + 'x'.repeat(195), 'second' + 'x'.repeat(194)])
-  for (const row of rows.slice(-2)) expect(row).toMatchObject({ by: 'judge', verdict: { level: 'light' }, judge: 'haiku', ms: 0, model: 'deepseek-v4.1-flash@max', effort: 'max' })
+  for (const row of rows.slice(-2)) {
+    expect(row).toMatchObject({ by: 'user', namedModel: 'gpt-6-1-sol', source: 'user', model: 'gpt-6.1-sol@xhigh', effort: 'xhigh' })
+    expect(row).not.toHaveProperty('rung')
+  }
   expect(text).not.toContain('PRIVATE_TASK_PROMPT')
   expect(b.logs.join('\n')).not.toContain('PRIVATE_TASK_PROMPT')
-  expect(judges.length).toBe(2)
+  expect(judges.length).toBe(0)
 })
 
 for (const failure of ['read', 'write'] as const) test(`worker log ${failure} failure reports without changing the spawn and later recovers`, async ($, on) => {
   const b = boundaries(on)
   http(on)
-  judgeStub(on)
   const sent = spawnStub(on)
   const path = '/home/test/.clauderipple/logs/worker-picks.jsonl'
   const previous = JSON.stringify({ previous: true }) + '\n'
@@ -577,7 +583,7 @@ for (const failure of ['read', 'write'] as const) test(`worker log ${failure} fa
   b.failWorkerLog(failure)
   await start($)
   expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
   expect(b.logs.some(log => log.includes('worker pick log') && log.includes(`worker log ${failure} denied`))).toBe(true)
   expect(b.files.get(path)).toBe(previous)
   b.failWorkerLog(null)
@@ -585,39 +591,43 @@ for (const failure of ['read', 'write'] as const) test(`worker log ${failure} fa
   expect(b.files.get(path)!.trim().split('\n').length).toBe(2)
 })
 
-for (const error of ['api-error: overloaded (503)', 'aborted'] as const) test(`failed worker judge persists defaults with ${error}`, async ($, on) => {
+// A model is named only with its source, and the mod checks each claim before it runs anything.
+for (const [label, prompt, said] of [
+  ['no Model reason line', '[[ripple: gpt-6-1-sol@high]]\nReview this.', 'No reason was given for the model gpt-6-1-sol'],
+  ['a quote the user never said', '[[ripple: gpt-6-1-sol@high]]\nModel reason: user "Use Astra now"\nReview this.', "not in the user's recent messages"],
+  ['a name this machine cannot run', '[[ripple: nope-model@high]]\nModel reason: rule CLAUDE.md — always\nReview this.', 'cannot run on this computer'],
+] as const) test(`a model marker is refused with ${label}`, async ($, on) => {
   const b = boundaries(on)
   http(on)
-  on('model.complete', async ($, e) => {
-    expect(e.timeoutMs).toBe(6000)
-    if (error === 'aborted') await b.clock.advance(6000)
-    return { value: error === 'aborted' ? { isAnswered: false, reason: 'aborted', usage: USAGE } : { isAnswered: false, reason: 'api-error', status: 503, error: 'overloaded', usage: USAGE } }
-  })
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
-  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
-  expect(row).toMatchObject({ by: 'default', verdict: null, judge: null, error, ms: error === 'aborted' ? 12000 : 0, rung: 'standard', model: 'gpt-6.1-sol@medium', effort: 'medium', position: 1, skipped: [] })
-  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
+  const result = await $.agent.spawn({ ...SPAWN, prompt })
+  expect(result.deny).toContain(said)
+  expect(sent.length).toBe(0)
+  expect(judges.length).toBe(0)
+  expect(b.logs).toEqual([])
+  expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')).toBeUndefined()
 })
 
-// The main chat only delegates; the judge picks among all four workers (2026-10-12 revision).
-for (const prefix of ['ripple:', '']) for (const [level, kind, rung, agent, model, effort] of [
-  ['light', 'do', 'light', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max', 'max'],
-  ['standard', 'do', 'standard', 'gpt-6-1-sol', 'gpt-6.1-sol@medium', 'medium'],
-  ['deep', 'do', 'hard', 'gpt-6-astra', 'gpt-6-astra@high', 'high'],
-  ['deep', 'plan', 'plan', 'general-purpose', 'opus', 'high'],
-] as const) test(`${prefix}auto: a ${level} ${kind} verdict runs the ${rung} rung`, async ($, on) => {
+// The session names the tier on the prompt's first line; the owner's ladder names the model.
+for (const prefix of ['ripple:', '']) for (const [tier, level, kind, rung, agent, model, effort] of [
+  ['light', 'light', 'do', 'light', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max', 'max'],
+  ['standard', 'standard', 'do', 'standard', 'gpt-6-1-sol', 'gpt-6.1-sol@medium', 'medium'],
+  ['hard', 'deep', 'do', 'hard', 'gpt-6-astra', 'gpt-6-astra@high', 'high'],
+  ['max', 'deep', 'plan', 'plan', 'general-purpose', 'opus', 'high'],
+] as const) test(`${prefix}auto: a [[ripple: ${tier}]] marker runs the ${rung} rung by the session's word`, async ($, on) => {
   const b = boundaries(on)
   http(on)
-  const judges = judgeStub(on, JSON.stringify({ domain: 'general', level, kind, effort: 'low', sure: 0.9, why: 'judged' }))
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   const steps = stepStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, subagentType: prefix + 'auto' })
-  expect(judges.length).toBe(1)
-  expect(sent[0]).toMatchObject({ subagentType: agent, model })
-  expect(JSON.parse(b.logs.find(log => log.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level, kind, rung, by: 'haiku', effort })
+  await $.agent.spawn({ ...SPAWN, subagentType: prefix + 'auto', prompt: `[[ripple: ${tier}]]\n${SPAWN.prompt}` })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: agent, model, prompt: SPAWN.prompt })
+  expect(JSON.parse(b.logs.find(log => log.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level, kind, rung, by: 'session', effort })
+  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)).toMatchObject({ tier, by: 'session' })
   // Named workers carry effort in their model suffix; Claude's own agent gets it on turn.step.
   if (agent === 'general-purpose') {
     await step($, 'claude-opus-5-5', 'low', 'worker-1')
@@ -625,30 +635,24 @@ for (const prefix of ['ripple:', '']) for (const [level, kind, rung, agent, mode
   }
 })
 
-// Session tier markers are ignored; every delegation is judged (2026-10-24).
-for (const [tier, rung, agent, model] of [
-  ['light', 'light', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max'],
-  ['standard', 'standard', 'gpt-6-1-sol', 'gpt-6.1-sol@medium'],
-  ['hard', 'hard', 'gpt-6-astra', 'gpt-6-astra@high'],
-  ['max', 'plan', 'general-purpose', 'opus'],
-] as const) test(`a [[ripple: ${tier}]] marker cannot select the ${rung} rung instead of the judge`, async ($, on) => {
-  const b = boundaries(on)
+// A model marker with the user's own words: the mod checks the quote and never reads it as language.
+test('a model marker with a quoted user reason runs that model at its @effort, by user, and its outcome joins the pick', async ($, on) => {
+  const b = boundaries(on, {}, { messages: [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this task.', toolUses: [] }] })
   http(on)
-  const judges = judgeStub(on, JSON.stringify({ domain: 'backend', level: 'deep', kind: 'do', effort: 'high', sure: 0.8, why: 'judged' }))
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: ${tier}]]\nRename one local variable and verify it.` })
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nModel reason: user "use sol, astra"\nReview the change.' })
   await b.clock.settle()
-  // The tier marker is the main chat's to the mod, never a model name the router would see.
-  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Rename one local variable and verify it.' })
+  // The worker reads neither the marker nor the reason line.
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh', prompt: 'Review the change.' })
+  expect(judges.length).toBe(0)
   const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
   const pick = rows.find(row => row.type === 'pick')
-  expect(pick).toMatchObject({ by: 'judge', rung: 'hard', domain: 'backend', judge: 'haiku', verdict: { level: 'deep' } })
-  expect(judges.length).toBe(1)
-  expect(judges[0]?.prompt).not.toContain('[[ripple:')
-  expect(rows.some(row => row.type === 'shadow')).toBe(false)
+  expect(pick).toMatchObject({ by: 'user', namedModel: 'gpt-6-1-sol', source: 'user', reason: '"use sol, astra"', domain: 'general', level: 'standard', model: 'gpt-6.1-sol@xhigh', effort: 'xhigh' })
+  expect(pick.rung).toBeUndefined()
   // The worker's end joins the same pick.
-  await complete($, 'worker-1', 'Renamed and tested.')
+  await complete($, 'worker-1', 'Reviewed and fixed.')
   const after = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
   expect(after.find(row => row.type === 'outcome')).toMatchObject({ pick: pick.id, agent: 'worker-1', reason: 'answer', aborted: false, ms: 1000, answerChars: 19 })
   // Once: a second completion of the same agent writes no second outcome.
@@ -717,62 +721,67 @@ test('a background command and a watch are listed from their calls and ended by 
   await b.clock.settle()
 })
 
-for (const domain of ['design', 'frontend', 'backend', 'docs'] as const) test(`auto selects the ${domain} task's domain ladder or its own general fallback`, async ($, on) => {
-  const b = boundaries(on, { domainRules: {
-    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' }] } },
-    backend: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'medium' }] } },
-  } })
+// The tier marker's optional domain word names the ladder; words outside the four keep general.
+const DOMAIN_RULES = {
+  ui: { mode: 'ladder' as const, rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' as const }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' as const }] } },
+  backend: { mode: 'ladder' as const, rungs: { light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'high' as const }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' as const }] } },
+}
+for (const [word, domain, rule, agent, model] of [
+  [null, 'general', 'general', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max'],
+  ['ui', 'frontend', 'ui', 'gpt-6-astra', 'gpt-6-astra@high'],
+  ['frontend', 'frontend', 'ui', 'gpt-6-astra', 'gpt-6-astra@high'],
+  ['design', 'design', 'ui', 'gpt-6-astra', 'gpt-6-astra@high'],
+  ['backend', 'backend', 'backend', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@high'],
+  ['server', 'backend', 'backend', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@high'],
+  ['docs', 'general', 'general', 'deepseek-v4-1-flash', 'deepseek-v4.1-flash@max'],
+] as const) test(`a [[ripple: light${word ? ' ' + word : ''}]] marker runs the ${rule} ladder's light rung`, async ($, on) => {
+  const b = boundaries(on, { domainRules: DOMAIN_RULES })
   http(on)
-  judgeStub(on, JSON.stringify({ domain, level: 'light', kind: 'do', effort: 'low', sure: 0.9, why: 'domain' }))
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn(SPAWN)
-  const rule = domain === 'design' || domain === 'frontend' ? 'ui' : domain === 'backend' ? 'backend' : 'general'
-  // Light work takes a domain ladder's light row, design included.
-  expect(sent[0]?.subagentType).toBe(rule === 'ui' ? 'gpt-6-astra' : rule === 'backend' ? 'gpt-6-1-sol' : 'deepseek-v4-1-flash')
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: light${word ? ' ' + word : ''}]]\n${SPAWN.prompt}` })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: agent, model, prompt: SPAWN.prompt })
   const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
-  expect(row).toMatchObject({ rule, domain, level: 'light', rung: 'light' })
+  expect(row).toMatchObject({ rule, domain, level: 'light', rung: 'light', tier: 'light', by: 'session' })
   expect(row.raised).toBeUndefined()
 })
 
-// A marker's domain word cannot replace the judge's domain either (2026-10-24).
-for (const [prompt, agent, rule, rung] of [
-  ['[[ripple: light ui]]\nTweak a color.', 'gpt-6-astra', 'ui', 'light'],
-  ['[[ripple: standard ui]]\nBuild the settings screen.', 'gpt-6-1-sol', 'ui', 'standard'],
-  ['[[ripple: standard backend]]\nAdd the endpoint.', 'gpt-6-astra', 'backend', 'standard'],
-  ['[[ripple: standard]]\nRewrite strings in the dictionary, app and server.', 'gpt-6-1-sol', 'general', 'standard'],
-] as const) test(`${prompt.split('\n')[0]} runs the ${rule} ladder's ${rung} rung`, async ($, on) => {
-  const b = boundaries(on, { domainRules: {
-    ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' }] } },
-    backend: { mode: 'ladder', rungs: { light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'high' }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] } },
-  } })
+test('a quoted reason ignores case and spacing, and a quote under three letters is refused', async ($, on) => {
+  const b = boundaries(on, {}, { messages: [{ role: 'user', text: 'Please Use   SOL for the review, and use Astra too.', toolUses: [] }] })
   http(on)
-  const judges = judgeStub(on, JSON.stringify({ domain: 'frontend', level: 'light', kind: 'do', effort: 'max', sure: 0.9, why: 'judged' }))
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, prompt })
-  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', prompt: prompt.split('\n')[1] })
-  expect(judges.length).toBe(1)
-  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())
-  expect(row).toMatchObject({ by: 'judge', rule: 'ui', rung: 'light', verdict: { domain: 'frontend' } })
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@high]]\nModel reason: user "use sol for"\nReview.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high' })
+  // "so" is inside the user's words but too short to stand for a model choice.
+  const short = await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@high]]\nModel reason: user "so"\nReview.' })
+  expect(short.deny).toContain("not in the user's recent messages")
+  expect(sent.length).toBe(1)
+  expect(b.logs.filter(log => log.startsWith('ClaudeRipple worker pick: ')).length).toBe(1)
 })
 
-test('a mode without domain rules uses its general ladder; neither domain nor model markers bypass the judge', async ($, on) => {
+test('a mode without domain rules uses its general ladder, and a reasoned model still runs over it', async ($, on) => {
   const b = boundaries(on, { domainRules: { ui: DEFAULTS.rules.general }, modes: [{ id: 'plain', name: 'Plain', rungs: DEFAULTS.rules.general.rungs, delegation: 'normal', until: 'none' }], activeMode: 'plain' }, { messages: NAMED })
   http(on)
-  const judges = judgeStub(on, '{"domain":"frontend","level":"light","effort":"low","sure":0.9}')
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
   await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: light ui]]\nWork.' })
   await b.clock.settle()
   const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
-  expect(rows.find(row => row.type === 'pick')).toMatchObject({ domain: 'frontend', rule: 'general', mode: 'Plain', verdict: { domain: 'frontend' } })
-  // Turn Base on, so its domain override is effective for this explicit marker.
+  // The mode brings no domain rules of its own: the ui word cannot borrow Base's.
+  expect(rows.find(row => row.type === 'pick')).toMatchObject({ domain: 'frontend', rule: 'general', mode: 'Plain', tier: 'light', by: 'session' })
+  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max', prompt: 'Work.' })
+  // Back on Base, a model a written rule assigns runs over the ladder, not instead of a refusal.
   b.remote({ settings: normalizeSettings({ setupDone: true, domainRules: { ui: DEFAULTS.rules.general } }), revision: 2, stored: true })
   await b.clock.advance(3000)
-  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@max]]\nWork.' })
-  expect(judges.length).toBe(2)
-  expect(sent[1]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max' })
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@max]]\nModel reason: rule rules/workers.md — UI copy runs on Astra\nWork.' })
+  expect(judges.length).toBe(0)
+  expect(sent[1]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@max' })
+  const after = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
+  expect(after.at(-1)).toMatchObject({ by: 'rule', source: 'rule', namedModel: 'gpt-6-astra' })
 })
 
 test('the limits row shows Claude\'s plan on a chat that runs on another provider', async ($, on) => {
@@ -826,18 +835,18 @@ for (const subagentType of ['Explore', 'Plan', 'statusline-setup', 'claude-code-
   expect(sent[0]).toEqual({ ...SPAWN, subagentType, prompt, model: 'opus' })
 })
 
-test('a judged spawn uses the default general ladder when general is inherit', async ($, on) => {
+test('a tier marker uses the default general ladder when general is inherit', async ($, on) => {
   boundaries(on, { rules: normalizeSettings({ rules: { general: { mode: 'inherit' } } }).rules })
   http(on)
-  const judges = judgeStub(on, '{"domain":"backend","level":"standard","effort":"low","sure":0.9,"why":"implementation"}')
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn(SPAWN)
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: standard]]\n${SPAWN.prompt}` })
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
-  expect(judges.length).toBe(1)
+  expect(judges.length).toBe(0)
 })
 
-test('a judged spawn uses the configured general ladder, then one rung up on a missing worker', async ($, on) => {
+test('a tier marker uses the configured general ladder, then one rung up on a missing worker', async ($, on) => {
   const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
     light: { target: { agent: 'missing-worker' }, effort: 'low' },
     standard: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
@@ -847,17 +856,17 @@ test('a judged spawn uses the configured general ladder, then one rung up on a m
   judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn(SPAWN)
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: light]]\n${SPAWN.prompt}` })
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@xhigh' })
   expect(b.toasts.some(text => text.includes('missing-worker'))).toBe(true)
-  expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level: 'light', rung: 'standard', by: 'haiku' })
+  expect(JSON.parse(b.logs[0]!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level: 'light', rung: 'standard', by: 'session' })
   const persisted = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
-  expect(persisted).toMatchObject({ verdict: { level: 'light', effort: 'low' }, rung: 'standard', model: 'gpt-6-astra@xhigh', effort: 'xhigh', by: 'judge' })
+  expect(persisted).toMatchObject({ level: 'light', rung: 'standard', model: 'gpt-6-astra@xhigh', effort: 'xhigh', by: 'session', tier: 'light' })
   expect(persisted.skipped.length).toBeGreaterThan(0)
   expect(persisted.fallbackReason).toContain('missing-worker')
 })
 
-test('exhaustion falls to the session after only one rung up; a plan verdict never moves down', async ($, on) => {
+test('exhaustion leaves nothing: a spawn is refused after one rung up, and plan never moves down', async ($, on) => {
   const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
     standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'medium' },
     hard: { target: { agent: 'gpt-6-astra' }, effort: 'high' },
@@ -865,17 +874,20 @@ test('exhaustion falls to the session after only one rung up; a plan verdict nev
   } } } }).rules
   const b = boundaries(on, { rules })
   http(on, true)
-  const verdicts = [
-    '{"domain":"backend","level":"standard","kind":"do","effort":"low","sure":0.9,"why":"implementation"}',
-    '{"domain":"general","level":"deep","kind":"plan","effort":"high","sure":0.9,"why":"architecture"}',
-  ]
-  on('model.complete', () => ({ value: { isAnswered: true, text: verdicts.shift() ?? verdicts[0] ?? '', usage: USAGE } }))
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  for (let i = 0; i < 2; i++) await $.agent.spawn(SPAWN)
-  expect(sent.map(e => [e.subagentType, e.model])).toEqual([['general-purpose', undefined], ['general-purpose', undefined]])
+  const standard = await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: standard]]\n${SPAWN.prompt}` })
+  expect(standard.deny).toContain('No worker on this tier can run now')
+  expect(standard.deny).toContain('ChatGPT')
+  // Plan has nothing above it: a missing worker there is never saved by a lower rung.
+  const plan = await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: max]]\n${SPAWN.prompt}` })
+  expect(plan.deny).toContain('No worker on this tier can run now')
+  expect(plan.deny).toContain('missing-max')
   expect(b.toasts.some(text => text.includes('ChatGPT'))).toBe(true)
   expect(b.toasts.some(text => text.includes('missing-max'))).toBe(true)
+  expect(sent.length).toBe(0)
+  expect(judges.length).toBe(0)
 })
 
 for (const agentAuto of ['off', 'auto', 'all'] as const) test('only ripple:auto is registered, and takeover respects agentAuto ' + agentAuto, async ($, on) => {
@@ -886,50 +898,56 @@ for (const agentAuto of ['off', 'auto', 'all'] as const) test('only ripple:auto 
   await start($)
   expect([...new Set(registered.map(e => e.name))]).toEqual(agentAuto === 'off' ? [] : ['auto'])
   for (const entry of registered) {
-    expect(entry.description).toContain('routing markers are ignored')
+    expect(entry.description).toContain('[[ripple: light]]')
+    expect(entry.description).toContain('Model reason:')
     expect(entry.disallowedTools).toEqual(['Agent'])
   }
   await $.agent.spawn(SPAWN)
-  expect(sent[0]?.subagentType).toBe(agentAuto === 'off' ? 'ripple:auto' : 'deepseek-v4-1-flash')
+  expect(sent[0]?.subagentType).toBe(agentAuto === 'off' ? 'ripple:auto' : 'gpt-6-1-sol')
   // A tier agent from a session started before 2026-10-12 is no longer taken over.
   await $.agent.spawn({ ...SPAWN, subagentType: 'ripple:max' })
   expect(sent[1]?.subagentType).toBe('ripple:max')
   await $.agent.spawn({ ...SPAWN, fork: true })
   expect(sent[2]?.subagentType).toBe('ripple:auto')
-  expect(judges.length).toBe(agentAuto === 'off' ? 0 : 1)
+  expect(judges.length).toBe(0)
 })
 
-test('a rung\'s stored backup is dropped on load: ChatGPT exhaustion moves up, it does not run the backup', async ($, on) => {
+test('a rung\'s stored backup is dropped on load: ChatGPT exhaustion moves up, then nothing runs', async ($, on) => {
   const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
     standard: { target: { agent: 'gpt-6-1-sol' }, effort: 'high', backup: { agent: 'general-purpose', model: 'opus' } },
     hard: { target: { agent: 'gpt-6-astra' }, effort: 'xhigh' },
   } } } }).rules
   const b = boundaries(on, { rules })
   http(on, true)
-  judgeStub(on, '{"domain":"backend","level":"standard","effort":"low","why":"implementation"}')
+  judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn(SPAWN)
-  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose' })
-  expect(sent[0]?.model).toBeUndefined()
-  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes("the session's model"))).toBe(true)
+  const result = await $.agent.spawn(SPAWN)
+  // Both ChatGPT rungs are spent and the stored backup on General was dropped on load.
+  expect(result.deny).toContain('No worker on this tier can run now')
+  expect(sent.length).toBe(0)
+  expect(b.toasts.some(t => t.includes('ChatGPT'))).toBe(true)
 })
 
-test('without a backup, ChatGPT exhaustion moves one rung up, then to the session model', async ($, on) => {
+test('without a backup, ChatGPT exhaustion moves one rung up, then refuses the spawn', async ($, on) => {
   const b = boundaries(on)
   http(on, true)
-  judgeStub(on, '{"domain":"backend","level":"standard","effort":"high","why":"implementation"}')
+  judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn(SPAWN)
-  // Standard is Sol and Hard is Astra, both ChatGPT: the subagent runs on the session's model.
-  expect(sent[0]?.subagentType).toBe('general-purpose')
-  expect(sent[0]?.model).toBeUndefined()
-  expect(b.toasts.some(t => t.includes('ChatGPT') && t.includes("the session's model"))).toBe(true)
+  const result = await $.agent.spawn(SPAWN)
+  // Standard is Sol and Hard is Astra, both ChatGPT: nothing is left to run.
+  expect(result.deny).toContain('No worker on this tier can run now')
+  expect(sent.length).toBe(0)
+  expect(b.toasts.some(t => t.includes('ChatGPT'))).toBe(true)
 })
 
 test('each spawn refreshes provider health before picking and toasts the exhaustion reason', async ($, on) => {
-  const b = boundaries(on, { language: 'ko' })
+  const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
+    standard: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'max' }],
+    hard: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }],
+  } } } }).rules
+  const b = boundaries(on, { language: 'ko', rules })
   let exhausted = false
   let reads = 0
   on('http.fetch', { url: /\/api\/mod-options$/ }, () => {
@@ -947,7 +965,7 @@ test('each spawn refreshes provider health before picking and toasts the exhaust
   exhausted = true
   await $.agent.spawn(SPAWN)
   expect(reads).toBeGreaterThan(before)
-  expect(sent[1]?.subagentType).toBe('gpt-6-1-sol')
+  expect(sent[1]?.subagentType).toBe('gpt-6-astra')
   expect(b.toasts.some(text => text.includes('deepseek: 잔액 부족'))).toBe(true)
   exhausted = false
   await $.agent.spawn(SPAWN)
@@ -988,11 +1006,19 @@ test('a session pin survives later prompts, authorizes only its model, and relea
   await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: 'Review again.' })
   expect(sent.slice(0, 2).map(spawn => spawn.subagentType)).toEqual(['gpt-6-1-sol', 'gpt-6-1-sol'])
   expect(judges.length).toBe(0)
-  // A conflicting session marker cannot replace the user's standing choice (2026-10-24).
-  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra]]\nOther model.' })
+  // A pin outranks a written rule: the session cannot move the person's standing choice.
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra]]\nModel reason: rule rules/workers.md — Astra for reviews\nOther model.' })
   expect(sent[2]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@high' })
+  // The person's own words for this task outrank their pin.
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@high]]\nModel reason: user "테스트도 확인해"\nCheck the tests.' })
+  expect(sent[3]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high' })
+  // A model named with no reason at all is still refused, pin or not.
+  const unreasoned = await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra]]\nOther model.' })
+  expect(unreasoned.deny).toContain('No reason was given for the model gpt-6-astra')
   const picks = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
-  expect(picks[0]).toMatchObject({ by: 'user', namedModel: 'gpt-6.1-sol', pinned: true, judge: null })
+  expect(picks[0]).toMatchObject({ by: 'user', namedModel: 'gpt-6.1-sol', source: 'pin' })
+  expect(picks[0]).not.toHaveProperty('reason')
+  expect(picks[0]).not.toHaveProperty('judge')
   expect(judges.length).toBe(0)
   await ui.press({ key: 'release-pin' })
   expect(await ui.find({ key: 'delegation-pin' })).toBeUndefined()
@@ -1027,59 +1053,66 @@ test('meta and notice prompts cannot pin, and session end clears a real pin', as
   await ui.unmount()
 })
 
-test('a model marker is stripped before judging and cannot pick the worker or effort', async ($, on) => {
+test('the worker reads neither the routing marker nor the Model reason line, wherever they sit', async ($, on) => {
   const b = boundaries(on, {}, { messages: NAMED })
   http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nReview this. [[ripple: hard]]' })
-  expect(judges.length).toBe(1)
-  expect(judges[0]?.prompt).not.toContain('[[ripple:')
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max', prompt: 'Review this. ' })
-  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim()).by).toBe('judge')
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-1-sol@xhigh]]\nModel reason: rule rules/workers.md — Sol reviews\nReview this. [[ripple: hard]]' })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh', prompt: 'Review this. ' })
+  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim()).by).toBe('rule')
 })
 
-// The judge, not a session marker, reads one-shot model intent (2026-10-24).
-for (const model of ['gpt-6-1-sol', 'opus', 'not-available', 'none']) test(`a judge model verdict ${model} runs only an available user target`, async ($, on) => {
+// A model marker names a worker file, a model id, or one of Claude's own aliases.
+for (const [model, target] of [
+  ['gpt-6-1-sol', { subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' }],
+  ['opus', { subagentType: 'general-purpose', model: 'opus' }],
+  ['sonnet', { subagentType: 'general-purpose', model: 'sonnet' }],
+  ['haiku', { subagentType: 'general-purpose', model: 'haiku' }],
+] as const) test(`a user-reasoned [[ripple: ${model}@xhigh]] runs that model at xhigh, by user`, async ($, on) => {
   const b = boundaries(on, {}, { messages: [{ role: 'user', text: '솔한테 시켜', toolUses: [] }] })
   http(on)
-  const judges = judgeStub(on, JSON.stringify({ domain: 'general', level: 'light', effort: 'xhigh', model, sure: 0.9 }))
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   const steps = stepStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, prompt: 'Review this.' })
-  expect(judges.length).toBe(1)
-  const userPick = model === 'gpt-6-1-sol' || model === 'opus'
-  expect(sent[0]).toMatchObject(model === 'gpt-6-1-sol' ? { subagentType: model, model: 'gpt-6.1-sol@xhigh' } : model === 'opus' ? { subagentType: 'general-purpose', model: 'opus' } : { subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max' })
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: ${model}@xhigh]]\nModel reason: user "솔한테 시켜"\nReview this.` })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject(target)
   const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim())
-  expect(row.by).toBe(userPick ? 'user' : 'judge')
-  expect(row.judge).toBe('haiku')
-  if (userPick) expect(row.namedModel).toBe(model)
-  if (model === 'opus') {
+  expect(row).toMatchObject({ by: 'user', namedModel: model, source: 'user', effort: 'xhigh' })
+  expect(row).not.toHaveProperty('judge')
+  // Claude's own agent gets its effort on turn.step; a routed worker's is in the model suffix.
+  if (target.subagentType === 'general-purpose') {
     await step($, 'claude-opus-5-5', 'low', 'worker-1')
     expect(steps[0]?.effort).toBe('xhigh')
   }
 })
 
-test('worker judge receives only the last three human messages plus mid-turn words', async ($, on) => {
+test('a user reason is checked against the last ten human messages and the last two prompts', async ($, on) => {
+  const older = 'an older line'
+  const tenth = 'the tenth line says Sol'
   boundaries(on, { effortAuto: false }, { messages: [
-    { role: 'user', text: 'obsolete', toolUses: [] },
-    { role: 'user', text: 'first human', toolUses: [] },
-    { role: 'assistant', text: 'assistant suggests Astra', toolUses: [] },
-    { role: 'user', text: '<system-reminder>not human</system-reminder>second human', toolUses: [] },
-    { role: 'user', text: '<task-notification>not human</task-notification>', toolUses: [] },
-    { role: 'user', text: 'third human', toolUses: [] },
+    { role: 'user' as const, text: older, toolUses: [] },
+    ...Array.from({ length: 10 }, (_, n) => ({ role: 'user' as const, text: n === 0 ? tenth : `line ${n}`, toolUses: [] })),
   ] })
   http(on)
   const judges = judgeStub(on)
-  spawnStub(on)
+  const sent = spawnStub(on)
   await start($)
-  await submit($, '솔한테 시켜', 'turn-1')
-  await $.agent.spawn(SPAWN)
-  const prompt = judges[0]!.prompt
-  for (const text of ['first human', 'second human', 'third human', '솔한테 시켜', 'gpt-6-1-sol', 'opus', 'sonnet', 'haiku']) expect(prompt).toContain(text)
-  for (const text of ['obsolete', 'assistant suggests', 'not human']) expect(prompt).not.toContain(text)
+  // Eleven human messages: the oldest is outside the ten the check reads.
+  const tooOld = await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: gpt-6-1-sol@high]]\nModel reason: user "${older}"\nReview.` })
+  expect(tooOld.deny).toContain("not in the user's recent messages")
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: gpt-6-1-sol@high]]\nModel reason: user "${tenth}"\nReview.` })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol' })
+  // A prompt sent this turn is heard too, even before it reaches the session's messages.
+  await submit($, 'Use Astra for this review', 'turn-1')
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@high]]\nModel reason: user "use astra for this"\nReview.' })
+  expect(sent[1]).toMatchObject({ subagentType: 'gpt-6-astra' })
+  expect(judges.length).toBe(0)
+  expect(sent.length).toBe(2)
 })
 
 for (const [label, spawn, expected] of [
@@ -1115,8 +1148,8 @@ test("a Workflow's ripple:auto whose marker names a worker runs on that worker's
   expect(judges.length).toBe(0)
 })
 
-test('a session-proposed model and short go-ahead still leave the choice to the judge', async ($, on) => {
-  boundaries(on, { agentAuto: 'all' }, { messages: [
+test('a model the session proposed in chat is never a reason: a worker called by type needs its own', async ($, on) => {
+  const b = boundaries(on, { agentAuto: 'all' }, { messages: [
     { role: 'user', text: '이 문구들 다듬어 줘', toolUses: [] },
     { role: 'assistant', text: '솔에게 교정안을 받겠습니다. 진행할까요?', toolUses: [] },
     { role: 'user', text: 'ㄱㄱ', toolUses: [] },
@@ -1125,49 +1158,86 @@ test('a session-proposed model and short go-ahead still leave the choice to the 
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: 'Propose fixes.' })
-  expect(judges.length).toBe(1)
-  expect(judges[0]?.prompt).not.toContain('솔에게 교정안을 받겠습니다')
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', prompt: 'Propose fixes.' })
+  // The assistant's suggestion and a two-letter go-ahead authorize nothing.
+  const named = await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: 'Model reason: user "ㄱㄱ"\nPropose fixes.' })
+  expect(named.deny).toContain("not in the user's recent messages")
+  // The ladder still runs the task when no model is named.
+  await $.agent.spawn({ ...SPAWN, prompt: 'Propose fixes.' })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium', prompt: 'Propose fixes.' })
+  expect(b.logs.filter(text => text.startsWith('ClaudeRipple worker pick: ')).length).toBe(1)
 })
 
-test('failed worker judge uses the standard rung; a missing worker moves up to the next rung', async ($, on) => {
+test('the default tier uses the standard rung, and a missing worker moves one rung up', async ($, on) => {
   const rules = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
     standard: { target: { agent: 'missing-worker' }, effort: 'medium' }, hard: { target: { agent: 'general-purpose', model: 'sonnet' }, effort: 'high' },
   } } } }).rules
   boundaries(on, { rules })
   http(on, true)
-  on('model.complete', () => ({ value: { isAnswered: false, reason: 'empty-reply', usage: USAGE } }))
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
   await $.agent.spawn(SPAWN)
   expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'sonnet' })
+  expect(judges.length).toBe(0)
   const debug = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
   expect(debug.text).toContain('"effort": "high"')
   expect(debug.text).toContain('"rung": "hard"')
   expect(debug.text).toContain('"by": "default"')
 })
 
-test('Jev reads recent user words and selects the requested worker at its verdict effort', async ($, on) => {
-  const b = boundaries(on, { judge: 'jev', effortAuto: false }, { key: 'test-secret', messages: [{ role: 'user', text: '솔한테 시켜', toolUses: [] }] })
-  on('http.fetch', { url: 'https://api.typesafe.ai/v1/systemone' }, ($, e) => {
-    const body = JSON.parse(e.init?.body ?? '{}')
-    expect(body.state.recent_conversation).toContain('솔한테 시켜')
-    expect(body.state.recent_conversation).toContain('이번 작업 검토해')
-    expect(body.questions.model).toMatchObject({ type: 'choice', criteria: { none: expect.any(String), 'gpt-6-1-sol': expect.any(String), opus: expect.any(String) } })
-    expect(body.questions.model.criteria['gpt-6-1-sol']).toContain('gpt-6.1-sol')
-    expect(body.state.next_message).not.toContain('[[ripple:')
-    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ answers: { domain: { choice: 'test' }, level: { choice: 'light' }, kind: { choice: 'do' }, effort: { choice: 'xhigh' }, model: { choice: 'gpt-6-1-sol' } } }) } }
-  })
+test('a written rule assigns the model like a user ask, needing no quote', async ($, on) => {
+  const b = boundaries(on)
   http(on)
-  const haiku = judgeStub(on)
+  const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await submit($, '이번 작업 검토해', 'turn-1')
-  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: opus@max]]\nReview.' })
-  expect(haiku.length).toBe(0)
-  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh', prompt: 'Review.' })
-  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)).toMatchObject({ by: 'user', judge: 'jev', namedModel: 'gpt-6-1-sol' })
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@high]]\nModel reason: rule memory/translation.md — 번역 초안은 아스트라\nReview the draft.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Review the draft.' })
+  expect(judges.length).toBe(0)
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(row).toMatchObject({ by: 'rule', source: 'rule', namedModel: 'gpt-6-astra', reason: 'memory/translation.md — 번역 초안은 아스트라' })
+  expect(row).not.toHaveProperty('judge')
+})
+
+test('the logged reason keeps only its first 200 characters', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  spawnStub(on)
+  await start($)
+  const rule = 'rules/workers.md — ' + 'x'.repeat(300)
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: opus@max]]\nModel reason: rule ${rule}\nInvestigate.` })
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(row.reason).toBe(rule.slice(0, 200))
+  expect(row.reason).toHaveLength(200)
+})
+
+test('a named model that cannot run now falls to the ladder and says why', async ($, on) => {
+  const b = boundaries(on, { language: 'ko' }, { messages: NAMED })
+  let deepseek = true
+  on('http.fetch', { url: /\/api\/mod-options$/ }, () => ({ value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ ...MOD_OPTIONS, providers: MOD_OPTIONS.providers.map(p => p.name === 'deepseek' ? { ...p, usable: deepseek, ...(!deepseek ? { reason: 'insufficient_balance', exhaustedUntil: NOW + 1_800_000 } : {}) } : p) }) } }))
+  http(on)
+  deepseek = false
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: deepseek-v4-1-flash@max]]\nModel reason: user "Use Sol, Astra"\nReview.' })
+  // The named worker is spent: the ladder's standard rung runs, and the toast names the spent model.
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
+  expect(b.toasts.some(text => text.includes('deepseek-v4.1-flash') && text.includes('지금 실행할 수 없습니다'))).toBe(true)
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  // The ladder chose what ran; the model asked for and its source stay beside the reason.
+  expect(row).toMatchObject({ by: 'default', namedModel: 'deepseek-v4-1-flash', source: 'user' })
+  expect(row.fallbackReason).toContain('지금 실행할 수 없습니다')
+})
+
+test('a Model reason line never reaches a worker the mod does not route', async ($, on) => {
+  boundaries(on, { agentAuto: 'auto' })
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: '[[ripple: gpt-6-1-sol@high]]\nModel reason: rule memory/x.md — review is Sol\nReview.' })
+  expect(sent[0]?.prompt).not.toContain('Model reason')
+  expect(sent[0]?.prompt).toContain('Review.')
 })
 
 test('Zen Jev uses the exact config authorization and first Jev model with CLAUDERIPPLE_HOME', async ($, on) => {
@@ -1204,29 +1274,67 @@ test('Zen without a key explains the missing key and falls back to Haiku', async
 })
 
 test('provider off refuses a user-named target; no enabled provider refuses the ladder', async ($, on) => {
-  boundaries(on, { agentAuto: 'all', providers: { chatgpt: false, deepseek: false, anthropic: false } }, { messages: NAMED })
+  const b = boundaries(on, { agentAuto: 'all', providers: { chatgpt: false, deepseek: false, anthropic: false } }, { messages: NAMED })
   http(on)
-  let named = true
-  on('model.complete', () => ({ value: { isAnswered: true, text: JSON.stringify({ domain: 'general', level: 'light', effort: 'high', model: named ? 'gpt-6-1-sol' : 'none' }), usage: USAGE } }))
   const sent = spawnStub(on)
   await start($)
-  const explicit = await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol' })
+  // The named model's provider is switched off: refused, even with a sound reason.
+  const explicit = await $.agent.spawn({ ...SPAWN, subagentType: 'gpt-6-1-sol', prompt: 'Model reason: user "Use Sol, Astra"\nDo it.' })
   expect(explicit.deny).toContain('switched off')
-  named = false
   const automatic = await $.agent.spawn(SPAWN)
-  expect(automatic.deny).toContain('No enabled worker')
+  expect(automatic.deny).toContain('No worker on this tier can run now')
+  expect(b.toasts.some(text => text.includes('No worker on this tier can run now'))).toBe(true)
   expect(sent.length).toBe(0)
 })
 
-for (const subagentType of ['opus-xhigh', 'gpt-6-1-sol', 'general-purpose']) test(`${subagentType} with a session-picked model is judged in all mode`, async ($, on) => {
+test('a project agent called by type in all mode takes the ladder and needs no reason', async ($, on) => {
   boundaries(on, { agentAuto: 'all' })
   http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  await $.agent.spawn({ ...SPAWN, subagentType, model: 'opus', prompt: '[[ripple: hard]]\nInvestigate.' })
-  expect(judges.length).toBe(1)
-  expect(sent[0]).toMatchObject({ subagentType: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@max', prompt: 'Investigate.' })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'opus-xhigh', model: 'opus', prompt: '[[ripple: hard]]\nInvestigate.' })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Investigate.' })
+})
+
+test('general-purpose without a model in all mode takes the ladder and needs no reason', async ($, on) => {
+  boundaries(on, { agentAuto: 'all' })
+  http(on)
+  const judges = judgeStub(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'general-purpose', prompt: '[[ripple: hard]]\nInvestigate.' })
+  expect(judges.length).toBe(0)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Investigate.' })
+})
+
+test('general-purpose on a model in all mode names that model: refused unreasoned, run at its @effort with one', async ($, on) => {
+  const b = boundaries(on, { agentAuto: 'all' }, { messages: [{ role: 'user', text: 'Use Opus for this review', toolUses: [] }] })
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  const unreasoned = await $.agent.spawn({ ...SPAWN, subagentType: 'general-purpose', model: 'opus@xhigh', prompt: '[[ripple: hard]]\nInvestigate.' })
+  expect(unreasoned.deny).toContain('No reason was given for the model opus')
+  await $.agent.spawn({ ...SPAWN, subagentType: 'general-purpose', model: 'opus@xhigh', prompt: '[[ripple: hard]]\nModel reason: user "Use Opus for this"\nInvestigate.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'opus', prompt: 'Investigate.' })
+  const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
+  expect(row).toMatchObject({ by: 'user', namedModel: 'opus', source: 'user', effort: 'xhigh' })
+  // A Claude id is a model this machine runs, so a reasoned one passes the name check too; a model
+  // with no @effort anywhere runs at high.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'general-purpose', model: 'claude-opus-5-5', prompt: 'Model reason: user "Use Opus for this"\nInvestigate again.' })
+  expect(sent[1]).toMatchObject({ subagentType: 'general-purpose', model: 'claude-opus-5-5' })
+  const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
+  expect(rows.at(-1)).toMatchObject({ namedModel: 'claude-opus-5-5', effort: 'high', by: 'user' })
+})
+
+test('a plugin agent stays the engine\'s in all mode: no ladder, no reason needed', async ($, on) => {
+  boundaries(on, { agentAuto: 'all' })
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'my-plugin:reviewer', model: 'opus', prompt: 'Do it.' })
+  expect(sent[0]).toMatchObject({ subagentType: 'my-plugin:reviewer', model: 'opus', prompt: 'Do it.' })
 })
 
 test('a subagent may not start a worker; the main chat still delegates', async ($, on) => {
@@ -1532,11 +1640,12 @@ test('an eager mode notes every prompt, whether or not it follows a compaction; 
   await submit($)
   const note = 'ClaudeRipple mode Burn GPT: delegate everything except judgment and final review to ripple:auto.'
   expect(b.contexts).toEqual([[note], [note], [], [note], [note]])
-  // Prefer ChatGPT: Low leaves DeepSeek for the cheaper of Sol and Astra (AA cost), at Low's effort.
-  await $.agent.spawn(SPAWN)
+  // The mode's light rung runs Sol at low, not the base ladder's DeepSeek.
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: light]]\n${SPAWN.prompt}` })
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@low' })
   const pick = b.logs.find(text => text.startsWith('ClaudeRipple worker pick: '))!
   expect(JSON.parse(pick.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level: 'light', rung: 'light', mode: 'Burn GPT' })
+  expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)).toMatchObject({ tier: 'light', by: 'session' })
   // The band names the mode.
   const ui = await band($, 'desktop')
   expect(await ui.find({ type: 'Text', text: 'Burn GPT' })).toBeDefined()
@@ -1958,8 +2067,8 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
     return result
   })
   await start($)
-  await $.agent.spawn(SPAWN)
-  // The routed id's @low is what the router sends, whatever the request's own effort says.
+  // The light rung runs DeepSeek, whose routed id carries @low whatever the request's effort says.
+  await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: light]]\n${SPAWN.prompt}` })
   await step($, 'deepseek-v4.1-flash@low', 'high', 'worker-1')
   await step($, 'deepseek-v4.1-flash@low', 'high', 'worker-1')
   const input: ToolCallInput = { tool: 'Bash', command: 'npm test', agentId: 'worker-1', tool_use_id: 'tool-a' }

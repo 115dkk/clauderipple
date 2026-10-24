@@ -2,12 +2,13 @@
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
-import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerJudgeInput, WorkerVerdict } from '../types'
-import { MOD_SETTINGS_SCHEMA_VERSION, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
+import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
+import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
-import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, jevWorkerRequest, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, parseJevWorker, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, WORKER_JUDGE_SYSTEM, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, parseWorkerVerdict, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, tierOf, workerJudgeInput, workerRule, zenJev } from './workers'
+import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, markerDomain, modelReason, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -99,7 +100,7 @@ const contextShowAll = atom({ plugin: 'ripple', key: 'contextShowAll' } as const
 /**
  * The person's last few prompts as submitted. One typed while a turn runs is absorbed into that turn
  * and never becomes a user message in `$.session.messages()`, so "솔한테 돌려" said mid-turn was not
- * heard and the worker went by tier (2026-10-23). The worker judge reads these too (2026-10-24).
+ * heard and the worker went by tier (2026-10-23). A model reason's quote is looked for in these too.
  */
 const heardPrompts = atom({ plugin: 'ripple', key: 'heardPrompts' } as const, [] as string[])
 const delegationPin = atom({ plugin: 'ripple', key: 'delegationPin' } as const, null)
@@ -174,9 +175,8 @@ async function rippleHome($: EngineInterface): Promise<string> {
 // The fs API has no append: serialize read/write pairs so concurrent picks in this mod survive.
 let workerLogWork: Promise<void> = Promise.resolve()
 /**
- * Lines the pick log keeps. Each delegation writes up to three (pick, shadow verdict, outcome), so
- * 300 lines held only a few days; weighing the judge against the main chat's tier markers needs
- * weeks (2026-10-15).
+ * Lines the pick log keeps. Each delegation writes a pick and an outcome, so 300 lines held only a
+ * few days; weighing whether a tier was enough needs weeks (2026-10-15).
  */
 const PICK_LOG_LINES = 3000
 async function persistWorkerPick($: EngineInterface, entry: Record<string, unknown>): Promise<void> {
@@ -714,7 +714,7 @@ async function down($: EngineInterface, message: string, network = false): Promi
   await $.ui.toast(t(await read($, lang), 'toasts.judgeDown', { reason: message }))
 }
 
-type Judged = { verdict: Verdict | WorkerVerdict | undefined; by: JudgeKind; ms: number; error?: string }
+type Judged = { verdict: Verdict | undefined; by: JudgeKind; ms: number; error?: string }
 function judgeFailure(answer: ModelCompleteResult): string | undefined {
   if (answer.isAnswered) return undefined
   return answer.reason === 'api-error' ? `${answer.reason}: ${answer.error} (${answer.status ?? 'no response'})` : answer.reason
@@ -722,14 +722,15 @@ function judgeFailure(answer: ModelCompleteResult): string | undefined {
 async function completeJudge($: EngineInterface, model: string, system: string, prompt: string): Promise<ModelCompleteResult> {
   return $.model.complete({ model, system, prompt, maxTokens: 160, timeoutMs: 6000, effort: 'low' })
 }
-async function judge($: EngineInterface, s: Settings, input: JudgeInput | WorkerJudgeInput, worker: boolean, testing = false): Promise<Judged> {
+/** The main session's effort. Delegated workers are no longer judged: the session names their tier (2026-10-24). */
+async function judge($: EngineInterface, s: Settings, input: JudgeInput, testing = false): Promise<Judged> {
   const language = await read($, lang)
   const started = await $.clock.now()
-  const system = worker ? WORKER_JUDGE_SYSTEM : EFFORT_JUDGE_SYSTEM
-  const prompt = 'description' in input ? workerJudgeInput(input) : judgeContext(input)
+  const system = EFFORT_JUDGE_SYSTEM
+  const prompt = judgeContext(input)
   let failure: string | undefined
   let by: JudgeKind = s.judge
-  let verdict: Verdict | WorkerVerdict | undefined
+  let verdict: Verdict | undefined
   let blip = false
   if (s.judge === 'jev') {
     try {
@@ -741,7 +742,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | Worker
         if (key) source = 'zen'
       }
       if (!key) throw new Error(t(language, source === 'zen' ? 'jev.zenMissing' : 'toasts.keyMissing'))
-      const body = 'description' in input ? jevWorkerRequest(input) : jevEffortRequest(input)
+      const body = jevEffortRequest(input)
       let model = 'jev-latest'
       if (source === 'zen') {
         const file = await optionalFile($, `${await rippleHome($)}/config.json`)
@@ -762,7 +763,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | Worker
       if (!response.ok) throw new Error(jevFailure(response.status, language))
       const json: unknown = JSON.parse(response.text)
       // An unsure Jev still answered: its odds settle it here and the bias setting tips it later. Haiku is only for a Jev that failed.
-      verdict = worker ? parseJevWorker(json) : parseJevEffort(json, 'current' in input ? input.current : null, language)
+      verdict = parseJevEffort(json, input.current ?? null, language)
       await update($, stats, value => addJudge(value, 'jev', 0, jevUsage(json)))
       if (!verdict) throw new Error(t(language, 'toasts.jevNoVerdict'))
     } catch (error) { failure = reason(error); verdict = undefined }
@@ -771,7 +772,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | Worker
     try {
       const answer = await completeJudge($, s.judgeModel, system, prompt)
       await update($, stats, value => addJudge(value, 'model', 0, answer.usage.input_tokens + answer.usage.output_tokens))
-      verdict = answer.isAnswered ? (worker ? parseWorkerVerdict(answer.text) : parseEffortVerdict(answer.text)) : undefined
+      verdict = answer.isAnswered ? parseEffortVerdict(answer.text) : undefined
       if (!verdict) failure = judgeFailure(answer) ?? t(language, 'toasts.routerNoVerdict')
     } catch (error) { failure = reason(error) }
   }
@@ -785,7 +786,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | Worker
         answer = await completeJudge($, 'haiku', system, prompt)
         await update($, stats, value => addJudge(value, 'haiku', 0, answer.usage.input_tokens + answer.usage.output_tokens))
       }
-      verdict = answer.isAnswered ? (worker ? parseWorkerVerdict(answer.text) : parseEffortVerdict(answer.text)) : undefined
+      verdict = answer.isAnswered ? parseEffortVerdict(answer.text) : undefined
       if (!verdict) failure ??= t(language, 'toasts.haikuNoVerdict')
     } catch (error) { failure ??= reason(error) }
   }
@@ -793,7 +794,7 @@ async function judge($: EngineInterface, s: Settings, input: JudgeInput | Worker
   await update($, stats, value => ({ ...value, judge: { ...value.judge, ms: value.judge.ms + ms } }))
   if (!testing) {
     // The log pane lists it: a Jev call never reaches the router, so nothing else would show it.
-    const run: JudgeRun = { at: started, for: worker ? 'worker' : 'prompt', asked: s.judge, by, ms, ...(verdict?.effort ? { effort: verdict.effort } : {}), ...(verdict?.sure !== undefined ? { sure: verdict.sure } : {}), ...(failure ? { error: failure } : {}) }
+    const run: JudgeRun = { at: started, for: 'prompt', asked: s.judge, by, ms, ...(verdict?.effort ? { effort: verdict.effort } : {}), ...(verdict?.sure !== undefined ? { sure: verdict.sure } : {}), ...(failure ? { error: failure } : {}) }
     await update($, judgeRuns, value => [...value, run].slice(-40))
     // A network blip or timeout is said only when it happens twice running; Haiku covers the one prompt.
     jevBlips = blip ? jevBlips + 1 : 0
@@ -807,7 +808,7 @@ async function testJudge($: EngineInterface): Promise<void> {
   await update($, jev, value => ({ ...value, test: { state: 'testing' as const } }))
   try {
     const s = normalizeSettings(await read($, settingsDraft) ?? await read($, settings))
-    const judged = await judge($, s, { messages: [], next: 'Rename a local variable in one function and verify the result.' }, false, true)
+    const judged = await judge($, s, { messages: [], next: 'Rename a local variable in one function and verify the result.' }, true)
     const ok = !!judged.verdict && !judged.error
     await update($, jev, value => ({ ...value, test: { state: ok ? 'ok' as const : 'fail' as const, message: `${judged.ms} ms · ${judged.verdict?.effort ? t(language, 'band.' + judged.verdict.effort).toLowerCase() : t(language, 'toasts.noVerdict')} · ${judged.error ?? judged.by}` } }))
   } catch (error) {
@@ -822,69 +823,84 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // Claude's own models are candidates as well: general-purpose on the model, effort by turn.step.
   const pinnedCandidates: WorkerCandidate[] = [...[...files].flatMap(([agent, file]) => { const model = agentModel(file)?.replace(/@[^@]*$/, ''); const provider = agentProvider(file); return model && provider ? [{ target: { agent }, model, provider }] : [] }), ...claudeCandidates()]
   const usable = await availability($)
-  // The session never picks a tier or model; only a user pin or the judge's reading of the user's
-  // own words can override the ladder (2026-10-24). Strip every marker before judging or spawning.
-  const prompt = e.prompt.replace(new RegExp(MARKER.source, 'gi'), '').replace(/^\s*\n/, '')
+  // The session names the tier and domain; the owner's ladder names the model (2026-10-24, the
+  // worker judge removed: see AUTO_DESCRIPTION). A model is named only with where it comes from.
+  const marker = readMarker(e.prompt)
+  const tier = tierOf(marker)
+  const markerModel = marker && !tier && !['auto', 'ripple'].includes(marker.name) ? marker.name : undefined
+  // Calling a worker agent by type, or Claude's own agent on a model (agentAuto "all"), names that
+  // model just as a marker does; ignored, a design brief sent to Opus ran on the general ladder.
+  const auto = ['ripple:auto', 'auto'].includes(e.subagentType)
+  const direct = auto ? undefined : files.has(e.subagentType) ? e.subagentType : e.subagentType === 'general-purpose' && e.model ? e.model.replace(/@[^@]*$/, '').toLowerCase() : undefined
+  const asked = markerModel ?? direct
+  const reason = modelReason(e.prompt)
+  const prompt = withoutRouting(e.prompt)
   const pin = await read($, delegationPin)
-  const catalogue = await read($, routerModels)
-  const models = [...files].map(([name, file]) => {
-    const model = agentModel(file)!.replace(/@[^@]*$/, '')
-    return { name, model, title: titleName(model, catalogue) }
-  }).concat(['opus', 'sonnet', 'haiku'].map(name => ({ name, model: name, title: titleName(name) })))
   const id = (await $.clock.now()).toString(36) + Math.random().toString(36).slice(2, 8)
-  let verdict: WorkerVerdict = { domain: 'general', level: 'standard', effort: 'high', why: t(language, 'toasts.judgeUnavailable') }
-  let by: WorkerPick['by'] = 'default'
-  let ms = 0
-  let rawVerdict: WorkerVerdict | null = null
-  let judgeError: string | undefined
+  const named = tier ? TIER_MARKERS[tier]! : { level: 'standard' as const, kind: 'do' as const }
+  let verdict: WorkerVerdict = { domain: markerDomain(tier ? marker!.domain : undefined), ...named, effort: RUNG_EFFORT[rungOf(named)], why: tier ? t(language, 'toasts.sessionTier', { tier }) : t(language, 'toasts.noTier') }
+  let by: WorkerPick['by'] = tier ? 'session' : 'default'
   let target: TierTarget | undefined
   const mode = activeModeOf(s)
   const routing = routingSettings(s)
-  if (pin) {
-    verdict = { ...verdict, model: pin.model, why: t(language, 'toasts.yourPick') }
-  } else {
-    const words = (await $.session.messages()).flatMap(m => { const text = humanText(m); return text ? [text] : [] }).slice(-3)
-    words.push(...await read($, heardPrompts))
-    const judged = await judge($, s, { description: e.description, prompt, words, models }, true)
-    if (judged.verdict && 'domain' in judged.verdict) { rawVerdict = judged.verdict; verdict = judged.verdict; by = judged.by }
-    ms = judged.ms
-    judgeError = judged.error
+  if (asked) {
+    // The mod checks the session's claim and never re-reads it as language: a reason must be given,
+    // the user's words must be ones they said, and the name must be a model this machine can run.
+    if (!reason) return { deny: t(language, 'workers.noReason', { name: asked }) }
+    if (reason.source === 'user') {
+      const words = (await $.session.messages()).flatMap(m => { const text = humanText(m); return text ? [text] : [] }).slice(-10)
+      words.push(...await read($, heardPrompts))
+      if (!reason.quote || !userSaid(reason.quote, words)) return { deny: t(language, 'workers.notSaid', { name: asked }) }
+    }
+    const known = [...files].some(([agent, f]) => agent.toLowerCase() === asked.toLowerCase() || agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === asked.toLowerCase()) || ['opus', 'sonnet', 'haiku'].includes(asked) || asked.startsWith('claude-')
+    if (!known) return { deny: t(language, 'workers.unknownModel', { name: asked }) }
   }
-  const judgedBy = rawVerdict ? by : null
-  const namedModel = pin?.model ?? models.find(m => m.name === verdict.model)?.name
+  // The user's words for this task, then their standing pin, then a written rule, then the ladder.
+  const source = asked && reason!.source === 'user' ? 'user' : pin ? 'pin' : asked ? 'rule' : null
+  const namedModel = source === 'pin' ? pin!.model : source ? asked! : undefined
   if (namedModel) {
-    const name = [...files].find(([agent, file]) => (agent === namedModel || agentModel(file)?.replace(/@[^@]*$/, '').toLowerCase() === namedModel.toLowerCase()) && (!pin?.provider || agentProvider(file) === pin.provider))?.[0]
+    const fromPin = source === 'pin' && pin?.provider
+    const name = [...files].find(([agent, file]) => (agent.toLowerCase() === namedModel.toLowerCase() || agentModel(file)?.replace(/@[^@]*$/, '').toLowerCase() === namedModel.toLowerCase()) && (!fromPin || agentProvider(file) === pin!.provider))?.[0]
     target = name ? { agent: name } : { agent: 'general-purpose', model: namedModel }
-    by = 'user'
+    by = source === 'rule' ? 'rule' : 'user'
+    verdict = { ...verdict, effort: (source !== 'pin' ? effortOf(marker?.level ?? /@([a-z]+)$/.exec(e.model ?? '')?.[1]) : undefined) ?? 'high', why: t(language, source === 'rule' ? 'toasts.rulePick' : 'toasts.yourPick') }
   }
-  // Availability is request-time state, not the ten-minute panel catalogue. Refresh after the
-  // judge (which may itself take a while), before every pick, even when no mode is active.
+  // Availability is request-time state, not the ten-minute panel catalogue. Refresh before every
+  // pick, even when no mode is active.
   await refreshLadder($)
   const now = await $.clock.now()
   const options = await read($, ladderOptions)
   const providers = options && options.until > now ? Object.fromEntries(Object.entries(options.providers ?? {}).filter(([, p]) => p.exhaustedUntil === undefined || p.exhaustedUntil > now)) : {}
-  const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent && c.target.model === target!.model) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: pin?.provider ?? (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model?.toLowerCase())?.provider ?? 'anthropic' } : undefined) : undefined
+  const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent && c.target.model === target!.model) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (source === 'pin' ? pin?.provider : undefined) ?? (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model?.toLowerCase())?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
   // An active mode replaces the ladder, not the user's named model (2026-10-24).
   const { rule, ladder } = workerRule(verdict.domain, routing)
   const explicitUsable = !!explicitCandidate && candidateUsable(explicitCandidate, s, usable, providers)
-  const resolved = explicitUsable
-    ? { target: target!, effort: verdict.effort }
-    : ladderPick(verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
+  const ladderResult = explicitUsable ? null : ladderPick(verdict, ladder, routing, pinnedCandidates, usable, language, routing.allow, providers, routing.allowKnown)
+  const resolved = ladderResult ?? { target: target!, effort: verdict.effort }
+  // The pick says who chose what ran: a named model that could not run leaves the ladder's choice
+  // (its name and source stay in the log beside the reason).
+  if (namedModel && ladderResult) by = tier ? 'session' : 'default'
+  // A named model that cannot run now says so beside the ladder's own reasons.
+  const reasons = [explicitCandidate && !explicitUsable ? t(language, 'workers.namedUnavailable', { name: explicitCandidate.model }) : '', resolved.fallbackReason ?? ''].filter(Boolean)
+  const fallbackReason = reasons.length ? reasons.join('; ') : undefined
   const selected = resolved.target
-  if (!selected) return { deny: t(language, 'workers.none') }
-  const fallbackReason = resolved.fallbackReason
+  if (!selected) {
+    const said = t(language, 'workers.ladderEmpty', { reason: fallbackReason ?? t(language, 'workers.none') })
+    await $.ui.toast(said)
+    return { deny: said }
+  }
   verdict = { ...verdict, effort: resolved.effort }
   const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
-  const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms, id, ...(fallbackReason ? { fallbackReason } : {}) }
-  // The verdict behind a pick is otherwise only in the agents panel; one debug line per pick keeps
-  // it checkable: what the judge said, the rung it landed on and what ran.
-  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', sure: value.sure, rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms: 0, id, ...(fallbackReason ? { fallbackReason } : {}) }
+  // The decision behind a pick is otherwise only in the agents panel; one debug line per pick keeps
+  // it checkable: the tier it was given, the rung it landed on and what ran.
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
   await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
-  // The brief itself is never logged (it can hold anything); its length is. To re-judge a pick,
-  // its brief is in the session's own transcript under the same description.
-  const named = by === 'user' || by === 'default'
-  await persistWorkerPick($, { type: 'pick', id, ...entry, at: new Date(now).toISOString(), verdict: rawVerdict, by: named ? by : 'judge', judge: judgedBy, ...(namedModel ? { namedModel, ...(pin ? { pinned: true } : {}) } : {}), ms, ...(judgeError ? { error: judgeError } : {}), promptChars: e.prompt.length })
+  // The brief itself is never logged (it can hold anything); its length is. To read a pick again,
+  // its brief is in the session's own transcript under the same description. A model's reason is
+  // kept, short, so a wrong source can be found.
+  await persistWorkerPick($, { type: 'pick', id, ...entry, at: new Date(now).toISOString(), ...(tier ? { tier } : {}), ...(namedModel ? { namedModel, source, ...(source !== 'pin' && reason ? { reason: reason.text.slice(0, 200) } : {}) } : {}), promptChars: e.prompt.length })
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
@@ -1623,7 +1639,7 @@ export const register: Register = on => {
         await update($, deciding, () => true)
         const c = await read($, context)
         const input: JudgeInput = { messages, next: e.text, attachments: e.attachments, current: { model, effort: current?.effort ?? effortOf(await read($, appEffort)) ?? 'medium' }, contextPercent: c?.percent, midTurn: !!e.turnId }
-        const judged = await judge($, s, input, false)
+        const judged = await judge($, s, input)
         if (sequence === judgeSequence && (await currentSettings($)).effortAuto && judged.verdict) {
           const final = finalEffort(judged.verdict, s, (await read($, saveUntil) ?? 0) > await $.clock.now(), await read($, lang))
           const value: Pick = { ...judged.verdict, ...final, by: judged.by, at: await $.clock.now() }
@@ -1687,8 +1703,8 @@ export const register: Register = on => {
         await countAgents($)
         // Its commands bound to its final response end with it; no notification follows them.
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
-        // A picked worker's outcome, once, joined to its pick by id: whether the judge's tier or
-        // the user's model choice was enough is read from these lines later (2026-10-24).
+        // A picked worker's outcome, once, joined to its pick by id: whether the session's tier or
+        // the named model was enough is read from these lines later (2026-10-24).
         if (before?.pick?.id && (before.state === 'running' || before.state === 'waiting')) {
           await persistWorkerPick($, { ...outcome, pick: before.pick.id, model: before.model ?? null, cost: before.cost })
         }
@@ -1712,7 +1728,7 @@ export const register: Register = on => {
       const teammate = 'isTeammate' in e && !!e.isTeammate
       if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
       const s = await currentSettings($)
-      // Named workers and project agents are judged too; native helpers stay native (2026-10-24).
+      // Named workers and project agents are routed too; native helpers stay native (2026-10-24).
       if (!workflow && !teammate && takesOver(e, s)) {
         const routed = await requestPick($, e, s)
         if ('deny' in routed) return routed
@@ -1742,8 +1758,7 @@ export const register: Register = on => {
         const provider = file ? agentProvider(file) : e.model && !/^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(e.model) ? (await read($, routerModels)).find(m => m.value === e.model?.replace(/@[^@]*$/, ''))?.provider : 'anthropic'
         if (provider && s.providers[provider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider }) }
         const marker = readMarker(e.prompt)
-        // Outside takeover, legacy tier markers are still dropped, never routed as models
-        // named "hard"; inside takeover every marker is ignored (2026-10-24).
+        // Outside takeover a tier marker is dropped, never routed as a model named "hard".
         if (tierOf(marker)) {
           input = { ...e, prompt: e.prompt.replace(MARKER, '').replace(/^\s*\n/, '') }
         } else if (marker) {
@@ -1756,6 +1771,11 @@ export const register: Register = on => {
           if (fix.dropped) await $.ui.toast(t(await read($, lang), 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
           input = { ...input, prompt: fix.prompt, model: fix.model }
         }
+      }
+      // The model-reason line is the mod's alone, on every path a worker starts from.
+      if (!e.fork) {
+        const bare = withoutReason(input.prompt)
+        if (bare !== input.prompt) input = { ...input, prompt: bare }
       }
     } catch (error) { input = e; await report($, 'agent.spawn prepare', error) }
     try {

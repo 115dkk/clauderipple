@@ -8,7 +8,7 @@ registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { WORKER_JUDGE_SYSTEM, workerJudgeInput, parseWorkerVerdict, readMarker, agentProvider, chatgptUsable,
+const { AUTO_DESCRIPTION, modelReason, withoutRouting, userSaid, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
 const { agentModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
@@ -20,33 +20,31 @@ const candidates: WorkerCandidate[] = [
 const verdict: WorkerVerdict = { domain: 'backend', level: 'standard', effort: 'medium', why: 'implementation' }
 const pick = (s: Settings = DEFAULTS, v = verdict, workers = candidates, usable = true) => ladderPick(v, s.rules.general, s, workers, usable, 'en', s.allow)
 
-test('judge separates domain and level, rejects mixed-tier legacy verdicts', () => {
-  assert.match(WORKER_JUDGE_SYSTEM, /independent/)
-  assert.equal(workerJudgeInput({ description: 'Review', prompt: 'x'.repeat(3000) + 'discard' }).includes('discard'), false)
-  assert.match(WORKER_JUDGE_SYSTEM, /"kind":"plan\|do"/)
-  // Deep planning is the Max worker's, and a retry after a failure reads as harder.
-  assert.match(WORKER_JUDGE_SYSTEM, /Deep plan is the hardest work/)
-  assert.match(WORKER_JUDGE_SYSTEM, /earlier attempt failed is one level higher/)
-  assert.deepEqual(parseWorkerVerdict('```json\n{"domain":"design","level":"deep","effort":"high","sure":0.9,"why":"taste"}\n```'), { domain: 'design', level: 'deep', kind: 'do', effort: 'high', sure: 0.9, why: 'taste' })
-  assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"plan","effort":"high","sure":0.8,"why":"billing design"}')?.kind, 'plan')
-  assert.equal(parseWorkerVerdict('{"domain":"backend","level":"deep","kind":"ponder","effort":"high"}')?.kind, 'do')
-  for (const text of ['', '{}', '{"tier":"design","effort":"high"}', '{"domain":"bad","level":"light","effort":"low"}']) assert.equal(parseWorkerVerdict(text), undefined)
-})
-test('worker judge reads user words and available names; model replies remain optional', () => {
-  const input = workerJudgeInput({ description: 'Review', prompt: 'Task brief', words: ['솔한테 시켜', '확인해'], models: [{ name: 'gpt-6-1-sol', model: 'gpt-6.1-sol', title: 'Sol' }] })
-  assert.match(input, /User's recent words:\n솔한테 시켜\n확인해/)
-  assert.match(input, /gpt-6-1-sol \(gpt-6\.1-sol; Sol\)/)
-  const base = { domain: 'general', level: 'light', effort: 'low' }
-  assert.equal(parseWorkerVerdict(JSON.stringify({ ...base, model: 'gpt-6-1-sol' }))?.model, 'gpt-6-1-sol')
-  for (const model of ['none', null, 42]) assert.equal(parseWorkerVerdict(JSON.stringify({ ...base, model }))?.model, undefined)
+test('ripple:auto asks the session for the tier and domain, and for a model only with its source', () => {
+  for (const marker of ['[[ripple: light]]', '[[ripple: standard]]', '[[ripple: hard]]', '[[ripple: max]]', '[[ripple: standard ui]]']) assert.ok(AUTO_DESCRIPTION.includes(marker))
+  assert.match(AUTO_DESCRIPTION, /Model reason: user/)
+  assert.match(AUTO_DESCRIPTION, /Model reason: rule/)
+  assert.match(AUTO_DESCRIPTION, /never carry a model over from an earlier task/)
+  assert.doesNotMatch(AUTO_DESCRIPTION, /judge/)
 })
 
-test('judge reserves plan for pure planning deliverables, never implementation after reading a spec', () => {
-  assert.match(WORKER_JUDGE_SYSTEM, /deliverable is a decision, design, specification, or review verdict, NOT implemented code/)
-  assert.match(WORKER_JUDGE_SYSTEM, /implemented code, files, builds or fixes is do/)
-  for (const example of ['"implement host listing of sessions" => do', '"build an iOS app" => do', '"read the spec first, then implement it" => do']) assert.ok(WORKER_JUDGE_SYSTEM.includes(example))
-  assert.match(WORKER_JUDGE_SYSTEM, /If planning and implementation are mixed, choose do/)
-  assert.match(WORKER_JUDGE_SYSTEM, /Writing a design\/spec document alone remains plan/)
+test('a model reason names its source and the user\'s quoted words; the worker never reads the routing lines', () => {
+  assert.deepEqual(modelReason('[[ripple: gpt-6-astra@high]]\nModel reason: user "아스트라에게 물어봐"\nTask'), { source: 'user', text: '"아스트라에게 물어봐"', quote: '아스트라에게 물어봐' })
+  assert.deepEqual(modelReason('model reason: User “use Sol for this”'), { source: 'user', text: '“use Sol for this”', quote: 'use Sol for this' })
+  assert.deepEqual(modelReason('Model reason: rule memory/translation-pipeline-scope.md — 번역 초안은 Opus'), { source: 'rule', text: 'memory/translation-pipeline-scope.md — 번역 초안은 Opus' })
+  assert.deepEqual(modelReason('Model reason: user'), { source: 'user', text: '' })
+  for (const prompt of ['no reason here', 'Model reason: guess "solo"']) assert.equal(modelReason(prompt), null)
+  assert.equal(withoutRouting('[[ripple: opus@high]]\nModel reason: user "오푸스로 번역해"\nTranslate the strings.'), 'Translate the strings.')
+  assert.equal(withoutRouting('[[ripple: standard ui]]\nFix the sheet.'), 'Fix the sheet.')
+})
+
+test('a quote counts only when the user said it, whitespace and case aside, and is not a lone word', () => {
+  const words = ['번역은  오푸스로 해줘', 'Then ask Gemini for a review']
+  assert.equal(userSaid('번역은 오푸스로', words), true)
+  assert.equal(userSaid('ask gemini', words), true)
+  assert.equal(userSaid('딥시크로 번역해', words), false)
+  assert.equal(userSaid('오푸', words), false)
+  assert.equal(userSaid('   ', words), false)
 })
 
 test('markers and frontmatter provider retain existing parsing semantics', () => {
@@ -87,9 +85,10 @@ test('domain ladders select UI for design/frontend, backend separately, otherwis
     assert.equal(resolved.target?.agent, expected === 'ui' ? 'deepseek-v4-1-flash' : expected === 'backend' ? 'gpt-6-astra' : 'gpt-6-1-sol')
   }
   assert.deepEqual(workerRule('backend', { ...s, domainRules: { ui: s.domainRules!.ui } }), { rule: 'general', ladder: s.rules.general })
-  // Unavailable domain rungs climb only within that ladder, not into the general one.
+  // Unavailable domain rungs climb only within that ladder, not into the general one, nor onto the
+  // session's own model.
   const blocked = ladderPick(verdict, s.domainRules!.backend!, s, candidates, false, 'en')
-  assert.deepEqual(blocked.target, { agent: 'general-purpose' })
+  assert.equal(blocked.target, undefined)
 })
 
 test('under a domain ladder only light work takes the light row; ordinary work takes the heavy one', () => {
@@ -393,10 +392,10 @@ test('session pin ignores assistant, tools, notices, summaries and reminder cont
   assert.equal(userNamed('gpt-6.1-sol', [{ role: 'user', text: '<system-reminder>Sol</system-reminder>계속 해' }]), false)
 })
 
-test('quota/off never chooses the blocked provider: the ladder moves up, then to the session model', () => {
-  // Standard (Sol) and the rung above (Astra) are both ChatGPT: out of quota, the session model runs.
+test('quota/off never chooses the blocked provider: the ladder moves up, then nothing runs', () => {
+  // Standard (Sol) and the rung above (Astra) are both ChatGPT: out of quota, nothing is left.
   const out = pick(DEFAULTS, verdict, candidates, false)
-  assert.deepEqual(out.target, { agent: 'general-purpose' })
+  assert.equal(out.target, undefined)
   assert.equal(out.effort, 'medium')
   assert.match(out.fallbackReason ?? '', /ChatGPT/)
   // Light (DeepSeek) switched off moves up to Standard, never down.
@@ -408,7 +407,7 @@ test('quota/off never chooses the blocked provider: the ladder moves up, then to
   assert.match(up.fallbackReason ?? '', /deepseek is switched off/)
   // A model of a switched-off provider named on Claude's own agent does not run either.
   const pinnedModel = normalizeSettings({ ...DEFAULTS, providers: { chatgpt: false }, rules: { general: { mode: 'ladder', rungs: { standard: { target: { agent: 'general-purpose', model: 'gpt-6.1-sol' }, effort: 'medium' } } } } })
-  assert.deepEqual(pick(pinnedModel).target, { agent: 'general-purpose' })
+  assert.equal(pick(pinnedModel).target, undefined)
 })
 
 test('spawn suffix and takeover retain named-worker and fork boundaries', () => {

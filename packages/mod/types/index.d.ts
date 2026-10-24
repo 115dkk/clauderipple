@@ -56,13 +56,6 @@ export type JudgeInput = {
   midTurn?: boolean
 }
 
-/** Worker judges read the person's words separately from the session's brief (2026-10-24). */
-export type WorkerJudgeInput = {
-  description: string; prompt: string
-  words?: readonly string[]
-  models?: readonly { name: string; model: string; title: string }[]
-}
-
 /** Who judges: Haiku on the person's Claude login, TypeSafe's Jev, or a model through the router. */
 export type JudgeKind = 'haiku' | 'jev' | 'model'
 /**
@@ -245,11 +238,9 @@ export type Pick = Verdict & { by: JudgeKind | 'manual' | 'followup'; at: number
 /** A judge's answer for a delegated task; a judge that names no kind means do. */
 export type WorkerVerdict = {
   domain: Domain; level: Level; kind?: Kind; effort: Effort
-  /** Only the judge reads a one-shot model request from the user's words (2026-10-24). */
-  model?: string
-  /** Confidence in the level, the one that moves a task up the ladder. */
+  /** Picks made while a worker judge ran (until 2026-10-24) keep its confidence in the level. */
   sure?: number
-  /** Jev's confidence in each answer, kept in the pick log so a rubric change can be compared. */
+  /** That judge's confidence in each answer, as kept in older pick-log rows. */
   odds?: { domain?: number; level?: number; kind?: number; effort?: number }
   why: string
 }
@@ -264,8 +255,11 @@ export type WorkerPick = WorkerVerdict & {
   position?: number
   skipped?: { rung: Rung; position: number; model: string; reason: string }[]
   target: TierTarget
-  /** The judge, the user's model choice, or the default; old records retain marker/session. */
-  by: JudgeKind | 'user' | 'session' | 'marker' | 'default'
+  /**
+   * The session's tier marker, the default with none, a model the user asked for or pinned, or one
+   * a written rule assigns. Records from before 2026-10-24 can name the worker judge or a marker.
+   */
+  by: JudgeKind | 'user' | 'rule' | 'session' | 'marker' | 'default'
   ms: number
   /** Set when the tier's own agent could not run and the fallback did. */
   fallbackReason?: string

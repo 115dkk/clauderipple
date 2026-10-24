@@ -88,7 +88,7 @@ test('old modes copy the actual base ladder; single steps become independent ord
   assert.deepEqual(normalizeSettings(s), s)
 })
 
-test('active modes route their own ordered rungs, then one rung up, then session; base stays unchanged', () => {
+test('active modes route their own ordered rungs, then one rung up, then nothing; base stays unchanged', () => {
   const rungs = { light: [{ target: { agent: 'gpt-6-luna' }, effort: 'low' }, { target: sonnet, effort: 'high' }], standard: [{ target: opus, effort: 'max' }] }
   const s = normalizeSettings({ modes: [{ id: 'work', name: 'Work', rungs }], activeMode: 'work', activeSince: 5 })
   const routing = routingSettings(s)
@@ -98,7 +98,7 @@ test('active modes route their own ordered rungs, then one rung up, then session
   assert.deepEqual([pick(routing, false).target, pick(routing, false).position], [sonnet, 2])
   const unticked = { ...routing, allow: ['general-purpose:opus'] }
   assert.deepEqual([pick(unticked, false).target, pick(unticked, false).rung], [opus, 'standard'])
-  assert.deepEqual(pick({ ...routing, allow: ['missing'] }, false).target, { agent: 'general-purpose' })
+  assert.equal(pick({ ...routing, allow: ['missing'] }, false).target, undefined)
   assert.deepEqual(s.rules.general.rungs, USER)
   assert.equal(routingSettings({ ...s, activeMode: undefined }).rules.general, s.rules.general)
 })

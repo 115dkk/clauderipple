@@ -1,25 +1,36 @@
-import type { Billing, Domain, Effort, LadderChoice, LadderOptions, Level, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerJudgeInput, WorkerVerdict } from '../types'
-import { CLAUDE_WORKERS, DOMAINS, EFFORTS, LEVELS, candidateKey, isAllowed } from './settings'
+import type { Billing, Domain, Effort, LadderChoice, LadderOptions, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import { CLAUDE_WORKERS, EFFORTS, candidateKey, isAllowed } from './settings'
 import { MARKER } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
-import { kindOf, parseEffortVerdict, verdictObject } from './judge'
 import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
 
-/** The one agent the main chat delegates to; the judge picks the worker (docs/specs/2026-10-12-worker-tiers.md). */
+/** The one agent the main chat delegates to (docs/specs/2026-10-12-worker-tiers.md). */
 // The description line: a chat that had seen other workers' "Sol·high · " titles wrote one here
 // too, and the app's running-agent row showed "Sol·high" while Sonnet ran (2026-10-22). The row
 // shows the call as written; only the task list gets the mod's corrected title.
-// The session supplies the task, never its tier or model; only the person's words override the judge (2026-10-24).
-export const AUTO_DESCRIPTION = 'Delegate tasks here. Write only the brief: scope, what not to touch, done criteria and how to verify. ' +
-  'ClaudeRipple\'s judge picks the worker and effort from the brief and the user\'s own words; routing markers are ignored. ' +
-  'Keep the description to the task alone, with no model or effort prefix. If an attempt failed, say so when delegating again. ' +
-  'Verify the report before using it. Continue with SendMessage only within 5 minutes of the last reply; later start a new worker with a continuation summary.'
+//
+// Who names the worker's model changed three times in two days (4000c3f, 28ae836, e9876fc). The
+// session guessed models from earlier tasks; then the worker judge, reading a few messages, gave a
+// render step's "딥시크" to the translation before it and could not see the written rule that
+// translation runs on Opus (2026-10-24). Now the session, which sees the whole conversation, names
+// the domain and rung; the owner's ladder names the model; a model is named only with its source,
+// which the mod checks but never re-reads as language. A wrong call is fixed in the criteria or the
+// review, not by moving the decision again.
+export const AUTO_DESCRIPTION = 'Delegate tasks here. Put the tier, and a domain word when it applies, on the prompt\'s first line: ' +
+  '[[ripple: light]], [[ripple: standard]], [[ripple: hard]] or [[ripple: max]]; light = lookups, mechanical edits, one small fix; ' +
+  'standard = carry out a designed change (even across several files), research, summarize, read-only review; ' +
+  'hard = subtle debugging, security review, or work where a wrong call is costly; max = planning or architecture where the deliverable is the decision itself. ' +
+  'Size, file count or the brief\'s warnings do not by themselves make a task hard. Add ui for screens, visual design or UX, or backend for server, API or database work, as in [[ripple: standard ui]]. ' +
+  'With no marker the task runs as general standard. The owner\'s ladder picks the model for the tier. ' +
+  'Name a model instead only when the user asked for it for this task, or a written rule (CLAUDE.md, a memory file) assigns it to this step: ' +
+  'put [[ripple: <worker agent name or opus/sonnet/haiku>@<effort>]] on the first line and on the second line "Model reason: user \\"<the user\'s exact words>\\"" or "Model reason: rule <file> — <the rule>". ' +
+  'A model without a reason, or a quote the user did not say, is refused; never carry a model over from an earlier task. A standing pin the user set ("앞으로 솔로") is applied for you. ' +
+  'Write the Agent description as the task alone, with no model or effort in front. If an attempt failed, say so when delegating again. ' +
+  'A brief states the scope, what must not be touched, the done criteria and how to verify them. Read the report for whether it did what was asked before using it. ' +
+  'Continue a worker with SendMessage only within 5 minutes of its last reply; later start a new one with a summary of what is done and what is left.'
 
-/**
- * Legacy tier names, kept only to strip routing notes outside takeover; they never decide a
- * taken-over spawn's tier or model (2026-10-24).
- */
+/** The tier markers the session writes on a ripple:auto prompt, as the verdict they stand for (`rungOf` gives the rung). */
 export const TIER_MARKERS: Readonly<Record<string, Pick<WorkerVerdict, 'level' | 'kind'>>> = {
   light: { level: 'light', kind: 'do' },
   standard: { level: 'standard', kind: 'do' },
@@ -31,34 +42,42 @@ export function tierOf(marker: { name: string } | null): string | null {
   return marker && Object.hasOwn(TIER_MARKERS, marker.name) ? marker.name : null
 }
 
-export const WORKER_JUDGE_SYSTEM = `Choose a domain, capability level, kind of work and the cheapest effort that still does this delegated task well. Evaluate actual scope and risk, not prompt length.
-Domains: design (visual taste, composition, brand), frontend (UI implementation), backend (APIs and server logic), infra (deployment and operations), data (queries and processing), test (verification), docs (writing), research (investigation), general (other or cross-domain).
-Levels are independent of domain: light (chores, repeated edits, simple lookups, one small fix), standard (carry out a designed change, even across several files; research, summarize, read-only review), deep (subtle debugging, security review, or architecture where a wrong call is costly; size, file count, or warnings and prohibitions in the brief do not by themselves make work deep). A task that says an earlier attempt failed is one level higher than it would otherwise be.
-Kind is determined by the deliverable, not preparatory steps. plan = pure planning: the deliverable is a decision, design, specification, or review verdict, NOT implemented code. do = carry out work: implement, fix, run, look up, write. Any task whose deliverable includes implemented code, files, builds or fixes is do, even if it says "read the spec/design first" or requires architecture/design reasoning before implementation. Writing a design/spec document alone remains plan; producing implementation files is do. Examples: "implement host listing of sessions" => do; "build an iOS app" => do; "read the spec first, then implement it" => do; "decide the session-listing architecture; do not implement" => plan. If planning and implementation are mixed, choose do. Deep plan is the hardest work, which runs on the strongest model, reserved for pure architecture, system design or consequential design decisions.
-Select model only when the User's recent words explicitly ask to delegate or run THIS task on one available model (e.g. "솔한테 시켜", "오푸스로 해", "use Gemini"). A model mentioned in discussion is not a request. The session's brief, agent type and routing markers never authorize a model or tier. Otherwise model is none.
-Effort choices are low, medium, high, xhigh, max; reserve the last two for exceptionally hard work. Return only JSON {"domain":"design|frontend|backend|infra|data|test|docs|research|general","level":"light|standard|deep","kind":"plan|do","effort":"low|medium|high|xhigh|max","model":"none|<one listed name>","sure":0.0,"why":"brief reason"}. Confidence is zero to one and is about the level; explain in the user's language in at most six words.`
-
-export function workerJudgeInput(input: WorkerJudgeInput): string {
-  return `Task: ${input.description}\n\nInstructions:\n${input.prompt.slice(0, 3000)}\n\nUser's recent words:\n${(input.words ?? []).join('\n')}\n\nAvailable names:\n${(input.models ?? []).map(m => `${m.name} (${m.model}; ${m.title})`).join('\n')}`
-}
-/**
- * A kind the judge leaves out or garbles reads as do: the verdict's level still stands, and losing
- * it over the kind would send the task to the default instead.
- */
-export function parseWorkerVerdict(text: string): WorkerVerdict | undefined {
-  const verdict = parseEffortVerdict(text)
-  const raw = verdictObject(text)
-  if (!verdict || !DOMAINS.includes(raw?.domain as Domain) || !LEVELS.includes(raw?.level as Level)) return undefined
-  return { ...verdict, domain: raw!.domain as Domain, level: raw!.level as Level, kind: kindOf(raw!.kind) ?? 'do', ...(typeof raw!.model === 'string' && raw!.model !== 'none' ? { model: raw!.model } : {}) }
-}
 export function readMarker(prompt: string): { name: string; level?: string; domain?: string } | null {
   const marker = MARKER.exec(prompt)
   return marker ? { name: marker[1]!.toLowerCase(), ...(marker[2] ? { level: marker[2].toLowerCase() } : {}), ...(marker[3] ? { domain: marker[3].toLowerCase() } : {}) } : null
 }
+
+/** The line that says where a named model comes from: the user's words for this task, or a written rule. */
+const REASON = /^[ \t]*model reason[ \t]*:[ \t]*(user|rule)\b[ \t]*(.*)$/im
+export type ModelReason = { source: 'user' | 'rule'; text: string; quote?: string }
+export function modelReason(prompt: string): ModelReason | null {
+  const line = REASON.exec(prompt)
+  if (!line) return null
+  const text = line[2]!.trim()
+  const pair = /"([^"]+)"|“([^”]+)”|「([^」]+)」|『([^』]+)』/.exec(text)
+  const quote = pair?.slice(1).find(Boolean)?.trim()
+  return { source: line[1]!.toLowerCase() as ModelReason['source'], text, ...(quote ? { quote } : {}) }
+}
+/** A prompt without its model-reason line, which is for the mod only. */
+export function withoutReason(prompt: string): string {
+  return prompt.replace(new RegExp(REASON.source + '\\n?', 'gim'), '').replace(/^\s*\n/, '')
+}
+/** The prompt a routed worker reads: no routing marker, no model-reason line. */
+export function withoutRouting(prompt: string): string {
+  return withoutReason(prompt.replace(new RegExp(MARKER.source, 'gi'), ''))
+}
 /**
- * Legacy marker-domain decoding for old callers; taken-over spawns use only the judge's domain
- * and ignore marker words (2026-10-24). No word: general.
+ * Whether the user said these words: whitespace and case aside, inside one of their own messages.
+ * A check of the session's claim, not a reading of what the user meant; a word or two ("솔") could
+ * be found anywhere, so a quote is at least three letters.
  */
+export function userSaid(quote: string, words: readonly string[]): boolean {
+  const flat = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase()
+  const wanted = flat(quote)
+  return wanted.replace(/ /g, '').length >= 3 && words.some(text => flat(text).includes(wanted))
+}
+
+/** The domain a tier marker names, as the verdict domain its ladder reads. No word: general. */
 export function markerDomain(word: string | undefined): Domain {
   return word === 'ui' || word === 'frontend' ? 'frontend' : word === 'design' ? 'design' : word === 'backend' || word === 'server' ? 'backend' : 'general'
 }
@@ -182,12 +201,10 @@ export function workerRule(domain: Domain, settings: Settings): { rule: WorkerPi
 
 export type Resolution = { target?: TierTarget; effort: Effort; rung?: Rung; position?: number; skipped?: { rung: Rung; position: number; model: string; reason: string }[]; fallbackReason?: string }
 
-/** Claude Code's own agent with no model: the subagent runs on the session's model. */
-export const SESSION_MODEL: TierTarget = { agent: 'general-purpose' }
-
 /**
- * The ladder: the verdict's rung, else one rung up, else the session model, never down. Whatever
- * ran instead says why (the fallback toast).
+ * The ladder: the verdict's rung, else one rung up, never down. Whatever ran instead says why (the
+ * fallback toast). With nothing on either rung usable there is no target: the session's own model
+ * used to run it, an Opus the owner had put on no rung and was there to save (2026-10-24).
  */
 export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Settings, candidates: readonly WorkerCandidate[], chatgpt: boolean, lang: Lang, allow: readonly string[] = [], providers: NonNullable<LadderOptions['providers']> = {}, known: readonly string[] = []): Resolution {
   const wanted = rungOf(verdict)
@@ -211,9 +228,7 @@ export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Setting
     }
   }
   const effort = rule.rungs[wanted]?.[0]?.effort ?? verdict.effort
-  // The session's model is Claude's: with Anthropic switched off nothing is left to run it.
-  if (settings.providers.anthropic === false) return { effort, rung: wanted, skipped, fallbackReason: t(lang, 'workers.none') }
-  return { target: { ...SESSION_MODEL }, effort, rung: wanted, skipped, fallbackReason: reasons.join('; ') || t(lang, 'workers.none') }
+  return { effort, rung: wanted, skipped, fallbackReason: reasons.join('; ') || t(lang, 'workers.none') }
 }
 
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {
@@ -260,6 +275,6 @@ export const NATIVE_AGENTS: readonly string[] = ['statusline-setup', 'claude-cod
 export function takesOver(spawn: { subagentType: string; model?: string; fork: boolean }, settings: Settings): boolean {
   if (spawn.fork || settings.agentAuto === 'off') return false
   if (['ripple:auto', 'auto'].includes(spawn.subagentType)) return true
-  // A project agent's pinned model must not bypass the judge either (2026-10-24, opus-xhigh).
+  // A project agent's pinned model must not bypass the ladder either (2026-10-24, opus-xhigh).
   return settings.agentAuto === 'all' && !spawn.subagentType.includes(':') && !NATIVE_AGENTS.includes(spawn.subagentType)
 }

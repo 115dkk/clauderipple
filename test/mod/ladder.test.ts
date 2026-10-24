@@ -54,23 +54,24 @@ test('the default ladder runs each rung at its own effort, whatever effort the j
   assert.deepEqual(pick(DEFAULTS, v('standard', { domain: 'design' })).target, { agent: 'gpt-6-1-sol' })
 })
 
-test('unavailable: one rung up, else the session model; never down', () => {
+test('unavailable: one rung up, else nothing (never the session model); never down', () => {
   const ladder = (rungs: unknown) => normalizeSettings({ ...DEFAULTS, rules: { general: { mode: 'ladder', rungs } } })
   const sol = { agent: 'gpt-6-1-sol' }, astra = { agent: 'gpt-6-astra' }, opus = { agent: 'general-purpose', model: 'opus' }, sonnet = { agent: 'general-purpose', model: 'sonnet' }
   // ChatGPT out of quota: one rung up, at that rung's effort.
   const up = pick(ladder({ standard: { target: sol, effort: 'medium' }, hard: { target: opus, effort: 'high' } }), v('standard'), false)
   assert.deepEqual([up.target, up.effort, up.rung], [opus, 'high', 'hard'])
   assert.match(up.fallbackReason ?? '', /ChatGPT/)
-  // Nothing up there either: the session model, at the wanted rung's effort.
+  // Nothing up there either: no target, the reasons kept for the refusal.
   const none = pick(ladder({ standard: { target: sol, effort: 'low' }, hard: { target: astra, effort: 'high' }, plan: { target: opus, effort: 'high' } }), v('standard'), false)
-  assert.deepEqual([none.target, none.effort], [{ agent: 'general-purpose' }, 'low'])
+  assert.deepEqual([none.target, none.effort], [undefined, 'low'])
+  assert.match(none.fallbackReason ?? '', /ChatGPT/)
   // Only one rung up: Light's trouble never reaches Plan's Opus.
   const one = pick(ladder({ light: { target: { agent: 'gone' }, effort: 'low' }, standard: { target: sol, effort: 'medium' }, plan: { target: opus, effort: 'high' } }), v('light'), false)
-  assert.deepEqual(one.target, { agent: 'general-purpose' })
+  assert.equal(one.target, undefined)
   assert.match(one.fallbackReason ?? '', /gone is not installed/)
-  // Never down: Hard out, Light free, still the session model.
+  // Never down: Hard out, Light free, still nothing.
   const down = pick(ladder({ light: { target: sonnet, effort: 'low' }, hard: { target: astra, effort: 'high' } }), v('deep'), false)
-  assert.deepEqual(down.target, { agent: 'general-purpose' })
+  assert.equal(down.target, undefined)
   // An empty rung says so and moves up.
   const empty = pick(ladder({ standard: { target: sol, effort: 'medium' } }), v('light'))
   assert.deepEqual([empty.target, empty.rung], [sol, 'standard'])
