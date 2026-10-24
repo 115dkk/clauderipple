@@ -640,10 +640,8 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
       expect(why?.text).toContain('ui/')
     } else expect(why, surface).toBeUndefined()
     // The API's own counts: 1200 + 38000 + 800 in, 95% of it from the cache, 5100 out, 12 tools.
-    // The desktop's row says them as the Claude app's task list does: the tokens in all, with the
-    // model; the breakdown is the open conversation's card.
     if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'in 40k · cache 95% · out 5.1k · tools 12' }), surface).toBeDefined()
-    else expect(await ui.find({ type: 'Text', text: 'gpt-6.1-sol·high   45k tokens' }), surface).toBeDefined()
+    else for (const value of ['40k', '95%', '5.1k', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
     // Two agents finished: nothing hides behind "more".
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeUndefined()
     const empty = await mount($, 'agents-empty', surface, 64)
@@ -674,10 +672,8 @@ test('the Agents pane draws forty agents at once, and a record missing its title
       const pictures = await ui.findAll({ type: 'Svg' })
       if (surface === 'terminal' || surface === 'mobile') expect(pictures).toHaveLength(0)
       else {
-        // The list is drawn on the page as the Claude app's task list (2026-10-24): no capsule's sea
-        // grows with it, only a spark per running row and a hairline between rows.
-        expect(pictures.some(p => p.props.alt === 'ClaudeRipple'), surface + ' ' + id + ' no sea').toBe(false)
-        expect(pictures.filter(p => p.props.alt === 'Working'), surface + ' ' + id + ' sparks').toHaveLength(31)
+        const tiles = pictures.filter(p => String(p.props.source).includes('viewBox="0 4096 '))
+        expect(tiles.length > 0, surface + ' ' + id + ' continuation').toBe(true)
         for (const picture of pictures) {
           expect(Number(picture.props.width) <= SVG_MAX_PX).toBe(true)
           expect(Number(picture.props.height) <= SVG_MAX_PX).toBe(true)

@@ -29,7 +29,7 @@ import type { RenderNode, SessionMessage } from 'claude-code'
 import type { AgentRec, Effort } from '../../types'
 import { bareTitle } from '../workers'
 import { CELL_PX, METER_H, METER_W, ROW_PX, SVG_MAX_PX, esc, r, svg } from './art'
-import { capsule, lift, pic, press } from './kit'
+import { capsule, lift, pic, pill, press, ripple } from './kit'
 import { DISPLAY, displayText } from './display'
 import { lookOf } from './look'
 import type { Look } from './look'
@@ -142,6 +142,15 @@ function figures(frame: Frame, agent: AgentRec): Figure[] {
 /** The numbers as one line of text (the terminal's). */
 function figureLine(frame: Frame, agent: AgentRec): string {
   return figures(frame, agent).map(f => f.label + ' ' + f.value).join(' · ')
+}
+
+/** All agents' input and output, for the list's head. */
+function totals(frame: Frame, agents: readonly AgentRec[]): string {
+  let input = 0
+  let output = 0
+  for (const a of agents) if (a.usage) { input += promptTokens(a.usage); output += a.usage.output }
+  if (!input && !output) return ''
+  return t(frame.lang, 'agents.input') + ' ' + compactNumber(input) + ' · ' + t(frame.lang, 'agents.output') + ' ' + compactNumber(output)
 }
 
 // ---- Conversation, read ----------------------------------------------------------------------
@@ -336,9 +345,10 @@ function timeBox(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNod
 /**
  * The open conversation's card, under the page's head that carries the title and the time: the
  * mark, the model and effort, the numbers, why. What the agent does now is the conversation's: a
- * line that changed each step made the pane jump.
+ * line that changed each step made the pane jump. A list tile draws these rows under its own head,
+ * which has the mark (`headed`), and may end the numbers with its time (`tail`).
  */
-function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
+function cardBody(el: Els, frame: Frame, agent: AgentRec, headed = false, tail?: RenderNode): RenderNode[] {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
@@ -351,10 +361,12 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
   const auto = agent.pick && ['haiku', 'jev', 'model'].includes(agent.pick.by)
   const rows: RenderNode[] = [
     // One line whatever the width: the name cut before the effort ever drops below it.
-    <Box key="ident" flexDirection="row" alignItems="center" columnGap={1} minWidth={0} overflow="hidden">
-      <Box key="mark" flexShrink={0}>
-        <Text color={m.color} bold>{m.glyph}</Text>
-      </Box>
+    <Box key="ident" flexDirection="row" alignItems="center" columnGap={1} minWidth={0} overflow="hidden" {...(headed ? { paddingLeft: 2 } : {})}>
+      {headed ? null : (
+        <Box key="mark" flexShrink={0}>
+          <Text color={m.color} bold>{m.glyph}</Text>
+        </Box>
+      )}
       {agent.provider ? <Box key="dot" flexShrink={0}><Text color={providerColor(agent.provider)}>●</Text></Box> : null}
       <Box key="model" flexShrink={1} minWidth={0} overflow="hidden">
         <Text {...k.ink}>{clipCh(model, Math.max(4, room))}</Text>
@@ -369,6 +381,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
     </Box>,
   ]
   nums.forEach((row, i) => {
+    const last = i === nums.length - 1
     rows.push(
       <Box key={'nums-' + i} flexDirection="row" alignItems="center" columnGap={2} paddingLeft={2} minWidth={0}>
         {row.map(f => (
@@ -384,6 +397,8 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
             </Box>
           </Box>
         ))}
+        {last && tail ? <Box key="gap" flexGrow={1} /> : null}
+        {last && tail ? tail : null}
       </Box>,
     )
   })
@@ -408,106 +423,161 @@ function card(el: Els, frame: Frame, agent: AgentRec): RenderNode {
   )
 }
 
-/** A hairline between two rows of the list, in the page's quiet grey. */
-export function dividerArt(width: number, appearance: Appearance): string {
-  return svg(width, 1, '<rect class="d" width="' + r(width) + '" height="1"/>', themed(appearance, '.d{fill:#000;fill-opacity:.09}', '.d{fill:#fff;fill-opacity:.1}'))
-}
+// ---- Desktop: the list's tiles -----------------------------------------------------------------
+// The list keeps its capsule of tiles (2026-10-24: the owner asked for background tasks to show
+// beside the agents as the app shows them, not for the tiles to become the app's plain rows).
 
-/** Px of the spark at a running row's end, the conversation's spark drawn smaller. */
-const ROW_SPARK_PX = 14
-
-/** What a row's second line says: the model and effort, the tokens it took, failed or waiting. */
-function rowFacts(frame: Frame, agent: AgentRec): string {
-  const L = frame.lang
-  const effort = effortOf(agent)
-  const parts = [modelOf(agent, L) + (effort ? '·' + effort : '')]
-  if (agent.usage) parts.push(t(L, 'agents.tokens', { count: compactNumber(promptTokens(agent.usage) + agent.usage.output) }))
-  if (agent.state === 'waiting') parts.push(t(L, 'agents.waiting'))
-  if (agent.state === 'failed') parts.unshift(t(L, 'agents.failed'))
-  return parts.join('   ')
+/**
+ * Cells the time needs at the end of the numbers' last row: an hour's worth ("59분 59초"). It ends the
+ * row right-aligned, so a longer one only grows leftward into the row's slack; reserving 99 hours there
+ * left the time a row of its own on a narrow pane (2026-10-20).
+ */
+function tailCells(frame: Frame, agent: AgentRec): number {
+  return Math.ceil(chOf(elapsed(3_599_000, frame.lang))) + failedCells(frame, agent)
 }
 
 /**
- * One agent in the list, as the Claude app lists a background task: its title on one line, the time
- * it has run at the right, and at the end the spark while it runs or a chevron once it is done;
- * under the title, quiet, the model and the tokens it took. The whole row is the press, and lights
- * under the pointer. No coloured mark: a failed one says so in words.
+ * How a list tile lays out, from the pane's width and its language alone, never a value that ticks.
+ * Wide: the time and the chevron in a fixed column right of the title, the four numbers in a row.
+ * Narrow (or when the four numbers would not fit a row): the numbers go in two fixed rows (in · cache /
+ * out · tools) and the time ends the second of them; the title has its row to itself but for the
+ * chevron, or, when the time does not fit by the numbers, beside the time in the head. The time never
+ * takes a row of its own (2026-10-20: a whole row for one value was the owner's complaint).
  */
-function listRow(el: Els, frame: Frame, agent: AgentRec, now: number, onOpen: () => void): RenderNode {
+type TileLayout = { width: number; narrow: boolean; time: number; timeOn: 'head' | 'nums'; side: number; title: number }
+function tileLayout(frame: Frame, agent: AgentRec): TileLayout {
+  const width = innerCells(frame)
+  const figs = cardFigures(frame, agent)
+  const narrow = narrowCard(frame, agent)
+  const time = timeCells(frame, agent)
+  const timeOn = narrow && figs.length && figureCells(figs.slice(2)) + 2 + tailCells(frame, agent) <= width - 2 ? 'nums' : 'head'
+  const side = timeOn === 'head' ? time + 2 : 1
+  return { width, narrow, time, timeOn, side, title: width - 2 - (side + 1) }
+}
+
+/** Lines a tile's title takes at most; the rest is cut with an ellipsis. */
+const TITLE_LINES = 2
+
+/**
+ * The title cut to two lines of `cells`: a few cells short of two full ones, as wrapping at words
+ * leaves the end of a line empty.
+ */
+function tileTitle(agent: AgentRec, cells: number): string {
+  return clipCh(titleOf(agent), TITLE_LINES * Math.max(10, cells) - 4)
+}
+
+/** Rows a list tile draws, about, for the capsule's water. */
+function tileRows(frame: Frame, agent: AgentRec): number {
+  const layout = tileLayout(frame, agent)
+  const head = Math.min(TITLE_LINES, linesOf(tileTitle(agent, layout.title), layout.title))
+  const nums = figureRows(cardFigures(frame, agent), layout.narrow).length
+  const fall = linesOf(fallbackLine(frame, agent), layout.width - 2)
+  return head + 1.2 + nums + fall + 1.3
+}
+
+/**
+ * A list tile: the head (mark, title, time, chevron) under one blank press, the model and effort, the
+ * numbers, why. The title is our own Text: a host Button around it painted it in the button's ink,
+ * dark on the deep's water (claude.ai, 2026-10-24).
+ */
+function tile(el: Els, frame: Frame, agent: AgentRec, now: number, onPress: () => void): RenderNode {
   const { Box, Text } = el
-  const k = pageLook(frame)
-  const facts = rowFacts(frame, agent)
-  const time = ranFor(agent, now, frame.lang)
-  // The title takes what the time's column, the end mark and the row's air leave.
-  const room = frame.columns - 3 - Math.ceil(timeCh(frame.lang)) - 3
+  const k = lookOf(frame)
+  const L = frame.lang
+  const m = mark(k, agent)
+  const layout = tileLayout(frame, agent)
+  // In the head a column as wide as its widest value; at the end of the numbers, right-aligned in
+  // the row's slack (tileLayout), as wide as it is.
+  const time = (
+    <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} {...(layout.timeOn === 'head' ? { width: layout.time } : {})}>
+      {agent.state === 'failed' ? <Text key="failed" color={k.tone('red')}>{t(L, 'agents.failed')}</Text> : null}
+      <Text key="elapsed" {...(live(agent) ? k.ink : k.sub)}>{ranFor(agent, now, L)}</Text>
+    </Box>
+  )
+  const head = (
+    <Box key="head" flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" minWidth={0}>
+      <Box key="mark" flexShrink={0}>
+        <Text color={m.color} bold>{m.glyph}</Text>
+      </Box>
+      <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Text bold {...k.ink} wrap="wrap">{tileTitle(agent, layout.title)}</Text>
+      </Box>
+      <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.side}>
+        {layout.timeOn === 'head' ? time : null}
+        <Text key="chev" {...k.mute}>›</Text>
+      </Box>
+      {press(el, 'open-' + agent.id, (frame.columns - 2) * CELL_PX, onPress)}
+    </Box>
+  )
+  // The model, numbers and why are the open conversation's card's own rows, less its mark (the head
+  // has it), with the time at the end of the numbers when the layout puts it there.
+  const body = cardBody(el, frame, agent, true, layout.timeOn === 'nums' ? time : undefined)
   return (
-    <Box key={'row-' + agent.id} position="relative" flexDirection="column" width="100%" minWidth={0} paddingX={1} {...k.lit} hover={{ ...k.lit.hover }}>
-      <Box key="line" flexDirection="row" alignItems="center" columnGap={1} minWidth={0}>
-        <Box key="title" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-          <Text {...k.ink}>{clipCh(titleOf(agent), room)}</Text>
-        </Box>
-        <Box key="time" flexShrink={0} width={Math.ceil(timeCh(frame.lang))} flexDirection="row" justifyContent="flex-end">
-          <Text {...k.sub}>{time}</Text>
-        </Box>
-        <Box key="end" flexShrink={0} width={2} alignItems="center" justifyContent="center">
-          {live(agent) ? pic(el, 'row-spark-' + agent.id, SPARK_ART, t(frame.lang, 'agents.working'), ROW_SPARK_PX, ROW_SPARK_PX) : <Text {...k.mute}>›</Text>}
-        </Box>
-      </Box>
-      <Box key="facts" flexDirection="row" minWidth={0} overflow="hidden">
-        <Text {...(agent.state === 'failed' ? { color: k.tone('red') } : k.sub)} wrap="wrap">{clipCh(facts, frame.columns - 3)}</Text>
-      </Box>
-      {press(el, 'open-' + agent.id, (frame.columns - 2) * CELL_PX, onOpen)}
+    <Box key={'card-' + agent.id} flexDirection="column" width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
+      {[head, ...body]}
     </Box>
   )
 }
 
-/**
- * The list on the desktop, as the Claude app lists its background tasks, on the page itself: a
- * quiet "Running" over the running agents (longest running first), then "Done 11" over the finished
- * (newest first, the latest few until it is pressed open), each row a line of its own between
- * hairlines.
- */
+/** The list on the desktop: one capsule, its head, the running agents' tiles, then the finished. */
 function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: AgentRec[], done: AgentRec[]): RenderNode {
   const { Box, Text } = el
-  const k = pageLook(frame)
+  const k = lookOf(frame)
   const L = frame.lang
+  const idle = running.length === 0
   const shownDone = view.showDone ? done : done.slice(0, DONE_SHOWN)
-  const ruleWidth = Math.max(40, frame.columns) * CELL_PX
-  const rows = (key: string, list: readonly AgentRec[]) => list.flatMap((a, i) => [
-    ...(i ? [<Box key={'rule-' + key + '-' + a.id} paddingX={1} overflow="hidden" minWidth={0}>{pic(el, 'rule-' + a.id, dividerArt(ruleWidth, frame.appearance), '', ruleWidth, 1)}</Box>] : []),
-    listRow(el, frame, a, view.now, () => actions.open(a.id)),
-  ])
-  const children: RenderNode[] = []
-  if (running.length) {
-    children.push(<Box key="section-live" paddingX={1}><Text {...k.sub}>{t(L, 'agents.running')}</Text></Box>)
-    children.push(...rows('live', running))
-  }
-  if (done.length) {
-    const more = done.length > DONE_SHOWN
-    // The section's head opens the rest of the finished and folds them again, its chevron saying which.
-    children.push(
-      <Box key="section-done" position="relative" flexDirection="row" alignItems="center" columnGap={1} paddingX={1} paddingTop={running.length ? 1 : 0} alignSelf="flex-start">
-        <Text {...k.sub}>{t(L, 'agents.finished', { count: done.length })}</Text>
-        {more ? <Text {...k.mute}>{view.showDone ? '⌄' : '›'}</Text> : null}
-        {more ? press(el, 'done-head', Math.ceil(chOf(t(L, 'agents.finished', { count: done.length })) + 3) * CELL_PX, actions.toggleDone) : null}
-      </Box>,
-    )
-    children.push(...rows('done', shownDone))
-    if (more && !view.showDone) {
-      const label = t(L, 'agents.more', { count: done.length - DONE_SHOWN })
-      children.push(
-        <Box key="more-row" position="relative" flexDirection="row" paddingX={1} alignSelf="flex-start">
-          <Text {...k.sub}>{label + ' ›'}</Text>
-          {press(el, 'done', Math.ceil(chOf(label) + 3) * CELL_PX, actions.toggleDone)}
-        </Box>,
-      )
-    }
-  }
-  return (
-    <Box key="agents" flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>
-      {children}
+  const total = totals(frame, view.agents)
+  const face = 32
+  // The head says what all of them took; each group's count heads the group.
+  const head = (
+    <Box key="agents-head" flexDirection="row" alignItems="center" columnGap={2} width="100%" minWidth={0}>
+      {idle ? ripple(el, frame, 'agents', 'calm', t(L, 'band.brand'), face) : null}
+      <Box key="agents-say" flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+        <Box flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+          <Text bold {...k.ink}>{t(L, 'agents.title')}</Text>
+          <Text {...k.mute}>{t(L, 'band.brand')}</Text>
+        </Box>
+        {total ? (
+          <Box flexDirection="row" columnGap={1} flexWrap="wrap">
+            <Text {...k.mute}>{t(L, 'agents.total')}</Text>
+            <Text {...k.sub}>{total}</Text>
+          </Box>
+        ) : null}
+      </Box>
     </Box>
   )
+  const section = (key: string, label: string) => (
+    <Box key={'section-' + key} paddingLeft={0.5} paddingTop={0.5}>
+      <Text {...k.mute}>{label}</Text>
+    </Box>
+  )
+  const children: RenderNode[] = [head]
+  if (running.length) children.push(section('live', t(L, 'agents.liveCount', { count: running.length })))
+  for (const a of running) children.push(tile(el, frame, a, view.now, () => actions.open(a.id)))
+  if (done.length) children.push(section('done', t(L, 'agents.doneCount', { count: done.length })))
+  for (const a of shownDone) children.push(tile(el, frame, a, view.now, () => actions.open(a.id)))
+  if (done.length > DONE_SHOWN) {
+    children.push(
+      <Box key="more-row" flexDirection="row" justifyContent="center" width="100%">
+        {view.showDone
+          ? pill(el, frame, 'done', t(L, 'agents.less'), 'ghost', actions.toggleDone, 'violet', 'back')
+          : pill(el, frame, 'done', t(L, 'agents.more', { count: done.length - DONE_SHOWN }), 'ghost', actions.toggleDone, 'violet', 'next')}
+      </Box>,
+    )
+  }
+  const rows = 3 + [...running, ...shownDone].reduce((n, a) => n + tileRows(frame, a) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
+  return capsule(el, frame, {
+    key: 'agents',
+    // While nothing runs 리플이 floats at the head in calm water; while one runs the water holds
+    // still, its light where the title is (the pane redraws each second then).
+    sea: idle
+      ? { tone: 'violet', ripples: 'calm', motes: true, reach: 110, at: { x: 1.5 * CELL_PX + face / 2, y: 9.5 + face / 2 } }
+      : { tone: 'violet', reach: 120, at: { x: 1.5 * CELL_PX + 18, y: 20 } },
+    rows,
+    paddingY: 1,
+    gap: 1,
+    children,
+  })
 }
 
 // ---- Desktop: the conversation -----------------------------------------------------------------
