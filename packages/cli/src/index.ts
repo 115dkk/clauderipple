@@ -23,7 +23,7 @@ import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
 import { applyAppProxy, caTrusted, currentAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
-import { removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
+import { defaultHome, removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
 import { withCommandHelp } from "./help-gate.ts";
 import { runtime } from "./runtime.ts";
 import { codexOff, codexOn } from "./codex.ts";
@@ -80,7 +80,9 @@ function describeRestart(r: ReturnType<typeof restartAgent>): string {
 
 function pickerOff(): void {
   const home = homeDir();
-  const removed = removeAppProxy();
+  // Under another CLAUDERIPPLE_HOME only this install's entry and CA go (integrations.ts).
+  const isDefault = path.resolve(home) === path.resolve(defaultHome());
+  const removed = removeAppProxy(isDefault ? undefined : proxyUrlFor(new ConfigStore(configPath()).get().listen.port));
   console.log(removed ? "✓ Claude Desktop config library entry removed (previous entry restored if there was one)" : "✓ no ClaudeRipple config library entry");
   try {
     setPickerEnabled(false);
@@ -90,7 +92,7 @@ function pickerOff(): void {
   }
   if (isWindows) console.log("Removing the CA: Windows will ask you to confirm once more.");
   const store = isWindows ? "your user certificate store" : isLinux ? `your NSS database (${nssDb()})` : "the login keychain";
-  console.log(untrustCa(certPaths(home).caPem) ? `✓ CA removed from ${store}` : `✓ CA was not in ${store}`);
+  console.log(untrustCa(certPaths(home).caPem, { sweep: isDefault }) ? `✓ CA removed from ${store}` : `✓ CA was not in ${store}`);
   console.log("\nQuit and reopen Claude Desktop to apply.");
 }
 
@@ -320,7 +322,7 @@ async function uninstall(): Promise<void> {
   } catch (e) {
     console.log(`  could not remove the menu-bar app launcher: ${(e as Error).message}`);
   }
-  const integrationsRemoved = removeClientIntegrations(home);
+  const integrationsRemoved = removeClientIntegrations(home, undefined, { port: cfg.listen.port });
   if (!integrationsRemoved) process.exitCode = 1;
   const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem, ...(cfg.cli.models ? { models: cfg.cli.models } : {}) });
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);

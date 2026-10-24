@@ -155,7 +155,7 @@ test("uninstall clears picker and Codex settings before purge, even if trust rem
   process.env.CLAUDERIPPLE_HOME = ctx.home;
   process.env.CODEX_HOME = path.join(ctx.home, "codex");
   applyAppProxy(ctx.proxyUrl);
-  codexOn(18793);
+  codexOn(18791);
   try {
     const modDir = path.join(ctx.home, "mod");
     const otherMod = path.join(ctx.home, "other-plugin");
@@ -184,6 +184,39 @@ test("uninstall clears picker and Codex settings before purge, even if trust rem
   } finally {
     if (oldHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
     else process.env.CLAUDERIPPLE_HOME = oldHome;
+    if (oldCodex === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = oldCodex;
+  }
+});
+
+test("uninstalling a second home leaves the default install's proxy, Codex provider, CA and workers", () => {
+  // A release check runs under its own CLAUDERIPPLE_HOME and port while the real install keeps
+  // ~/.clauderipple; on 2026-10-24 its uninstall reached the shared Desktop proxy, Codex config, CA.
+  const real = scratch();
+  const check = scratch({ listen: { host: "127.0.0.1", port: 18890 } });
+  const oldCodex = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = path.join(real.home, "codex");
+  applyAppProxy(real.proxyUrl);
+  codexOn(18791);
+  try {
+    const agents = path.join(path.dirname(check.settings), "agents");
+    const worker = { ...DEFAULTS, providers: { test: { type: "openai-compatible" as const, url: "http://unused", models: [{ id: "shared-worker" }] } } };
+    syncAgentFiles(worker, agents, undefined, { manifestPath: path.join(real.home, "generated-agents.json") });
+    syncAgentFiles(worker, agents, undefined, { manifestPath: path.join(check.home, "generated-agents.json") });
+    let sweep: boolean | undefined;
+    assert.equal(removeClientIntegrations(check.home, (_ca, opts) => { sweep = opts.sweep; return true; }, { agentDir: agents, defaultHome: real.home }), true);
+    assert.equal(currentAppProxy().egressProxyUrl, real.proxyUrl);
+    assert.equal(codexEnabled(), true);
+    assert.equal(fs.existsSync(path.join(agents, "shared-worker.md")), true);
+    assert.equal(sweep, false, "only the check's own CA, by fingerprint");
+
+    // The same call from the default home still removes all of it, and sweeps leftover CAs.
+    assert.equal(removeClientIntegrations(real.home, (_ca, opts) => { sweep = opts.sweep; return true; }, { agentDir: agents, defaultHome: real.home }), true);
+    assert.equal(currentAppProxy().egressProxyUrl, null);
+    assert.equal(codexEnabled(), false);
+    assert.equal(fs.existsSync(path.join(agents, "shared-worker.md")), false);
+    assert.equal(sweep, true);
+  } finally {
     if (oldCodex === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = oldCodex;
   }

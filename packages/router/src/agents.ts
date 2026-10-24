@@ -232,15 +232,20 @@ function readManifest(file: string): Manifest {
   return { agents: [] };
 }
 
-/** Uninstall: the manifest is the ownership boundary, never all of ~/.claude/agents. */
-export function removeGeneratedAgentFiles(dir: string, manifestPath: string): void {
+/**
+ * Uninstall: the manifest is the ownership boundary, never all of ~/.claude/agents. Names another
+ * install's manifest also records (`sharedWith`) stay: two homes write the same agent folder.
+ */
+export function removeGeneratedAgentFiles(dir: string, manifestPath: string, sharedWith?: string): void {
   if (!fs.existsSync(manifestPath)) return;
   const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { agents?: unknown };
   if (!Array.isArray(parsed.agents) || !parsed.agents.every(name => typeof name === "string" && /^[a-z0-9-]+$/.test(name))) {
     throw new Error("생성 워커 목록이 올바르지 않아 워커 파일을 제거하지 않았습니다.");
   }
   if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("워커 폴더가 심볼릭 링크이므로 제거하지 않았습니다.");
+  const shared = new Set(sharedWith && path.resolve(sharedWith) !== path.resolve(manifestPath) ? readManifest(sharedWith).agents : []);
   for (const name of parsed.agents) {
+    if (shared.has(name)) continue;
     const file = path.join(dir, `${name}.md`);
     if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) continue;
     const text = fs.readFileSync(file, "utf8");
