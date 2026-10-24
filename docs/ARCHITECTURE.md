@@ -22,6 +22,13 @@ CLI: CONNECT api.anthropic.com  → ClaudeRipple terminates TLS (leaf cert signe
 CLI: CONNECT anything else      → blind tunnel
 ```
 
+Before those rules run, `requestKind` (routing.ts) decides once what the request is
+(a web search, a web fetch, an Auto mode classifier request, or an ordinary turn),
+and `decide` returns the route, carrying that `kind` and the model the client
+`asked` for, or the reason to refuse it, in one pass over the rules above. The
+adapters read `kind` through `promptAdditions` (identity.ts) to know what they may
+add to the system prompt.
+
 Why this path is stable:
 
 - Anthropic's [corporate proxy docs](https://code.claude.com/docs/en/corporate-proxy)
@@ -98,6 +105,15 @@ security-monitor system prompt, never user messages or routing markers. The
 original security prompt, context, output format and native decision logic remain
 intact. The dashboard's Clients page sets it (see the first-stage section below),
 or edit the JSON config. Removing the field restores ordinary routing.
+
+"Intact" covers the system prompt on every provider: `promptAdditions` gives a
+request of kind `auto-mode-classifier` no identity line, no `instructionsAppend`
+and no image hint. Until 2026-10-24 it did not hold. The request's kind never
+reached the adapters, so the ChatGPT path put `You are gpt-6-luna (reasoning
+effort: high), answering through Claude Code, a terminal-based coding agent.` in
+front of the security prompt and the image-generation hint after it, and the
+OpenAI-compatible, Google, Grok and Anthropic-compatible paths added the identity
+line and the addendum (docs/reviews/2026-10-24-architecture-review.md, candidate 1).
 
 This request is Auto mode's safety check: it decides whether an action the agent
 wants to take runs without asking. A target that judges worse than the model

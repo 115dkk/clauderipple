@@ -25,10 +25,10 @@ import type { Logger } from "./log.ts";
 import { exhaustionHeaders, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
-import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
+import { THREAD_UNSUPPORTED, continuesTranslatedTurn, decide, effortOf, requestKind, rewriteBody, stripThreadFields, threadDecision, type RequestKind, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
-import { applyIdentityToAnthropicBody } from "./identity.ts";
+import { applyIdentityToAnthropicBody, promptAdditions } from "./identity.ts";
 import { anthropicServerToolBackend, webPluginBackend, webSearchBlocks, webSearchErrorBlocks, webSearchMessage, webSearchQuery, webSearchSse, type WebSearchQuery } from "./websearch.ts";
 import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.ts";
 import { PRESETS } from "./presets.ts";
@@ -44,7 +44,6 @@ import { adminPort, providerFor, searchProviderFor, terminateHosts } from "./con
 import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevels, effortLevelsForModel } from "./admin.ts";
-import { isWebFetchRequest } from "./webfetch.ts";
 import { ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -873,6 +872,7 @@ export class Proxy {
         json = null;
       }
     }
+    const kind: RequestKind = json && isApiHost && path.startsWith("/v1/messages") ? requestKind(json, pathname) : "turn";
     // A WebSearch arrives as its own request aimed at ANTHROPIC_SMALL_FAST_MODEL, recognised by the
     // forced `web_search` server tool rather than by its model id. Recognise it whether or not a
     // backend is configured: `cfg.webSearch` decides who answers it, but knowing that this is a
@@ -881,9 +881,10 @@ export class Proxy {
     if (json) {
       record.source = record.target = typeof model === "string" ? model : "-";
       record.stream = json.stream === true;
-      if (isAutoModeClassifier(json)) record.purpose = "auto-mode-classifier";
+      if (kind === "auto-mode-classifier") record.purpose = "auto-mode-classifier";
+      if (cfg.webSearch && kind === "web-fetch") record.purpose = "web-fetch";
     }
-    const search = json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
+    const search = kind === "web-search" ? webSearchQuery(json!) : null;
     let searchAttempted = false;
     const markSearchAttempted = (): void => { searchAttempted = true; };
     if (search && cfg.webSearch) {
@@ -893,15 +894,20 @@ export class Proxy {
       // returns nothing is worse than one that costs what it always cost.
     }
 
-    const webFetch = !!(cfg.webSearch && json && pathname === "/v1/messages" && isWebFetchRequest(json));
+    const webFetch = !!cfg.webSearch && kind === "web-fetch";
     let fetchRoute: Resolved | null = null;
-    if (webFetch) record.purpose = "web-fetch";
     if (webFetch && cfg.webSearch) {
       const settings = cfg.webSearch;
       if (this.targetUsable(settings, cfg)) {
         const ladder = effortLevels(cfg).providers[settings.provider];
         const levels = ladder?.models?.[settings.model] ?? ladder?.default ?? [];
-        fetchRoute = { ...settings, effort: levels.includes("low") ? "low" : undefined, tag: `${String(model)}->${settings.model} (web fetch)` };
+        fetchRoute = {
+          ...settings,
+          effort: levels.includes("low") ? "low" : undefined,
+          tag: `${String(model)}->${settings.model} (web fetch)`,
+          kind: "web-fetch",
+          asked: String(model),
+        };
       } else {
         unwrittenFallbackNote = `web fetch via ${settings.provider} unavailable; original destination fallback`;
         log.warn(`web fetch via ${settings.provider}: provider unusable; leaving the request alone`);
@@ -944,19 +950,22 @@ export class Proxy {
         delete output.effort;
         json.output_config = output;
       }
-      const resolved = fetchTarget ?? (json ? resolve(model, json, cfg) : null);
+      const decision = fetchTarget
+        ? { route: fetchTarget, refusal: null }
+        : json ? decide(model, json, cfg, kind) : { route: null, refusal: null };
+      const resolved = decision.route;
 
       // A non-Claude model this router cannot route is refused here, by name, instead of being
       // forwarded to Anthropic. `PASS` on such a request answers 404 from Anthropic and looks like
       // "the model vanished" (2026-09-20: an agent file named `deepseek` resolved, through a missing
       // alias, to a model no provider declared — thirty of them came back 404). A native `claude-*`
       // id is deliberately unrouted and must keep passing through (§5).
-      if (!resolved && isApiHost && isMessages && json && typeof model === "string" && !model.startsWith("claude-")) {
-        const reason = unroutableReason(model, json, cfg);
+      if (!resolved && isApiHost && isMessages && json) {
+        const reason = decision.refusal;
         if (reason) {
           const payload = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: `ClaudeRipple: ${reason}` } });
           res.writeHead(400, { "content-type": "application/json", "content-length": String(Buffer.byteLength(payload)) }).end(payload);
-          tag = `REFUSE ${model}`;
+          tag = `REFUSE ${String(model)}`;
           record = { ...record, provider: "refused" };
           finish("400", payload.length, `ClaudeRipple: ${reason}`, true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "unroutable" });
           return;
@@ -1064,7 +1073,7 @@ export class Proxy {
             try {
               // The adapter reports each account's outcome to the shared pool itself, so a slot pointing
               // here fails over once every account is out (chooseTarget asks the adapter).
-              const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json), { subagent, imageHint: imageLine(adminPort(cfg)) });
+              const o = await this.chatgpt(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, effortOf(json), { subagent, imageHint: imageLine(adminPort(cfg)), kind: route.kind });
               if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
@@ -1108,7 +1117,7 @@ export class Proxy {
               return using.headers;
             } : undefined;
             try {
-              const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { headers: using.headers, ...(next ? { next } : {}) });
+              const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { headers: using.headers, ...(next ? { next } : {}) }, { kind: route.kind });
               if (o.status >= 400) this.pool.penalise(poolName, using.id, o.upstreamStatus ?? o.status, o.retryAfterMs, o.errorBody);
               else if (o.status > 0) this.pool.succeed(poolName, using.id);
               if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
@@ -1136,7 +1145,7 @@ export class Proxy {
             if (routeEffort) record.effort = routeEffort;
             tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
             try {
-              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { kind: route.kind });
               if (o.kind === "prompt-incompatible" || o.kind === "model-capacity") {
                 const why = o.kind === "prompt-incompatible" ? "prompt" : "capacity";
                 const alreadyRetried = unwrittenSeen;
@@ -1187,7 +1196,7 @@ export class Proxy {
             if (routeEffort) record.effort = routeEffort;
             tag = `GROK ${route.tag} effort=${routeEffort ?? "-"}`;
             try {
-              const o = await this.grok(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+              const o = await this.grok(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { kind: route.kind });
               this.recordOutcome(route.provider, o.status);
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...(o.usage ? { usage: o.usage } : {}), ...(o.stopReason ? { stopReason: o.stopReason } : {}) });
             } catch (e) {
@@ -1272,8 +1281,7 @@ export class Proxy {
           applyIdentityToAnthropicBody(json, {
             model: route.model,
             effort: effortOf(json),
-            identity: provider.identity,
-            instructionsAppend: provider.instructionsAppend,
+            ...promptAdditions(route.kind, provider),
           });
           body = Buffer.from(JSON.stringify(json));
           const u = new URL(provider.url);
@@ -1843,12 +1851,13 @@ export class Proxy {
       log.info(`FAILOVER ${resolved.provider}/${resolved.model} exhausted → ${f.provider}/${f.model}`);
       // The tag names the model that answers, not the one that could not: a log line saying `->m1`
       // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
-      const asked = resolved.tag.split("->")[0] ?? resolved.model;
       return {
         provider: f.provider,
         model: f.model,
         effort: f.effort ?? resolved.effort,
-        tag: `${asked}->${f.model} (failover from ${resolved.provider})`,
+        tag: `${resolved.asked}->${f.model} (failover from ${resolved.provider})`,
+        kind: resolved.kind,
+        asked: resolved.asked,
       };
     }
     return resolved;
@@ -1861,7 +1870,8 @@ export class Proxy {
       if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
       return {
         provider: f.provider, model: f.model, effort: f.effort ?? resolved.effort,
-        tag: `${resolved.tag.split("->")[0] ?? resolved.model}->${f.model} (${why} fallback from ${attempted.provider})`,
+        tag: `${resolved.asked}->${f.model} (${why} fallback from ${attempted.provider})`,
+        kind: resolved.kind, asked: resolved.asked,
       };
     }
     return null;
