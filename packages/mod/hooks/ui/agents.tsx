@@ -12,8 +12,10 @@
 // conversation (`$.session.messages({ agentId })`, register.tsx) and draws it here, a way back at
 // its head.
 //
-// The desktop draws the list in one capsule (kit.tsx), each agent a tile on it, its title and
-// chevron the presses (Button takes Text children; Box has no press or Button size in 2.1.308). The conversation reads on the host's own page under its card's capsule: Markdown takes the
+// The desktop draws the list in one capsule (kit.tsx), each agent a tile on it, its head row the
+// press: our own title and chevron under a blank native button (kit.tsx `press`). A host Button
+// around the title painted it in the button's ink, dark on the deep's water (claude.ai, 2026-10-24).
+// The conversation reads on the host's own page under its card's capsule: Markdown takes the
 // host's ink and no colour of ours, so on the deep's dark water it would vanish on a light app.
 //
 // 리플이 only where nothing redraws: the empty pane, and the list's head while nothing runs. Each
@@ -355,7 +357,7 @@ function mark(k: Look, agent: AgentRec): { glyph: string; color: string } {
  * now is the conversation's (and the terminal's): a line that changed each step made the list jump.
  */
 function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, onPress?: () => void): RenderNode[] {
-  const { Box, Text, Button } = el
+  const { Box, Text } = el
   const pressable = !!onPress
   const k = lookOf(frame)
   const L = frame.lang
@@ -381,14 +383,15 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, now: number, onPress?:
         <Text color={m.color} bold>{m.glyph}</Text>
       </Box>
       <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
-        {onPress ? <Button key={'open-' + agent.id + '-title'} plain onPress={onPress}><Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text></Button> : <Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text>}
+        <Text bold {...k.ink} wrap="wrap">{cardTitle(agent, layout.title)}</Text>
       </Box>
       {layout.side ? (
         <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.side}>
           {layout.timeOn === 'head' ? time : null}
-          {onPress ? <Button key={'open-' + agent.id + '-0'} plain onPress={onPress}><Text key="chev" {...k.mute}>›</Text></Button> : null}
+          {onPress ? <Text key="chev" {...k.mute}>›</Text> : null}
         </Box>
       ) : null}
+      {onPress ? press(el, 'open-' + agent.id, (frame.columns - 2) * CELL_PX, onPress) : null}
     </Box>,
     // One line whatever the width: the name cut before the effort ever drops below it.
     <Box key="ident" flexDirection="row" alignItems="center" columnGap={1} paddingLeft={2} minWidth={0} overflow="hidden">

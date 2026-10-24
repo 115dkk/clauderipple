@@ -812,14 +812,15 @@ test('the Agents pane shows the latest finished agents and the rest behind more;
     for (const i of [2, 1, 0]) expect(await ui.find({ type: 'Text', text: 'Finished task ' + i }), surface + ' ' + i).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeDefined()
     await ui.press({ key: 'done' })
-    // The desktop's title and chevron are the presses; no width-sized space strips.
-    await ui.press({ key: surface === 'terminal' ? 'open-a1' : 'open-a1-0' })
+    // The desktop's press is one blank button over the card's head; the title is our own Text, so
+    // the host's button ink never paints it.
+    await ui.press({ key: 'open-a1' })
     const all = await mount($, 'agents-all', surface, 64)
     expect(await all.find({ type: 'Text', text: 'Finished task 0' }), surface).toBeDefined()
     expect(await all.find({ type: 'Text', text: 'failed' }) ?? await all.find({ type: 'Text', text: /^✕/ }), surface).toBeDefined()
     if (surface === 'desktop') {
-      expect(await all.find({ type: 'Button', key: 'open-d0-title' }), surface).toBeDefined()
-      await all.press({ key: 'open-d0-title' })
+      expect(await all.find({ type: 'Button', key: 'open-d0' }), surface).toBeDefined()
+      await all.press({ key: 'open-d0' })
     }
   }
   expect(calls).toEqual(['done', 'open:["a1"]', 'done', 'open:["a1"]', 'open:["d0"]'])
