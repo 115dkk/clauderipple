@@ -653,6 +653,30 @@ for (const [tier, rung, agent, model] of [
   expect(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').filter(line => line.includes('"outcome"')).length).toBe(1)
 })
 
+test('a worker that ends before its spawn is recorded is listed as ended, not running', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  let written: AgentRec[] = []
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => {
+    const result = await next(e)
+    written = e.value as AgentRec[]
+    return result
+  })
+  // Its first request fails at once: the end arrives while the spawn hook is still at work.
+  const engine = $
+  on('agent.spawn', async () => {
+    await engine.turn.complete({ turnId: 'turn-1', answer: '', reason: 'error', durationMs: 72, isAborted: false, agentId: 'worker-1' })
+    return { model: 'gpt-6.1-sol@high', agentId: 'worker-1' }
+  })
+  await start($)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: standard]]\nVerify one claim.' })
+  await b.clock.settle()
+  expect(written.find(a => a.id === 'worker-1')).toMatchObject({ state: 'failed', endedAt: NOW })
+  const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
+  expect(rows.find(row => row.type === 'outcome')).toMatchObject({ pick: rows.find(row => row.type === 'pick').id, agent: 'worker-1', reason: 'error', ms: 72 })
+})
+
 for (const domain of ['design', 'frontend', 'backend', 'docs'] as const) test(`auto selects the ${domain} task's domain ladder or its own general fallback`, async ($, on) => {
   const b = boundaries(on, { domainRules: {
     ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }], hard: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'high' }] } },

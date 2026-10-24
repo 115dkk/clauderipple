@@ -131,6 +131,12 @@ let judgeSequence = 0
 let jevBlips = 0
 let generation = 0
 let carriedPick = false
+/**
+ * An agent's end that came before its spawn was recorded, kept until the record lands. A worker
+ * whose first request fails ends in milliseconds, while the spawn hook still reads its files; a
+ * workflow's 29 such agents stayed "running" in the pane for good (2026-10-24).
+ */
+const endedEarly = new Map<string, { state: 'done' | 'failed'; endedAt: number; outcome: Record<string, unknown> }>()
 // Serialize settings reads and writes so a slow poll cannot overwrite a queued edit.
 let settingsWork: Promise<void> = Promise.resolve()
 function settingsTask<T>(work: () => Promise<T>): Promise<T> {
@@ -1577,12 +1583,19 @@ export const register: Register = on => {
       if (e.agentId) {
         const now = await $.clock.now()
         const before = (await read($, agents)).find(a => a.id === e.agentId)
-        await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state: e.reason === 'answer' ? 'done' : 'failed', endedAt: now, now: undefined, toolSince: undefined } : a))
+        const state = e.reason === 'answer' ? 'done' : 'failed'
+        const outcome = { type: 'outcome', agent: e.agentId, at: new Date(now).toISOString(), reason: e.reason, aborted: e.isAborted, ms: e.durationMs, answerChars: e.answer.trim().length }
+        if (!before) {
+          endedEarly.set(e.agentId, { state, endedAt: now, outcome })
+          // Forks and other loops no spawn records end here too: only the latest few are kept.
+          for (const id of endedEarly.keys()) if (endedEarly.size > 40) endedEarly.delete(id)
+        }
+        await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a))
         await countAgents($)
         // A picked worker's outcome, once, joined to its pick by id: whether the tier it was given
         // (by the main chat or the judge) was enough is read from these lines later.
         if (before?.pick?.id && (before.state === 'running' || before.state === 'waiting')) {
-          await persistWorkerPick($, { type: 'outcome', pick: before.pick.id, agent: e.agentId, at: new Date(now).toISOString(), reason: e.reason, aborted: e.isAborted, ms: e.durationMs, answerChars: e.answer.trim().length, model: before.model ?? null, cost: before.cost })
+          await persistWorkerPick($, { ...outcome, pick: before.pick.id, model: before.model ?? null, cost: before.cost })
         }
       } else if (!forking) {
         if (await read($, busy)) await update($, busy, () => false)
@@ -1664,9 +1677,13 @@ export const register: Register = on => {
       if (result.agentId) {
         const provider = await spawnProvider($, input.subagentType, result.model)
         const effort = chosen?.effort ?? /@([a-z]+)$/.exec(result.model)?.[1]
-        const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: 'running', startedAt: await $.clock.now(), cost: 0 }
+        const now = await $.clock.now()
+        const early = endedEarly.get(result.agentId)
+        endedEarly.delete(result.agentId)
+        const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: early?.state ?? 'running', startedAt: Math.min(now, early?.endedAt ?? now), ...(early ? { endedAt: early.endedAt } : {}), cost: 0 }
         await update($, agents, list => [...list.filter(a => a.id !== rec.id), rec].slice(-40))
         await countAgents($)
+        if (early && chosen?.id) await persistWorkerPick($, { ...early.outcome, pick: chosen.id, model: result.model ?? null, cost: 0 })
       }
     } catch (error) { await report($, 'agent.spawn record', error) }
     return result
