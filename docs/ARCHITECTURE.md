@@ -96,8 +96,8 @@ this setting, native routing remains unchanged. For example:
 The named provider must exist and support outbound inference. Detection uses the
 security-monitor system prompt, never user messages or routing markers. The
 original security prompt, context, output format and native decision logic remain
-intact. Configure this field in the JSON config; the settings GUI has no control
-for it yet. Removing the field restores ordinary routing.
+intact. The dashboard's Clients page sets it (see the first-stage section below),
+or edit the JSON config. Removing the field restores ordinary routing.
 
 This request is Auto mode's safety check: it decides whether an action the agent
 wants to take runs without asking. A target that judges worse than the model
@@ -141,31 +141,63 @@ that keeps the stage-1 verdict ("Blocked by fast classifier"), and its refusal
 fallback model is empty in the external build, so nothing retries it. GPT-6 Luna at
 `high` effort took 4–20 s per call on both stages.
 
-`stage1: { provider, model, effort }` therefore sends only the exact first-stage
-shape (one stop sequence, `</block>`, and `max_tokens < 8192`) to its own target.
-Stage 2, fast mode, the severity score and any shape not recognised keep the main
-target. The router log tags the first stage `(auto-mode classifier, stage 1)`;
-`requests.jsonl` keeps `purpose: "auto-mode-classifier"` and names the target.
+So the setting can be split by stage, and which model answers each side is the
+operator's choice. A first stage is the exact shape above: one stop sequence,
+`</block>`, and `max_tokens < 8192`. Every other classifier request (stage 2, fast
+mode, the severity score, any shape not recognised) is "the rest".
+
+| Setting | First stage | The rest |
+|---|---|---|
+| `{provider, model, effort}` | that target | that target |
+| `{provider, model, effort, stage1: {…}}` | `stage1` | the top-level target |
+| `{stage1: {…}}` | `stage1` | ordinary routing |
+| `{provider, model, effort, stage1: "native"}` | ordinary routing | the top-level target |
+
+Ordinary routing is what the request gets without the setting: passthrough, or a
+slot route for its model. A setting that leaves both sides to it is a config error,
+not a silent no-op. The router log tags the first stage `(auto-mode classifier,
+stage 1)`; `requests.jsonl` keeps `purpose: "auto-mode-classifier"` and names the
+target.
+
+Two settings this allows. One Claude model on both stages:
 
 ```json
 "providers": {"claude-classifier": {"type": "anthropic", "auth": "claude-code", "accountPool": true, "limits": false}},
+"autoModeClassifier": {"provider": "claude-classifier", "model": "claude-haiku-5-5"}
+```
+
+Sonnet 5.5 on the first stage, which it answers, and a GPT model on the rest (this
+machine's setting since 2026-10-24):
+
+```json
 "autoModeClassifier": {"provider": "chatgpt", "model": "gpt-6-luna", "effort": "high",
                        "stage1": {"provider": "claude-classifier", "model": "claude-sonnet-5-5"}}
 ```
 
 An `accountPool` provider with no `models` list is a target only where a setting
 names it, so no other Claude request moves to it. It signs in as the observed
-Claude Code login, and every first stage counts against that subscription.
+Claude Code login, and every request it answers counts against that subscription.
 
-Why this is no looser than the native classifier:
+The dashboard's Clients page has an "Auto mode classifier" section with one row per
+side, each a provider and model or Claude Code's own choice, plus an effort. The
+rows and the config are translated only by `classifierRowsOf` and
+`classifierSettingOf` in `packages/ui/app.js`; one model on both rows is saved
+without `stage1`. A Claude `accountPool` provider without a model list is offered
+with the Claude catalogue, and the models the engine refuses for stage 2 are
+labelled in the second row.
 
-- A first-stage `no` allows the action without stage 2, as it does natively. The
-  only change is who answers: Sonnet 5.5 instead of the engine's default.
-- A first-stage `yes` always reaches the main target's full second stage.
+Why splitting the stages does not loosen the check by itself:
+
+- A first-stage `no` allows the action without stage 2, as it does natively; only
+  who answers changes. That makes the first-stage target the one that decides
+  which actions are never looked at twice, so the warning above applies to it
+  most: a target that says `no` where the native model says `yes` lets the action
+  through unseen.
+- A first-stage `yes` always reaches the full second stage on the other side.
 - A first stage that fails (a refusal, an HTTP error, no usable Claude account) is
   a block in the engine, never an allow.
-- Fast mode is excluded on purpose: there stage 1's verdict is final, so it stays
-  with the target the operator chose for final verdicts.
+- Fast mode belongs to the rest: its single stage is final, so it goes where final
+  verdicts go.
 
 Also considered: answering every first stage `<block>yes` in the router so that
 every action gets the full second stage. That is stricter than native, but every
