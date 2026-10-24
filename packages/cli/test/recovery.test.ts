@@ -593,7 +593,13 @@ test("Linux launcher: a desktop entry; Windows: shortcuts through a hidden Power
   assert.match(scripts[0]!, /WScript\.Shell/);
   assert.match(scripts[0]!, /conhost\.exe/);
   assert.ok(scripts[0]!.includes(path.join(process.env.CLAUDERIPPLE_LAUNCHER_DIR!, "Desktop", "ClaudeRipple.lnk")));
-  assert.match(fs.readFileSync(path.join(home, "clauderipple-tray.ps1"), "utf8"), /tray --ensure/);
+  const trayScript = fs.readFileSync(path.join(home, "clauderipple-tray.ps1"), "utf8");
+  assert.match(trayScript, /tray --ensure/);
+  // The router holds logs\launcher.log open for its whole life, so the tray's launcher writes
+  // elsewhere — and still runs the tray when even that file is unavailable (#87).
+  assert.ok(trayScript.includes(`'${path.join(home, "logs", "tray-launcher.log")}'`));
+  assert.ok(!trayScript.includes(`'${path.join(home, "logs", "launcher.log")}'`));
+  assert.match(trayScript, /try \{ & .* tray --ensure \*>> .*tray-launcher\.log' \} catch \{ & .* tray --ensure \}/);
 
   assert.deepEqual(installLauncher({ rt: { ...rt, packaged: true }, home, version: "1", platform: "darwin" }).paths, []);
 });
