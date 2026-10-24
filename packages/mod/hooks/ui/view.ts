@@ -105,6 +105,8 @@ export type BandActions = {
   toggleWarm: () => void
   compact: () => void
   clear: () => void
+  /** Has the session's model write a handoff and opens a new session in this folder with it. */
+  handoff: () => void
   toggleLog: () => void
   toggleAgents: () => void
   openSettings: () => void
@@ -122,7 +124,7 @@ export type BandActions = {
 
 // ---- Alerts and cards ------------------------------------------------------------------------
 
-export type ResultStage = 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 
 export type AlertView =
   /** The cache expired on a big chat: the next prompt re-reads it all. */
@@ -150,6 +152,8 @@ export type AlertActions = {
   openSettings: () => void
   /** Each change of the compact note's field. */
   noteInput: (text: string) => void
+  /** Copies a written handoff again (its done card). */
+  copy: () => void
 }
 
 // ---- Settings and setup ----------------------------------------------------------------------

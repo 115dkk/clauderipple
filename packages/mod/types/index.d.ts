@@ -385,8 +385,10 @@ export type Stats = {
   warm: { pings: number; cost: number }
 }
 
+/** `writing`: the fork is (or will be) writing the note; `opened`: a new session was opened with it; `copied`: no session could be opened, so it was copied. */
+export type HandoffStage = 'writing' | 'opened' | 'copied' | 'failed'
 export type SetupStep = 1 | 2 | 3 | 4
-export type ResultStage = 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 export type JevState = {
   source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
@@ -435,6 +437,9 @@ declare module 'claude-code' {
       coldHidden: boolean
       kept: { pings: number; tokens: number } | null
       judgeDown: string | null
+      handoff: { stage: HandoffStage; text?: string } | null
+      /** The band's Handoff was pressed and its fork has not started: the tick starts it when the session is idle. */
+      handoffQueued: boolean
       panel: 'settings' | 'setup' | 'compact' | 'clear' | null
       busy: boolean
       decidingSince: number | null

@@ -1,6 +1,6 @@
 // The bands that take the dashboard's place when something wants a decision: cold cache, heavy
 // context, a hot plan limit, a judge that failed, the compact bar, and the cards that report a
-// compact in progress and done.
+// compact or a handoff in progress and done.
 //
 // Each one is 리플이 telling you one thing: its face of the moment on the left, a short title that
 // says what, one line that says why, then at most one main action, the others quiet, and a way to
@@ -127,6 +127,10 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
   const L = frame.lang
   const close: Choice = { key: 'dismiss', label: t(L, 'alerts.dismiss'), hotkey: 'x', onPress: a.dismiss }
   switch (alert.stage) {
+    case 'handingOff':
+      return { key: 'result', face: 'going', title: t(L, 'alerts.handingOff'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.quickProgress') }
+    case 'handoffDone':
+      return { key: 'result', face: 'pleased', title: t(L, 'alerts.handoffDone'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.summaryReady'), quiet: [{ key: 'copy', label: t(L, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }], close }
     case 'compacting':
       return { key: 'result', face: 'squeezing', title: t(L, 'alerts.compacting'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.compactingBody') }
     case 'compacted':
@@ -182,7 +186,7 @@ function seaOf(card: Card, alert: AlertView): Omit<Sea, 'at'> {
       return { tone: 'violet', weather: 'sparkles', ripples: 'calm' }
     default: {
       const stage = alert.kind === 'result' ? alert.stage : 'failed'
-      if (stage === 'compacting') return { tone: 'violet', ripples: 'busy', current: true }
+      if (stage === 'handingOff' || stage === 'compacting') return { tone: 'violet', ripples: 'busy', current: true }
       if (stage === 'failed') return { tone: 'red', weather: 'static' }
       return { tone: 'green', tick: true, weather: 'sparkles' }
     }

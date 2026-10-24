@@ -4,7 +4,7 @@ import { renderBand, renderFooter } from '../hooks/ui/band'
 import type { BandActions, DashboardView, Frame } from '../hooks/ui/view'
 
 const noop = () => undefined
-const actions: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+const actions: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
 const view: DashboardView = {
   effort: { level: 'high', mode: 'auto' }, model: 'Opus', context: null, cache: null,
   warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null,

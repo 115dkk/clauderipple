@@ -213,6 +213,13 @@ prose when they disagree.
   model's window, else the model's window. The dashboard's Compaction card picks the model
   (the app's compactor / Claude Haiku·Sonnet·Opus / router models by provider) and the point
   (400k / 500k / 600k / a typed value in k / model default).
+- **Handoff (restored 2026-10-24, one button):** the band's Handoff has the session's own model
+  write a resume note in a fork (nothing is sent to this chat; it is never cleared), then opens a
+  new Code session in the same folder with the note in its prompt box (`claude://code/new`, which
+  fills the box and waits for Enter). A note past 12k characters goes to
+  `~/.clauderipple/handoffs/` and the box says to read it; no link → clipboard; a failed fork →
+  a failed card. Why: app changes reach only new sessions (a `/clear` keeps the old one), so moving
+  on is a routine step. The advice judge, choices and settings removed in 8480bae stay removed.
 - **Stats** (`/ripple stats`): Auto-steered prompts by effort, weighted cost (input 1, write 1.25,
   read 0.1, output 5), judge counts/time/tokens, worker picks by tier, keep-warm pings and cost.
 
@@ -220,7 +227,7 @@ prose when they disagree.
 
 - **Band (desktop, SVG-drawn):** effort (Deciding glow / Paused / Off) · model · context ring ·
   cache countdown (with a keep-warm mark) · limits · last route (provider colour, cache hit) ·
-  Auto · Warm · Compact · Log · Agents · ⚙. Terminal: the same in text with hotkeys.
+  Handoff · Auto · Warm · Compact · Log · Agents · ⚙. Terminal: the same in text with hotkeys.
   Minimal layout: footer controls only.
 - **Panes:** Log (existing request log) and Agents (each subagent: tier/agent/effort/why, state,
   current tool, elapsed, cost).

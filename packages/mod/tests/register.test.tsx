@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { MOD_SETTINGS_SCHEMA_VERSION, DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
+import { QUICK_PROMPT } from '../hooks/handoff'
 import type { Lang } from '../hooks/i18n'
 import type { AgentRec, BgTask, ModSettingsSnapshot, Settings } from '../types'
 
@@ -2150,6 +2151,122 @@ test('an agent\'s run of tool calls unfolds on press, its paths short against th
   expect(runs.at(-1)).toEqual([])
   await ui.press({ key: 'open-worker-1' })
   expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
+})
+
+// ---- Handoff (2026-10-24: one press, the session's model writes it in a fork) -------------------
+
+/** The claude:// link a handoff opened, and its query. */
+function opened(b: { processes: { argv: readonly string[] }[] }): URLSearchParams | undefined {
+  const link = b.processes.map(p => p.argv.at(-1) ?? '').find(arg => arg.startsWith('claude://code/new?'))
+  return link ? new URLSearchParams(link.slice('claude://code/new?'.length)) : undefined
+}
+
+// 2026-10-13: a handoff that cleared the chat lost the owner the chat. It never clears, and it
+// sends nothing to this chat: the note waits in the new session's prompt box.
+test('the band\'s Handoff has the session write the note in a fork and opens a new session in the folder, this chat untouched', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const commands: string[] = []
+  on('command.run', { command: 'clear' }, () => { commands.push('clear'); return {} })
+  const prompts: string[] = []
+  on('model.fork', ($, e) => { prompts.push(e.prompt); return { value: { isAnswered: true, text: 'Resume: the band fix is half done.', usage: USAGE } } })
+  await start($)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Button', key: 'handoff' })).toBeDefined()
+  await ui.press({ key: 'handoff' })
+  await b.clock.advance(15000)
+  expect(prompts).toEqual([QUICK_PROMPT])
+  const query = opened(b)
+  expect(query?.get('folder')).toBe('/work')
+  expect(query?.get('source')).toBe('services')
+  expect(query?.get('q')).toContain('the band fix is half done')
+  expect(query?.get('q')).toContain('Continue with the justified next action')
+  expect(b.submitted).toEqual([])
+  expect(b.filled).toEqual([])
+  expect(commands).toEqual([])
+  const card = await band($, 'desktop')
+  expect(await card.find({ type: 'Text', text: 'Handoff done' })).toBeDefined()
+  expect(await card.find({ type: 'Text', text: /^A new session opened with the handoff filled in/ })).toBeDefined()
+})
+
+test('a long handoff is saved under handoffs and the new session\'s box only names the file', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const note = 'Resume: ' + 'verify the pending step. '.repeat(600)
+  on('model.fork', () => ({ value: { isAnswered: true, text: note, usage: USAGE } }))
+  await start($)
+  await (await band($)).press({ key: 'handoff' })
+  await b.clock.advance(15000)
+  const path = [...b.files.keys()].find(p => p.startsWith('/home/test/.clauderipple/handoffs/handoff-') && p.endsWith('.md'))
+  expect(path).toBeDefined()
+  expect(b.files.get(path!)).toContain(note.trim())
+  expect(opened(b)?.get('q')).toBe(`Read the handoff in ${path} and continue from it.`)
+})
+
+test('a handoff that cannot open a new session is copied; without a clipboard it fills this prompt', async ($, on) => {
+  const b = boundaries(on, {}, { browserFailure: 'exit' })
+  http(on)
+  const copied: string[] = []
+  let clipboard = true
+  on('ui.copy', ($, e) => { copied.push(e.text); return { value: clipboard ? { isCopied: true } : { isCopied: false, reason: 'no-clipboard' } } as never })
+  on('model.fork', () => ({ value: { isAnswered: true, text: 'Pending: verify the changed files.', usage: USAGE } }))
+  await start($)
+  await (await band($)).press({ key: 'handoff' })
+  await b.clock.advance(15000)
+  expect(copied.length).toBe(1)
+  expect(copied[0]).toContain('Pending: verify the changed files.')
+  expect(b.toasts.some(t => t.includes('Could not open a new session'))).toBe(true)
+  expect(b.filled).toEqual([])
+  const card = await band($, 'desktop')
+  expect(await card.find({ type: 'Text', text: 'The resume note was copied; this chat was kept.' })).toBeDefined()
+  // Copy again, with the clipboard gone: the note goes into this chat's prompt box, not sent.
+  clipboard = false
+  await card.press({ key: 'copy' })
+  expect(b.filled[0]).toContain('Pending: verify the changed files.')
+  expect(b.toasts.some(t => t.includes('clipboard unavailable'))).toBe(true)
+  expect(b.submitted).toEqual([])
+})
+
+test('a handoff whose fork fails or answers nothing fails with a toast and sends nothing here', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  let forks = 0
+  on('model.fork', () => ({ value: ++forks === 1 ? { isAnswered: false, reason: 'nothing-to-fork' } : { isAnswered: true, text: '  ', usage: USAGE } }) as never)
+  await start($)
+  const first = await band($)
+  await first.press({ key: 'handoff' })
+  await first.unmount()
+  await b.clock.advance(15000)
+  expect(forks).toBe(1)
+  expect(b.toasts.filter(t => t.includes('handoff failed')).length).toBe(1)
+  const card = await band($, 'desktop')
+  expect(await card.find({ type: 'Text', text: 'That did not finish' })).toBeDefined()
+  await card.press({ key: 'dismiss' })
+  await (await band($)).press({ key: 'handoff' })
+  await b.clock.advance(15000)
+  expect(forks).toBe(2)
+  expect(b.toasts.filter(t => t.includes('handoff failed')).length).toBe(2)
+  expect(b.submitted).toEqual([])
+  expect(b.filled).toEqual([])
+  expect(opened(b)).toBeUndefined()
+})
+
+test('a handoff pressed mid-turn is written once the turn ends', async ($, on) => {
+  const b = boundaries(on, { effortAuto: false })
+  http(on)
+  let forks = 0
+  on('model.fork', () => { forks++; return { value: { isAnswered: true, text: 'Resume: tests pending.', usage: USAGE } } })
+  await start($)
+  await submit($)
+  await (await band($)).press({ key: 'handoff' })
+  await b.clock.advance(15000)
+  expect(forks).toBe(0)
+  await complete($)
+  await b.clock.advance(15000)
+  expect(forks).toBe(1)
+  expect(opened(b)?.get('q')).toContain('tests pending')
+  // Only the person's own prompt went to this chat.
+  expect(b.submitted).toEqual(['Implement the bounded change and verify the tests.'])
 })
 
 test('a restored manual pick yields to the first app effort, but a fresh manual pick applies', async ($, on) => {

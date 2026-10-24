@@ -185,7 +185,7 @@ test('with no breakdown the pane says so and keeps its way out; a failed count i
 })
 
 const noop = () => undefined
-const BAND: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+const BAND: BandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
 const DASH: DashboardView = {
   effort: { level: 'high', mode: 'auto' }, model: 'Opus 5.5', context: { percent: 38, tokens: 76_000, window: 200_000 }, cache: null,
   warm: { on: false, pings: 0, cost: 0 }, limit: null, route: null, notice: null, auto: true, agents: { live: 0, total: 0 },

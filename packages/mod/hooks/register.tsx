@@ -17,6 +17,7 @@ import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
+import { QUICK_PROMPT, wrapForNewChat } from './handoff'
 import { addTask, endTasks, endWithAgent, settleTasks, stopTask, taskEnds, taskStarted } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
@@ -80,6 +81,8 @@ const judgeSeen = atom({ plugin: 'ripple', key: 'judgeSeen' } as const, [])
 const judgeRuns = atom({ plugin: 'ripple', key: 'judgeRuns' } as const, [])
 // The standing judge failure was a dropped connection or a timeout: the card blames the network, not the judge.
 const judgeDownNetwork = atom({ plugin: 'ripple', key: 'judgeDownNetwork' } as const, false)
+const handoff = atom({ plugin: 'ripple', key: 'handoff' } as const, null)
+const handoffQueued = atom({ plugin: 'ripple', key: 'handoffQueued' } as const, false)
 const resultCard = atom({ plugin: 'ripple', key: 'result' } as const, null)
 const panel = atom({ plugin: 'ripple', key: 'panel' } as const, null)
 const busy = atom({ plugin: 'ripple', key: 'busy' } as const, false)
@@ -997,6 +1000,84 @@ async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult
     return answer
   } finally { forking = false; forkUsage = null }
 }
+/**
+ * The band's Handoff (2026-10-24): the note is written by a fork of this session (its own model,
+ * its cache), started by the tick once the session is idle; nothing is sent to this chat. A press
+ * while one is being written does nothing. This chat is never cleared (2026-10-13: a handoff that
+ * cleared it lost the owner the chat).
+ */
+async function queueHandoff($: EngineInterface): Promise<void> {
+  if ((await read($, handoff))?.stage === 'writing') return
+  await update($, handoff, () => ({ stage: 'writing' as const }))
+  await update($, panel, () => null)
+  await update($, handoffQueued, () => true)
+  // A tick now rather than at the next 15 s one: the card already says the note is being written.
+  $.clock.after(1, async () => { await tick($) })
+}
+async function copyHandoff($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  const value = await read($, handoff)
+  if (!value?.text) return
+  const text = wrapForNewChat(value.text)
+  try {
+    const copied = await $.ui.copy({ text })
+    if (!copied.isCopied) throw new Error(copied.reason)
+  } catch (error) {
+    await $.prompt.fill({ text, mode: 'replace' })
+    await $.ui.toast(t(language, 'toasts.clipboardFallback'))
+    await report($, 'copy fallback', error)
+  }
+  await update($, handoff, () => ({ ...value, stage: 'copied' as const }))
+}
+/** A note longer than this goes to a file the new session reads; the app takes ~14k characters in a link. */
+const LINK_TEXT = 12_000
+/**
+ * Opens a new Code session in this session's folder with the handoff in its prompt box
+ * (claude://code/new?folder=…&q=…, the desktop app's own link: it fills the box and waits for
+ * Enter, never sends by itself). A long note is saved under ~/.clauderipple/handoffs and the box
+ * says to read it. Where no link can be opened, the text is copied instead.
+ */
+async function moveToNewSession($: EngineInterface): Promise<void> {
+  const value = await read($, handoff)
+  if (!value?.text) return
+  const language = await read($, lang)
+  let text = wrapForNewChat(value.text)
+  try {
+    if (text.length > LINK_TEXT) {
+      const path = `${await rippleHome($)}/handoffs/handoff-${await $.clock.now()}.md`
+      await $.fs.write(path, text + '\n')
+      text = t(language, 'alerts.readHandoffFile', { path })
+    }
+    const folder = await $.session.cwd()
+    const url = 'claude://code/new?' + new URLSearchParams({ ...(folder ? { folder } : {}), q: text, source: 'services' }).toString()
+    await openUrl($, url)
+    await update($, handoff, () => ({ ...value, stage: 'opened' as const }))
+  } catch (error) {
+    await report($, 'open new session', error)
+    await copyHandoff($)
+    await $.ui.toast(t(language, 'toasts.newSessionFallback'))
+  }
+}
+/**
+ * Writes a queued handoff when the session is idle. A fork that fails or answers nothing fails the
+ * handoff: no prompt goes to this chat in its place (the old fallback turn is not kept, 2026-10-24).
+ */
+async function driveHandoff($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  const value = await read($, handoff)
+  if (value?.stage !== 'writing' || value.text || !await read($, handoffQueued) || await read($, busy)) return
+  await update($, handoffQueued, () => false)
+  try {
+    const answer = await fork($, QUICK_PROMPT)
+    if (!answer?.isAnswered || !answer.text.trim()) throw new Error(answer && !answer.isAnswered ? answer.reason : 'empty handoff')
+    await update($, handoff, () => ({ stage: 'writing' as const, text: answer.text }))
+    await moveToNewSession($)
+  } catch (error) {
+    await update($, handoff, () => ({ stage: 'failed' as const }))
+    await $.ui.toast(t(language, 'toasts.handoffFailed'))
+    await report($, 'handoff', error)
+  }
+}
 async function runCompact($: EngineInterface, note = ''): Promise<void> {
   const language = await read($, lang)
   await update($, panel, () => null)
@@ -1197,6 +1278,7 @@ async function tick($: EngineInterface): Promise<void> {
     }
     await countAgents($)
     await scheduleCountdown($)
+    if (await read($, handoff)) await driveHandoff($)
     const s = { ...await currentSettings($) }
     s.keepWarm = await keepWarmOn($, s)
     const decision = shouldPing({ settings: s, memo: await read($, cache), warm: await read($, warm), now: await $.clock.now(), idle: !await read($, busy) && !await read($, deciding) && !forking,
@@ -1324,11 +1406,12 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
   const c = await read($, context)
   const m = await read($, cache)
   const h = await read($, hot)
+  const writing = await read($, handoff)
   const result = await read($, resultCard)
   const downReason = await read($, judgeDown)
   const d = await read($, demo)
   const which = bandPriority({ panel: await read($, panel), judgeDown: d === 'down' || (!!downReason && downReason !== await read($, judgeDownHidden)),
-    hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!result,
+    hot: d === 'hot' || hotAlert(h, await read($, hotHidden)), result: !!writing || !!result,
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c), await read($, swampHidden))) })
@@ -1336,7 +1419,12 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
   if (which === 'clear') return { kind: 'clear' }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
-  if (which === 'result') return { kind: 'result', ...result! }
+  if (which === 'result') {
+    if (!writing) return { kind: 'result', ...result! }
+    const stage = writing.stage === 'writing' ? 'handingOff' : writing.stage === 'failed' ? 'failed' : 'handoffDone'
+    const detail = writing.stage === 'copied' ? t(language, 'alerts.copied') : writing.stage === 'opened' ? t(language, 'alerts.openedBody') : undefined
+    return { kind: 'result', stage, ...(detail ? { detail } : {}) }
+  }
   if (which === 'cold') return { kind: 'cold', tokens: d === 'cold' ? 180000 : c!.tokens, idleMinutes: m ? Math.round((now - m.lastReplyAt) / 60000) : 61 }
   if (which === 'kept') {
     const k = d === 'kept' ? { pings: 2, tokens: 312000 } : (await read($, kept)) ?? { pings: 0, tokens: 0 }
@@ -1364,11 +1452,11 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
   else if (view.kind === 'kept') await update($, kept, () => null)
   else if (view.kind === 'swamp') await update($, swampHidden, () => view.percent)
   else if (view.kind === 'judgeDown') await update($, judgeDownHidden, () => view.reason)
-  else if (view.kind === 'result') await update($, resultCard, () => null)
+  else if (view.kind === 'result') { await update($, resultCard, () => null); await update($, handoff, () => null) }
   else await update($, panel, () => null)
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
-  return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
+  return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), handoff: () => queueHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
     toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($), toggleContext: () => toggleContext($) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
@@ -1389,7 +1477,7 @@ function setupActions($: EngineInterface): SetupActions {
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
   return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
-    noteInput: text => update($, compactNote, () => text) }
+    noteInput: text => update($, compactNote, () => text), copy: () => copyHandoff($) }
 }
 function agentsActions($: EngineInterface): AgentsActions {
   return {

@@ -153,7 +153,7 @@ test('view helpers', () => {
 test('the band draws on both surfaces and its controls reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = {
-    toggleAuto: fn('auto'), toggleWarm: fn("warm"), compact: fn("compact"), clear: fn("clear"), toggleLog: fn('log'),
+    toggleAuto: fn('auto'), toggleWarm: fn("warm"), compact: fn("compact"), clear: fn("clear"), handoff: fn('handoff'), toggleLog: fn('log'),
     toggleAgents: fn('agents'), openSettings: fn('settings'), toggleEffortMenu: fn('menu'), pickEffort: fn('pick'),
   }
   drawPane(on, 'band', (el, surface) => renderBand(el, frameOf(surface), DASH, actions))
@@ -163,7 +163,8 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
   for (const surface of SURFACES) {
     const ui = await mount($, 'band', surface)
     // Compact and clear are the desktop's icons; the terminal has no Log (the route is its own press)…
-    const keys = surface === 'terminal' ? ['auto', 'warm', 'log', 'agents', 'settings'] : ['auto', 'warm', 'agents', 'compact', 'clear', 'settings']
+    // Handoff shows on both, always (2026-10-24).
+    const keys = surface === 'terminal' ? ['handoff', 'auto', 'warm', 'log', 'agents', 'settings'] : ['handoff', 'auto', 'warm', 'agents', 'compact', 'clear', 'settings']
     // …but no Compact clear card here: the desktop's Compact opens the note bar from the band.
     if (surface === 'terminal') expect(await ui.find({ key: 'compact' })).toBeUndefined()
     for (const key of keys) {
@@ -211,13 +212,14 @@ test('the band draws on both surfaces and its controls reach their callbacks', a
   expect(calls.filter(c => c === 'log').length).toBe(2)
   expect(calls.filter(c => c === 'compact').length).toBe(1)
   expect(calls.filter(c => c === 'clear').length).toBe(1)
+  expect(calls.filter(c => c === 'handoff').length).toBe(2)
   expect(calls.filter(c => c === 'menu').length).toBe(1)
   expect(calls.filter(c => c === 'pick:["low"]').length).toBe(2)
 })
 
 test('the band draws the same markup for the same view', async ($, on) => {
   const noop = () => undefined
-  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
   drawPane(on, 'band', (el, surface) => renderBand(el, frameOf(surface), { ...DASH, effort: { level: 'medium', mode: 'deciding', since: NOW - 300 } }, actions))
   const once = await mount($, 'band', 'desktop')
   const first = JSON.stringify(await once.drawn())
@@ -228,7 +230,7 @@ test('the band draws the same markup for the same view', async ($, on) => {
 
 test('the terminal band fits its rows at narrow widths', async ($, on) => {
   const noop = () => undefined
-  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
   const busy: DashboardView = { ...DASH, warm: { on: true, pings: 3, cost: 0 }, limit: { kind: 'seven_day', percent: 91, save: false } }
   drawPane(on, 'wide', el => renderBand(el, frameOf('terminal', 200, 3), busy, actions))
   drawPane(on, 'narrow', el => renderBand(el, frameOf('terminal', 60, 4), busy, actions))
@@ -252,7 +254,7 @@ test('the minimal footer draws on both surfaces', async ($, on) => {
 test('a ko frame resolves temporary Korean text in labels and hover cards', async ($, on) => {
   const original = { ...STRINGS.ko }
   const noop = () => undefined
-  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
+  const actions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop }
   try {
     STRINGS.ko['band.auto'] = '자동'
     STRINGS.ko['band.high'] = '높음'
@@ -279,6 +281,8 @@ const ALERTS: AlertView[] = [
   { kind: 'swamp', percent: 63, tokens: 126_000 },
   { kind: 'hot', limitKind: 'five_hour', percent: 86, resetsAt: '2026-10-10T15:40:00', save: false },
   { kind: 'judgeDown', judge: 'jev', reason: 'key rejected (401)' },
+  { kind: 'result', stage: 'handingOff' },
+  { kind: 'result', stage: 'handoffDone', detail: 'A new session opened with the handoff filled in: press Enter there to go on.' },
   { kind: 'result', stage: 'compacting' },
   { kind: 'result', stage: 'compacted' },
   { kind: 'result', stage: 'failed', detail: 'Haiku timed out' },
@@ -287,7 +291,7 @@ const ALERTS: AlertView[] = [
 
 test('every alert draws on both surfaces', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
+  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
   ALERTS.forEach((alert, i) => drawPane(on, 'alert-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, actions)))
   for (const surface of SURFACES) {
     for (let i = 0; i < ALERTS.length; i++) {
@@ -301,12 +305,13 @@ test('every alert draws on both surfaces', async ($, on) => {
 test('alert choices reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = {
-    compact: fn("compact"), clear: fn("clear"), dismiss: fn("dismiss"), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'),
+    compact: fn("compact"), clear: fn("clear"), dismiss: fn("dismiss"), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'), copy: fn('copy'),
   }
   drawPane(on, 'cold', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[0]!, actions))
   drawPane(on, 'kept', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[1]!, actions))
   drawPane(on, 'hot', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[3]!, actions))
   drawPane(on, 'note', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'compactNote', draft: '' }, actions))
+  drawPane(on, 'handed', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'result', stage: 'handoffDone' }, actions))
   for (const surface of SURFACES) {
     const cold = await mount($, 'cold', surface)
     await cold.press({ key: 'compact' })
@@ -317,8 +322,10 @@ test('alert choices reach their callbacks', async ($, on) => {
     await hot.press({ key: 'save' })
     const note = await mount($, 'note', surface)
     await note.input({ key: 'note', text: 'keep the API decision' })
+    const handed = await mount($, 'handed', surface)
+    await handed.press({ key: 'copy' })
   }
-  const once = ['compact', 'dismiss', 'dismiss', 'save', 'compact:["keep the API decision"]']
+  const once = ['compact', 'dismiss', 'dismiss', 'save', 'compact:["keep the API decision"]', 'copy']
   expect(calls).toEqual([...once, ...once])
 })
 
@@ -333,7 +340,7 @@ function mascots(tree: unknown): Drawn[] {
 
 test('each alert shows 리플이 with the face of its state, its gauge in 5% steps; the terminal keeps a text mark', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
+  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
   const variants: [string, AlertView][] = [
     ['swamp-59', { kind: 'swamp', percent: 59, tokens: 118_000 }],
     ['swamp-61', { kind: 'swamp', percent: 61, tokens: 122_000 }],
@@ -358,9 +365,8 @@ test('each alert shows 리플이 with the face of its state, its gauge in 5% ste
     expect(mascots(await terminal.drawn()).length).toBe(0)
     await terminal.unmount()
   }
-  // compacted and kept share the pleased face, compactNote the asking one; every other state has
-  // its own.
-  expect(new Set(sources).size).toBe(ALERTS.length - 1)
+  // handoffDone, compacted and kept share the pleased face; every other state has its own.
+  expect(new Set(sources).size).toBe(ALERTS.length - 2)
   const source = async (id: string) => {
     const ui = await mount($, id, 'desktop')
     const s = String(mascots(await ui.drawn())[0]?.props?.source)
@@ -478,8 +484,8 @@ const DEEP_INKS = ['#f2f0eb', '#cbc8bf', '#9c988e']
 
 test('every skin draws the band, the quick settings and a card on the desktop; flat paints the app\'s surface and its quiet words', async ($, on) => {
   const noop = () => undefined
-  const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
+  const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
   const full: DashboardView = { ...DASH, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, save: true }, effortMenu: true, warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, mode: 'Burn GPT' }
   for (const skin of SKINS) {
     drawPane(on, skin + '-band', el => renderBand(el, frameOf('desktop', 100, 12, skin), full, bandActions))
@@ -1056,7 +1062,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
   // over it (kit.tsx), never from a blank button over nothing.
   const noop = () => undefined
   const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
   const cases: [string, Draw][] = [
     ['one-quick', (el, surface) => renderSettings(el, frameOf(surface, 64, 30), { settings: { ...SETTINGS, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
     ...([1, 2, 3, 4] as const).map((step): [string, Draw] => ['one-setup-' + step, (el, surface) => renderSetup(el, frameOf(surface, 64, 30), { step, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, setupActions)]),
@@ -1076,7 +1082,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
 
 test('a card says one thing: at most one main action, the others quiet, one way to let it go', async ($, on) => {
   const noop = () => undefined
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
   const all: AlertView[] = [...ALERTS, { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }]
   all.forEach((alert, i) => drawPane(on, 'say-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, alertActions)))
   for (let i = 0; i < all.length; i++) {
@@ -1113,7 +1119,7 @@ test('no drawing cuts its text: no truncating Text on any surface', async ($, on
     ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
     ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
     ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
-    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop })]),
+    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop })]),
   ]
   for (const [id, draw] of cases) drawPane(on, id, draw)
   for (const surface of SURFACES) {
@@ -1129,7 +1135,7 @@ test('no drawing cuts its text: no truncating Text on any surface', async ($, on
 
 // ---- The band holds still (2026-10-10) ----------------------------------------------------------
 
-const BAND_ACTIONS = { toggleAuto: () => undefined, toggleWarm: () => undefined, compact: () => undefined, clear: () => undefined, toggleLog: () => undefined, toggleAgents: () => undefined, openSettings: () => undefined, toggleEffortMenu: () => undefined, pickEffort: () => undefined }
+const BAND_ACTIONS = { toggleAuto: () => undefined, toggleWarm: () => undefined, compact: () => undefined, clear: () => undefined, handoff: () => undefined, toggleLog: () => undefined, toggleAgents: () => undefined, openSettings: () => undefined, toggleEffortMenu: () => undefined, pickEffort: () => undefined }
 const unhandled = (tree: unknown) => JSON.stringify(tree).replace(/"handle":\d+/g, '')
 
 test('within a minute the band draws the same tree; a minute on, only the countdown changes', async ($, on) => {
@@ -1297,7 +1303,7 @@ test('the desktop band keeps the route and every control in one row at 770 px (C
     const ui = await mount($, 'row-' + lang, 'desktop', columns(lang))
     expect(await ui.find({ type: 'Box', key: 'fact-route' }), lang).toBeDefined()
     expect(await ui.find({ type: 'Box', key: 'fact-effort' }), lang).toBeDefined()
-    for (const key of ['auto', 'warm', 'agents', 'settings', 'hide']) expect(await ui.find({ type: 'Button', key }), lang + ' ' + key).toBeDefined()
+    for (const key of ['handoff', 'auto', 'warm', 'agents', 'settings', 'hide']) expect(await ui.find({ type: 'Button', key }), lang + ' ' + key).toBeDefined()
     await ui.unmount()
   }
 })
@@ -1325,7 +1331,7 @@ test('the Auto word toggles on press and draws its state', async ($, on) => {
 })
 
 // 2026-10-14: at the band's narrowest real width (94 columns) everything asked of the band holds:
-// the limit and the new icons stay; Auto and the way out draw with them.
+// the limit and the new icons stay; Handoff, Auto and the way out draw with them.
 test('at 94 columns the limit is drawn beside the new controls', async ($, on) => {
   const busy: DashboardView = { ...DASH, limit: { kind: 'seven_day', percent: 42, resetsAt: '2026-10-10T15:40:00', save: false }, extras: ['context', 'limits'] }
   drawPane(on, 'n94', el => renderBand(el, frameOf('desktop', 94), busy, { ...BAND_ACTIONS, hide: () => undefined }))
@@ -1334,7 +1340,7 @@ test('at 94 columns the limit is drawn beside the new controls', async ($, on) =
   expect(await ui.find({ type: 'Box', key: 'fact-cache' }), 'cache at 94').toBeDefined()
   expect(await ui.find({ type: 'Box', key: 'fact-effort' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'route' })).toBeDefined()
-  for (const key of ['auto', 'warm', 'agents', 'compact', 'clear', 'settings', 'hide']) expect(await ui.find({ type: 'Button', key }), key + ' at 94').toBeDefined()
+  for (const key of ['handoff', 'auto', 'warm', 'agents', 'compact', 'clear', 'settings', 'hide']) expect(await ui.find({ type: 'Button', key }), key + ' at 94').toBeDefined()
   await ui.unmount()
 })
 
@@ -1368,8 +1374,8 @@ test('a control\'s tip is drawn in a full band, hidden and revealed by its scope
   const ui = await mount($, 'n100', 'desktop', 100)
   const tree = await ui.drawn()
   const tips = tipsOf(tree)
-  // One tip per fact and control (the effort, the context, the cache, the limit, and every control)
-  // plus the way out — the row is full and all are drawn. The route has none: it lights as a
+  // One tip per fact and control (the effort, the context, the cache, the limit, and every control
+  // but Handoff, which names itself in its pill) plus the way out — the row is full and all are drawn. The route has none: it lights as a
   // button, and the log it opens is its card (028aee5).
   expect(tips.length, 'tips: ' + tips.map(t => t.text.slice(0, 14)).join(' / ')).toBe(11)
   const words = (start: string) => tips.find(tip => tip.text.startsWith(start))

@@ -36,7 +36,7 @@ import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB,
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
-import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
+import { CLOSE_CELLS, capsule, closeButton, hoverLight, lift, lit, pic, pill, press, ripple, rowsOf, segmented, word, wordCells } from './kit'
 import { textButton } from './parts'
 import { DISPLAY, displayText } from './display'
 import type { Els } from './parts'
@@ -296,6 +296,8 @@ function controls(frame: Frame, view: DashboardView, actions: BandActions): Cont
   const L = frame.lang
   const mark = (on: boolean) => (on ? ' ●' : ' ○')
   const out: Control[] = []
+  // Handoff always shows (2026-10-24: one press, no advice), first in the row as it was.
+  out.push({ key: 'handoff', label: t(L, 'band.handoff'), hotkey: 'h', onPress: actions.handoff, on: false })
   out.push(
     { key: 'auto', label: t(L, 'band.auto') + mark(view.auto), hotkey: 'a', onPress: actions.toggleAuto, on: view.auto },
     { key: 'warm', label: t(L, 'band.warm') + mark(view.warm.on), hotkey: 'w', onPress: actions.toggleWarm, on: view.warm.on },
@@ -347,7 +349,7 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 // it, left to right: the effort as five bars rising shallow to deep and its word; a rule; the
 // context ring, the cache clock, the plan limit and the mode when on; a rule; the last route (its
 // model the way into the log); the judge's reason in what is left. Then the controls, each lit
-// under the pointer: Auto's switch, keep-warm's flame, the agents, settings, and the way out.
+// under the pointer: Handoff, Auto's switch, keep-warm's flame, the agents, settings, and the way out.
 // Pointing at a fact shows what it means in the reason's place.
 // With the `limits` extra on and any window known, a second row under the first (starting where
 // the effort does) gauges every plan window — Claude's, then each ChatGPT account's — and the
@@ -783,6 +785,9 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   const out: DrawnControl[] = []
   const k = lookOf(frame)
   const state = (on: boolean) => t(L, on ? 'band.on' : 'band.off')
+  // Handoff, a quiet pill that names itself: always there, so it is counted like any control.
+  const handoffLabel = t(L, 'band.handoff')
+  out.push({ key: 'handoff', cells: k.art.pill(handoffLabel, 'ghost', 'violet').cells + 1, node: pill(el, frame, 'handoff', handoffLabel, 'ghost', actions.handoff, 'violet'), tip: t(L, 'alerts.handoffTitle') })
   // Auto's word is the control (art.ts `wordArt`): lit violet while on, a quiet ghost while off,
   // pulsing while the judge decides. No switch: the state is in the word's own light (2026-10-14).
   const autoLabel = t(L, 'band.auto')
@@ -952,7 +957,8 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   }
   const tips = [effort, ...facts].filter(f => f.tip).map(f => ({ key: f.key, text: f.tip!, ...(past[f.key] !== undefined ? { at: past[f.key] } : {}) }))
   if (limitsRow) for (const tip of limitsRow.tips) tips.push(tip)
-  for (const c of controls) tips.push({ key: c.key, text: c.tip })
+  // Handoff names itself in its pill: no tip of its own.
+  for (const c of controls) if (c.key !== 'handoff') tips.push({ key: c.key, text: c.tip })
   if (actions.hide) tips.push({ key: 'hide', text: t(frame.lang, 'band.hideBand') })
   const crest = (
     <Box key="band-crest" width={CREST_CELLS} flexShrink={0} alignItems="center">
