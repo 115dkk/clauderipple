@@ -493,6 +493,8 @@ test('every skin draws the band, the quick settings and a card on the desktop; f
       const svgs = await ui.findAll({ type: 'Svg' })
       expect(svgs.length, skin + ' ' + what + ' pictures').toBeGreaterThan(3)
       for (const svg of svgs) expect(String(svg.props.source), skin + ' ' + what + ' ' + svg.props.alt).not.toMatch(/NaN|undefined/)
+      // The desktop draws nothing for a picture whose alt is blank.
+      for (const svg of svgs) expect(String(svg.props.alt ?? '').trim(), skin + ' ' + what + ' alt').not.toBe('')
       // The capsule's backdrop: a picture as wide as the frame (flat's is the app's own surface).
       const backdrop = svgs.some(svg => svg.props.alt === 'ClaudeRipple' && Number(svg.props.width) > 300)
       expect(backdrop, skin + ' ' + what + ' backdrop').toBe(true)
@@ -897,6 +899,9 @@ test('an open conversation is headed by a chevron back and its title, which stay
   expect(float?.props.right).toBe(0)
   // On a plate of the pane's own surface, so the words under it do not show through.
   expect(await down.find({ key: 'pic-float-plate' })).toBeDefined()
+  // The desktop drops a picture whose alt is blank (2026-10-24: this plate and the prompt's grey card
+  // were never drawn, and the words showed through the head): every picture here says something.
+  for (const svg of await down.findAll({ type: 'Svg' })) expect(String(svg.props.alt ?? '').trim(), String(svg.props.source).slice(0, 80)).not.toBe('')
   await down.press({ key: 'back-float' })
   expect(calls).toEqual(['back', 'back'])
 })
