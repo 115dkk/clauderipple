@@ -1380,9 +1380,10 @@ function agentsActions($: EngineInterface): AgentsActions {
     toggleDone: () => update($, agentsShowDone, value => !value),
     // The app's own agent view first, as the person's pick from its task list opens it (2026-10-24:
     // ours, drawn after it, did not read like it). One the host refuses (a workflow's agent no list
-    // names, a host with no main view) is read here instead. Opened, a conversation shows its newest:
-    // the pane goes to its end, and `end` keeps up with the tree as the agent adds to it until the
-    // person scrolls away (UiScrollTarget). A surface that cannot scroll leaves it where it is.
+    // names, a host with no main view: the desktop's headless session, always) is read here
+    // instead. Opened, a conversation shows its newest: the pane goes to its end, and `end` keeps up
+    // with the tree as the agent adds to it until the person scrolls away (UiScrollTarget). A
+    // surface that cannot scroll leaves it where it is.
     open: async id => {
       try {
         const viewed = await $.ui.view({ agentId: id })

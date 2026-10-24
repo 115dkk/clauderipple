@@ -8,9 +8,11 @@
 // weighted `cost` the pick log keeps disagreed with the host's task list a few lines up, so it is
 // not shown (2026-10-20).
 //
-// "Open" takes the app to the agent's own view (`$.ui.view`, register.tsx). Where the host refuses
-// (a workflow's agent no list names, a host with no main view) it reads the agent's conversation
-// (`$.session.messages({ agentId })`) and draws it here, a way back at its head.
+// "Open" takes the terminal to the agent's own view (`$.ui.view`, register.tsx). Where the host
+// refuses it reads the agent's conversation (`$.session.messages({ agentId })`) and draws it here, a
+// way back at its head. The desktop always refuses: its session runs headless, with no main view the
+// engine can move ("no main view here", engine 2.1.308, read 2026-10-24), and no tool of the app
+// opens its own agent view either. So on the desktop this pane is the only view we can give.
 //
 // The desktop draws both as the Claude app draws its own (2026-10-24): the list as its background
 // task list, on the page, a row per agent under a blank press (the host inks a Button's Text in its
