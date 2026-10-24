@@ -1108,7 +1108,11 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   sets `accountPool: true`. With that flag and `auth: "claude-code"`, Claude
   Desktop/Code Messages requests stay unmodified except for the routed model and
   selected identity. The runtime pool is ordered current observed/env/Claude Code
-  login first, then ClaudeRipple-owned accounts. A conversation is sticky to the
+  login first, then ClaudeRipple-owned accounts. When none of them is usable, a
+  turn that carries the client's own `Bearer` goes out on it unchanged, as a
+  passthrough would; only a turn without one is refused with 401 (#88,
+  2026-10-24: the observed login aged out unseen behind the pool, and one revoked
+  stored account stopped every main-chat turn). A conversation is sticky to the
   account that answered so its prompt-cache prefix survives, including across that
   account's token refresh. Before response headers reach the client, 401, 429, 402
   and retryable HTTP failures such as 5xx may retry the same request on an untried

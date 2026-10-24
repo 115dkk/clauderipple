@@ -1201,7 +1201,13 @@ export class Proxy {
             // Native Messages need no translation. Only authentication changes, so server-side threads,
             // prompt caching, beta features and the client's exact tool contract remain first-party.
             const credentials = await this.claudeAccounts.credentials();
-            if (credentials.length === 0) {
+            // With no account of the pool usable, the app's own sign-in still is: the turn goes out on
+            // it, as it did before the provider was added. A pool whose only stored account lost its
+            // grant refused every main-chat turn with this 401 until the provider was deleted, the
+            // current login having aged out of the observed source unseen (#88, 2026-10-24).
+            const clientAuth = req.headers.authorization;
+            const ownSignIn = credentials.length === 0 && typeof clientAuth === "string" && /^Bearer\s+\S+$/i.test(clientAuth);
+            if (credentials.length === 0 && !ownSignIn) {
               const out = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "ClaudeRipple: no usable Claude account; sign in or reauthenticate an account" } });
               res.writeHead(401, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out)) }).end(out);
               finish("401", out.length, "no usable Claude account", true, { ...(!searchAttempted ? { upstreamCalled: false as const } : {}), refusal: "no-account" });
@@ -1209,6 +1215,13 @@ export class Proxy {
             }
             dropForeignThinking(json);
             body = Buffer.from(JSON.stringify(json));
+            if (ownSignIn) {
+              target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.agentFor(route.provider, "https:"), extraHeaders: {} };
+              const routeEffort = effortOf(json);
+              if (routeEffort) record.effort = routeEffort;
+              tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
+              break;
+            }
             chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
             const using = chosen ?? credentials[0]!;
             chosen = using;
