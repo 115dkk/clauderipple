@@ -269,3 +269,18 @@ test('a spent quota group skips only its own models: the same provider still run
   assert.deepEqual(later['google-gemini'], { usable: true })
   assert.equal(ladderPick(v('standard'), s.rules.general, s, workers, true, 'ko', [], later).target?.agent, 'claude-opus-5-5-medium')
 })
+
+test('a spent model stays skipped when the rung names it with an effort suffix', () => {
+  // The re-review's repro: gemini-3.8-flash out, a rung of gemini-3.8-flash@high still picked with nothing skipped.
+  const flashHigh = { target: { agent: 'gemini-3-8-flash-high' }, model: 'gemini-3.8-flash@high', provider: 'google-gemini' }
+  const astra = candidates.find(c => c.model === 'gpt-6-astra')!
+  const s = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { standard: [{ target: flashHigh.target, effort: 'high' }, { target: astra.target, effort: 'high' }] } } } })
+  const providers = { 'google-gemini': { usable: true, models: { 'gemini-3.8-flash': { reason: 'quota_exhausted', exhaustedUntil: 1_800_000 } } } }
+  assert.equal(candidateUsable(flashHigh, s, true, providers), false)
+  const result = ladderPick(v('standard'), s.rules.general, s, [flashHigh, ...candidates], true, 'ko', [], providers)
+  assert.deepEqual([result.target, result.position], [astra.target, 2])
+  assert.deepEqual(result.skipped, [{ rung: 'standard', position: 1, model: 'gemini-3.8-flash@high', reason: 'google-gemini: 사용량 한도 소진' }])
+  // A general-purpose rung naming the model with its effort is looked up the same way.
+  const gp = { target: { agent: 'general-purpose', model: 'gemini-3.8-flash@high' }, model: 'gemini-3.8-flash@high', provider: 'google-gemini' }
+  assert.equal(candidateUsable(gp, s, true, providers), false)
+})

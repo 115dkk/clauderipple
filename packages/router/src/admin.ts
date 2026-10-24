@@ -70,7 +70,7 @@ import { listClaudeAccounts, listClaudeAccountsWithSubject, removeClaudeAccount,
 import { readChatGptAccounts, removeChatGptAccount, summarize as summarizeChatGptAccount, updateChatGptAccount } from "./providers/chatgpt/accounts.ts";
 import { exhaustedForMs, IMAGE_ASPECTS, IMAGE_BACKGROUNDS, IMAGE_FORMATS, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "./providers/google/index.ts";
-import { antigravityQuotaScope, googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
+import { googleWindowsFromGroups, type QuotaGroup } from "./providers/google/usage.ts";
 import { isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import type { GrokWindow } from "./providers/grok/usage.ts";
 import { ANTIGRAVITY_WARNING, staticAntigravityModels } from "./providers/google/antigravity.ts";
@@ -137,6 +137,8 @@ export type AdminDeps = {
     models?: (name: string) => Promise<ProviderModel[] | null>;
     /** Each antigravity account's quota groups by owner id, for the status bar's limits row (`/api/limits`). Absent in tests. */
     usage?: (name: string) => Promise<Record<string, QuotaGroup[]>>;
+    /** The pool scope a turn for one model rests in (its quota group on its host), the key of `quotaCooldowns`. */
+    quotaScope?: (name: string, model: string) => string | undefined;
     /** Put one resting account back into rotation now. */
     clearCooldown?: (accountId: string) => void;
     /** Ask Google again whether an account still needs its verification page. */
@@ -659,18 +661,20 @@ export type ModelUnavailable = { reason: string; exhaustedUntil: number };
 /**
  * An Antigravity provider's spent quota groups: a group resting on every account that is otherwise
  * in rotation (`quotaCooldowns`, set only by a 429 that proves the group spent). Google counts Gemini
- * and Claude/GPT models separately, so a spent group takes only its own models out of the ladder.
- * The accounts are the one source, so clearing an account's cooldown or signing in a fresh one puts
- * the models back at once.
+ * and Claude/GPT models separately, and each host its own, so a spent group takes only its own models
+ * on that host out of the ladder. The accounts are the one source, so clearing an account's cooldown
+ * or signing in a fresh one puts the models back at once.
+ *
+ * An account that is only cooling still counts: it takes the group's turns again once both its own
+ * rest and the group's are over, so the group is back at the soonest of those per-account waits.
  */
 function antigravityGroupsOut(accounts: readonly GoogleAccountStatus[], now: number): Record<string, ModelUnavailable> {
   const out: Record<string, ModelUnavailable> = {};
-  const ready = accounts.filter(a => a.state === "ready");
-  if (ready.length === 0) return out;
-  for (const group of new Set(ready.flatMap(a => Object.keys(a.quotaCooldowns ?? {})))) {
-    const waits = ready.map(a => a.quotaCooldowns?.[group] ?? 0);
+  const inRotation = accounts.filter(a => a.state === "ready" || a.state === "cooling");
+  for (const scope of new Set(inRotation.flatMap(a => Object.keys(a.quotaCooldowns ?? {})))) {
+    const waits = inRotation.map(a => Math.max(a.state === "cooling" ? a.cooldownSeconds ?? 0 : 0, a.quotaCooldowns?.[scope] ?? 0));
     if (waits.some(seconds => seconds <= 0)) continue;
-    out[group] = { reason: "quota_exhausted", exhaustedUntil: now + Math.min(...waits) * 1000 };
+    out[scope] = { reason: "quota_exhausted", exhaustedUntil: now + Math.min(...waits) * 1000 };
   }
   return out;
 }
@@ -711,9 +715,10 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     const modelsOut: Record<string, ModelUnavailable> = {};
     if (p.type === "google" && p.auth === "antigravity") {
       const groups = antigravityGroupsOut(google[name] ?? [], now);
+      const scopeOf = deps.google?.().quotaScope;
       const ids = new Set([...(p.models ?? []).map(m => m.id), ...agents.filter(a => a.provider === name).map(a => a.model)]);
       for (const id of ids) {
-        const scope = antigravityQuotaScope(id);
+        const scope = scopeOf?.(name, id);
         if (scope && groups[scope]) modelsOut[id] = groups[scope];
       }
     }

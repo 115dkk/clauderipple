@@ -1484,18 +1484,20 @@ They were not live-tested during the original implementation. Files are under `s
   the 3P weekly window at 100% and Gemini's at 0.3%, rested the whole account, so every
   `gemini-3.8-flash` turn for the next five hours was refused "every signed-in account is at its
   limit" without reaching Google, and the same 429 marked the provider exhausted, so the mod's
-  picker skipped the Gemini worker too. Now the pool keeps a per-account, per-group rest
-  (`CredentialPool` `scope`): a turn picks an account whose group has room, the account stays
+  picker skipped the Gemini worker too. Now the pool keeps a per-account rest for the group on the
+  host the turn went to (`CredentialPool` `scope`, `antigravityScopeKey`:
+  `3p@daily-cloudcode-pa.googleapis.com`), because each host counts quota separately (above) and a
+  group spent on daily still answers on prod: a turn picks an account whose group has room, the account stays
   `ready` for the other group (the dashboard shows the group's rest from `quotaCooldowns` and
   offers its clear-cooldown button, which clears the groups too), and the refusal names the spent
   group when the other still answers. Such a 429 is not reported as the provider's exhaustion;
-  `/api/mod-options` lists the group's models under `providers[].models` while every account in
-  rotation rests the group, and the picker skips only those models. A 429 without that proof (a
+  `/api/mod-options` lists a model under `providers[].models` while every account in rotation
+  rests that model's group on that model's host (the adapter's `quotaScopeOf`), until the soonest
+  account is back: per account the later of its own rest and the group's, so an account that is
+  only cooling counts. The picker skips only those models, looked up without an `@effort` suffix. A 429 without that proof (a
   per-minute limit, the generic `RESOURCE_EXHAUSTED`, a detail naming no model), a 402, a refused
   credential or a broken upstream still rests the whole account, and so does any 429 for a model
-  in no known group. Groups are per account, not per host: each host counts quota separately
-  (above), so a group spent on one host also rests that group's models on the other — narrower than
-  the whole account, still not exact. Refresh is per account, single-flight per token generation, five minutes
+  in no known group. Refresh is per account, single-flight per token generation, five minutes
   ahead; only a structured `invalid_grant` marks an account for sign-in. Only the access token
   and the account email/project id are ever in memory; no token reaches a log or an API response.
 - **No capacity for the model (measured 2026-10-20, daily host, `gemini-3.8-flash-high`, router.log

@@ -140,6 +140,15 @@ export function isGroupQuotaExhausted(status: number, text: string, scope: strin
   }
 }
 
+/**
+ * The pool scope (pool.ts) a quota group rests in: the group on one Cloud Code Assist host, as
+ * `3p@daily-cloudcode-pa.googleapis.com`. Each host counts its own quota (usage.ts reads them apart),
+ * so a group spent on one host still answers on the other.
+ */
+export function antigravityScopeKey(group: string, host: string): string {
+  return `${group}@${new URL(host).host}`;
+}
+
 /** The group's name in a refusal: what is spent, and what still answers. */
 const GROUP_NAMES: Record<string, { spent: string; other: string }> = {
   "3p": { spent: "Claude/GPT", other: "Gemini" },
@@ -184,7 +193,8 @@ export type GoogleAccountStatus = GoogleAccountSummary & {
   state: "ready" | "cooling" | "quarantined" | "paused" | "needs-login" | "needs-verification";
   cooldownSeconds?: number;
   /**
-   * Seconds until each resting quota group (`gemini`, `3p`) is usable again, while the account itself
+   * Seconds until each resting quota group is usable again, keyed by group and host
+   * (`antigravityScopeKey`, e.g. `3p@daily-cloudcode-pa.googleapis.com`), while the account itself
    * stays in rotation for the others. Absent when no group rests.
    */
   quotaCooldowns?: Record<string, number>;
@@ -283,10 +293,23 @@ export class GoogleAdapter {
 
   /**
    * Whether any account could answer now, for the proxy's choice between this provider and a fallback.
-   * With a model, that model's quota group must have room on the account too.
+   * With a model, that model's quota group must have room on the account, on the host it goes to.
    */
-  hasUsable(model?: string): boolean {
-    return this.pool.hasUsable(this.name, this.accounts.peekCredentials(), model ? antigravityQuotaScope(model) : undefined);
+  hasUsable(model?: string, effort?: string): boolean {
+    return this.pool.hasUsable(this.name, this.accounts.peekCredentials(), model ? this.quotaScopeOf(model, effort) : undefined);
+  }
+
+  /**
+   * The pool scope a turn for `model` rests in: its quota group on the host it would be sent to
+   * (`antigravityScopeKey`). A `model@effort` id takes its effort from the suffix. Undefined for a
+   * model outside the two groups.
+   */
+  quotaScopeOf(model: string, effort?: string): string | undefined {
+    const at = model.lastIndexOf("@");
+    const base = at > 0 ? model.slice(0, at) : model;
+    const group = antigravityQuotaScope(base);
+    if (!group) return undefined;
+    return antigravityScopeKey(group, this.hostFor(base, (at > 0 ? model.slice(at + 1) : effort) ?? this.cfg.defaultEffort));
   }
 
   signedIn(): boolean {
@@ -752,7 +775,9 @@ export class GoogleAdapter {
     let last: Extract<SendResult, { kind: "refused" }> | null = null;
     let lastThrown: Error | null = null;
     let capacityAsks = 0;
-    const scope = antigravityQuotaScope(spec.model);
+    // The model's quota group on the host this turn goes to: each host counts its own quota.
+    const group = antigravityQuotaScope(spec.model);
+    const scope = group ? antigravityScopeKey(group, spec.host) : undefined;
     for (;;) {
       const credential = await this.pickAccount(spec.conversation, tried, scope);
       if (credential === "none") return { kind: "no-account" };
@@ -760,8 +785,8 @@ export class GoogleAdapter {
         if (last) return last;
         if (lastThrown) return { kind: "unreachable", error: lastThrown };
         const backMs = this.soonestBackMs(scope);
-        const group = scope && this.pool.hasUsable(this.name, this.accounts.peekCredentials()) ? scope : undefined;
-        return { kind: "all-resting", ...(backMs ? { backMs } : {}), ...(group ? { group } : {}) };
+        const resting = group && this.pool.hasUsable(this.name, this.accounts.peekCredentials()) ? group : undefined;
+        return { kind: "all-resting", ...(backMs ? { backMs } : {}), ...(resting ? { group: resting } : {}) };
       }
 
       const { built, secrets } = spec.build(credential);
@@ -845,9 +870,9 @@ export class GoogleAdapter {
 
       const retryHeader = upstream.headers.get("retry-after");
       const waitMs = retryHeader ? retryAfterMs({ "retry-after": retryHeader }) : googleRetryDelayMs(text);
-      const group = scope && isGroupQuotaExhausted(status, text, scope) ? scope : undefined;
-      const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text, group);
-      last = { kind: "refused", status, text: safeText, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}), ...(group ? { group } : {}) };
+      const spent = group && isGroupQuotaExhausted(status, text, group) ? group : undefined;
+      const verdict = this.pool.penalise(this.name, credential.id, credentialRefused ? 403 : status, waitMs, text, spent ? scope : undefined);
+      last = { kind: "refused", status, text: safeText, ...(status === 429 && waitMs ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}), ...(spent ? { group: spent } : {}) };
       if (!verdict.retryable) return last;
       tried.add(credential.ownerId);
     }

@@ -2208,9 +2208,15 @@ function accountPoolActions(account, patch) {
   return actions;
 }
 
-/** An Antigravity quota group as the limits row names it: "3P" for Claude/GPT models. */
-function quotaGroupLabel(group) {
-  return group === "3p" ? "3P" : group === "gemini" ? "Gemini" : group;
+/**
+ * A resting Antigravity quota group as the limits row names it, with the host it rests on: the key is
+ * `group@host` (`3p@daily-cloudcode-pa.googleapis.com` → "3P daily"), because each host counts its own.
+ */
+function quotaGroupLabel(key) {
+  const [group, host] = key.split("@");
+  const name = group === "3p" ? "3P" : group === "gemini" ? "Gemini" : group;
+  if (!host) return name;
+  return `${name} ${/^daily-/.test(host) ? "daily" : host === "cloudcode-pa.googleapis.com" ? "prod" : host}`;
 }
 
 /**
@@ -2513,14 +2519,18 @@ function renderGoogleAccountRows(target, data, name, generation) {
       actions.push(link, recheck);
     }
     actions.push(...accountPoolActions(account, (change) => patchGoogleAccount(name, account.id, change)));
-    // The account answers while one quota group rests (`quotaCooldowns`), so the shared actions show
-    // no clear button for it; this one clears the account's resting groups.
-    if (account.state !== "cooling" && !(account.cooldownSeconds > 0)) {
-      for (const group of Object.keys(account.quotaCooldowns || {})) {
-        const clear = el("button", { class: "btn secondary compact", type: "button", text: `${quotaGroupLabel(group)} · ${t("providers.chatgptClearCooldown")}` });
-        clear.addEventListener("click", () => { clear.disabled = true; void patchGoogleAccount(name, account.id, { clearCooldown: true }); });
-        actions.push(clear);
-      }
+    // The account answers while a quota group rests (`quotaCooldowns`), so the shared actions show no
+    // clear button for it; this one clears all of the account's resting groups at once. A failed
+    // request leaves the row as it was, so the button comes back for another try.
+    const resting = Object.keys(account.quotaCooldowns || {});
+    if (resting.length && account.state !== "cooling" && !(account.cooldownSeconds > 0)) {
+      const clear = el("button", { class: "btn secondary compact", type: "button", text: `${resting.map(quotaGroupLabel).join(", ")} · ${t("providers.chatgptClearCooldown")}` });
+      clear.addEventListener("click", async () => {
+        clear.disabled = true;
+        try { await patchGoogleAccount(name, account.id, { clearCooldown: true }); }
+        finally { clear.disabled = false; }
+      });
+      actions.push(clear);
     }
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
     rename.addEventListener("click", () => {

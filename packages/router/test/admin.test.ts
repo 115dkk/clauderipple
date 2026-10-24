@@ -225,7 +225,10 @@ test("mod options take a spent Antigravity quota group's models out, not the pro
   const models = ['gemini-3.8-flash', 'claude-opus-5-5-medium', 'claude-sonnet-5-5-low'].map(id => ({ id }));
   const cfg = makeCfg({ providers: { google: { type: 'google', auth: 'antigravity', models } } });
   const ready = { id: 'a', label: 'a', email: 'a@example.test', projectId: 'p', expiresAt: 0, needsReauth: false, paused: false, state: 'ready', active: true } as GoogleAccountStatus;
-  let accounts: GoogleAccountStatus[] = [{ ...ready, quotaCooldowns: { '3p': 600 } }];
+  // The adapter's own answer for where each model's quota is counted: its group on the host it goes to.
+  const DAILY_3P = '3p@daily-cloudcode-pa.googleapis.com';
+  const scopes: Record<string, string> = { 'gemini-3.8-flash': 'gemini@daily-cloudcode-pa.googleapis.com', 'claude-opus-5-5-medium': DAILY_3P, 'claude-sonnet-5-5-low': DAILY_3P };
+  let accounts: GoogleAccountStatus[] = [{ ...ready, quotaCooldowns: { [DAILY_3P]: 600 } }];
   await withAdmin(cfg, async ({ port }) => {
     const read = async () => (await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions).providers.find(p => p.name === 'google')!;
     const google = await read();
@@ -235,15 +238,44 @@ test("mod options take a spent Antigravity quota group's models out, not the pro
     assert.equal(google.models?.['claude-opus-5-5-medium']?.reason, 'quota_exhausted');
     assert.ok((google.models?.['claude-opus-5-5-medium']?.exhaustedUntil ?? 0) > Date.now() + 590_000);
     // Only when every account in rotation rests the group: a second account with Claude quota keeps it.
-    accounts = [{ ...ready, quotaCooldowns: { '3p': 600 } }, { ...ready, id: 'b' }];
+    accounts = [{ ...ready, quotaCooldowns: { [DAILY_3P]: 600 } }, { ...ready, id: 'b' }];
     assert.equal((await read()).models, undefined);
-    // A cooling or paused account is not in rotation, so it neither keeps nor spends the group.
-    accounts = [{ ...ready, quotaCooldowns: { '3p': 600 } }, { ...ready, id: 'b', state: 'cooling', cooldownSeconds: 30 }];
+    // A paused account is not in rotation, so it neither keeps nor spends the group.
+    accounts = [{ ...ready, quotaCooldowns: { [DAILY_3P]: 600 } }, { ...ready, id: 'b', state: 'paused', paused: true }];
     assert.ok((await read()).models?.['claude-sonnet-5-5-low']);
     // Cleared on the dashboard (or reset): the models are back at once.
     accounts = [ready];
     assert.equal((await read()).models, undefined);
-  }, { google: () => ({ accounts: () => ({ google: accounts }) }), modelScoresFetch: async () => new Response('{}') });
+  }, { google: () => ({ accounts: () => ({ google: accounts }), quotaScope: (_name: string, model: string) => scopes[model] }), modelScoresFetch: async () => new Response('{}') });
+});
+
+test("a quota group spent on one host leaves the models that go to the other host in the ladder", async () => {
+  const models = ['claude-opus-5-5-medium', 'claude-sonnet-5-5-low'].map(id => ({ id }));
+  const cfg = makeCfg({ providers: { google: { type: 'google', auth: 'antigravity', models } } });
+  const ready = { id: 'a', label: 'a', email: 'a@example.test', projectId: 'p', expiresAt: 0, needsReauth: false, paused: false, state: 'ready', active: true } as GoogleAccountStatus;
+  const scopes: Record<string, string> = { 'claude-opus-5-5-medium': '3p@daily-cloudcode-pa.googleapis.com', 'claude-sonnet-5-5-low': '3p@cloudcode-pa.googleapis.com' };
+  const accounts = [{ ...ready, quotaCooldowns: { '3p@daily-cloudcode-pa.googleapis.com': 600 } }];
+  await withAdmin(cfg, async ({ port }) => {
+    const google = (await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions).providers.find(p => p.name === 'google')!;
+    assert.deepEqual(Object.keys(google.models ?? {}), ['claude-opus-5-5-medium'], "prod's Claude/GPT quota is counted apart from daily's");
+  }, { google: () => ({ accounts: () => ({ google: accounts }), quotaScope: (_name: string, model: string) => scopes[model] }), modelScoresFetch: async () => new Response('{}') });
+});
+
+test("a group's return counts an account that is only cooling: the soonest of each account's later rest", async () => {
+  const cfg = makeCfg({ providers: { google: { type: 'google', auth: 'antigravity', models: [{ id: 'claude-opus-5-5-medium' }] } } });
+  const ready = { id: 'a', label: 'a', email: 'a@example.test', projectId: 'p', expiresAt: 0, needsReauth: false, paused: false, state: 'ready', active: true } as GoogleAccountStatus;
+  const DAILY_3P = '3p@daily-cloudcode-pa.googleapis.com';
+  // A's group rests four hours; B still has Claude quota but its own account rests ten seconds.
+  let accounts: GoogleAccountStatus[] = [{ ...ready, quotaCooldowns: { [DAILY_3P]: 14_400 } }, { ...ready, id: 'b', state: 'cooling', cooldownSeconds: 10 }];
+  await withAdmin(cfg, async ({ port }) => {
+    const until = async () => ((await (await fetch(`${base()}:${port}/api/mod-options`)).json()) as ModOptions).providers.find(p => p.name === 'google')!.models?.['claude-opus-5-5-medium']?.exhaustedUntil;
+    const back = (await until()) ?? 0;
+    assert.ok(back > Date.now() && back <= Date.now() + 10_000, `back with B in about ten seconds, not four hours (${back - Date.now()} ms)`);
+    // B cooling longer than its own group rest: the later of the two is when B takes the group again.
+    accounts = [{ ...ready, quotaCooldowns: { [DAILY_3P]: 14_400 } }, { ...ready, id: 'b', state: 'cooling', cooldownSeconds: 60, quotaCooldowns: { [DAILY_3P]: 300 } }];
+    const later = (await until()) ?? 0;
+    assert.ok(later > Date.now() + 290_000 && later <= Date.now() + 300_000, `B's group rest outlasts its own (${later - Date.now()} ms)`);
+  }, { google: () => ({ accounts: () => ({ google: accounts }), quotaScope: () => DAILY_3P }), modelScoresFetch: async () => new Response('{}') });
 });
 
 const putModSettings = (port: number, body: unknown) => fetch(`${base()}:${port}/api/mod-settings`, {
