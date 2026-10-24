@@ -95,6 +95,25 @@ test('48 mixed workers including 31 Workflow workers keep their rows, Korean tit
   }
 })
 
+test('background tasks sit with the agents, running with running and ended with ended, on either surface', () => {
+  const tasks = [
+    { id: 'b-dev', kind: 'shell' as const, title: '개발 서버 실행', command: 'npm run dev', state: 'running' as const, startedAt: 2 },
+    { id: 'b-test', kind: 'shell' as const, title: 'npm test', command: 'npm test', state: 'failed' as const, startedAt: 3, endedAt: frame.now - 1, summary: 'Background command "npm test" failed with exit code 1' },
+  ]
+  const done: AgentRec = { ...base, id: 'old', state: 'done', endedAt: frame.now - 5 }
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const tree = renderAgents(el, { ...frame, surface }, { agents: [base, done], tasks, now: frame.now, showDone: true }, actions)
+    const keys = nodes(tree).map(n => String(n.props.key))
+    const text = textOf(tree)
+    assert.ok(text.includes('2개 실행 중') && text.includes('2개 완료'), text)
+    assert.ok(keys.indexOf('task-b-dev') > keys.indexOf(surface === 'desktop' ? 'card-worker' : 'agent-worker'))
+    assert.ok(keys.indexOf('task-b-test') < keys.indexOf(surface === 'desktop' ? 'card-old' : 'done-old'))
+    assert.ok(text.includes('npm run dev') && text.includes('종료 코드 1') && text.includes('실패'))
+  }
+  // Tasks alone are a list, not the empty pane.
+  assert.ok(textOf(renderAgents(el, frame, { agents: [], tasks, now: frame.now, showDone: false }, actions)).includes('개발 서버 실행'))
+})
+
 test('unfolded short tool histories are bounded by entries as well as characters and keep the latest calls', () => {
   const entries = Array.from({ length: 1800 }, (_, i) => ({ kind: 'tool' as const, id: 't' + i, tool: 'Bash', detail: 'pwd', state: 'ok' as const }))
   const first = entries.length - TALK_ENTRIES

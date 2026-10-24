@@ -4,7 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { MOD_SETTINGS_SCHEMA_VERSION, DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
 import type { Lang } from '../hooks/i18n'
-import type { AgentRec, ModSettingsSnapshot, Settings } from '../types'
+import type { AgentRec, BgTask, ModSettingsSnapshot, Settings } from '../types'
 
 const NOW = 1000000
 const USAGE: ModelUsage = { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 40000, cache_creation_input_tokens: 0 }
@@ -675,6 +675,43 @@ test('a worker that ends before its spawn is recorded is listed as ended, not ru
   expect(written.find(a => a.id === 'worker-1')).toMatchObject({ state: 'failed', endedAt: NOW })
   const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
   expect(rows.find(row => row.type === 'outcome')).toMatchObject({ pick: rows.find(row => row.type === 'pick').id, agent: 'worker-1', reason: 'error', ms: 72 })
+})
+
+test('a background command and a watch are listed from their calls and ended by notice, stop and Stop', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  let written: BgTask[] = []
+  on('state.set', { plugin: 'ripple', key: 'bgTasks' }, async ($, e, next) => {
+    const result = await next(e)
+    written = e.value as BgTask[]
+    return result
+  })
+  // The tools' own results as core answers them (claude-code-tools BuiltinToolResults).
+  on('tool.call', ($, e) => {
+    if (e.tool === 'Bash') return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: e.command.includes('dev') ? 'b-dev' : 'b-test' } }
+    if (e.tool === 'Monitor') return { result: { taskId: 'm-log', timeoutMs: 300000 } }
+    if (e.tool === 'TaskStop') return { result: { message: 'stopped', task_id: e.task_id!, task_type: 'local_bash' } }
+    return { result: {} }
+  })
+  on('classic.Stop', () => ({}))
+  await start($)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'npm test', run_in_background: true })
+  await $.tool.call({ tool: 'Monitor', command: 'tail -f app.log', description: 'Watch the app log', timeout_ms: 300000 })
+  expect(written.map(task => [task.id, task.kind, task.title, task.state])).toEqual([
+    ['b-dev', 'shell', 'Start the dev server', 'running'], ['b-test', 'shell', 'npm test', 'running'], ['m-log', 'monitor', 'Watch the app log', 'running'],
+  ])
+  // A watch's event carries no status and ends nothing; the command's notice says it failed, and how.
+  await $.prompt.submit({ text: '<task-notification>\n<task-id>m-log</task-id>\n<event>ready</event>\n</task-notification>', origin: { kind: 'task-notification' }, wait: false })
+  await $.prompt.submit({ text: '<task-notification>\n<task-id>b-test</task-id>\n<status>failed</status>\n<summary>Background command "npm test" failed with exit code 1</summary>\n</task-notification>', origin: { kind: 'task-notification' }, wait: false })
+  expect(written.find(task => task.id === 'm-log')?.state).toBe('running')
+  expect(written.find(task => task.id === 'b-test')).toMatchObject({ state: 'failed', endedAt: NOW, summary: 'Background command "npm test" failed with exit code 1' })
+  await $.tool.call({ tool: 'TaskStop', task_id: 'b-dev' })
+  expect(written.find(task => task.id === 'b-dev')?.state).toBe('stopped')
+  // The watch ended unannounced: a Stop that no longer holds it in flight settles it.
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [] })
+  expect(written.find(task => task.id === 'm-log')).toMatchObject({ state: 'done', settled: true })
+  await b.clock.settle()
 })
 
 for (const domain of ['design', 'frontend', 'backend', 'docs'] as const) test(`auto selects the ${domain} task's domain ladder or its own general fallback`, async ($, on) => {

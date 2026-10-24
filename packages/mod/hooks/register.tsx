@@ -1,7 +1,7 @@
 // Engine wiring lives here: imported logic and drawings never receive the engine interface.
 // Timers own background work; hooks only admit/rewrite a request and record its result.
 import { atom, read, update } from 'claude-code'
-import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionRateLimit, ToolCallInput, TurnStepInput, TurnUsage } from 'claude-code'
+import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
 import { rungOf } from './ladder'
@@ -17,6 +17,7 @@ import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
 import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
+import { addTask, endTasks, endWithAgent, settleTasks, stopTask, taskEnds, taskStarted } from './tasks'
 import { addAgentStep, addJudge, addPrompt, addRequest, addWarm, addWorker, emptyStats, formatStats, sentEffort } from './stats'
 import { besideBand, renderBand, renderFooter } from './ui/band'
 import { renderAlert } from './ui/alerts'
@@ -53,6 +54,8 @@ const modelIs = atom({ plugin: 'ripple', key: 'modelIs' } as const, null)
 const lastRequest = atom({ plugin: 'ripple', key: 'lastRequest' } as const, null)
 const lastSpawn = atom({ plugin: 'ripple', key: 'lastSpawn' } as const, null)
 const agents = atom({ plugin: 'ripple', key: 'agents' } as const, [])
+/** Commands and watches left running in the background, listed in the Agents pane (tasks.ts). */
+const bgTasks = atom({ plugin: 'ripple', key: 'bgTasks' } as const, [])
 /** What the band shows of the agents (countAgents): it reads this, never the list above. */
 const agentCounts = atom({ plugin: 'ripple', key: 'agentCounts' } as const, { live: 0, total: 0 })
 const cache = atom({ plugin: 'ripple', key: 'cache' } as const, null)
@@ -1200,15 +1203,43 @@ function startTimers($: EngineInterface): void {
   $.clock.every(1000, async () => { await agentsClock($) })
 }
 /**
- * The Agents pane's clocks: each second an agent runs while the pane is open, one write that only
- * the pane reads, so its elapsed times tick and nothing else redraws.
+ * The Agents pane's clocks: each second an agent or a background task runs while the pane is open,
+ * one write that only the pane reads, so its elapsed times tick and nothing else redraws.
  */
 async function agentsClock($: EngineInterface): Promise<void> {
   try {
-    if (!(await read($, agents)).some(a => a.state === 'running' || a.state === 'waiting')) return
+    if (!(await read($, agents)).some(a => a.state === 'running' || a.state === 'waiting') && !(await read($, bgTasks)).some(task => task.state === 'running')) return
     if (!(await $.ui.panes()).some(p => p.id === AGENTS_PANE)) return
     await update($, agentsTick, n => n + 1)
   } catch (error) { await report($, 'agents clock', error) }
+}
+
+/**
+ * A command or watch the call left in the background starts a task, from the moment the call began
+ * (one the person sent there with Ctrl+B ran before); a TaskStop that answered ends one.
+ */
+async function noteTask($: EngineInterface, e: ToolCallInput, answer: ToolCallResult, started: number): Promise<void> {
+  if (answer.deny !== undefined || answer.isError) return
+  if (e.tool === 'TaskStop') {
+    const id = (answer.result as { task_id?: unknown } | undefined)?.task_id
+    if (typeof id === 'string' && (await read($, bgTasks)).some(task => task.id === id && task.state === 'running')) {
+      const now = await $.clock.now()
+      await update($, bgTasks, list => stopTask(list, id, now))
+    }
+    return
+  }
+  const task = taskStarted(e.tool, e, answer.result, e.agentId, started)
+  if (task) await update($, bgTasks, list => addTask(list, task))
+}
+
+/** The tasks a notification reports as ended, ended: written only when one of ours does. */
+async function endBackground($: EngineInterface, text: string): Promise<void> {
+  const ends = taskEnds(text)
+  if (!ends.length) return
+  const now = await $.clock.now()
+  const list = await read($, bgTasks)
+  const next = endTasks(list, ends, now)
+  if (!same(next, list)) await update($, bgTasks, () => next)
 }
 
 /**
@@ -1519,7 +1550,26 @@ export const register: Register = on => {
     } catch (error) { await report($, 'classic.SessionStart', error) }
     return next(e)
   })
+  on('classic.Stop', async ($, e, next) => {
+    // A task the session no longer holds in flight has ended, though no notice of it reached us (yet).
+    // A Stop that carries no list (an older engine) settles nothing.
+    try {
+      if (e.background_tasks) {
+        const inFlight = e.background_tasks.map(task => task.id)
+        const list = await read($, bgTasks)
+        if (list.some(task => task.state === 'running' && !inFlight.includes(task.id))) {
+          const now = await $.clock.now()
+          await update($, bgTasks, tasks => settleTasks(tasks, inFlight, now))
+        }
+      }
+    } catch (error) { await report($, 'classic.Stop', error) }
+    return next(e)
+  })
   on('prompt.submit', async ($, e, next) => {
+    // A background task's notification says it ended, and how (tasks.ts taskEnds).
+    if (e.origin.kind === 'task-notification') {
+      try { await endBackground($, e.text) } catch (error) { await report($, 'prompt.submit tasks', error) }
+    }
     const sequence = ++judgeSequence
     // The eager mode's note, beside every prompt while eager (modes.ts eagerNote): sent only once it
     // gets buried in a long context.
@@ -1619,6 +1669,8 @@ export const register: Register = on => {
         }
         await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a))
         await countAgents($)
+        // Its commands bound to its final response end with it; no notification follows them.
+        if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
         // A picked worker's outcome, once, joined to its pick by id: whether the tier it was given
         // (by the main chat or the judge) was enough is read from these lines later.
         if (before?.pick?.id && (before.state === 'running' || before.state === 'waiting')) {
@@ -1722,11 +1774,14 @@ export const register: Register = on => {
       const line = e.agentId ? await toolLine($, e) : ''
       if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, now: line, toolSince: started, state: 'running', tools: (a.tools ?? 0) + 1 } : a))
     } catch (error) { await report($, 'tool.call start', error) }
-    try { return await next(e) }
+    let answer: ToolCallResult | undefined
+    try { answer = await next(e); return answer }
     finally {
       try {
         if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId && a.toolSince === started ? { ...a, now: undefined, toolSince: undefined, state: a.state === 'waiting' ? 'running' : a.state } : a))
       } catch (error) { await report($, 'tool.call finish', error) }
+      try { if (answer && ['Bash', 'Monitor', 'TaskStop'].includes(e.tool)) await noteTask($, e, answer, started) }
+      catch (error) { await report($, 'tool.call task', error) }
     }
   })
   on('session.compact', async ($, e, next) => {
@@ -1901,7 +1956,7 @@ export const register: Register = on => {
       id = await read($, agentOpen)
       const open = id === null ? undefined : { id, talk: await agentTalk($, id), runsOpen: await read($, agentRunsOpen) }
       if (open && 'deny' in open.talk) throw new Error(open.talk.deny)
-      return renderAgents($.ui.resolve(e), frame, { agents: records, now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
+      return renderAgents($.ui.resolve(e), frame, { agents: records, tasks: await read($, bgTasks), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { return agentsRenderFailure($, e, error, { ...(frame ? { frame } : {}), records, wasOpen: id !== null }) }
   }).catch(($, e, next) => agentsRenderFailure($, e, next.error.message ?? next.error.kind))
   on('ui.render', { component: 'Pane', requestId: CONTEXT_PANE }, async ($, e) => {

@@ -298,6 +298,31 @@ export type AgentRec = {
   tools?: number
 }
 
+/**
+ * Work Claude left running in the background, as the Claude app lists it beside the agents: a
+ * command (Bash `run_in_background`, or one the person or a timeout sent there) or a watch (Monitor).
+ */
+export type BgTask = {
+  /** The engine's task id: Bash's `backgroundTaskId`, Monitor's `taskId`, what its notification names. */
+  id: string
+  kind: 'shell' | 'monitor'
+  /** What it does in the call's own words (its `description`), else its command. */
+  title: string
+  /** The command line, or a watch's WebSocket address. */
+  command?: string
+  /** The agent whose call started it; absent for the main conversation's. */
+  agentId?: string
+  /** It ends with that agent's final response (Bash `backgroundEndsWithFinalResponse`): no notification follows. */
+  endsWithAgent?: true
+  state: 'running' | 'done' | 'failed' | 'stopped'
+  startedAt: number
+  endedAt?: number
+  /** Its notification's own line on how it ended ("… completed (exit code 0)"). */
+  summary?: string
+  /** Ended by a Stop that no longer listed it in flight, before any notification said how. */
+  settled?: true
+}
+
 /** The main chat's prompt cache as far as its responses show it. */
 export type CacheMemo = {
   ttlMs: number
@@ -383,6 +408,8 @@ declare module 'claude-code' {
       deciding: boolean
       paused: boolean
       agents: AgentRec[]
+      /** Commands and watches left running in the background, and the latest that ended (tasks.ts). */
+      bgTasks: BgTask[]
       /** Running (or waiting) and all agents, for the band: written only when a count moves. */
       agentCounts: { live: number; total: number }
       cache: CacheMemo | null

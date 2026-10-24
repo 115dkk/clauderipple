@@ -19,6 +19,9 @@
 // works. The agent's card keeps its capsule (kit.tsx): its words are the deep's light ink. The rest
 // reads on the host's own page: Markdown takes the host's ink and no colour of ours.
 //
+// The commands and watches Claude left running in the background (tasks.ts) sit in the list with the
+// agents, as the Claude app lists its background tasks: running with running, ended with ended.
+//
 // 리플이 only where nothing redraws: the empty pane. Each running agent's step and the pane's
 // one-second clock redraw it, and every redraw may start a motion over; the spark's turn is one
 // second long, so a restart lands where it would have been.
@@ -26,7 +29,8 @@
 import { t } from '../i18n'
 import type { RenderNode, SessionMessage } from 'claude-code'
 
-import type { AgentRec, Effort } from '../../types'
+import type { AgentRec, BgTask, Effort } from '../../types'
+import { exitCode } from '../tasks'
 import { bareTitle } from '../workers'
 import { CELL_PX, METER_H, METER_W, ROW_PX, SVG_MAX_PX, esc, r, svg } from './art'
 import { capsule, lift, pic, pill, press, ripple } from './kit'
@@ -63,6 +67,21 @@ const ANSWER_MAX = 12000
 
 function live(agent: AgentRec): boolean {
   return agent.state === 'running' || agent.state === 'waiting'
+}
+
+/** A row of the list: an agent, or a command or watch left in the background. */
+type Item = { kind: 'agent'; agent: AgentRec } | { kind: 'task'; task: BgTask }
+
+function itemLive(item: Item): boolean {
+  return item.kind === 'agent' ? live(item.agent) : item.task.state === 'running'
+}
+
+function itemStart(item: Item): number {
+  return item.kind === 'agent' ? item.agent.startedAt : item.task.startedAt
+}
+
+function itemEnd(item: Item): number {
+  return (item.kind === 'agent' ? item.agent.endedAt : item.task.endedAt) ?? 0
 }
 
 /** A title without the model tag the spawn put in front of it: the card names the model itself. */
@@ -519,8 +538,103 @@ function tile(el: Els, frame: Frame, agent: AgentRec, now: number, onPress: () =
   )
 }
 
-/** The list on the desktop: one capsule, its head, the running agents' tiles, then the finished. */
-function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: AgentRec[], done: AgentRec[]): RenderNode {
+// ---- Desktop: a background task's tile ---------------------------------------------------------
+// A command or a watch has a tile as an agent does, less what only an agent has (a model, tokens, a
+// conversation to open): its mark, what it does and its time, and under them what it runs.
+
+/** A task's mark: running in the accent, done green, failed red, stopped quiet. */
+function taskMark(k: Look, task: BgTask): { glyph: string; word: Look['ink'] } {
+  if (task.state === 'running') return { glyph: '●', word: { color: k.tone('violet') } }
+  if (task.state === 'done') return { glyph: '✓', word: { color: k.tone('green') } }
+  if (task.state === 'failed') return { glyph: '✕', word: { color: k.tone('red') } }
+  return { glyph: '■', word: k.mute }
+}
+
+/** How long a task ran, or has run so far. */
+function taskRanFor(task: BgTask, now: number, lang: Frame['lang']): string {
+  return elapsed((task.state === 'running' ? now : task.endedAt ?? task.startedAt) - task.startedAt, lang)
+}
+
+/** The word before a task's time when it did not end well. */
+function taskEndWord(frame: Frame, task: BgTask): string {
+  return task.state === 'failed' ? t(frame.lang, 'agents.failed') : task.state === 'stopped' ? t(frame.lang, 'agents.stopped') : ''
+}
+
+/** Cells of a task's time column: the elapsed time's widest, its end word before it. */
+function taskTimeCells(frame: Frame, task: BgTask): number {
+  const word = taskEndWord(frame, task)
+  return Math.ceil(timeCh(frame.lang)) + (word ? Math.ceil(chOf(word)) + 1 : 0)
+}
+
+/**
+ * Cells right of a task's time, where an agent's tile has its chevron: the times of both line up.
+ */
+const CHEVRON_CELLS = 2
+
+/** Cells a task's title has on a line: the row less its mark, its time and the chevron's room. */
+function taskTitleCells(frame: Frame, task: BgTask): number {
+  return innerCells(frame) - 2 - (taskTimeCells(frame, task) + CHEVRON_CELLS + 1)
+}
+
+/** What a task runs, when its title is not that already. */
+function taskCommand(task: BgTask): string | undefined {
+  return task.command && task.command !== task.title ? task.command : undefined
+}
+
+/** A failed command's exit code in words, when its notification named one. */
+function taskCode(frame: Frame, task: BgTask): string {
+  const code = task.state === 'failed' ? exitCode(task.summary) : undefined
+  return code === undefined ? '' : t(frame.lang, 'agents.exitCode', { code })
+}
+
+/** Rows a task's tile draws, about, for the capsule's water. */
+function taskRows(frame: Frame, task: BgTask): number {
+  const cells = taskTitleCells(frame, task)
+  return Math.min(TITLE_LINES, linesOf(clipCh(task.title, TITLE_LINES * Math.max(10, cells) - 4), cells)) + 1.2 + 1.3
+}
+
+/** A task's tile: the mark, its title and time, then what kind it is and what it runs. Nothing to open. */
+function taskTile(el: Els, frame: Frame, task: BgTask, now: number): RenderNode {
+  const { Box, Text } = el
+  const k = lookOf(frame)
+  const L = frame.lang
+  const m = taskMark(k, task)
+  const end = taskEndWord(frame, task)
+  const kind = t(L, task.kind === 'shell' ? 'agents.shell' : 'agents.monitor')
+  const command = taskCommand(task)
+  const code = taskCode(frame, task)
+  const room = innerCells(frame) - 2 - Math.ceil(chOf(kind)) - 1 - (code ? Math.ceil(chOf(code)) + 1 : 0)
+  return (
+    <Box key={'task-' + task.id} flexDirection="column" width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
+      <Box key="head" flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" minWidth={0}>
+        <Box key="mark" flexShrink={0}>
+          <Text {...m.word} bold>{m.glyph}</Text>
+        </Box>
+        <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
+          <Text bold {...k.ink} wrap="wrap">{clipCh(task.title, TITLE_LINES * Math.max(10, taskTitleCells(frame, task)) - 4)}</Text>
+        </Box>
+        <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={taskTimeCells(frame, task) + CHEVRON_CELLS} paddingRight={CHEVRON_CELLS}>
+          {end ? <Text key="end" {...(task.state === 'failed' ? { color: k.tone('red') } : k.mute)}>{end}</Text> : null}
+          <Text key="elapsed" {...(task.state === 'running' ? k.ink : k.sub)}>{taskRanFor(task, now, L)}</Text>
+        </Box>
+      </Box>
+      <Box key="runs" flexDirection="row" alignItems="center" columnGap={1} paddingLeft={2} minWidth={0} overflow="hidden">
+        <Box key="kind" flexShrink={0}>
+          <Text {...k.mute}>{kind}</Text>
+        </Box>
+        {command ? (
+          <Box key="command" flexShrink={1} minWidth={0} overflow="hidden">
+            <Text {...k.sub} wrap="truncate-end">{clipCh(command, Math.max(8, room))}</Text>
+          </Box>
+        ) : null}
+        {code ? <Box key="code" flexShrink={0}><Text {...k.sub}>{code}</Text></Box> : null}
+      </Box>
+    </Box>
+  )
+}
+
+/** The list on the desktop: one capsule, its head, the running agents' and tasks' tiles, then the ended. */
+function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: Item[], done: Item[]): RenderNode {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
@@ -551,11 +665,12 @@ function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
       <Text {...k.mute}>{label}</Text>
     </Box>
   )
+  const drawn = (item: Item) => item.kind === 'agent' ? tile(el, frame, item.agent, view.now, () => actions.open(item.agent.id)) : taskTile(el, frame, item.task, view.now)
   const children: RenderNode[] = [head]
   if (running.length) children.push(section('live', t(L, 'agents.liveCount', { count: running.length })))
-  for (const a of running) children.push(tile(el, frame, a, view.now, () => actions.open(a.id)))
+  for (const item of running) children.push(drawn(item))
   if (done.length) children.push(section('done', t(L, 'agents.doneCount', { count: done.length })))
-  for (const a of shownDone) children.push(tile(el, frame, a, view.now, () => actions.open(a.id)))
+  for (const item of shownDone) children.push(drawn(item))
   if (done.length > DONE_SHOWN) {
     children.push(
       <Box key="more-row" flexDirection="row" justifyContent="center" width="100%">
@@ -565,7 +680,7 @@ function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
       </Box>,
     )
   }
-  const rows = 3 + [...running, ...shownDone].reduce((n, a) => n + tileRows(frame, a) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
+  const rows = 3 + [...running, ...shownDone].reduce((n, item) => n + (item.kind === 'agent' ? tileRows(frame, item.agent) : taskRows(frame, item.task)) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
   return capsule(el, frame, {
     key: 'agents',
     // While nothing runs 리플이 floats at the head in calm water; while one runs the water holds
@@ -1088,10 +1203,28 @@ function doneLine(el: Els, frame: Frame, agent: AgentRec, now: number, hotkey: s
   )
 }
 
-function listText(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: AgentRec[], done: AgentRec[]): RenderNode {
+/** A background task in a line: its mark, title, kind, what it runs, how it ended and its time. */
+function taskLine(el: Els, frame: Frame, task: BgTask, now: number): RenderNode {
+  const { Box, Text } = el
+  const tone = textTone(frame.appearance)
+  const L = frame.lang
+  const glyph = task.state === 'running' ? '●' : task.state === 'done' ? '✓' : task.state === 'failed' ? '✕' : '■'
+  const color = task.state === 'running' ? tone.accent : task.state === 'done' ? tone.ok : task.state === 'failed' ? tone.bad : undefined
+  const command = taskCommand(task)
+  const rest = [t(L, task.kind === 'shell' ? 'agents.shell' : 'agents.monitor'), command ? clip(command, 80) : '', taskEndWord(frame, task), taskCode(frame, task), taskRanFor(task, now, L)]
+  return (
+    <Box key={'task-' + task.id} flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={task.state === 'running' ? 0 : 1}>
+      <Text color={color} dimColor={task.state === 'stopped'}>{glyph}</Text>
+      <Text wrap="wrap">{cut(task.title, 240)}</Text>
+      <Text dimColor>{rest.filter(Boolean).join(' · ')}</Text>
+    </Box>
+  )
+}
+
+function listText(el: Els, frame: Frame, view: AgentsView, actions: AgentsActions, running: Item[], done: Item[]): RenderNode {
   const { Box, Text } = el
   const shownDone = view.showDone ? done : done.slice(0, DONE_SHOWN)
-  // The first nine a digit each, in the order drawn.
+  // The first nine agents a digit each, in the order drawn; a task has nothing to open.
   let n = 0
   const key = () => (++n <= 9 ? String(n) : undefined)
   return (
@@ -1100,10 +1233,10 @@ function listText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
         <Text bold>{running.length ? t(frame.lang, 'agents.liveCount', { count: running.length }) : t(frame.lang, 'agents.noneRunning')}</Text>
         {done.length ? <Text dimColor>{t(frame.lang, 'agents.doneCount', { count: done.length })}</Text> : null}
       </Box>
-      {running.map(agent => liveLines(el, frame, agent, view.now, key(), () => actions.open(agent.id)))}
+      {running.map(item => item.kind === 'agent' ? liveLines(el, frame, item.agent, view.now, key(), () => actions.open(item.agent.id)) : taskLine(el, frame, item.task, view.now))}
       {shownDone.length ? (
         <Box flexDirection="column">
-          {shownDone.map(agent => doneLine(el, frame, agent, view.now, key(), () => actions.open(agent.id)))}
+          {shownDone.map(item => item.kind === 'agent' ? doneLine(el, frame, item.agent, view.now, key(), () => actions.open(item.agent.id)) : taskLine(el, frame, item.task, view.now))}
         </Box>
       ) : null}
       {done.length > DONE_SHOWN ? (
@@ -1227,10 +1360,11 @@ function agentsTree(el: Els, frame: Frame, view: AgentsView, actions: AgentsActi
     const agent = view.agents.find(a => a.id === view.open!.id)
     return drawn ? openDrawn(el, frame, view, actions, agent, view.open.talk) : openText(el, frame, view, actions, agent, view.open.talk)
   }
+  const items: Item[] = [...view.agents.map((agent): Item => ({ kind: 'agent', agent })), ...(view.tasks ?? []).map((task): Item => ({ kind: 'task', task }))]
   // Empty, the pane has nothing to redraw it, so 리플이 can live out its idle loops here.
-  if (view.agents.length === 0) return speak(el, frame, { key: 'agents', face: 'calm', size: GREET_SIZE, title: t(frame.lang, 'agents.emptyTitle'), line: t(frame.lang, 'agents.emptyBody') })
-  const running = view.agents.filter(live).sort((a, b) => a.startedAt - b.startedAt)
-  const done = view.agents.filter(a => !live(a)).sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))
+  if (items.length === 0) return speak(el, frame, { key: 'agents', face: 'calm', size: GREET_SIZE, title: t(frame.lang, 'agents.emptyTitle'), line: t(frame.lang, 'agents.emptyBody') })
+  const running = items.filter(itemLive).sort((a, b) => itemStart(a) - itemStart(b))
+  const done = items.filter(i => !itemLive(i)).sort((a, b) => itemEnd(b) - itemEnd(a))
   return drawn ? listDrawn(el, frame, view, actions, running, done) : listText(el, frame, view, actions, running, done)
 }
 
@@ -1250,6 +1384,7 @@ export function renderAgents(el: Els, frame: Frame, view: AgentsView, actions: A
       ...(agent.now ? { now: displayText(agent.now) } : {}),
       ...(agent.pick ? { pick: { ...agent.pick, why: displayText(agent.pick.why), ...(agent.pick.fallbackReason ? { fallbackReason: displayText(agent.pick.fallbackReason) } : {}) } } : {}),
     })),
+    ...(view.tasks ? { tasks: view.tasks.map(task => ({ ...task, title: displayText(task.title, DISPLAY.name), ...(task.command ? { command: displayText(task.command) } : {}), ...(task.summary ? { summary: displayText(task.summary) } : {}) })) } : {}),
     ...(view.open ? { open: { ...view.open, talk: 'deny' in view.open.talk ? { deny: displayText(view.open.talk.deny) } : { entries: view.open.talk.entries.map(entry => entry.kind === 'tool' ? { ...entry, tool: displayText(entry.tool, DISPLAY.name), detail: displayText(entry.detail) } : { ...entry, text: displayText(entry.text, DISPLAY.conversation) }) } } } : {}),
   }
   const tree = agentsTree(el, frame, view, actions)

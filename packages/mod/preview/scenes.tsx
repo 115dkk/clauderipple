@@ -4,7 +4,7 @@
 import { test } from 'claude-code/testing'
 import type { ContextGridSquare, RenderElement, RenderPropsOf, SessionContextBreakdown } from 'claude-code'
 
-import type { AgentRec, LimitItem, Settings, Skin } from '../types'
+import type { AgentRec, BgTask, LimitItem, Settings, Skin } from '../types'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents, talkOf } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
@@ -126,6 +126,12 @@ const CARDS: AgentRec[] = [HOSTED, AGENTS[2]!, AGENTS[3]!]
 const at = (ms: number): AgentRec[] => [{ ...HOSTED, startedAt: NOW - ms }]
 
 /** One running agent and eight finished: the list shows the latest four and "more". */
+const TASKS: BgTask[] = [
+  { id: 'b-dev', kind: 'shell', title: '개발 서버 실행', command: 'npm run dev -- --port 5173', state: 'running', startedAt: NOW - 420_000 },
+  { id: 'm-log', kind: 'monitor', title: '라우터 로그에서 오류 감시', command: 'tail -f ~/.clauderipple/logs/router.log | grep --line-buffered ERROR', state: 'running', startedAt: NOW - 130_000 },
+  { id: 'b-test', kind: 'shell', title: 'npm test', command: 'npm test', state: 'failed', startedAt: NOW - 400_000, endedAt: NOW - 300_000, summary: 'Background command "npm test" failed with exit code 1' },
+  { id: 'b-wait', kind: 'shell', title: '5분 대기', command: 'sleep 300', state: 'stopped', startedAt: NOW - 900_000, endedAt: NOW - 800_000 },
+]
 const MANY: AgentRec[] = [AGENTS[0]!, ...Array.from({ length: 8 }, (_, i): AgentRec => ({ ...AGENTS[i % 2 ? 2 : 4]!, id: 'm' + i, description: ['문서 링크 점검', '타입 오류 정리', 'i18n 키 대조', '빌드 로그 요약', '테스트 이름 정리', '캐시 적중률 확인', '라우터 로그 검색', '설정 스키마 비교'][i]!, endedAt: NOW - 60_000 * (i + 1), startedAt: NOW - 60_000 * (i + 2) }))]
 
 /** The Sol worker's conversation so far: its task, its words, its tools, one still running. */
@@ -333,6 +339,8 @@ const SCENES: Scene[] = [
   { name: 'agents-empty', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: [], now: NOW, showDone: false }, AGENT_ACTIONS) },
   { name: 'agents-live', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
   { name: 'agents-live-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, now: NOW, showDone: false }, AGENT_ACTIONS) },
+  { name: 'agents-tasks', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS, tasks: TASKS, now: NOW, showDone: true }, AGENT_ACTIONS) },
+  { name: 'agents-tasks-narrow', columns: PANE_NARROW, draw: (el, f) => renderAgents(el, f, { agents: AGENTS.slice(2), tasks: TASKS, now: NOW, showDone: true }, AGENT_ACTIONS) },
   { name: 'agents-idle', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: AGENTS.slice(2), now: NOW, showDone: false }, AGENT_ACTIONS) },
   { name: 'agents-many', columns: PANE, draw: (el, f) => renderAgents(el, f, { agents: MANY, now: NOW, showDone: false }, AGENT_ACTIONS) },
   ...(['deep', 'flat'] as const).map(skin => ({

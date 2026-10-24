@@ -2,7 +2,7 @@
 // callbacks it hands in. Every renderer in ./ is a pure function of (elements, view, actions);
 // none of them calls the engine, so they can be drawn and tested anywhere.
 
-import type { AgentRec, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
+import type { AgentRec, BgTask, Effort, JudgeKind, JudgeRun, LadderOptions, LimitItem, Pick as EffortPick, Settings, Skin, StatusRequest, TierTarget } from '../../types'
 import type { Appearance } from './theme'
 import { t } from '../i18n'
 import { DISPLAY, displayText } from './display'
@@ -216,6 +216,8 @@ export type AgentTalk = { entries: readonly AgentEntry[] } | { deny: string }
 
 export type AgentsView = {
   agents: readonly AgentRec[]
+  /** Commands and watches left running in the background, listed with the agents (tasks.ts). */
+  tasks?: readonly BgTask[]
   now: number
   /** Every finished agent, not only the latest few. */
   showDone: boolean
