@@ -117,7 +117,8 @@ export type LadderChoice = {
 export type PresetId = 'claude' | 'claudeGpt' | 'gpt' | 'cheap'
 /** The fill as computed from the ticked models: the rungs, and the ones it had to fill otherwise. */
 export type Preset = { rungs: Record<Rung, Step>; substituted: Rung[] }
-export type ProviderAvailability = { usable: boolean; reason?: string; exhaustedUntil?: number }
+/** `models`: models out while the provider answers others (a spent Antigravity quota group). */
+export type ProviderAvailability = { usable: boolean; reason?: string; exhaustedUntil?: number; models?: Record<string, { reason?: string; exhaustedUntil?: number }> }
 export type LadderOptions = { until: number; choices: LadderChoice[]; providers?: Record<string, ProviderAvailability> }
 export type RouterModel = { value: string; label: string; provider: string; name?: string }
 export type WorkerCandidate = { target: TierTarget; model: string; provider: string }

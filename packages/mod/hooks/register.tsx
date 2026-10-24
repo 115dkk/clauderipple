@@ -8,7 +8,7 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, markerDomain, modelReason, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -873,7 +873,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   await refreshLadder($)
   const now = await $.clock.now()
   const options = await read($, ladderOptions)
-  const providers = options && options.until > now ? Object.fromEntries(Object.entries(options.providers ?? {}).filter(([, p]) => p.exhaustedUntil === undefined || p.exhaustedUntil > now)) : {}
+  const providers = options && options.until > now ? liveProviders(options.providers ?? {}, now) : {}
   const explicitCandidate = target ? pinnedCandidates.find(c => c.target.agent === target!.agent && c.target.model === target!.model) ?? (target.agent === 'general-purpose' ? { target, model: target.model ?? 'sonnet', provider: (source === 'pin' ? pin?.provider : undefined) ?? (await read($, routerModels)).find(m => m.value.toLowerCase() === target!.model?.toLowerCase())?.provider ?? 'anthropic' } : undefined) : undefined
   if (explicitCandidate && s.providers[explicitCandidate.provider] === false) return { deny: t(language, 'workers.disabled', { provider: explicitCandidate.provider }) }
   // An active mode replaces the ladder, not the user's named model (2026-10-24).

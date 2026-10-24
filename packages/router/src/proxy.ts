@@ -483,6 +483,12 @@ export class Proxy {
   }
 
   /** Dashboard action: put one resting Google account back into rotation now. */
+  /** The pool scope a turn for `model` rests in on one antigravity provider (its quota group on its host). */
+  googleQuotaScope(name: string, model: string): string | undefined {
+    const p = this.deps.config().providers[name];
+    return p?.type === "google" && p.auth === "antigravity" ? this.google(name, p).quotaScopeOf(model) : undefined;
+  }
+
   googleClearCooldown(ownerId: string): void {
     for (const [name, p] of Object.entries(this.deps.config().providers)) {
       if (p.type === "google" && p.auth === "antigravity") this.google(name, p).clearCooldown(ownerId);
@@ -1833,7 +1839,7 @@ export class Proxy {
     if (this.targetUsable(resolved, cfg)) return resolved;
     for (const f of resolved.fallbacks) {
       if (f.provider === resolved.provider && f.model === resolved.model) continue;
-      if (!this.targetUsable(f, cfg)) continue;
+      if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
       log.info(`FAILOVER ${resolved.provider}/${resolved.model} exhausted → ${f.provider}/${f.model}`);
       // The tag names the model that answers, not the one that could not: a log line saying `->m1`
       // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
@@ -1852,7 +1858,7 @@ export class Proxy {
   private unwrittenFallback(resolved: Resolved, attempted: Resolved, cfg: Config, why: "prompt" | "capacity"): Resolved | null {
     for (const f of resolved.fallbacks ?? []) {
       if (f.provider === attempted.provider && f.model === attempted.model) continue;
-      if (!this.targetUsable(f, cfg)) continue;
+      if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
       return {
         provider: f.provider, model: f.model, effort: f.effort ?? resolved.effort,
         tag: `${resolved.tag.split("->")[0] ?? resolved.model}->${f.model} (${why} fallback from ${attempted.provider})`,
@@ -1861,7 +1867,7 @@ export class Proxy {
     return null;
   }
 
-  private targetUsable(target: Pick<Resolved, "provider" | "model">, cfg: Config): boolean {
+  private targetUsable(target: Pick<Resolved, "provider" | "model"> & { effort?: string | undefined }, cfg: Config): boolean {
     const configured = cfg.providers[target.provider];
     if (!configured) return false;
     const provider = providerFor(configured, target.model);
@@ -1871,7 +1877,7 @@ export class Proxy {
       return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts);
     }
     if (provider.type === "chatgpt") return this.chatgpt(target.provider, provider).hasUsable();
-    if (provider.type === "google" && provider.auth === "antigravity") return this.google(target.provider, provider).hasUsable();
+    if (provider.type === "google" && provider.auth === "antigravity") return this.google(target.provider, provider).hasUsable(target.model, target.effort);
     return this.pool.hasUsable(target.provider, this.credentialsOf(target.provider, provider));
   }
 

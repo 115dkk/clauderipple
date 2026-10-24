@@ -243,3 +243,45 @@ test('ordered lists skip missing, disabled, unticked and exhausted entries befor
   s.rules.general.rungs.light!.reverse()
   assert.deepEqual(ladderPick(v('light'), s.rules.general, s, candidates, true, 'en').target, sonnet)
 })
+
+test('a spent quota group skips only its own models: the same provider still runs the others', async () => {
+  const { liveProviders } = await import('../../packages/mod/hooks/workers.ts')
+  // The owner's 2026-10-23 ladder: Standard opens on Antigravity's Opus, then Antigravity's Gemini.
+  const opus = { target: { agent: 'claude-opus-5-5-medium' }, model: 'claude-opus-5-5-medium', provider: 'google-gemini' }
+  const flash = { target: { agent: 'gemini-3-8-flash' }, model: 'gemini-3.8-flash', provider: 'google-gemini' }
+  const workers = [opus, flash, ...candidates]
+  const s = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { standard: [{ target: opus.target, effort: 'medium' }, { target: flash.target, effort: 'high' }] } } } })
+  const raw = { agents: [
+    { name: 'claude-opus-5-5-medium', model: 'claude-opus-5-5-medium', provider: 'google-gemini', efforts: ['medium'], billing: 'subscription' },
+    { name: 'gemini-3-8-flash', model: 'gemini-3.8-flash', provider: 'google-gemini', efforts: ['high'], billing: 'subscription' },
+  ], providers: [
+    { name: 'google-gemini', usable: true, models: { 'claude-opus-5-5-medium': { reason: 'quota_exhausted', exhaustedUntil: 1_800_000 }, junk: null } },
+  ] }
+  const options = ladderOptionsFrom(raw, 600_000)
+  assert.deepEqual(options.providers?.['google-gemini'], { usable: true, models: { 'claude-opus-5-5-medium': { reason: 'quota_exhausted', exhaustedUntil: 1_800_000 } } })
+  assert.deepEqual(options.choices.filter(c => c.provider === 'google-gemini').map(c => c.target.agent), ['gemini-3-8-flash'], 'the spent model is not offered to a fill')
+  const result = ladderPick(v('standard'), s.rules.general, s, workers, true, 'ko', [], options.providers)
+  assert.deepEqual([result.target, result.effort, result.position], [flash.target, 'high', 2])
+  assert.deepEqual(result.skipped, [{ rung: 'standard', position: 1, model: 'claude-opus-5-5-medium', reason: 'google-gemini: 사용량 한도 소진' }])
+  assert.equal(candidateUsable(opus, s, true, options.providers), false)
+  assert.equal(candidateUsable(flash, s, true, options.providers), true)
+  // Past its stated reset the model is back, even from a cached catalogue.
+  const later = liveProviders(options.providers!, 1_800_000)
+  assert.deepEqual(later['google-gemini'], { usable: true })
+  assert.equal(ladderPick(v('standard'), s.rules.general, s, workers, true, 'ko', [], later).target?.agent, 'claude-opus-5-5-medium')
+})
+
+test('a spent model stays skipped when the rung names it with an effort suffix', () => {
+  // The re-review's repro: gemini-3.8-flash out, a rung of gemini-3.8-flash@high still picked with nothing skipped.
+  const flashHigh = { target: { agent: 'gemini-3-8-flash-high' }, model: 'gemini-3.8-flash@high', provider: 'google-gemini' }
+  const astra = candidates.find(c => c.model === 'gpt-6-astra')!
+  const s = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { standard: [{ target: flashHigh.target, effort: 'high' }, { target: astra.target, effort: 'high' }] } } } })
+  const providers = { 'google-gemini': { usable: true, models: { 'gemini-3.8-flash': { reason: 'quota_exhausted', exhaustedUntil: 1_800_000 } } } }
+  assert.equal(candidateUsable(flashHigh, s, true, providers), false)
+  const result = ladderPick(v('standard'), s.rules.general, s, [flashHigh, ...candidates], true, 'ko', [], providers)
+  assert.deepEqual([result.target, result.position], [astra.target, 2])
+  assert.deepEqual(result.skipped, [{ rung: 'standard', position: 1, model: 'gemini-3.8-flash@high', reason: 'google-gemini: 사용량 한도 소진' }])
+  // A general-purpose rung naming the model with its effort is looked up the same way.
+  const gp = { target: { agent: 'general-purpose', model: 'gemini-3.8-flash@high' }, model: 'gemini-3.8-flash@high', provider: 'google-gemini' }
+  assert.equal(candidateUsable(gp, s, true, providers), false)
+})

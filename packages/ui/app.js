@@ -2208,11 +2208,28 @@ function accountPoolActions(account, patch) {
   return actions;
 }
 
-/** Runtime use is independent of first place, pauses and cooldowns. */
+/**
+ * A resting Antigravity quota group as the limits row names it, with the host it rests on: the key is
+ * `group@host` (`3p@daily-cloudcode-pa.googleapis.com` → "3P daily"), because each host counts its own.
+ */
+function quotaGroupLabel(key) {
+  const [group, host] = key.split("@");
+  const name = group === "3p" ? "3P" : group === "gemini" ? "Gemini" : group;
+  if (!host) return name;
+  return `${name} ${/^daily-/.test(host) ? "daily" : host === "cloudcode-pa.googleapis.com" ? "prod" : host}`;
+}
+
+/**
+ * Runtime use is independent of first place, pauses and cooldowns. A resting quota group
+ * (`quotaCooldowns`, Antigravity) is shown beside the account's own state: the account still answers
+ * the other group.
+ */
 function accountPoolBadges(account) {
   return [
     account.preferred ? el("span", { class: "badge first", text: t("providers.preferBadge") }) : null,
     chatgptStateBadge(account),
+    ...Object.entries(account.quotaCooldowns || {}).map(([group, seconds]) =>
+      el("span", { class: "badge warn", text: `${quotaGroupLabel(group)} · ${t("pool.coolingFor", { duration: durationText(seconds) })}` })),
     account.inUse && account.state && account.state !== "ready" ? el("span", { class: "badge ok", text: t("providers.chatgptInUse") }) : null,
   ];
 }
@@ -2502,6 +2519,19 @@ function renderGoogleAccountRows(target, data, name, generation) {
       actions.push(link, recheck);
     }
     actions.push(...accountPoolActions(account, (change) => patchGoogleAccount(name, account.id, change)));
+    // The account answers while a quota group rests (`quotaCooldowns`), so the shared actions show no
+    // clear button for it; this one clears all of the account's resting groups at once. A failed
+    // request leaves the row as it was, so the button comes back for another try.
+    const resting = Object.keys(account.quotaCooldowns || {});
+    if (resting.length && account.state !== "cooling" && !(account.cooldownSeconds > 0)) {
+      const clear = el("button", { class: "btn secondary compact", type: "button", text: `${resting.map(quotaGroupLabel).join(", ")} · ${t("providers.chatgptClearCooldown")}` });
+      clear.addEventListener("click", async () => {
+        clear.disabled = true;
+        try { await patchGoogleAccount(name, account.id, { clearCooldown: true }); }
+        finally { clear.disabled = false; }
+      });
+      actions.push(clear);
+    }
     const rename = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit") });
     rename.addEventListener("click", () => {
       const label = prompt(t("providers.anthropicRenamePrompt"), account.label);
@@ -4126,7 +4156,8 @@ function modChoices() {
     return {
       value: agent.name, label: agent.model, model: agent.model, provider: agent.provider,
       billing: /(?::|-)free$/i.test(agent.model) ? "free" : agent.billing || (info && info.billing) || null,
-      usable: !info || info.usable !== false,
+      // A spent quota group lists its models under `models` while the provider still answers others.
+      usable: !info || (info.usable !== false && !(info.models && info.models[agent.model])),
       efforts: Array.isArray(agent.efforts) ? agent.efforts : effortLevelsFor(agent.provider, agent.model),
     };
   });

@@ -1,4 +1,4 @@
-import type { Billing, Domain, Effort, LadderChoice, LadderOptions, ModelScore, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
+import type { Billing, Domain, Effort, LadderChoice, LadderOptions, ModelScore, ProviderAvailability, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { CLAUDE_WORKERS, EFFORTS, candidateKey, isAllowed } from './settings'
 import { MARKER } from './worker'
 import { t } from './i18n'
@@ -160,12 +160,14 @@ export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly s
   const root = record(raw)
   const efforts = (value: unknown): Effort[] => list(value).filter((e): e is Effort => EFFORTS.includes(e as Effort))
   const usable = new Set(list(root.providers).flatMap(p => { const v = record(p); return typeof v.name === 'string' && v.usable !== false ? [v.name] : [] }))
+  const modelsOut = new Map(list(root.providers).flatMap(p => { const v = record(p); return typeof v.name === 'string' ? [[v.name, unavailableModels(v.models)] as const] : [] }))
   const catalogue = list(root.providers).length > 0
   const scores = scoreModels(root.scores)
   const choices: LadderChoice[] = list(root.agents).flatMap(value => {
     const a = record(value)
     if (typeof a.name !== 'string' || !a.name || typeof a.model !== 'string' || typeof a.provider !== 'string') return []
     if (catalogue && !usable.has(a.provider)) return []
+    if (modelsOut.get(a.provider)?.[baseModel(a.model)]) return []
     const costs = (scores.find(s => s.model === a.model && s.provider === a.provider)?.variants ?? []).flatMap(v => v.costPerTask === null ? [] : [v.costPerTask])
     const billing = BILLINGS.includes(a.billing as Billing) ? a.billing as Billing : 'payg'
     return [{ target: { agent: a.name }, model: a.model, provider: a.provider, billing, efforts: efforts(a.efforts), ...(costs.length ? { cost: Math.min(...costs) } : {}) }]
@@ -173,16 +175,45 @@ export function ladderOptionsFrom(raw: unknown, until: number, allow: readonly s
   const providers = Object.fromEntries(list(root.providers).flatMap(value => {
     const p = record(value)
     if (typeof p.name !== 'string' || typeof p.usable !== 'boolean') return []
-    return [[p.name, { usable: p.usable, ...(typeof p.reason === 'string' ? { reason: p.reason } : {}), ...(typeof p.exhaustedUntil === 'number' ? { exhaustedUntil: p.exhaustedUntil } : {}) }]]
+    const models = unavailableModels(p.models)
+    return [[p.name, { usable: p.usable, ...(typeof p.reason === 'string' ? { reason: p.reason } : {}), ...(typeof p.exhaustedUntil === 'number' ? { exhaustedUntil: p.exhaustedUntil } : {}), ...(Object.keys(models).length ? { models } : {}) }]]
   }))
   return { until, choices: tickedChoices([...choices, ...claudeChoices(efforts(root.claudeEfforts))], allow, allowKnown), providers }
 }
+/**
+ * A provider's models that are out while it answers others (GET /api/mod-options `models`): a spent
+ * Antigravity quota group takes its own models out, not the provider's other ones.
+ */
+function unavailableModels(value: unknown): NonNullable<ProviderAvailability['models']> {
+  return Object.fromEntries(Object.entries(record(value)).flatMap(([model, entry]) => {
+    const e = record(entry)
+    if (!model || entry === null || typeof entry !== 'object') return []
+    return [[model, { ...(typeof e.reason === 'string' ? { reason: e.reason } : {}), ...(typeof e.exhaustedUntil === 'number' ? { exhaustedUntil: e.exhaustedUntil } : {}) }]]
+  }))
+}
+/** Drop availability entries whose stated reset has passed: a cached catalogue must not outlive them. */
+export function liveProviders(providers: NonNullable<LadderOptions['providers']>, now: number): NonNullable<LadderOptions['providers']> {
+  return Object.fromEntries(Object.entries(providers).flatMap(([name, p]) => {
+    const models = Object.fromEntries(Object.entries(p.models ?? {}).filter(([, m]) => m.exhaustedUntil === undefined || m.exhaustedUntil > now))
+    const expired = p.exhaustedUntil !== undefined && p.exhaustedUntil <= now
+    // A provider-wide exhaustion that has reset drops the provider entry, but not a model still out.
+    if (expired && !Object.keys(models).length) return []
+    const { models: _, ...rest } = p
+    const base: ProviderAvailability = expired ? { usable: true } : rest
+    return [[name, Object.keys(models).length ? { ...base, models } : base]]
+  }))
+}
+/** A model out while its provider answers others (a spent quota group), by its id without `@effort`. */
+function modelOut(candidate: WorkerCandidate, providers: NonNullable<LadderOptions['providers']>): boolean {
+  return !!providers[candidate.provider]?.models?.[baseModel(candidate.model)]
+}
 export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean, providers: NonNullable<LadderOptions['providers']> = {}): boolean {
   const live = providers[candidate.provider]
+  if (modelOut(candidate, providers)) return false
   return settings.providers[candidate.provider] !== false && (live ? live.usable : candidate.provider !== 'chatgpt' || chatgpt)
 }
-function unavailableReason(provider: string, providers: NonNullable<LadderOptions['providers']>, lang: Lang): string {
-  const reason = providers[provider]?.reason
+function unavailableReason(provider: string, providers: NonNullable<LadderOptions['providers']>, lang: Lang, model?: string): string {
+  const reason = model ? providers[provider]?.models?.[baseModel(model)]?.reason : providers[provider]?.reason
   if (!reason && provider === 'chatgpt') return t(lang, 'toasts.providerQuota')
   const labels: Record<string, string> = lang === 'ko'
     ? { insufficient_balance: '잔액 부족', billing_exhausted: '결제 한도 소진', quota_exhausted: '사용량 한도 소진' }
@@ -222,7 +253,7 @@ export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Setting
       if (candidate && candidateUsable(candidate, settings, chatgpt, providers) && ticked) {
         return { target: { ...target }, effort: step.effort, rung, position: index + 1, skipped, ...(reasons.length ? { fallbackReason: reasons.join('; ') } : {}) }
       }
-      const reason = !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !ticked ? t(lang, 'workers.notCandidate', { name: candidate.model }) : providers[candidate.provider]?.usable === false ? unavailableReason(candidate.provider, providers, lang) : t(lang, 'toasts.providerQuota')
+      const reason = !candidate ? t(lang, 'toasts.workerMissing', { name: target.agent }) : settings.providers[candidate.provider] === false ? t(lang, 'workers.disabled', { provider: candidate.provider }) : !ticked ? t(lang, 'workers.notCandidate', { name: candidate.model }) : providers[candidate.provider]?.usable === false ? unavailableReason(candidate.provider, providers, lang) : modelOut(candidate, providers) ? unavailableReason(candidate.provider, providers, lang, candidate.model) : t(lang, 'toasts.providerQuota')
       const model = candidate?.model ?? target.model ?? target.agent
       skipped.push({ rung, position: index + 1, model, reason })
       reasons.push(`${model}: ${reason}`)
