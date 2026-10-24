@@ -91,14 +91,14 @@ test('domain ladders select UI for design/frontend, backend separately, otherwis
   assert.equal(blocked.target, undefined)
 })
 
-test('under a domain ladder only light work takes the light row; ordinary work takes the heavy one', () => {
+test('under a domain ladder light and ordinary work take the light row; hard work and plans the heavy one', () => {
   const s = normalizeSettings({ domainRules: {
     ui: { mode: 'ladder', rungs: { light: [{ target: { agent: 'deepseek-v4-1-flash' }, effort: 'low' }], plan: [{ target: { agent: 'gpt-6-astra' }, effort: 'high' }] } },
   } })
   for (const domain of ['design', 'frontend'] as const) {
     const at = (change: Partial<WorkerVerdict>) => ladderPick({ ...verdict, domain, ...change }, s.domainRules!.ui!, s, candidates, true, 'en').target?.agent
-    assert.equal(at({ level: 'light' }), 'deepseek-v4-1-flash')
-    for (const change of [{ level: 'standard' }, { level: 'deep' }, { level: 'deep', kind: 'plan' }] as const) assert.equal(at(change), 'gpt-6-astra')
+    for (const change of [{ level: 'light' }, { level: 'standard' }] as const) assert.equal(at(change), 'deepseek-v4-1-flash')
+    for (const change of [{ level: 'deep' }, { level: 'deep', kind: 'plan' }] as const) assert.equal(at(change), 'gpt-6-astra')
   }
 })
 

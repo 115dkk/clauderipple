@@ -135,7 +135,7 @@ test('a mode\'s domain ladders fold into two levels, the general ladder of the m
     hard: [{ target: { agent: 'h' }, effort: 'high' }], plan: [{ target: { agent: 'p' }, effort: 'high' }],
   })
   assert.deepEqual(mode.domainRules!.ui!.rungs, {
-    light: [{ target: { agent: 'u' }, effort: 'low' }], standard: [{ target: { agent: 'uh' }, effort: 'high' }],
+    light: [{ target: { agent: 'u' }, effort: 'low' }], standard: [{ target: { agent: 'u' }, effort: 'low' }],
     hard: [{ target: { agent: 'uh' }, effort: 'high' }], plan: [{ target: { agent: 'uh' }, effort: 'high' }],
   })
 })

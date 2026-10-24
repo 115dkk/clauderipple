@@ -233,6 +233,12 @@ the override. The router fills empty rungs in existing Base and mode domain ladd
 same `fillLadder` as general, without creating absent overrides. All six UI languages cover the
 controls. The shared model checklist stays on Base.
 
+**The split moved back 2026-10-24: light work is `light` + `standard`, heavy work `hard` + `plan`.**
+The 10-22 move below answered a worker judge that read ordinary design as `standard`; with the
+judge gone the session names the tier, and design names Opus itself with a written rule, so the
+owner's two rows mean difficulty again ("표준까지는 소넷"). `twoLevelRungs` reads stored rows the
+same way (light, else standard; heavy from plan down), so either stored split reads right.
+
 **A domain ladder has two levels, not four (2026-10-21; the split moved 2026-10-22).** The stored
 shape keeps the four rungs, so `ladderPick` and `rungOf` are untouched. Light work is the `light`
 rung alone; heavy work is `standard`, `hard` and `plan`, which hold one list. Normalization folds

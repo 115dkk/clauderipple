@@ -135,19 +135,21 @@ function ladderRungs(raw: unknown): Rule['rungs'] {
   return rungs
 }
 /**
- * A domain ladder folded into two levels: light work is the light rung alone, heavy work is
- * standard, hard and plan. "Easy design on Sonnet, ordinary to hard on Opus" is what the owner set
- * the two rows for; folding standard into the light row sent ordinary design to Sonnet, and a
- * design-only raise patched that for one domain (2026-10-21/22). Light reads its own rung, else
- * standard's; heavy reads plan, else hard, else standard, else light, so one filled row still runs
- * everything. The general ladder keeps its four rungs.
+ * A domain ladder folded into two levels: light work is the light and standard rungs, heavy work
+ * hard and plan, by difficulty as the owner sets the two rows (2026-10-24). From 2026-10-22 to
+ * 10-24 standard sat in the heavy row, because the worker judge read ordinary design as standard
+ * and the owner wanted design on Opus; the judge is gone, and design now names Opus itself with a
+ * written rule (memory design-work-opus-only), so a standard UI or backend task no longer runs on
+ * the heavy model. Light reads its own rung, else standard's; heavy reads plan, else hard, else
+ * standard, else light, so one filled row still runs everything and a ladder stored by the old
+ * split reads right. The general ladder keeps its four rungs.
  */
 export function twoLevelRungs(rungs: Rule['rungs']): Rule['rungs'] {
   const out: Rule['rungs'] = {}
   const light = rungs.light?.length ? rungs.light : rungs.standard
   const heavy = [rungs.plan, rungs.hard, rungs.standard, rungs.light].find(list => list?.length)
-  if (light?.length) out.light = copy(light)
-  if (heavy?.length) { out.standard = copy(heavy); out.hard = copy(heavy); out.plan = copy(heavy) }
+  if (light?.length) { out.light = copy(light); out.standard = copy(light) }
+  if (heavy?.length) { out.hard = copy(heavy); out.plan = copy(heavy) }
   return out
 }
 /**

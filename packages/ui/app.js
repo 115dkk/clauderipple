@@ -3787,8 +3787,8 @@ const MOD_CLAUDE_IDS = { haiku: "claude-haiku-5-5", sonnet: "claude-sonnet-5-5",
 const MOD_RUNGS = ["light", "standard", "hard", "plan"];
 // A domain ladder has two levels: light work (the light rung) and heavy work (standard, hard, plan).
 const MOD_DOMAIN_LEVELS = [
-  { key: "light", rungs: ["light"] },
-  { key: "heavy", rungs: ["standard", "hard", "plan"] },
+  { key: "light", rungs: ["light", "standard"] },
+  { key: "heavy", rungs: ["hard", "plan"] },
 ];
 const modClaude = (model, effort) => ({ target: { agent: "general-purpose", model }, effort });
 /** The mod's defaults (packages/mod/hooks/settings.ts), for a router that has stored nothing yet. */
@@ -4216,14 +4216,14 @@ function modRungs() {
   return general && general.mode === "ladder" && general.rungs ? general.rungs : {};
 }
 /** A domain ladder folded into two levels, as the mod folds it (settings.ts twoLevelRungs): light
- * work is the light rung, heavy work standard+hard+plan. */
+ * work is light+standard, heavy work hard+plan. */
 function modTwoLevelRungs(rungs) {
   const out = {};
   const filled = (list) => list && list.length;
   const light = filled(rungs.light) ? rungs.light : rungs.standard;
   const heavy = [rungs.plan, rungs.hard, rungs.standard, rungs.light].find(filled);
-  if (filled(light)) out.light = clone(light);
-  if (heavy) { out.standard = clone(heavy); out.hard = clone(heavy); out.plan = clone(heavy); }
+  if (filled(light)) { out.light = clone(light); out.standard = clone(light); }
+  if (heavy) { out.hard = clone(heavy); out.plan = clone(heavy); }
   return out;
 }
 /** One menu of `model · effort` for the ticked models, effort limited to what each model takes; the session's model too. */
