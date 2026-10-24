@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { ConfigStore, DEFAULTS, homeDir, configPath } from "../../router/src/config.ts";
 import { adminPort } from "../../router/src/admin.ts";
+import { CLI_WINDOW_MAX } from "../../router/src/bootstrap.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, checkProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
 import { agentDefinitionPath, agentState, installAgent, isLinux, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
@@ -275,7 +276,9 @@ async function install(): Promise<void> {
     console.log(`${settingsPath()} was left as it was, so Claude Code does not depend on a router that is not answering. Fix the router, then run install again.`);
     return;
   }
-  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), ...(maxCtx ? { maxContextTokens: Number(maxCtx) } : {}), models: cfg.cli.models ?? {}, respectDirect: true });
+  // The cap sits at Claude Code's ceiling for a per-model window, so each routed model compacts at
+  // its own window from the bootstrap (CLI_WINDOW_MAX); a flag still sets another.
+  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), maxContextTokens: maxCtx ? Number(maxCtx) : CLI_WINDOW_MAX, models: cfg.cli.models ?? {}, respectDirect: true });
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
   // Something to double-click for the menu-bar app, which is what offers repair when the router is
