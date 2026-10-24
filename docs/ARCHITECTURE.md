@@ -112,6 +112,65 @@ configured target; an authorized temporary-file write proceeded and an explicitl
 forbidden deletion was denied. The registered `CLAUDE_CODE_AUTO_MODE_MODEL`
 environment variable did not change the actual native classifier requests.
 
+#### A separate first-stage target (CLI 2.1.310, 2026-10-24)
+
+The two stages, as the 2.1.310 binary builds them (`classifierStage` `xml_s1` /
+`xml_s2`; `n` is one thinking allowance added to both):
+
+- Stage 1: `max_tokens: 64 + n`, `stop_sequences: ["</block>"]`, the last user
+  text ending in an instruction to err on the side of blocking. `<block>no` allows
+  the action at once; `<block>yes` sends it to stage 2.
+- Stage 2: `max_tokens: 8192 + n`, no stop sequence, `<thinking>` then `<block>`.
+  Its verdict is final.
+- The server can set `tengu_auto_mode_config.twoStageClassifier` to `"fast"`
+  (stage 1 alone, `256 + n`, no stop sequence, and its `yes` blocks) or
+  `"thinking"` (stage 2 alone). A severity-score site stops at `</severity>`.
+
+In 2.1.310 `CLAUDE_CODE_AUTO_MODE_MODEL` does steer the native classifier (unlike
+2.1.284 above), but a server-configured classifier model takes priority, and the
+variable is refused for `claude-sonnet-5-5`, `claude-opus-5-5` and `claude-opus-5`
+(list `nH`, check `c4o`) with the warning that "the API's safeguards refuse the
+classifier's escalated check on it". `ANTHROPIC_DEFAULT_SONNET_MODEL` naming a
+5.5 model is refused as the classifier the same way.
+
+Measured 2026-10-24 by sending both stages to `claude-sonnet-5-5` through an
+`accountPool` provider: six first stages answered in 0.8–2.2 s with 8–9 output
+tokens (`stop_sequence`); both second stages came back `stop_reason: "refusal"`
+with 0 output tokens in about 1 s. The engine turns a stage-2 refusal into a block
+that keeps the stage-1 verdict ("Blocked by fast classifier"), and its refusal
+fallback model is empty in the external build, so nothing retries it. GPT-6 Luna at
+`high` effort took 4–20 s per call on both stages.
+
+`stage1: { provider, model, effort }` therefore sends only the exact first-stage
+shape (one stop sequence, `</block>`, and `max_tokens < 8192`) to its own target.
+Stage 2, fast mode, the severity score and any shape not recognised keep the main
+target. The router log tags the first stage `(auto-mode classifier, stage 1)`;
+`requests.jsonl` keeps `purpose: "auto-mode-classifier"` and names the target.
+
+```json
+"providers": {"claude-classifier": {"type": "anthropic", "auth": "claude-code", "accountPool": true, "limits": false}},
+"autoModeClassifier": {"provider": "chatgpt", "model": "gpt-6-luna", "effort": "high",
+                       "stage1": {"provider": "claude-classifier", "model": "claude-sonnet-5-5"}}
+```
+
+An `accountPool` provider with no `models` list is a target only where a setting
+names it, so no other Claude request moves to it. It signs in as the observed
+Claude Code login, and every first stage counts against that subscription.
+
+Why this is no looser than the native classifier:
+
+- A first-stage `no` allows the action without stage 2, as it does natively. The
+  only change is who answers: Sonnet 5.5 instead of the engine's default.
+- A first-stage `yes` always reaches the main target's full second stage.
+- A first stage that fails (a refusal, an HTTP error, no usable Claude account) is
+  a block in the engine, never an allow.
+- Fast mode is excluded on purpose: there stage 1's verdict is final, so it stays
+  with the target the operator chose for final verdicts.
+
+Also considered: answering every first stage `<block>yes` in the router so that
+every action gets the full second stage. That is stricter than native, but every
+action, including a plain file write, then waits for a whole second stage.
+
 Verified in `app.asar` (`.vite/build/index.chunk-C0sgyfNn.js`, `-2CuMdv3h.js`):
 
 - The gateway setting (`inferenceGatewayBaseUrl`) is a **whole-app deployment

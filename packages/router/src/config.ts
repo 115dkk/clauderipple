@@ -422,8 +422,12 @@ export type Config = {
   providers: Record<string, Provider>;
   /** Picker-slot alias → route. Keys are the model ids the app sends (e.g. "claude-opus-4-8"). */
   routes: Record<string, Route>;
-  /** Opt-in target for Claude Code's Auto mode security-monitor requests only. */
-  autoModeClassifier?: Pick<Route, "provider" | "model" | "effort">;
+  /**
+   * Opt-in target for Claude Code's Auto mode security-monitor requests only. `stage1`, when set,
+   * answers the first stage's yes/no instead; the second stage and every other shape keep the main
+   * target (ARCHITECTURE §2, "Optional Auto mode classifier target").
+   */
+  autoModeClassifier?: Pick<Route, "provider" | "model" | "effort"> & { stage1?: Pick<Route, "provider" | "model" | "effort"> };
   direct: DirectRule[];
   /** Short names usable in "[[ripple: sol@xhigh]]" markers and "@effort" suffixes. */
   aliases: Record<string, string>;
@@ -759,14 +763,22 @@ export function validate(c: Config): string[] {
   const errors: string[] = [];
   if (c.autoUpdate !== undefined && typeof c.autoUpdate !== "boolean") errors.push("autoUpdate must be true or false");
   if (c.autoModeClassifier !== undefined) {
-    const target = c.autoModeClassifier;
-    if (!target || typeof target !== "object") errors.push("autoModeClassifier must be an object");
-    else {
+    // The first-stage target is checked the same way: a typo there would otherwise surface only as a
+    // classifier error, and so a blocked action, on every first stage.
+    const checkTarget = (target: Pick<Route, "provider" | "model" | "effort"> | undefined, label: string): boolean => {
+      if (!target || typeof target !== "object") {
+        errors.push(`${label} must be an object`);
+        return false;
+      }
       const provider = c.providers[target.provider];
-      if (!provider) errors.push("autoModeClassifier: unknown provider");
-      else if (provider.type === "anthropic" && !provider.accountPool) errors.push("autoModeClassifier: provider is ingress-only");
-      if (typeof target.model !== "string" || !target.model.trim()) errors.push("autoModeClassifier: missing model");
-      if (target.effort !== undefined && typeof target.effort !== "string") errors.push("autoModeClassifier: effort must be a string");
+      if (!provider) errors.push(`${label}: unknown provider`);
+      else if (provider.type === "anthropic" && !provider.accountPool) errors.push(`${label}: provider is ingress-only`);
+      if (typeof target.model !== "string" || !target.model.trim()) errors.push(`${label}: missing model`);
+      if (target.effort !== undefined && typeof target.effort !== "string") errors.push(`${label}: effort must be a string`);
+      return true;
+    };
+    if (checkTarget(c.autoModeClassifier, "autoModeClassifier") && c.autoModeClassifier.stage1 !== undefined) {
+      checkTarget(c.autoModeClassifier.stage1, "autoModeClassifier.stage1");
     }
   }
   if (c.webSearch !== undefined) {
