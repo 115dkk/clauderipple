@@ -841,7 +841,7 @@ const KO: Record<Key, string> = {
   'toasts.unnamedModel': '리플: 직접 고르신 모델이 아니어서 "{model}" 대신 등급에 맞는 {name}에 맡깁니다.',
   'toasts.transcriptEmpty': '대화 기록이 없거나 압축에 쓸 수 있는 토큰 한도를 넘었습니다.',
   'toasts.summaryEmpty': 'Haiku가 쓸 만한 요약을 보내지 않았습니다.',
-  'toasts.compactFallback': '리플: 요약 모델이 응답하지 않아 현재 대화의 기본 방식으로 압축합니다.',
+  'toasts.compactFallback': '리플: 압축 모델이 응답하지 않아 현재 대화의 기본 방식으로 압축합니다.',
   'toasts.error': '리플: {reason}',
   'toasts.jevTimeout': 'Jev 응답 대기 시간 초과',
   'toasts.jevRejected': 'Jev 키 인증 실패',

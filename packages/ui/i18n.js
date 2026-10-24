@@ -153,7 +153,7 @@ const I18N = {
     "mod.compactAt": "압축 기준",
     "mod.compactAtDefault": "모델 기본",
     "mod.compactAtCustom": "직접 입력 (k)",
-    "mod.compactAtHint": "대화가 이 크기에 가까워지면 압축합니다. 세션에서 /autocompact로 바꾼 값과 같습니다.",
+    "mod.compactAtHint": "대화가 설정한 크기보다 조금 앞에서 압축됩니다. 세션에서 /autocompact로 설정한 값과 같습니다.",
     "mod.compactAtRange": "100k~1M 토큰 사이로 입력해 주세요.",
     "mod.context": "컨텍스트",
     "mod.look": "화면 표시",
