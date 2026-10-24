@@ -2088,6 +2088,39 @@ test('a poll that finds nothing new writes no state, and the band draws the same
   await ui.unmount()
 })
 
+// 2026-10-24: with workers running, 리플이 and the water stopped short and started over — the band
+// read the agent list, written on every agent step and tool call, and took each worker request as
+// its route. Each redraw is a new picture, so every one restarts the motion.
+test('workers do not redraw the band: it reads agent counts, not the list, and its route is the chat\'s own', async ($, on) => {
+  const b = boundaries(on)
+  const request = (at: string, target: string, subagent: boolean) => ({ at, source: target, target, provider: 'anthropic', status: 200, ok: true, ms: 1000, session: 'session-test', ...(subagent ? { subagent: true } : {}) })
+  let requests = [request('2026-10-10T13:19:10', 'claude-opus-5-5', false)]
+  on('http.fetch', { url: /\/api\/requests/ }, () => ({ value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ requests }) } }))
+  http(on)
+  const reads: string[] = []
+  const writes: string[] = []
+  let reading = false
+  let writing = false
+  on('state.get', { plugin: 'ripple' }, ($, e, next) => { if (reading) reads.push(e.key); return next(e) })
+  on('state.set', { plugin: 'ripple' }, async ($, e, next) => { if (writing) writes.push(e.key); return next(e) })
+  await start($)
+  await b.clock.advance(3000)
+  reading = true
+  const ui = await band($, 'desktop')
+  await ui.drawn()
+  reading = false
+  expect(reads).toContain('agentCounts')
+  expect(reads).not.toContain('agents')
+  writing = true
+  requests = [request('2026-10-10T13:19:20', 'deepseek-v4.1-flash', true), ...requests]
+  await b.clock.advance(3000)
+  expect(writes).not.toContain('last')
+  requests = [request('2026-10-10T13:19:30', 'claude-opus-5-5', false), ...requests]
+  await b.clock.advance(3000)
+  expect(writes).toContain('last')
+  await ui.unmount()
+})
+
 test('an idle band is asked again only when the minute it shows changes', async ($, on) => {
   // Each ask is a new answer the desktop draws afresh; idle, only the countdown may cause one.
   const b = boundaries(on)

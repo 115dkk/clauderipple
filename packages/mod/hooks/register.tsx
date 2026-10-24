@@ -52,6 +52,8 @@ const modelIs = atom({ plugin: 'ripple', key: 'modelIs' } as const, null)
 const lastRequest = atom({ plugin: 'ripple', key: 'lastRequest' } as const, null)
 const lastSpawn = atom({ plugin: 'ripple', key: 'lastSpawn' } as const, null)
 const agents = atom({ plugin: 'ripple', key: 'agents' } as const, [])
+/** What the band shows of the agents (countAgents): it reads this, never the list above. */
+const agentCounts = atom({ plugin: 'ripple', key: 'agentCounts' } as const, { live: 0, total: 0 })
 const cache = atom({ plugin: 'ripple', key: 'cache' } as const, null)
 const warm = atom({ plugin: 'ripple', key: 'warm' } as const, { pings: 0, cost: 0 })
 const warmHere = atom({ plugin: 'ripple', key: 'warmHere' } as const, null)
@@ -450,14 +452,16 @@ async function refreshRouter($: EngineInterface): Promise<void> {
     await refreshPhoneQueue($, session)
     const open = await isLogUp($)
     if (!open && await read($, bandHidden)) { await update($, line, () => null); return }
-    const own = await $.http.fetch(`${admin}/api/requests?kind=messages&n=${open ? 60 : 1}&session=${encodeURIComponent(session)}`)
+    const own = await $.http.fetch(`${admin}/api/requests?kind=messages&n=${open ? 60 : 20}&session=${encodeURIComponent(session)}`)
     if (!own.ok) throw new Error(t(language, 'commands.routerHttp', { status: own.status }))
     const mine = (object(JSON.parse(own.text)).requests ?? []) as StatusRequest[]
     const newest = mine[0] ?? null
     const notice = newest && newest.session === undefined ? t(language, 'band.routerRestart') : null
     if (notice !== await read($, line)) await update($, line, () => notice)
-    // Do not show a route belonging to another chat from a router without session support.
-    const route = notice ? null : newest
+    // Do not show a route belonging to another chat from a router without session support. The
+    // route is this chat's own: subagents share its session id, and a route that moved with each
+    // worker request redrew the band every poll, starting 리플이's motion over each time.
+    const route = notice ? null : mine.find(r => !r.subagent) ?? await read($, last)
     if (JSON.stringify(route) !== JSON.stringify(await read($, last))) await update($, last, () => route)
     if (!open) return
     let shown = mine
@@ -1222,6 +1226,7 @@ async function tick($: EngineInterface): Promise<void> {
     if (list.some(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000)) {
       await update($, agents, value => value.map(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000 ? { ...a, state: 'waiting' } : a))
     }
+    await countAgents($)
     await scheduleCountdown($)
     if (await read($, handoff)) await driveHandoff($)
     const queued = await read($, adviceQueue)
@@ -1278,10 +1283,19 @@ async function agentsClock($: EngineInterface): Promise<void> {
   } catch (error) { await report($, 'agents clock', error) }
 }
 
+/**
+ * The band's agent counts, written only when one moves. The agent list changes on every step and
+ * tool call of every agent, and a band that read it redrew with each, starting its motion over.
+ */
+async function countAgents($: EngineInterface): Promise<void> {
+  const list = await read($, agents)
+  const counts = { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length }
+  if (!same(counts, await read($, agentCounts))) await update($, agentCounts, () => counts)
+}
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
   const s = await currentSettings($)
   const p = await read($, pick)
-  const list = await read($, agents)
+  const counts = await read($, agentCounts)
   const record = await read($, last)
   const saving = (await read($, saveUntil) ?? 0) > await $.clock.now()
   const l = await read($, limit)
@@ -1296,7 +1310,7 @@ async function dashboard($: EngineInterface, working: boolean): Promise<Dashboar
     limit: l ? { ...l, save: saving } : null, route: record ? routeOf(record) : null, notice: await read($, line),
     limits: await read($, limits) ?? [],
     auto: s.effortAuto, handoff: await read($, advice) ? 'advised' : s.handoffButton === 'always' ? 'always' : 'off',
-    agents: { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length },
+    agents: counts,
     compactions: await read($, compactions),
     logOpen: await read($, logOpen), agentsOpen: await read($, agentsOpen), effortMenu: await read($, effortMenuOpen),
     swampAt: s.swampAt, hide: s.hide, extras: s.extras, isWorking: working,
@@ -1661,6 +1675,7 @@ export const register: Register = on => {
         const now = await $.clock.now()
         const before = (await read($, agents)).find(a => a.id === e.agentId)
         await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state: e.reason === 'answer' ? 'done' : 'failed', endedAt: now, now: undefined, toolSince: undefined } : a))
+        await countAgents($)
         // A picked worker's outcome, once, joined to its pick by id: whether the tier it was given
         // (by the main chat or the judge) was enough is read from these lines later.
         if (before?.pick?.id && (before.state === 'running' || before.state === 'waiting')) {
@@ -1757,6 +1772,7 @@ export const register: Register = on => {
         const effort = chosen?.effort ?? /@([a-z]+)$/.exec(result.model)?.[1]
         const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: 'running', startedAt: await $.clock.now(), cost: 0 }
         await update($, agents, list => [...list.filter(a => a.id !== rec.id), rec].slice(-40))
+        await countAgents($)
       }
     } catch (error) { await report($, 'agent.spawn record', error) }
     return result

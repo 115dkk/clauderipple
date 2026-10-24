@@ -25,6 +25,8 @@ export type StatusRequest = {
   session?: string
   /** Sent by the session this mod runs in. */
   mine?: boolean
+  /** Sent from inside a subagent (the router reads Claude Code's agent-id header). */
+  subagent?: true
 }
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -379,6 +381,8 @@ declare module 'claude-code' {
       deciding: boolean
       paused: boolean
       agents: AgentRec[]
+      /** Running (or waiting) and all agents, for the band: written only when a count moves. */
+      agentCounts: { live: number; total: number }
       cache: CacheMemo | null
       warm: WarmState
       /** Keep-warm for this chat alone, set by the band's flame; null follows Settings. */
