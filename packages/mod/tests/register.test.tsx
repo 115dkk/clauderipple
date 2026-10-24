@@ -2027,7 +2027,7 @@ test('an agent\'s run of tool calls unfolds on press, its paths short against th
   await $.agent.spawn(SPAWN)
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
   await ui.press({ key: 'open-worker-1' })
-  expect(await ui.find({ type: 'Button', text: /^Ran 1 command, Read 1 file/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /^Ran a command, read a file/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: './gradlew test' })).toBeUndefined()
   await ui.press({ key: 'run-c1' })
   expect(await ui.find({ type: 'Text', text: /^\.\/gradlew test$/ })).toBeDefined()

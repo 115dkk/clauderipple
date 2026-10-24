@@ -841,7 +841,7 @@ test('an agent\'s conversation reads in the pane: the task, its words, its tools
     expect(await live.find({ key: 'task-body' }) !== undefined, surface).toBe(surface === 'desktop')
     // Its three calls fold into one line. The terminal keeps the failure count and the call in
     // flight under it; the desktop's line is the app's: its words alone, no mark, no count.
-    expect(await live.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Read 1 file, Ran 1 command, Edited 1 file/ }), surface).toBeDefined()
+    expect(await live.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Read a file, ran a command, edited a file/ }), surface).toBeDefined()
     expect(await live.find({ type: 'Text', text: '1 failed' }) !== undefined, surface).toBe(surface === 'terminal')
     expect(await live.find({ type: 'Text', text: /^Edit$/ }) !== undefined, surface).toBe(surface === 'terminal')
     for (const tool of ['Read', 'Bash']) expect(await live.find({ type: 'Text', text: new RegExp('^' + tool + '$') }), surface + ' ' + tool).toBeUndefined()
@@ -1417,13 +1417,16 @@ test('a run of tool calls is headed in one line as the Claude app heads it', () 
   // A file read twice counts once; a read and an edit of one file count in each kind.
   // The Claude app's own Korean (2026-10-24): "실행됨 명령 20개, 읽음 파일 15개".
   expect(runSummary(run, 'ko')).toEqual({ text: '실행됨 명령 2개, 읽음 파일 1개, 편집함 파일 1개', failed: 1 })
-  expect(runSummary(run.slice(0, 2), 'en')).toEqual({ text: 'Ran 1 command, Read 1 file', failed: 0 })
+  // The app's English: the first word capitalised, the rest as written.
+  expect(runSummary(run.slice(0, 2), 'en')).toEqual({ text: 'Ran a command, read a file', failed: 0 })
   expect(runSummary([call('1', 'Bash', 'a'), call('2', 'Bash', 'b')], 'es').text).toBe('2 comandos ejecutados')
   expect(runSummary([call('1', 'Bash', 'a')], 'es').text).toBe('1 comando ejecutado')
-  // Five kinds or more: the first three, the rest counted.
-  const kinds = [call('1', 'Bash', 'x'), call('2', 'Read', 'a'), call('3', 'Edit', 'b'), call('4', 'Grep', 'c'), call('5', 'WebFetch', 'd'), call('6', 'WebFetch', 'e')]
-  expect(runSummary(kinds, 'ko').text).toBe('실행됨 명령 1개, 읽음 파일 1개, 편집함 파일 1개, 그 외 작업 3개')
-  expect(runSummary(kinds, 'en').text).toBe('Ran 1 command, Read 1 file, Edited 1 file, and 3 more actions')
+  // Every kind shown, in the order they came, but the tools the app has no kind for last
+  // (2026-10-24: ours led with "사용함 도구 2개" where the app's view beside it ended with it).
+  // A search, a lookup and a browse name no count; a page fetched twice counts once.
+  const kinds = [call('0', 'ToolSearch', 'q'), call('1', 'Bash', 'x'), call('2', 'Read', 'a'), call('3', 'Write', 'b'), call('4', 'Grep', 'c'), call('5', 'WebFetch', 'd'), call('6', 'WebFetch', 'd'), call('7', 'Skill', 's'), call('8', 'Glob', 'g'), call('9', 'Agent', 'w')]
+  expect(runSummary(kinds, 'ko').text).toBe('실행됨 명령 1개, 읽음 파일 1개, 생성됨 파일 1개, 검색함 코드, 가져옴 페이지 1개, 찾음 파일, 실행됨 에이전트 1개, 사용함 도구 2개')
+  expect(runSummary(kinds, 'en').text).toBe('Ran a command, read a file, created a file, searched code, fetched a page, found files, ran an agent, used 2 tools')
 })
 
 test('an edit counts the lines it adds and removes from what the model sent, and a run sums its answered edits', () => {
@@ -1507,7 +1510,7 @@ test('a run of calls folds into its head, unfolds call by call when pressed; a s
   drawPane(on, 'runs-open', (el, surface) => renderAgents(el, frameOf(surface, 64), { agents: [done], now: NOW, showDone: false, open: { id: 'a9', talk: { entries: talk }, runsOpen: ['b0'] } }, actions))
   for (const surface of SURFACES) {
     const folded = await mount($, 'runs-folded', surface, 64)
-    expect(await folded.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Ran 8 commands, Edited 1 file/ }), surface).toBeDefined()
+    expect(await folded.find({ type: surface === 'desktop' ? 'Text' : 'Button', text: /^Ran 8 commands, edited a file/ }), surface).toBeDefined()
     expect(await folded.find({ type: 'Text', text: '1 failed' }) !== undefined, surface).toBe(surface === 'terminal')
     // Folded, none of its calls show. The single call after the words: on the terminal its own
     // line, no head; on the desktop a run of one, as the Claude app draws it.
@@ -1515,7 +1518,7 @@ test('a run of calls folds into its head, unfolds call by call when pressed; a s
     expect(await folded.findAll({ type: 'Text', text: /^Bash$/ }), surface).toHaveLength(desktop ? 0 : 1)
     expect(await folded.find({ type: 'Text', text: 'git status' }) !== undefined, surface).toBe(!desktop)
     expect(await folded.find({ type: 'Button', key: 'run-solo' }) !== undefined, surface).toBe(desktop)
-    if (desktop) expect(await folded.find({ type: 'Text', text: 'Ran 1 command' }), surface).toBeDefined()
+    if (desktop) expect(await folded.find({ type: 'Text', text: 'Ran a command' }), surface).toBeDefined()
     await folded.press({ key: 'run-b0' })
     const open = await mount($, 'runs-open', surface, 64)
     expect(await open.findAll({ type: 'Text', text: /^Bash$/ }), surface).toHaveLength(desktop ? 8 : 9)
