@@ -416,6 +416,13 @@ declare module 'claude-code' {
       agentRunsOpen: string[]
       /** Counts the Agents pane's seconds while an agent runs: a write redraws its clocks. */
       agentsTick: number
+      /**
+       * The Context pane's precise count (the token-count API's), kept against the context's tokens
+       * when it was asked for (`basis`); `busy` while it runs, `error` when it failed.
+       */
+      contextFull: { basis: number | null; breakdown?: import('claude-code').SessionContextBreakdown; busy?: boolean; error?: string } | null
+      /** The Context pane's sections shown whole. */
+      contextShowAll: ('memory' | 'mcp' | 'skills' | 'agents')[]
       /** The person's last two prompts as submitted, mid-turn ones included (userNamed). */
       heardPrompts: string[]
       delegationPin: DelegationPin | null

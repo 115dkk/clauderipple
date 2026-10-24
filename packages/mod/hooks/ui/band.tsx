@@ -437,17 +437,34 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
   )
 }
 
-function contextDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
+/**
+ * The context ring and its share. With the Context pane to open it is a button (the app dropped the
+ * breakdown its own ring under the composer opened, 2026-10-24): our ring and words, lit under the
+ * pointer, a blank press laid over them, as the route is (a host Button inks its Text since then).
+ */
+function contextDrawn(el: Els, frame: Frame, view: DashboardView, onPress?: () => void): DrawnFact | null {
   const ctx = view.context
   if (!ctx || !view.extras.includes('context')) return null
-  const { Text } = el
+  const { Box, Text } = el
   const tone = contextTone(ctx.percent, view.swampAt)
-  const tip = contextFact(frame, view)?.card?.join(' · ')
+  const card = contextFact(frame, view)?.card ?? []
+  const tip = [...card, ...(onPress ? [t(frame.lang, 'band.contextOpen')] : [])].join(' · ') || undefined
   const cells = Math.ceil((16 + CELL_PX + textPx('100%')) / CELL_PX)
-  return drawnFact(el, 'context', cells, [
-    pic(el, 'ring', lookOf(frame).art.ring(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16),
-    <Text key="ctx-value" {...figure(frame, tone)}>{Math.round(ctx.percent) + '%'}</Text>,
-  ], tip)
+  const ring = pic(el, 'ring', lookOf(frame).art.ring(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16)
+  const value = <Text key="ctx-value" {...figure(frame, tone)}>{Math.round(ctx.percent) + '%'}</Text>
+  if (!onPress) return drawnFact(el, 'context', cells, [ring, value], tip)
+  return {
+    key: 'context',
+    cells,
+    tip,
+    node: (
+      <Box key="fact-context" position="relative" flexDirection="row" alignItems="center" columnGap={1} width={cells} flexShrink={0} {...hoverLight(frame, tipScope('context'))}>
+        {ring}
+        {value}
+        {press(el, 'context', cells * CELL_PX, onPress)}
+      </Box>
+    ),
+  }
 }
 
 function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
@@ -891,7 +908,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // The second row is decided before the first row's budget: when it draws, the first row's limit
   // fact steps aside and the route takes its room.
   const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS)
-  const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view)])].filter((f): f is DrawnFact => f !== null)
+  const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view, actions.toggleContext), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view)])].filter((f): f is DrawnFact => f !== null)
   // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
   // spare words (the icons' beside it) go first when the row narrows.
   let words: readonly string[] = [...WORDLESS]

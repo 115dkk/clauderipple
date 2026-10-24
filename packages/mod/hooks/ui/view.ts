@@ -118,6 +118,8 @@ export type BandActions = {
   hide?: () => void
   /** Releases the session-only delegation pin. */
   releaseDelegationPin?: () => void
+  /** Opens or closes the Context pane (desktop: the context chip is its press). */
+  toggleContext?: () => void
 }
 
 // ---- Alerts and cards ------------------------------------------------------------------------

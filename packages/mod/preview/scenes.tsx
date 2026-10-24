@@ -2,13 +2,15 @@
 // renderer with fixed data, drawn on the desktop surface and printed as `@@SCENE {...}`.
 
 import { test } from 'claude-code/testing'
-import type { RenderElement, RenderPropsOf } from 'claude-code'
+import type { ContextGridSquare, RenderElement, RenderPropsOf, SessionContextBreakdown } from 'claude-code'
 
 import type { AgentRec, LimitItem, Settings, Skin } from '../types'
 import { normalizeSettings } from '../hooks/settings'
 import { renderAgents, talkOf } from '../hooks/ui/agents'
 import { renderAlert } from '../hooks/ui/alerts'
 import { renderBand } from '../hooks/ui/band'
+import { renderContext } from '../hooks/ui/context'
+import type { ContextView } from '../hooks/ui/context'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
@@ -193,7 +195,61 @@ function queued(el: Els, frame: Frame, view: DashboardView, first: string): Rend
   return (<Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{renderPhoneQueue(el, frame, { count: 2, first })}{renderBand(el, frame, view, noop)}</Box>) as RenderElement
 }
 
+/** A session's context as `$.session.usage({ breakdown })` reports it (2.1.304's category names and theme keys). */
+const CONTEXT: SessionContextBreakdown = (() => {
+  const max = 160_000
+  const categories: SessionContextBreakdown['categories'] = [
+    { name: 'System prompt', tokens: 3100, color: 'promptBorder', isDeferred: false, kind: 'used' },
+    { name: 'System tools', tokens: 14_800, color: 'inactive', isDeferred: false, kind: 'used' },
+    { name: 'MCP tools', tokens: 6200, color: 'cyan_FOR_SUBAGENTS_ONLY', isDeferred: false, kind: 'used' },
+    { name: 'MCP tools (deferred)', tokens: 21_000, color: 'inactive', isDeferred: true, kind: 'deferred' },
+    { name: 'Custom agents', tokens: 1900, color: 'permission', isDeferred: false, kind: 'used' },
+    { name: 'Memory files', tokens: 4100, color: 'claude', isDeferred: false, kind: 'used' },
+    { name: 'Skills', tokens: 2600, color: 'warning', isDeferred: false, kind: 'used' },
+    { name: 'Messages', tokens: 41_200, color: 'purple_FOR_SUBAGENTS_ONLY', isDeferred: false, kind: 'used' },
+    { name: 'Free space', tokens: 70_100, color: 'promptBorder', isDeferred: false, kind: 'free' },
+    { name: 'Autocompact buffer', tokens: 16_000, color: 'inactive', isDeferred: false, kind: 'buffer' },
+  ]
+  const squares: ContextGridSquare[] = []
+  for (const c of categories.filter(c => c.kind !== 'deferred')) {
+    const exact = c.tokens / (max / 100)
+    const count = Math.max(1, Math.round(exact))
+    for (let i = 0; i < count && squares.length < 100; i++) squares.push({ color: c.color, isFilled: c.kind !== 'free', categoryName: c.name, tokens: c.tokens, percentage: Math.round((c.tokens / max) * 100), squareFullness: i === count - 1 && exact % 1 > 0 ? exact % 1 : 1 })
+  }
+  return {
+    categories, totalTokens: 73_900, maxTokens: max, rawMaxTokens: max, autocompactSource: 'model-default', percentage: 46,
+    gridRows: Array.from({ length: 10 }, (_, y) => squares.slice(y * 10, y * 10 + 10)),
+    model: 'claude-opus-5-5',
+    memoryFiles: [
+      { path: '/work/CLAUDE.md', type: 'Project', tokens: 1800 },
+      { path: '/home/me/.claude/CLAUDE.md', type: 'User', tokens: 2100 },
+      { path: '/home/me/.claude/projects/work/memory/MEMORY.md', type: 'AutoMem', tokens: 200 },
+    ],
+    mcpTools: [
+      ...Array.from({ length: 8 }, (_, i) => ({ name: 'mcp__linear__t' + i, serverName: 'linear', tokens: 500, isLoaded: true })),
+      ...Array.from({ length: 6 }, (_, i) => ({ name: 'mcp__browser__t' + i, serverName: 'browser', tokens: 366, isLoaded: true })),
+      ...Array.from({ length: 20 }, (_, i) => ({ name: 'mcp__gmail__t' + i, serverName: 'gmail', tokens: 1050, isLoaded: false })),
+    ],
+    agents: ['gpt-6-1-sol', 'gpt-6-astra', 'deepseek-v4-1-flash', 'gemini-3-8-flash', 'ripple:auto', 'statusline-setup'].map((agentType, i) => ({ agentType, source: i < 4 ? 'userSettings' : 'plugin', tokens: 420 - i * 30 })),
+    slashCommands: { totalCommands: 34, includedCommands: 30, tokens: 1100 },
+    skills: {
+      totalSkills: 9, includedSkills: 8, tokens: 2600,
+      skillFrontmatter: ['code-discipline', 'seo-os', 'store-release', 'plugin-authoring', 'dataviz', 'docs', 'pdf', 'xlsx'].map((name, i) => ({ name, source: i % 3 ? 'userSettings' : 'plugin', ...(i % 3 ? {} : { pluginName: 'anthropic-skills' }), tokens: 520 - i * 40 })),
+    },
+    autoCompactThreshold: 144_000, isAutoCompactEnabled: true, apiUsage: null,
+  }
+})()
+const CONTEXT_VIEW: ContextView = { breakdown: CONTEXT, basis: 'summary', busy: false, open: [], place: { cwd: '/work', home: '/home/me' }, swampAt: 50 }
+
 const SCENES: Scene[] = [
+  // The Context pane the band's context chip opens (2026-10-24): an estimate, a precise count under
+  // way with a section opened, a narrow pane, the flat skin, and nothing to show yet.
+  { name: 'context', columns: PANE, draw: (el, f) => renderContext(el, f, CONTEXT_VIEW, noop) },
+  { name: 'context-busy-open', columns: PANE, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, busy: true, open: ['skills'] }, noop) },
+  { name: 'context-narrow', columns: PANE_NARROW, draw: (el, f) => renderContext(el, f, CONTEXT_VIEW, noop) },
+  { name: 'context-wide', columns: 100, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, basis: 'full' }, noop) },
+  { name: 'flat-context', columns: PANE, skin: 'flat', draw: (el, f) => renderContext(el, f, CONTEXT_VIEW, noop) },
+  { name: 'context-none', columns: PANE, draw: (el, f) => renderContext(el, f, { ...CONTEXT_VIEW, breakdown: null, error: 'count_tokens 529 overloaded' }, noop) },
   { name: 'band', draw: (el, f) => site(el, f, DASH) },
   // The delegation pin's line at the top of the capsule (2026-10-23): with the person's sentence, without, narrow, flat.
   { name: 'band-pinned', draw: (el, f) => site(el, f, { ...DASH, delegationPin: 'Sol', delegationSaid: '앞으로 솔로 해' }) },

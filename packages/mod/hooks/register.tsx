@@ -24,10 +24,12 @@ import { PHONE_QUEUE_ROWS, renderPhoneQueue } from './ui/queue'
 import { renderSettings } from './ui/settings'
 import { renderSetup } from './ui/setup'
 import { renderAgents, renderAgentsFallback, talkOf } from './ui/agents'
+import { renderContext, renderContextFallback } from './ui/context'
+import type { ContextActions } from './ui/context'
 import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { displayText } from './ui/display'
-import { EFFORTS, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
+import { EFFORTS, isRich, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
 import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
@@ -88,6 +90,8 @@ const agentsShowDone = atom({ plugin: 'ripple', key: 'agentsShowDone' } as const
 const agentOpen = atom({ plugin: 'ripple', key: 'agentOpen' } as const, null)
 const agentRunsOpen = atom({ plugin: 'ripple', key: 'agentRunsOpen' } as const, [])
 const agentsTick = atom({ plugin: 'ripple', key: 'agentsTick' } as const, 0)
+const contextFull = atom({ plugin: 'ripple', key: 'contextFull' } as const, null)
+const contextShowAll = atom({ plugin: 'ripple', key: 'contextShowAll' } as const, [])
 /**
  * The person's last few prompts as submitted. One typed while a turn runs is absorbed into that turn
  * and never becomes a user message in `$.session.messages()`, so "솔한테 돌려" said mid-turn was not
@@ -113,6 +117,7 @@ function same(a: unknown, b: unknown): boolean {
 
 const LOG_PANE = 'ripple-log'
 const AGENTS_PANE = 'ripple-agents'
+const CONTEXT_PANE = 'ripple-context'
 const HAIKU = 'claude-haiku-5-5'
 const EXECUTOR = 'Do the assigned task yourself. Inspect the relevant files, implement what was asked, and verify the result. Report the outcome concisely, citing evidence and marking uncertainty. Never delegate to another agent. Do not create unrequested files or commit unless explicitly asked.'
 let timersStarted = false
@@ -422,6 +427,40 @@ async function toggleAgents($: EngineInterface): Promise<void> {
   if (open) await $.ui.close({ id: AGENTS_PANE })
   else await $.ui.open({ id: AGENTS_PANE, title: t(language, 'commands.agentsTitle') })
   await syncPanes($)
+}
+/**
+ * The Context pane, opened as a dialog: it takes the keyboard, Escape closes it and toasts wait
+ * while it shows. It is read and left, as the app's own breakdown was.
+ */
+async function toggleContext($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  if ((await $.ui.panes()).some(p => p.id === CONTEXT_PANE)) await $.ui.close({ id: CONTEXT_PANE })
+  else await $.ui.open({ id: CONTEXT_PANE, title: t(language, 'commands.contextTitle'), focus: true, closeOnEscape: true, holdToasts: true, rows: 30 })
+}
+/**
+ * The token-count API's count of the context (`full`, one request per tool and memory file), kept
+ * against the context's tokens when it was asked for: the next step makes it stale, and the pane
+ * shows the local estimate again.
+ */
+async function countContext($: EngineInterface): Promise<void> {
+  if ((await read($, contextFull))?.busy) return
+  const basis = (await read($, context))?.tokens ?? null
+  await update($, contextFull, () => ({ basis, busy: true }))
+  try {
+    const breakdown = (await $.session.usage({ breakdown: 'full' })).context.breakdown
+    const none = t(await read($, lang), 'context.none')
+    await update($, contextFull, () => (breakdown ? { basis, breakdown } : { basis, error: none }))
+  } catch (error) {
+    await update($, contextFull, () => ({ basis, error: reason(error) }))
+    await report($, 'context count', error)
+  }
+}
+function contextActions($: EngineInterface): ContextActions {
+  return {
+    refresh: () => countContext($),
+    toggle: section => update($, contextShowAll, list => (list.includes(section) ? list.filter(s => s !== section) : [...list, section])),
+    close: () => $.ui.close({ id: CONTEXT_PANE }),
+  }
 }
 async function toggleBar($: EngineInterface): Promise<boolean> {
   const hidden = !await read($, bandHidden)
@@ -1252,7 +1291,7 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
   return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
-    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($) }
+    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($), toggleContext: () => toggleContext($) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
   return { patch: async change => {
@@ -1354,6 +1393,13 @@ async function agentsRenderFailure($: EngineInterface, e: RenderInput, error: un
   const failure = reason(error)
   await report($, 'agents render', error, frame.lang)
   return renderAgentsFallback($.ui.resolve(e), frame, context.records ?? [], failure, { ...agentsActions($), close: () => $.ui.close({ id: AGENTS_PANE }) }, context.wasOpen ?? false) as RenderElement
+}
+
+/** The Context pane's last resort: its error and its way out; never reads state or the clock. */
+async function contextRenderFailure($: EngineInterface, e: RenderInput, error: unknown, frame?: Frame): Promise<RenderElement> {
+  const f: Frame = frame ?? { surface: e.surface, columns: 'bodyColumns' in e.props ? e.props.bodyColumns : 80, maxRows: 30, now: 0, lang: 'en', appearance: 'auto', skin: 'flat' }
+  await report($, 'context render', error, f.lang)
+  return renderContextFallback($.ui.resolve(e), f, reason(error), () => $.ui.close({ id: CONTEXT_PANE })) as RenderElement
 }
 
 /** State-independent last resort for every non-agent surface; never reads state or the clock. */
@@ -1682,6 +1728,7 @@ export const register: Register = on => {
       else if (sub === 'save') await toggleSave($)
       else if (sub === 'log') await toggleLog($)
       else if (sub === 'agents') await toggleAgents($)
+      else if (sub === 'context') await toggleContext($)
       else if (sub === 'bar') await toggleBar($)
       else if (['cold', 'swamp', 'hot', 'down', 'kept'].includes(sub)) { await update($, panel, () => null); await update($, demo, () => sub as 'cold' | 'swamp' | 'hot' | 'down' | 'kept') }
       else return { text: t(language, 'commands.help') }
@@ -1712,6 +1759,15 @@ export const register: Register = on => {
       // Opened again, the pane starts on the list.
       if (await read($, agentOpen) !== null) await update($, agentOpen, () => null)
     } catch (error) { await report($, 'agents close', error) }
+    return next(e)
+  })
+  on('ui.close', { id: CONTEXT_PANE }, async ($, e, next) => {
+    // Opened again, the pane starts on the estimate with every section at its largest few.
+    try {
+      if ((await read($, contextShowAll)).length) await update($, contextShowAll, () => [])
+      const full = await read($, contextFull)
+      if (full && !full.busy) await update($, contextFull, () => null)
+    } catch (error) { await report($, 'context close', error) }
     return next(e)
   })
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1790,4 +1846,24 @@ export const register: Register = on => {
       return renderAgents($.ui.resolve(e), frame, { agents: records, now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { return agentsRenderFailure($, e, error, { ...(frame ? { frame } : {}), records, wasOpen: id !== null }) }
   }).catch(($, e, next) => agentsRenderFailure($, e, next.error.message ?? next.error.kind))
+  on('ui.render', { component: 'Pane', requestId: CONTEXT_PANE }, async ($, e) => {
+    let frame: Frame | undefined
+    try {
+      startTimers($)
+      frame = await frameOf($, e)
+      // Read to be drawn again on each step, as the band's ring is; a precise count holds only
+      // until then.
+      const live = await read($, context)
+      const full = await read($, contextFull)
+      const fresh = full?.breakdown && full.basis === (live?.tokens ?? null) ? full : null
+      // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
+      const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null
+      const cwd = await $.session.cwd().catch(() => undefined)
+      const error = full && !full.busy && full.basis === (live?.tokens ?? null) ? full.error : undefined
+      return renderContext($.ui.resolve(e), frame, {
+        breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, ...(error ? { error } : {}),
+        open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) }, swampAt: (await currentSettings($)).swampAt,
+      }, contextActions($)) as RenderElement
+    } catch (error) { return contextRenderFailure($, e, error, frame) }
+  }).catch(($, e, next) => contextRenderFailure($, e, next.error.message ?? next.error.kind))
 }
