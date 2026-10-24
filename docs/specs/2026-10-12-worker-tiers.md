@@ -142,7 +142,9 @@ its name; `기본` (Base) means the base worker set, not a saved mode.
 - **Delegation** — `normal` or `eager` (보통 / 적극 — 메인 대화는 지휘만). The main chat may run on
   any model, so no string names Claude as the one directing. Eager adds the existing
   hidden `prompt.submit` context note: "Delegate everything except judgment and final review to
-  ripple:auto." First prompt after activation and after main-chat compaction only.
+  ripple:auto." Sent with every prompt while eager, because a note sent only on activation and
+  after a main-chat compaction is buried in a long context, and main chats were seen doing the
+  work themselves (2026-10-24).
 - **End** — `until: 'none' | number | { reset: '<provider>' }`: until turned off, epoch-ms time,
   or the named provider's first known quota reset **after activation** (끄기 전까지 / 시각 지정 /
   한도 초기화 때). Only that provider's reset counts, whatever the rung lists use.

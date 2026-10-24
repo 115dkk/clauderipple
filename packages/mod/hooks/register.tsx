@@ -1576,7 +1576,8 @@ export const register: Register = on => {
   })
   on('prompt.submit', async ($, e, next) => {
     const sequence = ++judgeSequence
-    // The eager mode's note, beside this prompt only (modes.ts eagerNote).
+    // The eager mode's note, beside every prompt while eager (modes.ts eagerNote): sent only once it
+    // gets buried in a long context.
     let note: string | undefined
     try {
       const s = await currentSettings($)
@@ -1802,7 +1803,8 @@ export const register: Register = on => {
     }
     try {
       const language = await read($, lang)
-      // The summary drops the eager note: the first prompt after it carries it again.
+      // The summary drops what was noted; the note itself goes with every prompt while eager
+      // (modes.ts eagerNote), so this is bookkeeping only.
       if (!e.agentId && e.trigger !== 'precompute' && await read($, modeNoted) !== null) await update($, modeNoted, () => null)
       if (e.agentId || (await currentSettings($)).compactWith !== 'haiku') return next(e).then(counted)
       if (e.trigger === 'precompute') return { skip: t(language, 'commands.compactSkip') }

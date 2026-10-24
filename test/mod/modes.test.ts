@@ -176,18 +176,17 @@ test('a mode ends at its time, or the first known quota reset after activation',
   assert.deepEqual(quotaWindows({}), [])
 })
 
-test('the eager note goes with the first prompt after the mode turns on and after each compaction, not every turn', () => {
+test('the eager note goes with every prompt while eager, not once per activation or compaction', () => {
   const modes = normalizeModes([{ id: 'burn', name: 'Burn GPT', targets: ['chatgpt'], delegation: 'eager' }, { id: 'calm', name: 'Calm', targets: ['chatgpt'] }])
   const on = { modes, activeMode: 'burn', activeSince: 5 }
   const first = eagerNote(on, null)
   assert.equal(first.note, modeNote('Burn GPT'))
   assert.equal(first.note, 'ClaudeRipple mode Burn GPT: delegate everything except judgment and final review to ripple:auto.')
   assert.equal(first.noted, modeKey(on))
-  // The next turn: nothing.
-  assert.deepEqual(eagerNote(on, first.noted), { noted: first.noted })
-  // A compaction clears what was noted: the next prompt carries it again.
+  // The next turn carries it too: one sent only once is buried in a long context.
+  assert.equal(eagerNote(on, first.noted).note, first.note)
   assert.equal(eagerNote(on, null).note, first.note)
-  // Turned off and on again is a new turning-on.
+  // Turned off and on again, still every prompt.
   assert.equal(eagerNote({ ...on, activeSince: 9 }, first.noted).note, first.note)
   // A normal mode, or none, adds nothing and clears what was noted (Base's delegation is normal).
   assert.deepEqual(eagerNote({ modes, activeMode: 'calm', activeSince: 5 }, null), { noted: null })

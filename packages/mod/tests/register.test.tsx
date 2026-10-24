@@ -1350,7 +1350,7 @@ test('the Compact icon counts the main chat\'s finished compactions; /clear zero
 
 const BURN = normalizeModes([{ id: 'burn', name: 'Burn GPT', rungs: { ...DEFAULTS.rules.general.rungs, light: [{ target: { agent: 'gpt-6-1-sol' }, effort: 'low' }] }, delegation: 'eager' }])
 
-test('an eager mode notes the main chat once, and again after a compaction; its tiers route spawns and each pick names it', async ($, on) => {
+test('an eager mode notes every prompt, whether or not it follows a compaction; its tiers route spawns and each pick names it', async ($, on) => {
   const b = boundaries(on, { modes: BURN, activeMode: 'burn', activeSince: NOW, compactWith: 'session' })
   http(on)
   judgeStub(on)
@@ -1359,7 +1359,7 @@ test('an eager mode notes the main chat once, and again after a compaction; its 
   await start($)
   await submit($)
   await submit($)
-  // A slash command is not the user's prompt: no note, and the turn after it is still noted.
+  // A slash command is not the user's prompt: no note.
   await submit($, '/model')
   await $.session.compact({ trigger: 'auto', messages: MESSAGES })
   // A subagent's compaction is not the main chat's.
@@ -1367,7 +1367,7 @@ test('an eager mode notes the main chat once, and again after a compaction; its 
   await $.session.compact({ trigger: 'auto', messages: MESSAGES, agentId: 'worker' })
   await submit($)
   const note = 'ClaudeRipple mode Burn GPT: delegate everything except judgment and final review to ripple:auto.'
-  expect(b.contexts).toEqual([[note], [], [], [note], []])
+  expect(b.contexts).toEqual([[note], [note], [], [note], [note]])
   // Prefer ChatGPT: Low leaves DeepSeek for the cheaper of Sol and Astra (AA cost), at Low's effort.
   await $.agent.spawn(SPAWN)
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@low' })
