@@ -1633,17 +1633,39 @@ test('the tidy switch is on by default, kept, and off compacts at once', async (
   await ui.unmount()
 })
 
-test('a Compact pressed again while the tidy turn waits sends one prompt', async ($, on) => {
+test('a Compact pressed again while the tidy turn runs sends one prompt', async ($, on) => {
   const b = boundaries(on)
   http(on)
   const notes = compacts(on)
   await start($)
   const ui = await pressCompact($, 'Keep the router decision.')
-  // The card let go, the band is back: a second press waits on the same tidy turn.
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  // The card let go, the band is back: a second press waits on the tidy turn already running.
   await ui.press({ key: 'dismiss' })
   await ui.press({ key: 'compact' })
   await ui.input({ key: 'note', text: 'Keep the router decision.' })
   expect(b.submitted).toEqual([TIDY])
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  await ui.unmount()
+})
+
+// 2026-10-25: a tidy prompt that never became a turn (the person dropped it from the queue, the
+// engine let it go) used to leave the wait standing, and the Compact button dead until the mod
+// reloaded. Pressing again now gives that wait up and sends the prompt again.
+test('a Compact pressed again before the tidy prompt becomes a turn sends it again', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  expect(b.submitted).toEqual([TIDY])
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([TIDY, TIDY])
+  // The prompt sent again is the one that becomes a turn, and its answer compacts once.
   await $.turn.start({ text: TIDY, turnId: 'turn-2' })
   await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
   await b.clock.advance(10)

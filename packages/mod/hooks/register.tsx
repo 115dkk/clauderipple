@@ -1081,7 +1081,8 @@ async function driveHandoff($: EngineInterface): Promise<void> {
   }
 }
 /** The tidy prompt the last Compact press sent and the main-loop turn it became; null once it settles. */
-let tidy: { text: string; note: string; turnId: string | null } | null = null
+type Tidy = { text: string; note: string; turnId: string | null }
+let tidy: Tidy | null = null
 async function compactNow($: EngineInterface, note: string): Promise<void> {
   const language = await read($, lang)
   await update($, resultCard, () => ({ stage: 'compacting' }))
@@ -1106,21 +1107,31 @@ async function tidyStopped($: EngineInterface): Promise<void> {
  * updates its handoff or memory files while those are still in the transcript. The prompt and the
  * answer stay in the transcript, and the summary is built from them. The turn it becomes is bound at
  * `turn.start` and settled at `turn.complete`: only its own end compacts, and one that is stopped
- * compacts nothing. With the switch off, the compaction goes at once.
+ * compacts nothing. A prompt still waiting for that turn when Compact is pressed again (the queue
+ * let it go, or the engine never started it) is given up and sent once more, so the button cannot be
+ * left dead; one already bound to a turn blocks the second press. With the switch off, the
+ * compaction goes at once.
  */
 async function runCompact($: EngineInterface, note = ''): Promise<void> {
   await update($, panel, () => null)
-  // A press while the tidy-up or the compaction runs sends nothing a second time; the card it shows says so.
-  if (tidy) return
+  // A press while the tidy-up is bound to its turn sends nothing a second time; the card it shows
+  // says so. One still waiting for that turn is given up instead, and the prompt goes again below.
+  if (tidy) {
+    if (tidy.turnId !== null) return
+    tidy = null
+  }
   const language = await read($, lang)
   if (!await read($, compactTidy)) { await compactNow($, note); return }
   await update($, resultCard, () => ({ stage: 'tidying' }))
   const text = t(language, 'alerts.tidyPrompt')
-  tidy = { text, note, turnId: null }
+  const wait: Tidy = { text, note, turnId: null }
+  tidy = wait
   try {
     const sent = await $.prompt.submit({ text })
     if ('drop' in sent) throw new Error(sent.drop)
   } catch (error) {
+    // A press made while this one was in flight has taken the wait over: its outcome is not this one's.
+    if (tidy !== wait) return
     tidy = null
     await tidyStopped($)
     await report($, 'compact tidy', error)
