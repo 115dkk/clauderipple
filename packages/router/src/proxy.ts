@@ -765,6 +765,8 @@ export class Proxy {
     }
     let tag = "PASS";
     let finished = false;
+    let clientClosed = false;
+    res.once("close", () => { clientClosed = !res.writableEnded; });
     let record: Omit<RequestRecord, "at" | "id" | "ms" | "status" | "ok" | "usage" | "stopReason" | "note"> = {
       kind: pathname === "/v1/messages/count_tokens" ? "count_tokens" : pathname === "/v1/messages" ? "messages" : "other",
       source: "-",
@@ -792,6 +794,14 @@ export class Proxy {
     const finish = (status: string, bytes: number, note?: string, failed: boolean = note !== undefined, extra?: { usage?: RequestUsage; stopReason?: string; resent?: boolean; messageId?: string; requestedTier?: string; servedTier?: string; upstreamCalled?: false | undefined; refusal?: RequestRecord["refusal"] }): void => {
       if (finished) return;
       finished = true;
+      // A translated adapter may have sent 200 before the client left. That is not a
+      // completed turn; reuse the request log's existing string-status contract.
+      const cancelled = clientClosed || (res.destroyed && !res.writableEnded);
+      if (cancelled) {
+        status = "aborted";
+        failed = true;
+        note = "client closed";
+      }
       if (unwrittenFallbackNote) note = [unwrittenFallbackNote, note].filter(Boolean).join("; ");
       this.stats.inFlight--;
       if (isMessages) {
@@ -812,10 +822,10 @@ export class Proxy {
           at: new Date(t0).toISOString(),
           ms,
           status: Number.isFinite(numericStatus) ? numericStatus : status,
-          ok: Number.isFinite(numericStatus) && numericStatus >= 200 && numericStatus < 400,
+          ok: !failed && Number.isFinite(numericStatus) && numericStatus >= 200 && numericStatus < 400,
         };
         if (usage) completed.usage = usage;
-        if (stopReason) completed.stopReason = stopReason;
+        if (stopReason && !cancelled) completed.stopReason = stopReason;
         if (note) completed.note = note;
         if (extra?.resent && !completed.ok) completed.resent = true;
         if (extra?.messageId !== undefined) completed.messageId = extra.messageId;
@@ -1472,11 +1482,13 @@ export class Proxy {
           send(lastAttemptHeaders);
           return;
         }
+        // Our own abort is neither a stuck router nor a failed credential. The close
+        // handler records it; do not count the ECONNRESET that destroy() caused.
+        if (clientAborted) return;
         if (target.host === cfg.upstream) this.deps.health.failure(e);
         // Nothing reached the provider, so this says nothing about the credential — but it does say
         // the route is unusable for a moment, and a pool with somewhere else to go should use it.
-        // Our own abort is not the provider's fault and must not be charged to it.
-        if (penalised && !clientAborted) this.pool.penalise(penalised.provider, penalised.id, 0);
+        if (penalised) this.pool.penalise(penalised.provider, penalised.id, 0);
         finish("-", 0, `upstream error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
         if (!res.headersSent) {
           res.writeHead(502, { "content-type": "application/json", connection: "close" });

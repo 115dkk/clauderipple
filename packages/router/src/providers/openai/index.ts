@@ -303,13 +303,19 @@ export class OpenAiCompatibleAdapter {
           if (wantStream) for (const anthropic of output) bytes += write(res, formatSse(anthropic));
           if (mapper.isFinished) break;
         }
+        // Chat's finish_reason can precede a usage-only chunk. Only [DONE] ends reads;
+        // Responses finishes inside the mapper on its terminal event.
+        if (wire === "chat" && parser.sawDone && !mapper.isFinished) {
+          const tail = mapper.finish();
+          if (wantStream) for (const event of tail) bytes += write(res, formatSse(event));
+        }
         if (mapper.isFinished) break;
       }
-      if (!mapper.isFinished) {
+      if (!mapper.isFinished && !controller.signal.aborted) {
         // Only a vendor that said it was done is finished. A stream that just stopped — muse went
         // quiet for up to 300s and then closed, 2026-09-19 — is reported as overloaded so the
         // client asks again, instead of taking an empty turn as the model's final answer.
-        const tail = mapper.completed || parser.sawDone
+        const tail = mapper.completed || (wire === "chat" && parser.sawDone)
           ? mapper.finish()
           : mapper.fail(`${model}: upstream stream ended before the response completed`, "server_is_overloaded");
         if (wantStream) for (const event of tail) bytes += write(res, formatSse(event));
@@ -323,6 +329,11 @@ export class OpenAiCompatibleAdapter {
       if (ping) clearInterval(ping);
       res.off("close", onClose);
       try { await reader.cancel(); } catch { /* already closed */ }
+    }
+
+    if (controller.signal.aborted) {
+      const usage = mapper.usage;
+      return { status: 0, bytes, note: "client closed", usage: { input: usage.input_tokens, cached: usage.cache_read_input_tokens, output: usage.output_tokens } };
     }
 
     const failure = mapper.failure;

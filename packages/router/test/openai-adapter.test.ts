@@ -472,6 +472,72 @@ test("replayed reasoning does not buffer a successful stream until upstream EOF"
   assert.match(text, /message_stop/);
 });
 
+for (const wire of ["chat", "responses"] as const) {
+  for (const stream of [true, false]) {
+    for (const afterTerminal of ["open", "reset", "error"] as const) {
+      test(`${wire} terminal completes stream=${stream} without waiting for EOF (${afterTerminal})`, { timeout: 3000 }, async (t) => {
+        const closed = Promise.withResolvers<void>();
+        let reset: NodeJS.Timeout | undefined;
+        const backend = http.createServer((req, res) => {
+          req.resume();
+          req.on("end", () => {
+            res.on("close", () => closed.resolve());
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.write(sse(wire === "chat" ? [
+              { choices: [{ delta: { content: "answer" }, finish_reason: "stop" }] },
+            ] : [
+              { type: "response.output_item.added", item: { type: "message", id: "msg_1" } },
+              { type: "response.output_text.delta", item_id: "msg_1", delta: "answer" },
+              { type: "response.output_item.done", item: { type: "message", id: "msg_1" } },
+            ]));
+            // Usage arrives after finish_reason, in a later write. It must not be lost.
+            setImmediate(() => {
+              const terminal = wire === "chat"
+                ? sse([{ choices: [], usage: { prompt_tokens: 40, prompt_tokens_details: { cached_tokens: 30 }, completion_tokens: 5 } }]) + "data: [DONE]\n\n"
+                : sse([{ type: "response.completed", response: { usage: { input_tokens: 40, input_tokens_details: { cached_tokens: 30 }, output_tokens: 5 } } }]);
+              const lateError = sse([{ error: { message: "too late", code: "server_is_overloaded" } }]);
+              res.write(terminal + (afterTerminal === "error" ? lateError : ""));
+              if (afterTerminal === "reset") reset = setTimeout(() => res.destroy(), 50);
+              // No EOF, even after the terminal marker: the adapter owns cleanup.
+            });
+          });
+        });
+        const port = await listen(backend);
+        const local = new OpenAiCompatibleAdapter("fake", { type: "openai-compatible", wire, url: `http://127.0.0.1:${port}` }, log);
+        const outcome = Promise.withResolvers<Awaited<ReturnType<OpenAiCompatibleAdapter["handle"]>>>();
+        const gateway = http.createServer((req, res) => {
+          req.resume();
+          req.on("end", () => {
+            local.handle(req, res, "/v1/messages", { ...request, stream }, "vendor-model", undefined).then(outcome.resolve, outcome.reject);
+          });
+        });
+        t.after(() => {
+          if (reset) clearTimeout(reset);
+          gateway.closeAllConnections(); backend.closeAllConnections();
+          gateway.close(); backend.close();
+        });
+        const gatewayPort = await listen(gateway);
+        const response = await fetch(`http://127.0.0.1:${gatewayPort}`, { method: "POST", body: "{}", signal: AbortSignal.timeout(1000) });
+        const text = await response.text();
+        const result = await outcome.promise;
+        assert.equal(result.status, 200);
+        assert.deepEqual(result.usage, { input: 10, cached: 30, output: 5 });
+        assert.equal(result.stopReason, "end_turn");
+        if (stream) {
+          const events = text.split("\n\n").filter(Boolean).map((event) => JSON.parse(event.split("\ndata: ")[1]!) as { type: string; usage?: unknown });
+          assert.equal(events.filter((event) => event.type === "message_stop").length, 1);
+          assert.equal(events.some((event) => event.type === "error"), false);
+          assert.deepEqual(events.find((event) => event.type === "message_delta")?.usage, { input_tokens: 10, cache_read_input_tokens: 30, cache_creation_input_tokens: 0, output_tokens: 5 });
+        } else {
+          assert.equal(response.status, 200);
+          assert.equal(JSON.parse(text).content[0].text, "answer");
+        }
+        await closed.promise;
+      });
+    }
+  }
+}
+
 test("cleanup", () => {
   front.close();
   upstream.close();
