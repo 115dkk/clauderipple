@@ -651,6 +651,7 @@ for (const failure of ['read', 'write'] as const) test(`worker log ${failure} fa
   b.failWorkerLog(failure)
   await start($)
   expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
+  expect(sent.length).toBe(1)
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
   expect(b.logs.some(log => log.includes('worker pick log') && log.includes(`worker log ${failure} denied`))).toBe(true)
   expect(b.files.get(path)).toBe(previous)
@@ -1349,6 +1350,38 @@ test('a written rule assigns the model like a user ask, needing no quote', async
   const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
   expect(row).toMatchObject({ by: 'rule', source: 'rule', namedModel: 'gpt-6-astra', reason: 'memory/translation.md — 번역 초안은 아스트라' })
   expect(row).not.toHaveProperty('judge')
+})
+
+test('an empty or shapeless rule reason is refused; a file and a rule run', async ($, on) => {
+  boundaries(on)
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  for (const rule of ['', 'CLAUDE.md', 'rules/workers.md —', 'translate first']) {
+    const refused = await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: gpt-6-astra@high]]\nModel reason: rule ${rule}\nReview.` })
+    expect(refused.deny).toContain('No reason was given for the model gpt-6-astra')
+  }
+  expect(sent.length).toBe(0)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@high]]\nModel reason: rule CLAUDE.md — always use Astra\nReview.' })
+  expect(sent.length).toBe(1)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Review.' })
+})
+
+test('a managed spawn is refused when its worker policy cannot be read; an engine spawn still runs once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const sent = spawnStub(on)
+  b.files.set('/home/test/.clauderipple/generated-agents.json', '{ not json')
+  await start($)
+  const managed = await $.agent.spawn(SPAWN)
+  expect(managed.deny).toContain('ClaudeRipple:')
+  expect(sent.length).toBe(0)
+  expect(b.logs.some(log => log.includes('agent.spawn prepare'))).toBe(true)
+  // A native agent is the engine's: the same broken catalogue does not stop it, and its own
+  // post-execution record failing must not run it a second time.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore' })
+  expect(sent.length).toBe(1)
+  expect(sent[0]?.subagentType).toBe('Explore')
 })
 
 test('the logged reason keeps only its first 200 characters', async ($, on) => {

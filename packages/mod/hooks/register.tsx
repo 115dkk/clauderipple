@@ -8,7 +8,7 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -901,7 +901,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
       const words = (await $.session.messages()).flatMap(m => { const text = humanText(m); return text ? [text] : [] }).slice(-10)
       words.push(...await read($, heardPrompts))
       if (!reason.quote || !userSaid(reason.quote, words)) return { deny: t(language, 'workers.notSaid', { name: asked }) }
-    }
+    } else if (!ruleReason(reason.text)) return { deny: t(language, 'workers.noReason', { name: asked }) }
     const known = [...files].some(([agent, f]) => agent.toLowerCase() === asked.toLowerCase() || agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === asked.toLowerCase()) || ['opus', 'sonnet', 'haiku'].includes(asked) || asked.startsWith('claude-')
     if (!known) return { deny: t(language, 'workers.unknownModel', { name: asked }) }
   }
@@ -1895,13 +1895,21 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     let input = e
     let chosen: WorkerPick | undefined
+    // Forks, workflows, teammates, Claude Code's own agents and other plugins' agents are the
+    // engine's to start. Only a spawn this mod routes or corrects must fail closed when its policy
+    // cannot be read: running it exactly as sent is how a model reason and a switched-off provider
+    // were bypassed (2026-10-25).
+    const workflow = 'workflow' in e && !!e.workflow
+    const teammate = 'isTeammate' in e && !!e.isTeammate
+    const ours = !e.fork && !workflow && !teammate && !NATIVE_AGENTS.includes(e.subagentType) &&
+      (!e.subagentType.includes(':') || ['ripple:auto', 'auto'].includes(e.subagentType))
+    let language: Lang = 'en'
+    try { language = await read($, lang) } catch { /* the refusal below falls back to English */ }
     try {
       // Only the main chat delegates. A worker that starts its own worker waits on it idle, and a
       // Claude worker's 5-minute cache lapses meanwhile: 324k tokens rewritten in one request after
       // an 8.5-minute wait on 2026-10-11. Forks, workflows and teammates are the engine's, not this.
-      const workflow = 'workflow' in e && !!e.workflow
-      const teammate = 'isTeammate' in e && !!e.isTeammate
-      if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
+      if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(language, 'workers.nested') }
       const s = await currentSettings($)
       // Named workers and project agents are routed too; native helpers stay native (2026-10-24).
       if (!workflow && !teammate && takesOver(e, s)) {
@@ -1931,7 +1939,7 @@ export const register: Register = on => {
         try { await refreshModels($) } catch (error) { await report($, 'explicit worker catalogue', error) }
         const file = files.get(e.subagentType)
         const provider = file ? agentProvider(file) : e.model && !/^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(e.model) ? (await read($, routerModels)).find(m => m.value === e.model?.replace(/@[^@]*$/, ''))?.provider : 'anthropic'
-        if (provider && s.providers[provider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider }) }
+        if (provider && s.providers[provider] === false) return { deny: t(language, 'workers.disabled', { provider }) }
         const marker = readMarker(e.prompt)
         // Outside takeover a tier marker is dropped, never routed as a model named "hard".
         if (tierOf(marker)) {
@@ -1939,11 +1947,11 @@ export const register: Register = on => {
         } else if (marker) {
           const markerFile = files.get(marker.name) ?? [...files.values()].find(f => agentModel(f)?.replace(/@[^@]*$/, '') === marker.name)
           const markerProvider = markerFile ? agentProvider(markerFile) : (await read($, routerModels)).find(m => m.value === marker.name)?.provider
-          if (markerProvider && s.providers[markerProvider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider: markerProvider }) }
+          if (markerProvider && s.providers[markerProvider] === false) return { deny: t(language, 'workers.disabled', { provider: markerProvider }) }
         }
         const fix = await workerFix($, input)
         if (fix) {
-          if (fix.dropped) await $.ui.toast(t(await read($, lang), 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
+          if (fix.dropped) await $.ui.toast(t(language, 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
           input = { ...input, prompt: fix.prompt, model: fix.model }
         }
       }
@@ -1952,7 +1960,13 @@ export const register: Register = on => {
         const bare = withoutReason(input.prompt)
         if (bare !== input.prompt) input = { ...input, prompt: bare }
       }
-    } catch (error) { input = e; await report($, 'agent.spawn prepare', error) }
+    } catch (error) {
+      input = e
+      await report($, 'agent.spawn prepare', error).catch(() => undefined)
+      // A managed spawn whose routing or correction could not be prepared is refused, never run
+      // as sent. The report above is the diagnostic; this denial is what the caller sees.
+      if (ours) return { deny: t(language, 'toasts.error', { reason: reason(error) }) }
+    }
     try {
       // The title names what really runs: the model set above, else the worker file's, else the parent's.
       if (!e.fork && !('workflow' in e && e.workflow) && !NATIVE_AGENTS.includes(e.subagentType) && input.description?.trim()) {
