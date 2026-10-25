@@ -20,7 +20,7 @@ import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, 
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
 import { pic } from '../hooks/ui/kit'
-import { SVG_MAX_PX, svg } from '../hooks/ui/art'
+import { CELL_PX, SVG_MAX_PX, svg } from '../hooks/ui/art'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
@@ -329,6 +329,14 @@ test('alert choices reach their callbacks', async ($, on) => {
   expect(calls).toEqual([...once, ...once])
 })
 
+/**
+ * The px a picture is drawn at: its document's own width. The Svg asks wider than that and fills
+ * the cells laid out for it (kit.tsx `filled`), so its `width` prop is not its size.
+ */
+function ownPx(picture: Drawn): number {
+  return Number(/^<svg\b[^>]*?\swidth="([\d.]+)"/.exec(String(picture.props?.source))?.[1])
+}
+
 /** The mascot pictures in a drawn tree: the Svgs on its 56 grid. */
 function mascots(tree: unknown): Drawn[] {
   const out: Drawn[] = []
@@ -356,7 +364,7 @@ test('each alert shows 리플이 with the face of its state, its gauge in 5% ste
     const found = mascots(await ui.drawn())
     expect(found.length, 'alert ' + i).toBe(1)
     // The full drawing (34 px up): brows and mouth say what the card is about.
-    expect(found[0]!.props?.width).toBe(34)
+    expect(ownPx(found[0]!)).toBe(34)
     // An image, not a frame: the desktop rebuilds a frame blank on each redraw.
     expect(found[0]!.props?.isInteractive, 'alert ' + i).toBeFalsy()
     sources.push(String(found[0]!.props?.source))
@@ -397,7 +405,7 @@ test('리플이 greets in setup and quick settings and waits in empty panes, nev
     const found = mascots(await ui.drawn())
     expect(found.length, id).toBe(count)
     if (tone) expect(String(found[0]!.props?.source).includes('stroke="' + tone + '"'), id).toBe(true)
-    if (size) expect(found[0]!.props?.width, id).toBe(size)
+    if (size) expect(ownPx(found[0]!), id).toBe(size)
     await ui.unmount()
     const terminal = await mount($, id, 'terminal', 64)
     expect(mascots(await terminal.drawn()).length, id).toBe(0)
@@ -537,7 +545,7 @@ test('band, settings and log pictures stay within the SVG limit on every surface
     expect((await ui.findAll({ type: 'Text' })).length > 0, id + ' ' + surface).toBe(true)
     for (const picture of await ui.findAll({ type: 'Svg' })) {
       expect(Number(picture.props.width) <= SVG_MAX_PX, id + ' width').toBe(true)
-      expect(Number(picture.props.height) <= SVG_MAX_PX, id + ' height').toBe(true)
+      expect(Number(picture.props.height ?? 0) <= SVG_MAX_PX, id + ' height').toBe(true)
     }
     await ui.unmount()
   }
@@ -684,7 +692,7 @@ test('the Agents pane draws forty agents at once, and a record missing its title
         expect(tiles.length > 0, surface + ' ' + id + ' continuation').toBe(true)
         for (const picture of pictures) {
           expect(Number(picture.props.width) <= SVG_MAX_PX).toBe(true)
-          expect(Number(picture.props.height) <= SVG_MAX_PX).toBe(true)
+          expect(Number(picture.props.height ?? 0) <= SVG_MAX_PX).toBe(true)
         }
       }
       await ui.unmount()
@@ -783,13 +791,43 @@ test('pictures tile at the SVG side limit without rescaling or restarting their 
         const y = Math.floor(i / across) * SVG_MAX_PX
         const width = Math.min(SVG_MAX_PX, size - x)
         const height = Math.min(SVG_MAX_PX, size - y)
-        expect(picture.props.width).toBe(width)
-        expect(picture.props.height).toBe(height)
+        // Each tile is its own size in its document and fills its cells as any picture does.
+        expect(ownPx(picture)).toBe(width)
+        expect(String(picture.props.source)).toMatch(new RegExp('^<svg\\b[^>]*\\sheight="' + height + '"'))
+        expect(Number(picture.props.width) >= width && picture.props.height === undefined).toBe(true)
         expect(String(picture.props.source)).toContain('viewBox="' + [x, y, width, height].join(' ') + '"')
         expect(String(picture.props.source).slice(String(picture.props.source).indexOf('><style>'))).toBe(source.slice(source.indexOf('><style>')))
       }
       await ui.unmount()
     }
+  }
+})
+
+// The desktop's newer type (2026-10-25) set a cell at ~8.8 px, not the CELL_PX the pictures are
+// drawn for: pictures asked at their own px fell short of their cells, the band's sea ended before
+// its right edge and its icons sat in wide gaps.
+test('every picture fills the cells laid out for it, so it keeps its place whatever px a cell is', async ($, on) => {
+  const noop = () => undefined
+  const draws: [string, Draw][] = [
+    ['band', el => renderBand(el, frameOf('desktop', 100), DASH, BAND_ACTIONS)],
+    ['settings', el => renderSettings(el, frameOf('desktop', 100), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
+    ['agents', el => renderAgents(el, frameOf('desktop', 64), { agents: AGENTS, now: NOW, showDone: true }, AGENT_NOOP)],
+    ['alert', el => renderAlert(el, frameOf('desktop', 100), ALERTS[0]!, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop })],
+  ]
+  for (const [id, draw] of draws) drawPane(on, 'cells-' + id, draw)
+  for (const [id] of draws) {
+    const ui = await mount($, 'cells-' + id, 'desktop', 100)
+    let pictures = 0
+    walk(await ui.drawn(), n => {
+      const only = n.type === 'Box' && n.children?.length === 1 ? n.children[0] as Drawn : null
+      if (only?.type !== 'Svg') return
+      pictures++
+      const key = id + ' ' + String(n.props?.key)
+      expect(Math.abs(Number(n.props?.width) * CELL_PX - ownPx(only)) < 0.5, key + ' cells').toBe(true)
+      expect(Number(only.props?.width) >= ownPx(only) && only.props?.height === undefined, key + ' fills').toBe(true)
+    })
+    expect(pictures > 0, id).toBe(true)
+    await ui.unmount()
   }
 })
 
@@ -1178,7 +1216,7 @@ test('리플이 acts out the band: thinking, working, drowsy, asleep or idle, on
     const tree = await ui.drawn()
     const found = mascots(tree)
     expect(found.length, id).toBe(1)
-    expect(found[0]!.props?.width, id).toBe(BAND_RIPPLE)
+    expect(ownPx(found[0]!), id).toBe(BAND_RIPPLE)
     expect(found[0]!.props?.isInteractive, id).toBeFalsy()
     sources[id] = String(found[0]!.props?.source)
     // Drawn for the capsule's dark water whatever the app's theme.

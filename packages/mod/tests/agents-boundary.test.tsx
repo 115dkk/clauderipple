@@ -61,7 +61,7 @@ test('48 workers with long fallback reasons and an unfolded short-call conversat
     expect(await list.find({ type: 'Text', text: '검토 47' }) ?? await list.find({ key: 'row-worker-47' }), surface + ' last list card').toBeDefined()
     expect((await list.findAll({ type: 'Button' })).length < 2000).toBe(true)
     for (const svg of await list.findAll({ type: 'Svg' })) {
-      expect(Number(svg.props.width) <= 4096 && Number(svg.props.height) <= 4096).toBe(true)
+      expect(Number(svg.props.width) <= 4096 && Number(svg.props.height ?? 0) <= 4096).toBe(true)
       expect(String(svg.props.source).length <= 131_072).toBe(true)
     }
     await list.unmount()

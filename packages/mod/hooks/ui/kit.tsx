@@ -21,6 +21,7 @@
 
 import type { RenderNode } from 'claude-code'
 
+import { filled } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
 import type { Frame } from './view'
@@ -29,10 +30,14 @@ import type { Glyph, PillLook, Sea, Tone } from './art'
 import { lookOf } from './look'
 import { chOf } from './theme'
 
-/** Width of one U+00A0 in the host's 12 px button font, px, taken a little wide. */
-const NBSP_PX = 3.6
-/** The host's padding either side of a plain Button's label, px. */
-const BUTTON_PAD = 6
+/**
+ * Width of one U+00A0 in the host's button font, px, and the host's padding either side of a plain
+ * Button's label, px, both taken wide of the cell they are counted against (CELL_PX). The desktop's
+ * newer type (2026-10-25) set a cell at ~8.8 px and a no-break space past 4.4 px, so labels counted
+ * at 3.6 px and 6 px ran past their buttons and each control showed the host's ink "…".
+ */
+const NBSP_PX = 5.2
+const BUTTON_PAD = 7
 
 /**
  * The props that light a Box under the pointer the way `lit` lights a control: the skin's light
@@ -89,10 +94,10 @@ export function lift(el: Els): RenderNode {
  */
 const QUIET_ALT = 'ClaudeRipple'
 
-/** A picture, `width` × `height` px, in a Box of its own that never shrinks. */
+/** A picture, `width` × `height` px where a cell is CELL_PX, filling its cells (parts.tsx `filled`). */
 export function pic(el: Els, key: string, source: string, alt: string, width: number, height: number): RenderNode {
   if (!('Svg' in el)) return ''
-  const { Box, Svg } = el
+  const { Box } = el
   if (!alt.trim()) alt = QUIET_ALT
   if (width > SVG_MAX_PX || height > SVG_MAX_PX) {
     // Crop the same drawing, not separately generated seas: gradients, corners and motion retain
@@ -110,18 +115,15 @@ export function pic(el: Els, key: string, source: string, alt: string, width: nu
         const cropped = root.replace(/\bwidth="[^"]*"/, 'width="' + w + '"')
           .replace(/\bheight="[^"]*"/, 'height="' + tileHeight + '"')
           .replace(/viewBox="[^"]*"/, 'viewBox="' + [vx + x * vw / width, vy + y * vh / height, w * vw / width, tileHeight * vh / height].join(' ') + '"')
-        tiles.push(<Svg key={key + '-' + x + '-' + y} source={cropped + source.slice(root.length)} alt={x === 0 && y === 0 ? alt : QUIET_ALT} width={w} height={tileHeight} />)
+        tiles.push(filled(el, key + '-' + x + '-' + y, cropped + source.slice(root.length), x === 0 && y === 0 ? alt : QUIET_ALT, w))
       }
       rows.push(<Box key={'row-' + y} flexDirection="row" flexShrink={0} columnGap={0} alignItems="flex-start">{tiles}</Box>)
     }
-    // Let images supply the pixel heights directly. Rounding a tile to host rows leaves seams.
+    // Let images supply their heights, each tile filling its cells as one picture would: rounding a
+    // tile to host rows leaves seams.
     return <Box key={'pic-' + key} flexDirection="column" flexShrink={0} rowGap={0} alignItems="flex-start">{rows}</Box>
   }
-  return (
-    <Box key={'pic-' + key} flexShrink={0} alignItems="center">
-      <Svg source={source} alt={alt} width={width} height={height} />
-    </Box>
-  )
+  return filled(el, 'pic-' + key, source, alt, width)
 }
 
 /**
@@ -131,12 +133,7 @@ export function pic(el: Els, key: string, source: string, alt: string, width: nu
  */
 export function ripple(el: Els, frame: Frame, key: string, face: Face, alt: string, size: number, percent?: number, dim = false): RenderNode {
   if (!('Svg' in el)) return ''
-  const { Box, Svg } = el
-  return (
-    <Box key={'ripple-' + key} flexShrink={0}>
-      <Svg source={lookOf(frame).art.mascot(face, size, percent, dim)} alt={alt} width={size} height={size} />
-    </Box>
-  )
+  return filled(el, 'ripple-' + key, lookOf(frame).art.mascot(face, size, percent, dim), alt, size)
 }
 
 /**

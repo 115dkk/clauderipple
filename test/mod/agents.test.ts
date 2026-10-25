@@ -75,7 +75,7 @@ test('long fallback reasons do not create an unbounded SVG sea or thousands of c
   assert.ok(!textOf(tree).includes(agent.pick!.fallbackReason!))
   for (const svg of all.filter(n => n.type === 'Svg')) {
     assert.ok(Number(svg.props.width) <= 4096)
-    assert.ok(Number(svg.props.height) <= 4096)
+    assert.ok(Number(svg.props.height ?? 0) <= 4096)
     assert.ok(String(svg.props.source).length <= 131_072)
   }
 })
@@ -90,7 +90,7 @@ test('48 mixed workers including 31 Workflow workers keep their rows, Korean tit
     assert.ok(textOf(tree).includes('검토 47'))
     for (const svg of all.filter(n => n.type === 'Svg')) {
       assert.ok(Number(svg.props.width) <= 4096)
-      assert.ok(Number(svg.props.height) <= 4096)
+      assert.ok(Number(svg.props.height ?? 0) <= 4096)
     }
   }
 })
