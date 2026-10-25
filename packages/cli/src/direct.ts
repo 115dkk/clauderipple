@@ -82,7 +82,9 @@ export function directOn(home: string, desktopService: DesktopServiceDeps = {}):
     const proxy = cliProxyState(env, proxyUrl, caPath);
     // Validate the whole transition before changing either client or the restoration snapshot.
     const app = currentAppProxy();
-    if (app.egressProxyUrl && (appProxyOwner(app, home, proxyUrl) !== "ours" || app.egressProxyUrl !== proxyUrl)) {
+    // An entry ClaudeRipple did not mark (the person's own proxy, or the one picker mode replaced
+    // and direct on restores) is theirs to keep; only a marked entry this home cannot prove stops it.
+    if (app.egressProxyUrl && app.ours && (appProxyOwner(app, home, proxyUrl) !== "ours" || app.egressProxyUrl !== proxyUrl)) {
       notes.push("Claude Desktop 프록시의 설치 소유권을 확인하지 못해 직접 연결로 전환하지 않았습니다. 기존 프록시 설정을 확인해 주세요.");
       blocked = true;
     }
@@ -150,7 +152,11 @@ export function directOn(home: string, desktopService: DesktopServiceDeps = {}):
     ? `Claude now connects directly. Removed: ${removed.join(", ")}. Saved in ${directStatePath(home)}.${edit.backup ? ` settings.json backup: ${edit.backup}.` : ""}`
     : "Claude was already on its default connection; nothing of ClaudeRipple's was in its settings.";
   const mode = currentMode(home);
-  const complete = mode === "direct" && !settingsEnv().HTTPS_PROXY && !currentAppProxy().egressProxyUrl;
+  // Direct means nothing of this installation's proxy is left. A proxy the person had before
+  // (restored by removeAppProxy) or set themselves is theirs, not a leftover.
+  const after = currentAppProxy();
+  const desktopLeft = after.egressProxyUrl === proxyUrl || (after.ours && appProxyOwner(after, home, proxyUrl) !== "other");
+  const complete = mode === "direct" && settingsEnv().HTTPS_PROXY !== proxyUrl && !desktopLeft;
   return { ok: complete, mode, restartClaude: true, detail: complete ? [detail, ...notes].join(" ") : "일부 프록시 설정이 남아 직접 연결로 전환하지 못했습니다. 저장된 복구 정보와 클라이언트 설정을 확인해 주세요." };
 }
 
