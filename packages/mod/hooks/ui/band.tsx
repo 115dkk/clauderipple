@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
+import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -353,7 +353,8 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 // Pointing at a fact shows what it means in the reason's place.
 // With the `limits` extra on and any window known, a second row under the first (starting where
 // the effort does) gauges every plan window — Claude's, then each ChatGPT account's — and the
-// first row's limit fact steps aside for the route.
+// first row's limit fact steps aside for the route. The row is a button: pressed, it opens the
+// limits pane, where each window's share and when it resets are spelled out.
 
 /** 리플이 in the band, px: the mini drawing (ripple.ts), a little taller than a line of text. */
 export const BAND_RIPPLE = 24
@@ -538,8 +539,9 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 //
 // The capsule's second row, under the first and starting where the effort does (a CREST_CELLS
 // indent): every plan window as a small gauge — Claude's 5-hour, weekly and per-model weeklies,
-// then each ChatGPT account's. A thinner row than the first (a line of text or so); the reset is
-// in the hover tip, which shows in the first row's tip place (see whyDrawn). Widths alone decide,
+// then each ChatGPT account's. A thinner row than the first (a line of text or so), and a button:
+// pressed, it opens the limits pane, where each window's share and when it resets are readable
+// (2026-10-25: the row has no room to add the reset beside every figure). Widths alone decide,
 // never values: the bar is one width, the figure's slot fits "100%", and only the name takes what
 // it takes (a changing figure never moves a neighbour). Narrow, the GPT accounts go first (the
 // last one first), then the per-model windows; what is left not fitting means no second row, and
@@ -646,16 +648,16 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string,
  * accounts (the last one first), then a later provider's whole group — Claude's own group stays to
  * the last. A provider with several accounts numbers them ("GPT 1", "GPT 2"); the number is the
  * account's, not its place in this row, so it holds even when only one of them fits.
+ * `onPress`: the row is a button (the limits pane); pressed it says so in the tip place, and each
+ * window's own tip (its name and reset) gives way to that one.
  */
-function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: number): { node: RenderNode; tips: { key: string; text: string }[] } | null {
+function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: number, onPress?: () => void): { node: RenderNode; tips: { key: string; text: string }[] } | null {
   const { Box } = el
   const items = view.limits ?? []
   if (!items.length || !view.extras.includes('limits')) return null
   const all = limitGroups(items)
   // Numbering follows the whole set of accounts a provider has, decided before any narrowing.
-  const accounts = new Map<string, number>()
-  for (const g of all) accounts.set(g.provider, (accounts.get(g.provider) ?? 0) + 1)
-  const numbered = (g: LimitGroup) => (accounts.get(g.provider) ?? 1) > 1
+  const numbered = limitGroupNumbered(all)
   // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
   const save = !!view.limit?.save
   const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
@@ -670,13 +672,21 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
     if (i > 0) children.push(rule(el, frame, 'limits-' + groups[i]!.key))
     children.push(d.node)
   })
+  // The press is laid over the row exactly as it draws — a box of the row's own width, so a press
+  // anywhere on the figures takes it — and lit under the pointer as a control is. It takes no width
+  // of its own: what the row holds is decided by its figures alone.
   return {
     node: (
-      <Box key="band-limits" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} paddingLeft={CREST_CELLS} paddingTop={0.5}>
-        {children}
+      <Box key="band-limits" flexDirection="row" alignItems="center" paddingLeft={CREST_CELLS} paddingTop={0.5}>
+        <Box key="limits-row" position="relative" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} flexShrink={0} {...(onPress ? hoverLight(frame, tipScope('limits-open')) : {})}>
+          {children}
+          {onPress ? press(el, 'limits-open', width(density)(groups) * CELL_PX, onPress) : null}
+        </Box>
       </Box>
     ),
-    tips: drawn.flatMap(d => d.tips),
+    tips: onPress
+      ? [{ key: 'limits-open', text: t(frame.lang, 'band.limitsOpen') }]
+      : drawn.flatMap(d => d.tips),
   }
 }
 
@@ -941,7 +951,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const effort = effortDrawn(el, frame, view, actions)
   // The second row is decided before the first row's budget: when it draws, the first row's limit
   // fact steps aside and the route takes its room.
-  const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS)
+  const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS, actions.toggleLimits)
   const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view, actions.toggleContext), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view)])].filter((f): f is DrawnFact => f !== null)
   // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
   // spare words (the icons' beside it) go first when the row narrows.

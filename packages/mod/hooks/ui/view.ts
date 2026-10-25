@@ -120,6 +120,8 @@ export type BandActions = {
   releaseDelegationPin?: () => void
   /** Opens or closes the Context pane (desktop: the context chip is its press). */
   toggleContext?: () => void
+  /** Opens or closes the limits pane (desktop: the limits row is its press). */
+  toggleLimits?: () => void
 }
 
 // ---- Alerts and cards ------------------------------------------------------------------------
@@ -251,6 +253,11 @@ export type LogView = {
 
 export type LogActions = {
   toggleScope: () => void
+}
+
+/** The limits pane: every plan window the router answered, grouped by provider account. */
+export type LimitsView = {
+  items: readonly LimitItem[]
 }
 
 // ---- Helpers register.tsx and the drawings share ----------------------------------------------
@@ -412,6 +419,37 @@ export function resetsLabel(resetsAt: string | undefined, now: number, lang: Lan
   return t(lang, 'band.resetsIn', { time: t(lang, 'units.days', { n: Math.round(left / 86_400_000) }) })
 }
 
+/** Short weekday names by `Date#getDay()`, Sunday first. */
+const WEEKDAYS = ['units.weekdaySun', 'units.weekdayMon', 'units.weekdayTue', 'units.weekdayWed', 'units.weekdayThu', 'units.weekdayFri', 'units.weekdaySat'] as const
+
+/** A weekday's short name in the person's language: "Thu", "목". */
+function weekdayName(day: number, lang: Lang): string {
+  return t(lang, WEEKDAYS[((day % 7) + 7) % 7]!)
+}
+
+/** A reset this close reads as the time left; further off, as the weekday and the clock. */
+const RESET_NEAR_MS = 20 * 3_600_000
+
+/**
+ * A reset as a plan window's detail reads it: "2시간 뒤" while the window is close, else the
+ * weekday and the local time ("목 09:00"), "초기화 중" once it has passed. The hover tips keep the
+ * whole sentence (`resetsLabel`); this is its short form, for the limits pane. Twenty hours is
+ * where the router's own status label (`limitLabel` in session.ts) stops naming the clock and
+ * names the day.
+ */
+export function resetShort(resetsAt: string | undefined, now: number, lang: Lang): string | undefined {
+  if (!resetsAt) return undefined
+  const at = Date.parse(resetsAt)
+  if (!Number.isFinite(at)) return undefined
+  const left = at - now
+  if (left <= 0) return t(lang, 'band.resetting')
+  if (left < RESET_NEAR_MS) {
+    const minutes = Math.max(1, Math.round(left / 60_000))
+    return t(lang, 'band.resetIn', { time: minutes < 60 ? t(lang, 'units.minutes', { n: minutes }) : t(lang, 'units.hours', { n: Math.round(minutes / 60) }) })
+  }
+  return t(lang, 'band.resetDay', { day: weekdayName(new Date(at).getDay(), lang), time: clockTime(at).slice(0, 5) })
+}
+
 /** "five_hour" → "5-hour", "seven_day" → "Weekly". */
 export function limitName(kind: string, lang: Lang): string {
   if (kind === 'five_hour') return t(lang, 'band.fiveHour')
@@ -474,6 +512,17 @@ function groupTitle(group: Pick<LimitGroup, 'provider' | 'type' | 'title'>): str
 export function limitGroupName(group: Pick<LimitGroup, 'provider' | 'type' | 'title' | 'account'>, numbered: boolean): string {
   const title = displayText(groupTitle(group), DISPLAY.name)
   return numbered ? title + ' ' + (group.account + 1) : title
+}
+
+/**
+ * Which groups carry their account's number: a provider with more than one account ("GPT 1",
+ * "GPT 2"). Decided on the whole set the router answered, before any narrowing, so the number is
+ * the account's own and holds even when only one of them is drawn.
+ */
+export function limitGroupNumbered(groups: readonly LimitGroup[]): (group: LimitGroup) => boolean {
+  const accounts = new Map<string, number>()
+  for (const group of groups) accounts.set(group.provider, (accounts.get(group.provider) ?? 0) + 1)
+  return group => (accounts.get(group.provider) ?? 1) > 1
 }
 
 /**

@@ -28,6 +28,7 @@ import { renderSetup } from './ui/setup'
 import { renderAgents, renderAgentsFallback, talkOf } from './ui/agents'
 import { renderContext, renderContextFallback } from './ui/context'
 import type { ContextActions } from './ui/context'
+import { renderLimits, renderLimitsFallback } from './ui/limits'
 import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { displayText } from './ui/display'
@@ -126,6 +127,7 @@ function same(a: unknown, b: unknown): boolean {
 const LOG_PANE = 'ripple-log'
 const AGENTS_PANE = 'ripple-agents'
 const CONTEXT_PANE = 'ripple-context'
+const LIMITS_PANE = 'ripple-limits'
 const HAIKU = 'claude-haiku-5-5'
 const EXECUTOR = 'Do the assigned task yourself. Inspect the relevant files, implement what was asked, and verify the result. Report the outcome concisely, citing evidence and marking uncertainty. Never delegate to another agent. Do not create unrequested files or commit unless explicitly asked.'
 let timersStarted = false
@@ -454,6 +456,19 @@ async function toggleContext($: EngineInterface): Promise<void> {
   const language = await read($, lang)
   if ((await $.ui.panes()).some(p => p.id === CONTEXT_PANE)) await $.ui.close({ id: CONTEXT_PANE })
   else await $.ui.open({ id: CONTEXT_PANE, title: t(language, 'commands.contextTitle'), focus: true, closeOnEscape: true, holdToasts: true, rows: 30 })
+}
+/**
+ * The limits pane, opened from the band's limits row: every plan window with the share it has used
+ * and when it resets, which the row has no room to say. Opened again it closes, as does the pane's
+ * own close. The windows are read afresh on the way in, once a minute at most (refreshLimits).
+ */
+async function toggleLimits($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.close({ id: LIMITS_PANE })
+  else {
+    await refreshLimits($)
+    await $.ui.open({ id: LIMITS_PANE, title: t(language, 'commands.limitsTitle') })
+  }
 }
 /**
  * The token-count API's count of the context (`full`, one request per tool and memory file), kept
@@ -1457,7 +1472,7 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
   return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), handoff: () => queueHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
-    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($), toggleContext: () => toggleContext($) }
+    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($), toggleContext: () => toggleContext($), toggleLimits: () => toggleLimits($) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
   return { patch: async change => {
@@ -1584,6 +1599,13 @@ async function contextRenderFailure($: EngineInterface, e: RenderInput, error: u
   const f: Frame = frame ?? { surface: e.surface, columns: 'bodyColumns' in e.props ? e.props.bodyColumns : 80, maxRows: 30, now: 0, lang: 'en', appearance: 'auto', skin: 'flat' }
   await report($, 'context render', error, f.lang)
   return renderContextFallback($.ui.resolve(e), f, reason(error), () => $.ui.close({ id: CONTEXT_PANE })) as RenderElement
+}
+
+/** The limits pane's last resort: its error and its way out; never reads state or the clock. */
+async function limitsRenderFailure($: EngineInterface, e: RenderInput, error: unknown, frame?: Frame): Promise<RenderElement> {
+  const f: Frame = frame ?? { surface: e.surface, columns: 'bodyColumns' in e.props ? e.props.bodyColumns : 80, maxRows: 30, now: 0, lang: 'en', appearance: 'auto', skin: 'flat' }
+  await report($, 'limits render', error, f.lang)
+  return renderLimitsFallback($.ui.resolve(e), f, reason(error), () => $.ui.close({ id: LIMITS_PANE })) as RenderElement
 }
 
 /** State-independent last resort for every non-agent surface; never reads state or the clock. */
@@ -2103,4 +2125,13 @@ export const register: Register = on => {
       }, contextActions($)) as RenderElement
     } catch (error) { return contextRenderFailure($, e, error, frame) }
   }).catch(($, e, next) => contextRenderFailure($, e, next.error.message ?? next.error.kind))
+  on('ui.render', { component: 'Pane', requestId: LIMITS_PANE }, async ($, e) => {
+    let frame: Frame | undefined
+    try {
+      startTimers($)
+      frame = await frameOf($, e)
+      // The row the band gauges: the same reading, every provider account's windows.
+      return renderLimits($.ui.resolve(e), frame, { items: await read($, limits) ?? [] }) as RenderElement
+    } catch (error) { return limitsRenderFailure($, e, error, frame) }
+  }).catch(($, e, next) => limitsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

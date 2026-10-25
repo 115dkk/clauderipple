@@ -17,6 +17,7 @@ import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, editLines, runDiff, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
+import { renderLimits } from '../hooks/ui/limits'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
 import { pic } from '../hooks/ui/kit'
@@ -1469,6 +1470,60 @@ test('with the limits row drawn, save mode\'s word follows Claude\'s windows', a
   await spending.unmount()
 })
 
+
+// 2026-10-25: the owner moved the reset times off the band into a pane the row opens. Each window
+// reads there with its share and when it resets — the time left while close, the weekday and clock
+// once far — under its provider account's head.
+test('the limits pane reads every window\'s share and reset', async ($, on) => {
+  const limits = [
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 28, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString() },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day' as const, label: '', percent: 8, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'five_hour' as const, label: '', windowMinutes: 300, percent: 12, resetsAt: new Date(NOW + 45 * 60_000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day' as const, label: '', windowMinutes: 10080, percent: 97 },
+  ]
+  // Every pane answered before the first mount: the hooks beneath the plugins register first.
+  for (const surface of SURFACES) {
+    drawPane(on, 'limits-' + surface, el => renderLimits(el, { ...frameOf(surface), lang: 'ko' }, { items: limits }))
+    drawPane(on, 'limits-none-' + surface, el => renderLimits(el, { ...frameOf(surface), lang: 'ko' }, { items: [] }))
+  }
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'limits-' + surface, surface)
+    expect(await ui.find({ type: 'Text', text: '기간별 한도' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '기간별 사용률과 초기화 시각입니다.' }), surface).toBeDefined()
+    // One head per provider account, numbered when a provider has several.
+    for (const head of ['Claude', 'GPT 1', 'GPT 2']) expect(await ui.find({ type: 'Text', text: head }), surface + ' ' + head).toBeDefined()
+    // Every window: its name, its share, and when it resets ("2시간 뒤", "45분 뒤"; a weekday past
+    // twenty hours — 13 October 2026 at 13:20 is a Tuesday).
+    for (const text of ['28%', '8%', '12%', '97%', '2시간 뒤', '45분 뒤', '화 13:20']) expect(await ui.find({ type: 'Text', text }), surface + ' ' + text).toBeDefined()
+    // A window the router gave no reset for says nothing about one.
+    expect((await ui.findAll({ type: 'Text' })).filter(text => /뒤$|^초기화 중$/.test(text.text)), surface).toHaveLength(2)
+    await ui.unmount()
+    const none = await mount($, 'limits-none-' + surface, surface)
+    expect(await none.find({ type: 'Text', text: '아직 한도 사용량을 확인할 수 없습니다.' }), surface).toBeDefined()
+    await none.unmount()
+  }
+})
+
+// 2026-10-25: the row itself is the way in. It lights under the pointer and says what pressing it
+// shows; the reset times are no longer written on it.
+test('the desktop limits row is a button that opens the limits pane', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { ...BAND_ACTIONS, toggleLimits: fn('limits') }
+  const limits: DashboardView['limits'] = [
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 28, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString() },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 8, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+  ]
+  drawPane(on, 'limits-row', el => renderBand(el, { ...frameOf('desktop', 94), lang: 'ko' }, { ...DASH, extras: ['limits'], limits }, actions))
+  const ui = await mount($, 'limits-row', 'desktop', 94)
+  expect(await ui.find({ type: 'Button', key: 'limits-open' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '눌러서 기간별 사용률과 초기화 시각 보기' })).toBeDefined()
+  // The shares are on the row; the reset times are the pane's.
+  for (const figure of ['28%', '8%']) expect(await ui.find({ type: 'Text', text: figure }), figure).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /뒤$/ })).toBeUndefined()
+  await ui.press({ key: 'limits-open' })
+  expect(calls).toEqual(['limits'])
+  await ui.unmount()
+})
 
 // ---- Tool runs (2026-10-20: a worker's commands read as a wall, each wrapped over lines) ------------
 

@@ -51,12 +51,15 @@ const EN = {
   'band.resetting': 'resetting',
   'band.resetsIn': 'resets in {time}',
   'band.resetsAt': 'resets {time}',
+  'band.resetIn': 'in {time}',
+  'band.resetDay': '{day} {time}',
   'band.router': 'Router',
   'band.routerAlt': 'Router: {value}',
   'band.resentCaption': 'RESENT · {status}',
   'band.failedCaption': 'FAILED · {status}',
   'band.lastRoute': 'LAST ROUTE',
   'band.logHint': 'Click for the request log',
+  'band.limitsOpen': 'Click for each window\'s share and reset',
   'band.routeAlt': 'Last route: {model} via {provider}{effort}{cache}, {time}{status}',
   'band.routeCache': ', cache {percent}%',
   'band.routeResent': ', resent {status}',
@@ -299,6 +302,10 @@ const EN = {
   'log.judgeWorker': 'Worker judge',
   'log.judgeFell': '{asked} failed → {by}',
   'log.sure': 'sure {percent}%',
+  // Limits pane.
+  'limits.title': 'Plan limits',
+  'limits.hint': 'Share used in each window, and when it resets.',
+  'limits.empty': 'Plan usage is not available yet.',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'Paste a single TypeSafe API key',
   'toasts.keyPrivateFailed': 'Could not make the Jev key file private (chmod 600)',
@@ -494,6 +501,7 @@ const EN = {
   'agents.nothingYet': 'Nothing in its conversation yet.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'ClaudeRipple Context',
+  'commands.limitsTitle': 'ClaudeRipple Limits',
   'band.contextOpen': '{tokens} of {window} tokens · Click for details',
   'context.title': 'Context breakdown',
   'context.of': '/ {max} tokens',
@@ -548,6 +556,14 @@ const EN = {
   'units.days': '{n}d',
   'units.minSec': '{m}m {s}s',
   'units.hourMin': '{h}h {m}m',
+  // Weekdays for a reset days away, Sunday first.
+  'units.weekdaySun': 'Sun',
+  'units.weekdayMon': 'Mon',
+  'units.weekdayTue': 'Tue',
+  'units.weekdayWed': 'Wed',
+  'units.weekdayThu': 'Thu',
+  'units.weekdayFri': 'Fri',
+  'units.weekdaySat': 'Sat',
 } as const
 
 export type Key = keyof typeof EN
@@ -601,12 +617,15 @@ const KO: Record<Key, string> = {
   'band.resetting': '초기화 중',
   'band.resetsIn': '{time} 뒤 초기화',
   'band.resetsAt': '{time} 초기화',
+  'band.resetIn': '{time} 뒤',
+  'band.resetDay': '{day} {time}',
   'band.router': '리플',
   'band.routerAlt': '리플: {value}',
   'band.resentCaption': '재전송 · {status}',
   'band.failedCaption': '실패 · {status}',
   'band.lastRoute': '최근 경로',
   'band.logHint': '눌러서 요청 로그 보기',
+  'band.limitsOpen': '눌러서 기간별 사용률과 초기화 시각 보기',
   'band.routeAlt': '최근 경로: {provider}의 {model}{effort}{cache}, {time}{status}',
   'band.routeCache': ', 캐시 {percent}%',
   'band.routeResent': ', {status} 재전송',
@@ -849,6 +868,10 @@ const KO: Record<Key, string> = {
   'log.judgeWorker': '워커 판정',
   'log.judgeFell': '{asked} 실패 → {by}',
   'log.sure': '확신도 {percent}%',
+  // Limits pane.
+  'limits.title': '기간별 한도',
+  'limits.hint': '기간별 사용률과 초기화 시각입니다.',
+  'limits.empty': '아직 한도 사용량을 확인할 수 없습니다.',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'TypeSafe API 키는 하나만 붙여 넣어야 합니다',
   'toasts.keyPrivateFailed': 'Jev 키 파일을 본인만 읽고 쓰도록 설정하지 못했습니다 (chmod 600)',
@@ -1044,6 +1067,7 @@ const KO: Record<Key, string> = {
   'agents.nothingYet': '아직 대화 내용이 없습니다.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': '리플 컨텍스트',
+  'commands.limitsTitle': '리플 한도',
   'band.contextOpen': '{tokens} / {window} 토큰 · 눌러서 자세히 보기',
   'context.title': '컨텍스트 구성',
   'context.of': '/ {max} 토큰',
@@ -1098,6 +1122,13 @@ const KO: Record<Key, string> = {
   'units.days': '{n}일',
   'units.minSec': '{m}분 {s}초',
   'units.hourMin': '{h}시간 {m}분',
+  'units.weekdaySun': '일',
+  'units.weekdayMon': '월',
+  'units.weekdayTue': '화',
+  'units.weekdayWed': '수',
+  'units.weekdayThu': '목',
+  'units.weekdayFri': '금',
+  'units.weekdaySat': '토',
 }
 
 const ZH: Record<Key, string> = {
@@ -1149,12 +1180,15 @@ const ZH: Record<Key, string> = {
   'band.resetting': '重置中',
   'band.resetsIn': '{time}后重置',
   'band.resetsAt': '{time} 重置',
+  'band.resetIn': '{time}后',
+  'band.resetDay': '{day} {time}',
   'band.router': '路由服务',
   'band.routerAlt': '路由服务：{value}',
   'band.resentCaption': '已重发 · {status}',
   'band.failedCaption': '失败 · {status}',
   'band.lastRoute': '最近路由',
   'band.logHint': '点击查看请求日志',
+  'band.limitsOpen': '点击查看各周期用量与重置时间',
   'band.routeAlt': '最近路由：{model} 经由 {provider}{effort}{cache}, {time}{status}',
   'band.routeCache': ', 缓存 {percent}%',
   'band.routeResent': ', 已重发 {status}',
@@ -1397,6 +1431,10 @@ const ZH: Record<Key, string> = {
   'log.judgeWorker': '工作者判定',
   'log.judgeFell': '{asked} 失败 → {by}',
   'log.sure': '确信 {percent}%',
+  // Limits pane.
+  'limits.title': '各期限额',
+  'limits.hint': '各周期的用量与重置时间。',
+  'limits.empty': '暂时无法查看限额使用量。',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': '请只粘贴一个 TypeSafe API 密钥',
   'toasts.keyPrivateFailed': '无法将 Jev 密钥文件设为私有 (chmod 600)',
@@ -1592,6 +1630,7 @@ const ZH: Record<Key, string> = {
   'agents.nothingYet': '对话中还没有内容。',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'ClaudeRipple 上下文',
+  'commands.limitsTitle': 'ClaudeRipple 限额',
   'band.contextOpen': '{tokens} / {window} token · 点击查看详情',
   'context.title': '上下文构成',
   'context.of': '/ {max} token',
@@ -1646,6 +1685,13 @@ const ZH: Record<Key, string> = {
   'units.days': '{n}天',
   'units.minSec': '{m}分{s}秒',
   'units.hourMin': '{h}小时{m}分',
+  'units.weekdaySun': '周日',
+  'units.weekdayMon': '周一',
+  'units.weekdayTue': '周二',
+  'units.weekdayWed': '周三',
+  'units.weekdayThu': '周四',
+  'units.weekdayFri': '周五',
+  'units.weekdaySat': '周六',
 }
 
 const JA: Record<Key, string> = {
@@ -1697,12 +1743,15 @@ const JA: Record<Key, string> = {
   'band.resetting': 'リセット中',
   'band.resetsIn': '{time}後にリセット',
   'band.resetsAt': '{time}にリセット',
+  'band.resetIn': '{time}後',
+  'band.resetDay': '{day} {time}',
   'band.router': 'ルーター',
   'band.routerAlt': 'ルーター: {value}',
   'band.resentCaption': '再送 · {status}',
   'band.failedCaption': '失敗 · {status}',
   'band.lastRoute': '直近のルート',
   'band.logHint': 'クリックでリクエストログを表示',
+  'band.limitsOpen': 'クリックで期間ごとの使用率とリセット時刻を表示',
   'band.routeAlt': '直近のルート: {model}（{provider} 経由）{effort}{cache}, {time}{status}',
   'band.routeCache': ', キャッシュ {percent}%',
   'band.routeResent': ', {status} 再送',
@@ -1945,6 +1994,10 @@ const JA: Record<Key, string> = {
   'log.judgeWorker': 'ワーカー判定',
   'log.judgeFell': '{asked} 失敗 → {by}',
   'log.sure': '確信 {percent}%',
+  // Limits pane.
+  'limits.title': '期間ごとの上限',
+  'limits.hint': '期間ごとの使用率とリセット時刻です。',
+  'limits.empty': '上限の使用量はまだ表示できません。',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'TypeSafe の API キーを 1 つだけ貼り付けてください',
   'toasts.keyPrivateFailed': 'Jev のキーファイルを非公開にできませんでした (chmod 600)',
@@ -2140,6 +2193,7 @@ const JA: Record<Key, string> = {
   'agents.nothingYet': '会話はまだありません。',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'ClaudeRipple コンテキスト',
+  'commands.limitsTitle': 'ClaudeRipple 上限',
   'band.contextOpen': '{tokens} / {window} トークン · クリックで詳細',
   'context.title': 'コンテキストの内訳',
   'context.of': '/ {max} トークン',
@@ -2194,6 +2248,13 @@ const JA: Record<Key, string> = {
   'units.days': '{n}日',
   'units.minSec': '{m}分{s}秒',
   'units.hourMin': '{h}時間{m}分',
+  'units.weekdaySun': '日',
+  'units.weekdayMon': '月',
+  'units.weekdayTue': '火',
+  'units.weekdayWed': '水',
+  'units.weekdayThu': '木',
+  'units.weekdayFri': '金',
+  'units.weekdaySat': '土',
 }
 
 const ES: Record<Key, string> = {
@@ -2245,12 +2306,15 @@ const ES: Record<Key, string> = {
   'band.resetting': 'restableciendo',
   'band.resetsIn': 'se restablece en {time}',
   'band.resetsAt': 'se restablece a las {time}',
+  'band.resetIn': 'en {time}',
+  'band.resetDay': '{day} {time}',
   'band.router': 'Router',
   'band.routerAlt': 'Router: {value}',
   'band.resentCaption': 'REENVIADO · {status}',
   'band.failedCaption': 'FALLÓ · {status}',
   'band.lastRoute': 'ÚLTIMA RUTA',
   'band.logHint': 'Haz clic para ver el registro de solicitudes',
+  'band.limitsOpen': 'Haz clic para ver el uso y el restablecimiento de cada periodo',
   'band.routeAlt': 'Última ruta: {model} vía {provider}{effort}{cache}, {time}{status}',
   'band.routeCache': ', caché {percent}%',
   'band.routeResent': ', reenviado {status}',
@@ -2493,6 +2557,10 @@ const ES: Record<Key, string> = {
   'log.judgeWorker': 'Juicio de trabajador',
   'log.judgeFell': '{asked} falló → {by}',
   'log.sure': 'seguro {percent}%',
+  // Limits pane.
+  'limits.title': 'Límites del plan',
+  'limits.hint': 'Uso de cada periodo y cuándo se restablece.',
+  'limits.empty': 'El uso del plan aún no está disponible.',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'Pega una sola clave de API de TypeSafe',
   'toasts.keyPrivateFailed': 'No se pudo hacer privado el archivo de clave de Jev (chmod 600)',
@@ -2688,6 +2756,7 @@ const ES: Record<Key, string> = {
   'agents.nothingYet': 'Aún no hay nada en su conversación.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'Contexto de ClaudeRipple',
+  'commands.limitsTitle': 'Límites de ClaudeRipple',
   'band.contextOpen': '{tokens} de {window} tokens · Clic para ver más',
   'context.title': 'Desglose del contexto',
   'context.of': '/ {max} tokens',
@@ -2742,6 +2811,13 @@ const ES: Record<Key, string> = {
   'units.days': '{n} d',
   'units.minSec': '{m} min {s} s',
   'units.hourMin': '{h} h {m} min',
+  'units.weekdaySun': 'dom',
+  'units.weekdayMon': 'lun',
+  'units.weekdayTue': 'mar',
+  'units.weekdayWed': 'mié',
+  'units.weekdayThu': 'jue',
+  'units.weekdayFri': 'vie',
+  'units.weekdaySat': 'sáb',
 }
 
 const PT: Record<Key, string> = {
@@ -2793,12 +2869,15 @@ const PT: Record<Key, string> = {
   'band.resetting': 'renovando',
   'band.resetsIn': 'renova em {time}',
   'band.resetsAt': 'renova às {time}',
+  'band.resetIn': 'em {time}',
+  'band.resetDay': '{day} {time}',
   'band.router': 'Roteador',
   'band.routerAlt': 'Roteador: {value}',
   'band.resentCaption': 'REENVIADO · {status}',
   'band.failedCaption': 'FALHOU · {status}',
   'band.lastRoute': 'ÚLTIMA ROTA',
   'band.logHint': 'Clique para ver o log de requisições',
+  'band.limitsOpen': 'Clique para ver o uso e a renovação de cada período',
   'band.routeAlt': 'Última rota: {model} via {provider}{effort}{cache}, {time}{status}',
   'band.routeCache': ', cache {percent}%',
   'band.routeResent': ', reenviado {status}',
@@ -3041,6 +3120,10 @@ const PT: Record<Key, string> = {
   'log.judgeWorker': 'Julgamento de worker',
   'log.judgeFell': '{asked} falhou → {by}',
   'log.sure': 'certeza {percent}%',
+  // Limits pane.
+  'limits.title': 'Limites do plano',
+  'limits.hint': 'Uso de cada período e quando renova.',
+  'limits.empty': 'O uso do plano ainda não está disponível.',
   // Toasts and locally generated failure/reason text.
   'toasts.keySingle': 'Cole uma única chave de API da TypeSafe',
   'toasts.keyPrivateFailed': 'Não foi possível tornar privado o arquivo da chave do Jev (chmod 600)',
@@ -3236,6 +3319,7 @@ const PT: Record<Key, string> = {
   'agents.nothingYet': 'Ainda não há nada na conversa.',
   // Context pane (the band's context chip opens it).
   'commands.contextTitle': 'Contexto do ClaudeRipple',
+  'commands.limitsTitle': 'Limites do ClaudeRipple',
   'band.contextOpen': '{tokens} de {window} tokens · Clique para ver mais',
   'context.title': 'Composição do contexto',
   'context.of': '/ {max} tokens',
@@ -3290,6 +3374,13 @@ const PT: Record<Key, string> = {
   'units.days': '{n} d',
   'units.minSec': '{m} min {s} s',
   'units.hourMin': '{h} h {m} min',
+  'units.weekdaySun': 'dom',
+  'units.weekdayMon': 'seg',
+  'units.weekdayTue': 'ter',
+  'units.weekdayWed': 'qua',
+  'units.weekdayThu': 'qui',
+  'units.weekdayFri': 'sex',
+  'units.weekdaySat': 'sáb',
 }
 
 // Independent tables: a translator can replace any language without changing English.

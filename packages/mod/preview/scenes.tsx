@@ -13,6 +13,7 @@ import { renderContext } from '../hooks/ui/context'
 import type { ContextView } from '../hooks/ui/context'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { renderLog } from '../hooks/ui/log'
+import { renderLimits } from '../hooks/ui/limits'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
 import type { AgentEntry, AlertView, DashboardView, Frame, SettingsView } from '../hooks/ui/view'
@@ -308,6 +309,12 @@ const SCENES: Scene[] = [
   { name: 'band-limits-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-70', columns: 70, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
+  // The limits pane the row opens (2026-10-25): every window's share, and when it resets — the time
+  // left while it is close, else a weekday and the clock.
+  { name: 'limits-pane', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS }) },
+  { name: 'limits-pane-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS }) },
+  { name: 'limits-pane-all', columns: 100, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ALL }) },
+  { name: 'limits-pane-none', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: [] }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
   // two real widths. Narrow, the scoped windows go first, then a later provider's group.
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
