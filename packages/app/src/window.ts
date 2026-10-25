@@ -103,9 +103,10 @@ export function openWindow(deps: WindowDeps, view?: string): void {
     if (mac) app.dock?.hide();
   });
   if (mac) {
-    // The window's Dock icon is the running bundle's: installed from npm that is Electron.app, so the
-    // Dock showed Electron's atom (2026-10-20). Ours is set on it whatever bundle runs, once the Dock
-    // icon is up: set while the app had none, it was dropped when show() put the bundle's back.
+    // The window's Dock icon is the running bundle's. npm installs run our own ClaudeRipple.app,
+    // but a checkout or a runtime fetched before that still runs Electron.app, whose Dock icon is
+    // the atom (2026-10-20). Ours is set on it whatever bundle runs, once the Dock icon is up: set
+    // while the app had none, it was dropped when show() put the bundle's back.
     void app.dock?.show().then(dockIcon);
   }
   void win.loadURL(`${ORIGIN}/?lang=${encodeURIComponent(deps.lang)}${view ? `#${view}` : ""}`);
