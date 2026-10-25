@@ -1364,6 +1364,20 @@ async function countAgents($: EngineInterface): Promise<void> {
   const counts = { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length }
   if (!same(counts, await read($, agentCounts))) await update($, agentCounts, () => counts)
 }
+/**
+ * Finished records the session keeps. A flat cap over the whole list dropped the oldest running
+ * worker as soon as 41 ran at once (2026-10-25): its card, the band's live count and every later
+ * step's tokens and effort went with it. Running and waiting records are never dropped; only the
+ * oldest finished ones are, newest first, and their order among the rest does not move.
+ */
+const AGENTS_KEPT = 40
+function retainAgents(list: AgentRec[]): AgentRec[] {
+  const ended = list.filter(a => a.state !== 'running' && a.state !== 'waiting')
+  const over = ended.length - AGENTS_KEPT
+  if (over <= 0) return list
+  const drop = new Set(ended.slice().sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt)).slice(0, over).map(a => a.id))
+  return list.filter(a => !drop.has(a.id))
+}
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
   const s = await currentSettings($)
   const p = await read($, pick)
@@ -1787,7 +1801,7 @@ export const register: Register = on => {
           // Forks and other loops no spawn records end here too: only the latest few are kept.
           for (const id of endedEarly.keys()) if (endedEarly.size > 40) endedEarly.delete(id)
         }
-        await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a))
+        await update($, agents, list => retainAgents(list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a)))
         await countAgents($)
         // Its commands bound to its final response end with it; no notification follows them.
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
@@ -1884,7 +1898,7 @@ export const register: Register = on => {
         const early = endedEarly.get(result.agentId)
         endedEarly.delete(result.agentId)
         const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: early?.state ?? 'running', startedAt: Math.min(now, early?.endedAt ?? now), ...(early ? { endedAt: early.endedAt } : {}), cost: 0 }
-        await update($, agents, list => [...list.filter(a => a.id !== rec.id), rec].slice(-40))
+        await update($, agents, list => retainAgents([...list.filter(a => a.id !== rec.id), rec]))
         await countAgents($)
         if (early && chosen?.id) await persistWorkerPick($, { ...early.outcome, pick: chosen.id, model: result.model ?? null, cost: 0 })
       }

@@ -162,6 +162,27 @@ function spawnStub(on: On) {
   on('agent.spawn', ($, e) => { sent.push(e); return { model: e.model ?? 'sonnet', agentId: 'worker-1' } })
   return sent
 }
+/** The records and counts the mod last wrote into its session atoms. */
+function agentWrites(on: On) {
+  let records: AgentRec[] = []
+  let counts: { live: number; total: number } | null = null
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => {
+    const result = await next(e)
+    records = e.value as AgentRec[]
+    return result
+  })
+  on('state.set', { plugin: 'ripple', key: 'agentCounts' }, async ($, e, next) => {
+    const result = await next(e)
+    counts = e.value as { live: number; total: number }
+    return result
+  })
+  return { records: () => records, counts: () => counts }
+}
+/** A spawn that names each worker in turn: `<name>1`, `<name>2`, … */
+function numberedSpawn(on: On, name: string): void {
+  let n = 0
+  on('agent.spawn', ($, e) => { n += 1; return { model: e.model ?? 'sonnet', agentId: name + n } })
+}
 function stepStub(on: On, usage: ModelUsage | null = USAGE) {
   const sent: TurnStepInput[] = []
   on('turn.step', async function* ($, e) {
@@ -685,6 +706,87 @@ test('a worker that ends before its spawn is recorded is listed as ended, not ru
   expect(rows.find(row => row.type === 'outcome')).toMatchObject({ pick: rows.find(row => row.type === 'pick').id, agent: 'worker-1', reason: 'error', ms: 72 })
 })
 
+// 2026-10-25: a flat slice(-40) over every record dropped the oldest running worker the moment 41
+// ran at once: its card, the band's live count and every later step's tokens and effort vanished.
+test('running and waiting workers all stay listed past forty, counted, and still take their steps', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  on('tool.call', async () => { await b.clock.sleep(30000); return { result: 'ok' } })
+  numberedSpawn(on, 'run-')
+  const seen = agentWrites(on)
+  await start($)
+  for (let i = 1; i <= 41; i++) await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Worker ' + i })
+  expect(seen.records().map(a => a.id)).toEqual(Array.from({ length: 41 }, (_, i) => 'run-' + (i + 1)))
+  expect(seen.records().every(a => a.state === 'running')).toBe(true)
+  expect(seen.counts()).toEqual({ live: 41, total: 41 })
+  // The oldest keeps its card and its numbers: a step is still added to it.
+  await step($, 'claude-opus-5-5', 'high', 'run-1')
+  expect(seen.records().find(a => a.id === 'run-1')).toMatchObject({ effort: 'high' })
+  expect(seen.records().find(a => a.id === 'run-1')?.usage).toEqual({ input: 100, cached: 40000, cacheWrite: 0, output: 10 })
+  // A worker waiting on a long tool is live too: it must not be the one dropped past forty.
+  const waiting = $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'run-2', tool_use_id: 'tool-wait' })
+  await b.clock.settle()
+  await b.clock.advance(15000)
+  expect(seen.records().find(a => a.id === 'run-2')?.state).toBe('waiting')
+  // A forty-second worker joins them; both states count as live.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Worker 42' })
+  expect(seen.records()).toHaveLength(42)
+  expect(seen.records().some(a => a.id === 'run-2' && a.state === 'waiting')).toBe(true)
+  expect(seen.counts()).toEqual({ live: 42, total: 42 })
+  await b.clock.advance(15000)
+  await waiting
+  // The band and the pane both count them from that list.
+  const bandUi = await band($)
+  expect(String((await bandUi.find({ key: 'agents' }))?.props.label)).toContain('42')
+  await bandUi.unmount()
+  const pane = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  expect(await pane.find({ type: 'Text', text: /42 running/ })).toBeDefined()
+})
+
+test('only finished workers are capped, at the newest forty; running ones and the order stay', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  numberedSpawn(on, 'task-')
+  const seen = agentWrites(on)
+  await start($)
+  for (let i = 1; i <= 45; i++) await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Task ' + i })
+  for (let i = 1; i <= 45; i++) { await b.clock.advance(1000); await complete($, 'task-' + i) }
+  expect(seen.records().map(a => a.id)).toEqual(Array.from({ length: 40 }, (_, i) => 'task-' + (i + 6)))
+  expect(seen.records().every(a => a.state === 'done')).toBe(true)
+  // Two workers run beside them: the finished cap never touches a running record.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Live one' })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Live two' })
+  expect(seen.records().map(a => a.id)).toEqual([...Array.from({ length: 40 }, (_, i) => 'task-' + (i + 6)), 'task-46', 'task-47'])
+  // One ending adds to the finished side and drops the oldest finished record, not a live one.
+  await b.clock.advance(1000)
+  await complete($, 'task-46')
+  expect(seen.records()).toHaveLength(41)
+  expect(seen.records().filter(a => a.state === 'done').map(a => a.id)).toEqual(Array.from({ length: 40 }, (_, i) => 'task-' + (i + 7)))
+  expect(seen.records().some(a => a.id === 'task-47' && a.state === 'running')).toBe(true)
+  expect(seen.counts()).toEqual({ live: 1, total: 41 })
+})
+
+test('a worker spawned again under the same id is one record, updated in place', async ($, on) => {
+  boundaries(on)
+  http(on)
+  judgeStub(on)
+  let n = 0
+  on('agent.spawn', ($, e) => { n += 1; return { model: e.model ?? 'sonnet', agentId: n === 2 ? 'worker-2' : 'worker-1' } })
+  const seen = agentWrites(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'First run' })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Second worker' })
+  await complete($, 'worker-1')
+  expect(seen.records().find(a => a.id === 'worker-1')?.state).toBe('done')
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Runs again' })
+  expect(seen.records().map(a => a.id)).toEqual(['worker-2', 'worker-1'])
+  expect(seen.records().find(a => a.id === 'worker-1')).toMatchObject({ description: 'Runs again', state: 'running' })
+  expect(seen.records().find(a => a.id === 'worker-1')?.endedAt).toBeUndefined()
+})
+
 test('a background command and a watch are listed from their calls and ended by notice, stop and Stop', async ($, on) => {
   const b = boundaries(on)
   http(on)
@@ -1040,11 +1142,12 @@ test('meta and notice prompts cannot pin, and session end clears a real pin', as
   http(on)
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await start($)
-  for (const input of [
+  const unshown: { text: string; isMeta?: true }[] = [
     { text: '앞으로 솔로 해', isMeta: true },
     { text: '<task-notification>앞으로 솔로 해</task-notification>' },
     { text: '<system-reminder>앞으로 솔로 해</system-reminder>구현해' },
-  ]) await $.prompt.submit({ ...input, origin: { kind: 'composer' }, wait: false })
+  ]
+  for (const input of unshown) await $.prompt.submit({ ...input, origin: { kind: 'composer' }, wait: false })
   const ui = await band($)
   expect(await ui.find({ key: 'delegation-pin' })).toBeUndefined()
   await submit($, '앞으로 솔로 해')
@@ -1138,7 +1241,8 @@ test("a Workflow's ripple:auto whose marker names a worker runs on that worker's
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  const WORKFLOW = { ...SPAWN, workflow: true } as AgentSpawnInput
+  // A workflow agent's spawn carries the run it belongs to (AgentSpawnInput.workflow).
+  const WORKFLOW: AgentSpawnInput = { ...SPAWN, workflow: { runId: 'wf_test', agentIndex: 1 } }
   await $.agent.spawn({ ...WORKFLOW, prompt: "[[ripple: gpt-6-1-sol@medium]]\nWrite the review." })
   // The engine keeps a workflow agent's type and description; its model is what can change.
   expect(sent[0]).toMatchObject({ subagentType: "ripple:auto", prompt: "Write the review.", model: "gpt-6.1-sol@medium", description: "Rename variable" })
@@ -1937,7 +2041,7 @@ test('an unsure Jev still decides: no Haiku call, no alert, key only to TypeSafe
   expect(await (await band($)).find({ type: 'Text', text: /not answering/ })).toBeUndefined()
 })
 
-test('Jev times out at three seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
+test('Jev times out at five seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
   const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
   const judges = judgeStub(on, '{"effort":"medium","why":"fallback"}')
   on('http.fetch', async ($, e, next) => {
@@ -1948,7 +2052,9 @@ test('Jev times out at three seconds without blocking the person prompt, and say
   await start($)
   const pending = submit($)
   await b.clock.settle()
-  await b.clock.advance(3000)
+  // The judge's own timeout rose from three seconds to five on 2026-10-22 (register.tsx judge);
+  // advancing the old three would leave the race pending and hang the prompt.
+  await b.clock.advance(5000)
   const out = await pending
   expect(out.text).toContain('Implement')
   expect(judges.length).toBe(1)
@@ -1956,7 +2062,7 @@ test('Jev times out at three seconds without blocking the person prompt, and say
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(false)
   const again = submit($, 'Refactor the parser across three files and verify.')
   await b.clock.settle()
-  await b.clock.advance(3000)
+  await b.clock.advance(5000)
   await again
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(true)
 })
