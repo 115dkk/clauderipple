@@ -922,7 +922,7 @@ test("hello denies and closes a wrong token, and returns ready with sessions for
   right.send({ t: "hello", token, clientId: "right-client" });
   const ready = (await right.take("ready")).msg;
   // `queue`: this host keeps what the phone queues, so the app hands it over instead of holding it.
-  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true, queue: true, capabilities: { sessionFiles: true } });
+  assert.deepEqual(ready.host, { name: "test-host", version: "test-version", routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true } });
   assert.deepEqual(ready.sessions, f.sessions.list());
   assert.equal(ready.sessions[0]?.id, id);
 });

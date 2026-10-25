@@ -258,6 +258,11 @@ export interface ModelOption { model: string; name: string; provider: string; ef
 export interface ProviderGroup { provider: string; label: string; usable: boolean; models: ModelOption[] }
 
 export interface FolderEntry { path: string; name: string; lastUsed?: number; model?: string }
+/** One row in a session folder's read-only listing; `path` is relative to the session folder. */
+export interface SessionFolderEntry { name: string; path: string; dir: boolean; bytes: number | null; /** a symlink that leads outside the folder: shown, not opened */ blocked?: boolean }
+export interface FolderListing { path: string; parent: string | null; entries: SessionFolderEntry[]; truncated: boolean }
+/** One small file from a session folder, base64. Larger files are refused, never truncated. */
+export interface FolderFile { path: string; name: string; mediaType: string; bytes: number; data: string }
 
 /**
  * `desktopProblem`: why sends, approvals and live state for Claude app (Mac) sessions cannot work
@@ -266,14 +271,14 @@ export interface FolderEntry { path: string; name: string; lastUsed?: number; mo
 export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string;
   /** The host keeps queued messages (ReqOp enqueue/queue_*); an older host leaves the queue to the phone. */
   queue?: boolean;
-  capabilities?: { sessionFiles: boolean };
+  capabilities?: { sessionFiles: boolean; /** read-only session folder listing and small-file reads */ folderFiles?: boolean };
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 
 // ---- client → host --------------------------------------------------------------------
 
 /** Per-connection opt-in. Missing/non-array lists mean no features; unknown entries are ignored. */
-export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames"] as const;
+export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames", "folderFiles"] as const;
 export type ClientFeature = typeof CLIENT_FEATURES[number];
 
 export type ClientMsg =
@@ -316,6 +321,10 @@ export type ReqOp =
   | { op: "diff"; session: string }
   /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
   | { op: "commands"; session: string }
+  /** Read-only listing of a session folder; `path` is relative to it. */
+  | { op: "folder_list"; session: string; path?: string }
+  /** One small file from that listing, base64; refuses anything larger. */
+  | { op: "folder_file"; session: string; path: string }
   /** Queue a message for when the running turn ends; attachments are uploads, as for `send`. A
    * session that is not busy takes it at once. Answers `{ queued: true }`; a resent id is a no-op. */
   | { op: "enqueue"; session: string; clientMsgId: string; text: string; attachments?: Attachment[] }
