@@ -85,7 +85,7 @@ download_node() {
   [ -n "$version" ] || version="$NODE_FALLBACK"
   name="node-$version-$os-$arch"
   base="https://nodejs.org/dist/$version"
-  tmp="$(mktemp -d)"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/clauderipple-node.XXXXXX")"
   DOWNLOAD="$tmp"
   say "Downloading Node $version ($os-$arch)…"
   curl -fsSL "$base/$name.tar.gz" -o "$tmp/node.tar.gz" || die "could not download Node from $base"

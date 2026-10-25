@@ -44,7 +44,7 @@ for (const point of ["first-rename", "second-rename", "npm", "extract"]) {
   test(`install.sh restores the previous runtime after ${point} failure`, { skip: process.platform === "win32" }, t => {
     const f = fixture(t);
     const result = f.run(point);
-    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.equal(result.status, point === "npm" ? 74 : point.endsWith("rename") ? 73 : 1, result.stdout + result.stderr);
     f.preserved();
   });
 }
