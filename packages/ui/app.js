@@ -381,10 +381,14 @@ function renderDiagnostics() {
   if (!box || !wrap || !status) return;
   const problems = (status.readiness && Array.isArray(status.readiness.problems)) ? status.readiness.problems : [];
   const configErrors = (status.config && Array.isArray(status.config.errors)) ? status.config.errors : [];
-  wrap.hidden = problems.length === 0 && configErrors.length === 0;
+  const envProxy = (status.envProxy && Array.isArray(status.envProxy.set)) ? status.envProxy.set : [];
+  wrap.hidden = problems.length === 0 && configErrors.length === 0 && envProxy.length === 0;
   if (wrap.hidden) { box.replaceChildren(); return; }
   const rows = problems.map((code) => cell(readinessProblemText(code), badge("warn", String(code))));
   for (const error of configErrors) rows.push(cell(t("health.diagnosticConfig"), badge("bad", "config"), [el("span", { class: "cell-sub mono", text: String(error) })]));
+  // Not a fault: a proxy that is set but not needed changes nothing. Said anyway, because an
+  // upstream call that needed one would otherwise fail with no hint why (G-D11).
+  if (envProxy.length) rows.push(cell(t("health.diagnosticEnvProxy", { list: envProxy.join(", ") }), badge("warn", "env-proxy")));
   box.replaceChildren(...rows);
 }
 /**
@@ -406,6 +410,7 @@ function diagnosticBundle() {
     cli: status.cliVersion,
     readiness: status.readiness || null,
     config: status.config || null,
+    envProxy: status.envProxy || null,
     settings: { pointsAtRouter: Boolean(status.settings && status.settings.pointsAtRouter) },
     autoUpdate: status.autoUpdate ? { enabled: Boolean(status.autoUpdate.enabled), running: Boolean(status.autoUpdate.running), kind: status.autoUpdate.kind || null, failed: Boolean(status.autoUpdate.lastError) } : null,
     listen: status.listen || null,

@@ -107,6 +107,11 @@ export type AdminDeps = {
   phone?: PhoneDeps;
   config: () => Config;
   configFile: string;
+  /**
+   * Validation errors from the config file as last read. An invalid file is still adopted on the
+   * first read so the router can serve the fix, but readiness must not call that healthy (G-D14).
+   */
+  configErrors?: () => string[];
   log: Logger;
   stats: () => Stats;
   health: () => number;
@@ -843,6 +848,10 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   // can go through. In picker mode a missing certificate trust or app proxy entry looks, from the
   // app, exactly like a dead router. Each problem is a code the tray and the GUI can name.
   const problems: string[] = [];
+  // A config that failed validation is not a healthy router: the routes it names may be missing,
+  // and the file has to be fixed before anything else can be trusted (G-D14).
+  const configErrors = deps.configErrors?.() ?? [];
+  if (configErrors.length) problems.push("config");
   if (env.HTTPS_PROXY !== wantProxy) problems.push("settings");
   if (deps.health() > 0) problems.push("upstream");
   if (picker.enabled) {
@@ -855,6 +864,13 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     version: deps.version,
     autoUpdate: deps.autoUpdater?.status() ?? { enabled: cfg.autoUpdate !== false, running: false },
     readiness: { ready: problems.length === 0, problems },
+    // The errors themselves, so a reader can name the line to fix rather than only "config".
+    config: { errors: configErrors },
+    // Outbound provider calls run on undici's own dispatcher, never the environment's proxy
+    // variables, so a network that requires a proxy is bypassed silently. Names only: a proxy URL
+    // can carry a credential (G-D11). The dashboard says so; readiness is unaffected, since a
+    // proxy that is set but not needed is not a fault.
+    envProxy: { set: ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_USE_ENV_PROXY"].filter((name) => (process.env[name] ?? "") !== "") },
     // Which files this process is running, so the app can tell an old router from its own after
     // an update: a zip unpacked next to the previous install left the old one serving (2026-09-15).
     runtime: { node: process.execPath, router: process.argv[1] ?? null, startedAt: STARTED_AT },

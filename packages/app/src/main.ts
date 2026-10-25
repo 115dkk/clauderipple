@@ -28,7 +28,7 @@ type Status = {
   /** Reported from 0.1.2 on; an older router leaves it out. */
   runtime?: { node: string; router: string | null; startedAt: string };
   /** Reported from 0.1.2 on: whether requests can actually go through, and what is in the way. */
-  readiness?: { ready: boolean; problems: ("settings" | "upstream" | "picker-ca" | "picker-proxy" | `provider:${string}`)[] };
+  readiness?: { ready: boolean; problems: ("settings" | "upstream" | "picker-ca" | "picker-proxy" | "config" | `provider:${string}`)[] };
   listen: { host: string; port: number };
   adminPort: number;
   stats: { started: number; completed: number; failed: number; inFlight: number };
@@ -90,6 +90,7 @@ const STRINGS = {
       : code === "upstream" ? "Anthropic is unreachable"
       : code === "picker-ca" ? "picker mode: certificate not trusted"
       : code === "picker-proxy" ? "picker mode: Claude Desktop proxy not set"
+      : code === "config" ? "the config file has errors"
       : code.startsWith("provider:") ? `provider ${code.slice(9)} unreachable`
       : code,
     about: "About ClaudeRipple",
@@ -175,6 +176,7 @@ const STRINGS = {
       : code === "upstream" ? "Anthropic 연결 안 됨"
       : code === "picker-ca" ? "피커 모드: 인증서 신뢰 필요"
       : code === "picker-proxy" ? "피커 모드: Claude Desktop 프록시 설정 필요"
+      : code === "config" ? "설정 파일에 오류가 있음"
       : code.startsWith("provider:") ? `프로바이더 ${code.slice(9)} 연결 안 됨`
       : code,
     about: "ClaudeRipple 정보",
@@ -260,6 +262,7 @@ const STRINGS = {
       : code === "upstream" ? "无法连接 Anthropic"
       : code === "picker-ca" ? "选择器模式：证书未被信任"
       : code === "picker-proxy" ? "选择器模式：未设置 Claude Desktop 代理"
+      : code === "config" ? "设置文件有错误"
       : code.startsWith("provider:") ? `无法连接供应商 ${code.slice(9)}`
       : code,
     about: "关于 ClaudeRipple",
@@ -345,6 +348,7 @@ const STRINGS = {
       : code === "upstream" ? "Anthropicに接続できません"
       : code === "picker-ca" ? "ピッカーモード：証明書が信頼されていません"
       : code === "picker-proxy" ? "ピッカーモード：Claude Desktopのプロキシが未設定です"
+      : code === "config" ? "設定ファイルにエラーがあります"
       : code.startsWith("provider:") ? `プロバイダー ${code.slice(9)} に接続できません`
       : code,
     about: "ClaudeRippleについて",
@@ -430,6 +434,7 @@ const STRINGS = {
       : code === "upstream" ? "No se puede acceder a Anthropic"
       : code === "picker-ca" ? "modo selector: el certificado no es de confianza"
       : code === "picker-proxy" ? "modo selector: proxy de Claude Desktop sin configurar"
+      : code === "config" ? "el archivo de ajustes tiene errores"
       : code.startsWith("provider:") ? `no se puede acceder al proveedor ${code.slice(9)}`
       : code,
     about: "Acerca de ClaudeRipple",
@@ -515,6 +520,7 @@ const STRINGS = {
       : code === "upstream" ? "A Anthropic está inacessível"
       : code === "picker-ca" ? "modo seletor: certificado não confiável"
       : code === "picker-proxy" ? "modo seletor: proxy do Claude Desktop não configurado"
+      : code === "config" ? "o arquivo de configuração tem erros"
       : code.startsWith("provider:") ? `provedor ${code.slice(9)} inacessível`
       : code,
     about: "Sobre o ClaudeRipple",
