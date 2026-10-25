@@ -80,10 +80,15 @@ function byRecency(a: SessionSummary, b: SessionSummary): number {
   return b.updatedAt - a.updatedAt || a.id.localeCompare(b.id);
 }
 
+/** One separator for both platforms: a Windows host sends backslashes, a Linux/macOS host slashes. */
+const pathForm = (value: string): string => value.replace(/\\/g, "/").replace(/\/+$/, "");
+/** Drive letters are case-insensitive on Windows; a POSIX path keeps its case. */
+const pathFold = (value: string): string => /^[A-Za-z]:/.test(pathForm(value)) ? pathForm(value).toLowerCase() : pathForm(value);
+
 /** The last path segment, the way a folder is named in speech. `~` for the home folder. */
 export function folderName(p: string, home?: string): string {
-  if (home && p === home) return "~";
-  const parts = p.split("/").filter(Boolean);
+  if (home && pathFold(home) && pathFold(p) === pathFold(home)) return "~";
+  const parts = pathForm(p).split("/").filter(Boolean);
   return parts[parts.length - 1] ?? "/";
 }
 
