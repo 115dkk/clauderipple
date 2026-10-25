@@ -1286,11 +1286,6 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     await refreshUsage($)
     await refreshLimits($)
-    const now = await $.clock.now()
-    const list = await read($, agents)
-    if (list.some(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000)) {
-      await update($, agents, value => value.map(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000 ? { ...a, state: 'waiting' } : a))
-    }
     await countAgents($)
     await scheduleCountdown($)
     if (await read($, handoff)) await driveHandoff($)
@@ -1336,7 +1331,7 @@ function startTimers($: EngineInterface): void {
  */
 async function agentsClock($: EngineInterface): Promise<void> {
   try {
-    if (!(await read($, agents)).some(a => a.state === 'running' || a.state === 'waiting') && !(await read($, bgTasks)).some(task => task.state === 'running')) return
+    if (!(await read($, agents)).some(a => a.state === 'running') && !(await read($, bgTasks)).some(task => task.state === 'running')) return
     if (!(await $.ui.panes()).some(p => p.id === AGENTS_PANE)) return
     await update($, agentsTick, n => n + 1)
   } catch (error) { await report($, 'agents clock', error) }
@@ -1376,7 +1371,7 @@ async function endBackground($: EngineInterface, text: string): Promise<void> {
  */
 async function countAgents($: EngineInterface): Promise<void> {
   const list = await read($, agents)
-  const counts = { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length }
+  const counts = { live: list.filter(a => a.state === 'running').length, total: list.length }
   if (!same(counts, await read($, agentCounts))) await update($, agentCounts, () => counts)
 }
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
@@ -1634,6 +1629,8 @@ export const register: Register = on => {
       // A failure here must not cost the commands: without them there is no /ripple to look with.
       try { await loadSettings($); await $.ui.status(undefined) }
       catch (error) { await report($, 'session.start settings', error) }
+      // Session atoms survive hot reloads: an old eight-second classification is still active work.
+      if ((await read($, agents)).some(a => String(a.state) === 'waiting')) await update($, agents, list => list.map(a => String(a.state) === 'waiting' ? { ...a, state: 'running' } : a))
       const language = await read($, lang)
       await $.command.register({ name: 'ripple', description: t(language, 'commands.description'), argumentHint: t(language, 'commands.argumentHint'), immediate: true })
       await $.command.register({ name: 'ripple-log', description: t(language, 'commands.logDescription'), immediate: true })
@@ -1815,7 +1812,7 @@ export const register: Register = on => {
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
         // A picked worker's outcome, once, joined to its pick by id: whether the session's tier or
         // the named model was enough is read from these lines later (2026-10-24).
-        if (before?.pick?.id && (before.state === 'running' || before.state === 'waiting')) {
+        if (before?.pick?.id && before.state === 'running') {
           await persistWorkerPick($, { ...outcome, pick: before.pick.id, model: before.model ?? null, cost: before.cost })
         }
       } else if (!forking) {
@@ -1924,7 +1921,7 @@ export const register: Register = on => {
     try { answer = await next(e); return answer }
     finally {
       try {
-        if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId && a.toolSince === started ? { ...a, now: undefined, toolSince: undefined, state: a.state === 'waiting' ? 'running' : a.state } : a))
+        if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId && a.toolSince === started ? { ...a, now: undefined, toolSince: undefined } : a))
       } catch (error) { await report($, 'tool.call finish', error) }
       try { if (answer && ['Bash', 'Monitor', 'TaskStop'].includes(e.tool)) await noteTask($, e, answer, started) }
       catch (error) { await report($, 'tool.call task', error) }

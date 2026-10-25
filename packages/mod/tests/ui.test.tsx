@@ -709,7 +709,7 @@ test('the Agents pane draws forty agents at once, and a record missing its title
 
 test('the Agents pane draws forty mixed real-world records on every surface, skin and theme', async ($, on) => {
   const by = ['marker', 'session', 'judge', 'haiku', 'jev', 'model', 'default', 'tier'] as const
-  const states = ['running', 'waiting', 'done', 'failed', 'killed'] as const
+  const states = ['running', 'done', 'failed', 'killed'] as const
   const mixed: AgentRec[] = Array.from({ length: 40 }, (_, i): AgentRec => ({
     ...AGENTS[0]!, id: 'mixed-' + i, description: '에이전트 표시 오류 수정 ' + i,
     state: states[i % states.length]!,

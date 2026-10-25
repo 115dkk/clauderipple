@@ -1070,7 +1070,7 @@ test('meta and notice prompts cannot pin, and session end clears a real pin', as
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await start($)
   for (const input of [
-    { text: '앞으로 솔로 해', isMeta: true },
+    { text: '앞으로 솔로 해', isMeta: true as const },
     { text: '<task-notification>앞으로 솔로 해</task-notification>' },
     { text: '<system-reminder>앞으로 솔로 해</system-reminder>구현해' },
   ]) await $.prompt.submit({ ...input, origin: { kind: 'composer' }, wait: false })
@@ -1167,7 +1167,7 @@ test("a Workflow's ripple:auto whose marker names a worker runs on that worker's
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  const WORKFLOW = { ...SPAWN, workflow: true } as AgentSpawnInput
+  const WORKFLOW: AgentSpawnInput = { ...SPAWN, workflow: { runId: 'workflow-test', agentIndex: 0 } }
   await $.agent.spawn({ ...WORKFLOW, prompt: "[[ripple: gpt-6-1-sol@medium]]\nWrite the review." })
   // The engine keeps a workflow agent's type and description; its model is what can change.
   expect(sent[0]).toMatchObject({ subagentType: "ripple:auto", prompt: "Write the review.", model: "gpt-6.1-sol@medium", description: "Rename variable" })
@@ -1966,7 +1966,7 @@ test('an unsure Jev still decides: no Haiku call, no alert, key only to TypeSafe
   expect(await (await band($)).find({ type: 'Text', text: /not answering/ })).toBeUndefined()
 })
 
-test('Jev times out at three seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
+test('Jev times out at five seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
   const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
   const judges = judgeStub(on, '{"effort":"medium","why":"fallback"}')
   on('http.fetch', async ($, e, next) => {
@@ -1977,7 +1977,7 @@ test('Jev times out at three seconds without blocking the person prompt, and say
   await start($)
   const pending = submit($)
   await b.clock.settle()
-  await b.clock.advance(3000)
+  await b.clock.advance(5000)
   const out = await pending
   expect(out.text).toContain('Implement')
   expect(judges.length).toBe(1)
@@ -1985,7 +1985,7 @@ test('Jev times out at three seconds without blocking the person prompt, and say
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(false)
   const again = submit($, 'Refactor the parser across three files and verify.')
   await b.clock.settle()
-  await b.clock.advance(3000)
+  await b.clock.advance(5000)
   await again
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(true)
 })
@@ -2055,7 +2055,18 @@ test('Jev Test displays latency and a missing-key result', async ($, on) => {
   await ui.unmount()
 })
 
-test('known agents show waiting after an eight-second tool and finish with cost', async ($, on) => {
+test('reload restores the retired waiting classification to running without losing its tool', async ($, on) => {
+  boundaries(on)
+  http(on)
+  let legacy = true
+  let records: AgentRec[] = []
+  on('state.get', { plugin: 'ripple', key: 'agents' }, ($, e, next) => legacy ? { value: { value: [{ id: 'old', state: 'waiting', startedAt: NOW - 30_000, cost: 0, now: 'Bash npm test', toolSince: NOW - 30_000 }], version: 0 } } : next(e))
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => { legacy = false; records = e.value as AgentRec[]; return next(e) })
+  await start($)
+  expect(records[0]).toMatchObject({ id: 'old', state: 'running', now: 'Bash npm test', toolSince: NOW - 30_000 })
+})
+
+test('known agents stay running through a long tool and finish with cost', async ($, on) => {
   const b = boundaries(on)
   http(on)
   judgeStub(on)
@@ -2070,7 +2081,12 @@ test('known agents show waiting after an eight-second tool and finish with cost'
   await b.clock.settle()
   await b.clock.advance(15000)
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
-  expect(await ui.find({ type: 'Text', text: /waiting/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /waiting/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Bash npm test · 15s/ })).toBeDefined()
+  const desktop = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'desktop', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  const age = await desktop.find({ type: 'Text', text: '15s' })
+  expect(age?.props.color).toBe('#f2f0eb')
+  await desktop.unmount()
   await b.clock.advance(15000)
   await tool
   await complete($, 'worker-1')

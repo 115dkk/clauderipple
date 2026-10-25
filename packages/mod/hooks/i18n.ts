@@ -273,7 +273,6 @@ const EN = {
   'setup.back': 'Back',
   'setup.skip': 'Skip setup',
   // Agents.
-  'agents.waiting': 'waiting',
   'agents.routerModel': 'router model',
   'agents.marker': 'marker',
   'agents.default': 'default',
@@ -839,7 +838,6 @@ const KO: Record<Key, string> = {
   'setup.back': '이전',
   'setup.skip': '설정 건너뛰기',
   // Agents.
-  'agents.waiting': '대기 중',
   'agents.routerModel': '리플 모델',
   'agents.marker': '직접 지정',
   'agents.default': '기본값',
@@ -1402,7 +1400,6 @@ const ZH: Record<Key, string> = {
   'setup.back': '上一步',
   'setup.skip': '跳过设置',
   // Agents.
-  'agents.waiting': '等待中',
   'agents.routerModel': '路由模型',
   'agents.marker': '标记',
   'agents.default': '默认',
@@ -1965,7 +1962,6 @@ const JA: Record<Key, string> = {
   'setup.back': '戻る',
   'setup.skip': 'セットアップをスキップ',
   // Agents.
-  'agents.waiting': '待機中',
   'agents.routerModel': 'ルーターのモデル',
   'agents.marker': 'マーカー',
   'agents.default': 'デフォルト',
@@ -2528,7 +2524,6 @@ const ES: Record<Key, string> = {
   'setup.back': 'Atrás',
   'setup.skip': 'Omitir configuración',
   // Agents.
-  'agents.waiting': 'en espera',
   'agents.routerModel': 'modelo del router',
   'agents.marker': 'marcador',
   'agents.default': 'predeterminado',
@@ -3091,7 +3086,6 @@ const PT: Record<Key, string> = {
   'setup.back': 'Voltar',
   'setup.skip': 'Pular configuração',
   // Agents.
-  'agents.waiting': 'aguardando',
   'agents.routerModel': 'modelo do roteador',
   'agents.marker': 'marcador',
   'agents.default': 'padrão',

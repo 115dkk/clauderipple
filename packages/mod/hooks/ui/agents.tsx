@@ -75,7 +75,7 @@ const PROMPT_MAX = 2400
 const ANSWER_MAX = 12000
 
 function live(agent: AgentRec): boolean {
-  return agent.state === 'running' || agent.state === 'waiting'
+  return agent.state === 'running'
 }
 
 /** A row of the list: an agent, or a command or watch left in the background. */
@@ -303,12 +303,11 @@ export function timeCells(frame: Frame, agent: AgentRec): number {
 
 /**
  * The elapsed time's own colour, which carries the state the title row's dot used to show: running
- * lit, waiting amber, failed red (the word before it says so too), done and killed quiet. No new
+ * lit, failed red (the word before it says so too), done and killed quiet. No new
  * element marks the state (2026-10-25).
  */
 function timeInk(agent: AgentRec, k: Look): Look['ink'] {
   if (agent.state === 'failed') return { color: k.tone('red') }
-  if (agent.state === 'waiting') return { color: k.tone('amber') }
   return live(agent) ? k.ink : k.sub
 }
 
@@ -1031,13 +1030,12 @@ function modelLine(frame: Frame, agent: AgentRec): string {
 function liveLines(el: Els, frame: Frame, agent: AgentRec, now: number, hotkey: string | undefined, onOpen: () => void): RenderNode {
   const { Box, Text } = el
   const tone = textTone(frame.appearance)
-  const waiting = agent.state === 'waiting'
   const why = whyLine(frame, agent)
   const nums = figureLine(frame, agent)
   return (
     <Box key={'agent-' + agent.id} flexDirection="column">
       <Box key="title" flexDirection="row" alignItems="center" columnGap={1}>
-        <Text color={waiting ? undefined : tone.accent} dimColor={waiting}>{waiting ? '○' : '●'}</Text>
+        <Text color={tone.accent}>●</Text>
         <Text bold wrap="wrap">{cut(titleOf(agent), 240)}</Text>
         {textButton(el, 'open-' + agent.id, t(frame.lang, 'agents.open'), onOpen, hotkey)}
       </Box>
@@ -1055,7 +1053,7 @@ function liveLines(el: Els, frame: Frame, agent: AgentRec, now: number, hotkey: 
         </Box>
       ) : null}
       <Box key="doing" flexDirection="row" flexWrap="wrap" columnGap={2} paddingLeft={2}>
-        <Text color={waiting ? undefined : tone.accent} dimColor={waiting} wrap="wrap">{'▸ ' + (waiting ? t(frame.lang, 'agents.waiting') + ' · ' : '') + doing(agent, now, frame.lang)}</Text>
+        <Text color={tone.accent} wrap="wrap">{'▸ ' + doing(agent, now, frame.lang)}</Text>
         <Text dimColor>{ranFor(agent, now, frame.lang)}</Text>
         {nums ? <Text dimColor>{nums}</Text> : null}
       </Box>
@@ -1221,7 +1219,7 @@ export function renderAgentsFallback(el: Els, frame: Frame, records: readonly Ag
       <Text dimColor wrap="truncate-end">{diagnostic(error, 240)}</Text>
       {records.slice(-40).map((agent, i) => (
         <Box key={'fallback-' + i} flexDirection="row" columnGap={1}>
-          <Text>{agent.state === 'running' ? '●' : agent.state === 'waiting' ? '◐' : agent.state === 'done' ? '✓' : '✕'}</Text>
+          <Text>{agent.state === 'running' ? '●' : agent.state === 'done' ? '✓' : '✕'}</Text>
           <Text wrap="wrap">{diagnostic(agent.description ?? agent.id, 160)}</Text>
           {textButton(el, 'fallback-open-' + i, t(L, 'agents.open'), () => actions.open(agent.id))}
         </Box>

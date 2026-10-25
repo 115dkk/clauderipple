@@ -268,7 +268,7 @@ export type WorkerPick = WorkerVerdict & {
   id?: string
 }
 
-export type AgentState = 'running' | 'waiting' | 'done' | 'failed' | 'killed'
+export type AgentState = 'running' | 'done' | 'failed' | 'killed'
 
 export type AgentRec = {
   id: string
@@ -421,7 +421,7 @@ declare module 'claude-code' {
       agents: AgentRec[]
       /** Commands and watches left running in the background, and the latest that ended (tasks.ts). */
       bgTasks: BgTask[]
-      /** Running (or waiting) and all agents, for the band: written only when a count moves. */
+      /** Running and all agents, for the band: written only when a count moves. */
       agentCounts: { live: number; total: number }
       cache: CacheMemo | null
       warm: WarmState
