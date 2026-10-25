@@ -752,9 +752,14 @@ export class Sessions {
     for (const s of sessions) {
       if (s.origin !== "desktop" || this.records.has(s.id) || this.archived.has(s.id)) continue;
       seen.add(s.id);
-      const permission = s.state === "waiting" || s.attention?.reason === "permission";
+      const permission = s.state === "waiting" || s.pending > 0;
       const previous = this.macStates.get(s.id);
       this.macStates.set(s.id, { state: s.state, permission });
+      const current = this.attention.get(s.id) ?? null;
+      // List-only desktop sessions have no record whose setState would retire the previous
+      // turn's attention. Use the same transition contract without generating startup alerts.
+      const next = nextAttention(current, previous?.state ?? "stopped", s.state, this.now());
+      if (next !== current) { this.setAttention(s.id, next); this.opts.onSessions(); }
       if (!previous) continue;
       if (permission && !previous.permission) this.alert(s.id, { kind: "permission" });
       else if (previous.state === "running" && s.state === "idle") {
@@ -1162,7 +1167,7 @@ export class Sessions {
   /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session.
    * A resend that finds a pending receipt left from before a host restart throws
    * OutcomeUnknownError instead of running again: the first attempt may or may not have run. */
-  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
+  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
     const key = `create:${req.clientMsgId}`;
     if (this.receipts.status(key) === "completed") {
@@ -1180,7 +1185,7 @@ export class Sessions {
     // A resend can arrive while the first create is still checking the folder; both get the one session.
     let pending = this.creating.get(req.clientMsgId);
     if (!pending) {
-      pending = this.createNew(req).then(
+      pending = this.createNew(req, title).then(
         id => { this.receipts.complete(key, id); return id; },
         (error: unknown) => { this.receipts.abandon(key); throw error; },
       ).finally(() => this.creating.delete(req.clientMsgId));
@@ -1189,7 +1194,7 @@ export class Sessions {
     return pending;
   }
 
-  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
+  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     const mode = req.permissionMode ?? "auto";
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const isolation = req.isolation ?? "local";
@@ -1203,7 +1208,7 @@ export class Sessions {
       : path.resolve(req.cwd);
     if (!(await isDirectory(cwd))) throw new Error(`not a folder: ${cwd}`);
     const now = this.now();
-    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
+    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: title?.trim() || oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
@@ -1231,7 +1236,9 @@ export class Sessions {
     if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
       const s = this.list().find(s => s.id === id);
       if (!s) throw new Error("no such session");
-      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" });
+      // This is a fresh conversation, not an SDK /clear: carry its label separately from the
+      // empty prompt so persistence, the first SDK launch and the desktop handoff all retain it.
+      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" }, s.title);
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }

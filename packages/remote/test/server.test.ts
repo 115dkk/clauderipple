@@ -714,6 +714,49 @@ test("presence: a phone that reported visible within 30 s counts as looking; hid
   await waitFor(() => !looking());
 });
 
+test("seen requires fresh visible presence and an attached session, including reconnects", async t => {
+  let now = 1_000_000;
+  const f = await fixture(t, { now: () => now });
+  const id = await f.create();
+  const peer = await f.auth();
+  const reason = () => f.sessions.summaryOf(id)?.attention?.reason;
+  peer.send({ t: "attach", session: id });
+  await peer.take("events");
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(reason(), "finished");
+  assert.equal(f.server.sessionSeenRecently(id), false, "a background attach is not a look");
+  peer.send({ t: "presence", visible: true });
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(reason(), undefined);
+  f.sessions.markUnread(id);
+  peer.send({ t: "presence", visible: false });
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(reason(), "finished", "an older phone's background seen is ignored");
+  const reconnected = await f.auth();
+  reconnected.send({ t: "attach", session: id });
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), "finished");
+  reconnected.send({ t: "presence", visible: true });
+  await reconnected.barrier();
+  now += VISIBLE_MS;
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), "finished", "a stale presence cannot clear attention");
+  reconnected.send({ t: "presence", visible: true });
+  reconnected.send({ t: "detach", session: id });
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), "finished", "a different focused screen cannot acknowledge this session");
+  reconnected.send({ t: "attach", session: id });
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), undefined);
+});
+
 test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {
   const f = await fixture(t);
   await new Promise<void>((resolve, reject) => {
@@ -922,6 +965,7 @@ test("a looked-at session suppresses push for 180 s; other sessions are unaffect
   const id = await f.create();
   const peer = await f.auth();
   assert.equal(f.server.sessionSeenRecently(id), false);
+  peer.send({ t: "presence", visible: true });
   peer.send({ t: "attach", session: id });
   await peer.take("events");
   await peer.barrier();

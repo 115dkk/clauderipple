@@ -182,7 +182,7 @@ export class HostServer {
   }
 
   private markSeen(c: Client, session: string): void {
-    if (!c.authed) return;
+    if (!c.authed || c.visibleAt <= 0 || this.now() - c.visibleAt >= VISIBLE_MS) return;
     this.seenAt.set(session, this.now());
     if (this.seenAt.size > 500) {
       const cutoff = this.now() - SEEN_MS;
@@ -408,7 +408,9 @@ export class HostServer {
       case "hello": return;
       case "attach": this.attach(c, msg.session, msg.epoch, msg.afterSeq); return;
       case "detach": c.attached.delete(msg.session); this.syncWatches(); return;
-      case "seen": if (s.has(msg.session)) s.markSeen(msg.session); return;
+      case "seen":
+        if (c.attached.has(msg.session) && c.visibleAt > 0 && this.now() - c.visibleAt < VISIBLE_MS && s.has(msg.session)) s.markSeen(msg.session);
+        return;
       case "archive":
         try { s.setArchived(msg.session, msg.archived === true); }
         catch (e) { this.send(c, { t: "error", code: "archive", message: (e as Error).message, session: msg.session }); }

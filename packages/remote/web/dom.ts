@@ -64,12 +64,7 @@ export function clock(at: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** The last path segment, the way a folder is named in speech. `~` for the home folder. */
-export function folderName(path: string, home?: string): string {
-  if (home && path === home) return "~";
-  const parts = path.split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? "/";
-}
+export { folderName } from "./sidebar.ts";
 
 export function shortPath(path: string, home?: string): string {
   return home && (path === home || path.startsWith(home + "/")) ? "~" + path.slice(home.length) : path;

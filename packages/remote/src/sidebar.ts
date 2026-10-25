@@ -144,7 +144,7 @@ export class DesktopSidebar {
       // an app session's record that no app session holds now is not in the app's sidebar either.
       if (!row && (sidebar.superseded.has(cliId(s.id)) || s.desktopBridge)) return [];
       if (!row) return [{ ...s, group: s.origin === "desktop" ? UNGROUPED : PHONE_GROUP }];
-      return [{ ...s, ...(row.archived ? { archived: true } : {}), title: row.title || s.title, unread: row.unread, group: row.group, order: row.order, updatedAt: row.activity }];
+      return [{ ...s, ...(row.archived ? { archived: true } : {}), title: row.title.trim() || s.title, unread: row.unread, group: row.group, order: row.order, updatedAt: row.activity }];
     });
   }
 }
