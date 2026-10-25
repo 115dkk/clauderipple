@@ -931,6 +931,16 @@ export class App {
 
   private bind(): void {
     const root = $("#app");
+    // A row's detail block keeps its own open state in the element; recording it here is what
+    // survives the element being replaced (a streaming row) or the conversation being opened again.
+    // `toggle` does not bubble, so it is caught on the way down.
+    root.addEventListener("toggle", (ev) => {
+      const details = ev.target as HTMLDetailsElement;
+      const key = details.dataset?.k;
+      if (!key) return;
+      if (details.open) this.ui.expanded.set(key, null);
+      else this.ui.expanded.delete(key);
+    }, true);
     root.addEventListener("click", (ev) => {
       const el = (ev.target as HTMLElement).closest<HTMLElement>("[data-act]");
       if (!el) return;
