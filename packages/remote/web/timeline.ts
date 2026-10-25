@@ -44,7 +44,23 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
   let effort: Effort | null = null;
   let turnStartedAt: number | null = null;
   let lastSeq = 0;
+  // A main response has one current text/thinking segment, independent of turn activity.
+  let streamingKey: string | null = null;
+  const finishStream = (): void => {
+    if (streamingKey === null) return;
+    const index = byKey.get(streamingKey);
+    const item = index === undefined ? undefined : items[index];
+    if (item?.type === "assistant" || item?.type === "thinking") {
+      item.streaming = false;
+      item.ver += "s";
+    }
+    streamingKey = null;
+  };
   const put = (item: Item): void => {
+    if (item.type === "assistant" || item.type === "thinking") {
+      if (streamingKey !== item.key || !item.streaming) finishStream();
+      streamingKey = item.streaming ? item.key : null;
+    }
     const at = byKey.get(item.key);
     if (at === undefined) { byKey.set(item.key, items.length); items.push(item); }
     else items[at] = item;
@@ -55,12 +71,14 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
     lastSeq = e.seq;
     switch (e.kind) {
       case "user":
+        finishStream();
         seenUser.add(e.clientMsgId);
         // The app counts "working for" from the person's message; Mac sessions have no turn event to say so.
         turnStartedAt = e.at;
         put({ type: "user", key: `u${e.clientMsgId}`, ver: `u${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}), at: e.at });
         break;
       case "turn":
+        finishStream();
         model = e.model; effort = e.effort; turnStartedAt = e.at;
         break;
       case "thinking": {
@@ -101,6 +119,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         put({ type: "subagent", key: `s${e.toolUseId}`, ver: `${e.seq}`, toolUseId: e.toolUseId, sub: e.sub, description: e.description, model: e.model, status: e.status, steps: e.steps });
         break;
       case "permission":
+        finishStream();
         put({ type: "permission", key: `p${e.id}`, ver: `${e.seq}`, id: e.id, tool: e.tool, title: e.title, summary: e.summary, input: e.input, canAlways: e.canAlways, ...(e.alwaysAllow ? { alwaysAllow: e.alwaysAllow } : {}), ...(e.requestKind ? { requestKind: e.requestKind } : {}), ...(e.questions ? { questions: e.questions } : {}), decision: null, at: e.at });
         break;
       case "permission_decided": {
@@ -112,12 +131,13 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
       case "result":
         // A queued next turn can already be running in the final snapshot.
         // Completion belongs to this point in the log, not only to the final state.
-        for (const item of items) if ((item.type === "thinking" || item.type === "assistant") && item.streaming) { item.streaming = false; item.ver += "s"; }
+        finishStream();
         put({ type: "result", key: `r${e.seq}`, ver: "1", ok: e.ok, ...(e.error ? { error: e.error } : {}), ms: e.ms, model: model ?? "", effort });
         turnStartedAt = null;
         break;
       case "state":
         state = e.state;
+        if (state !== "running" && state !== "starting") finishStream();
         // Idle ends a Mac session's turn (it has no result event); "stopped" is a host restart's blip, not an end.
         if (e.state === "idle" || e.state === "error") turnStartedAt = null;
         else if (e.state === "running" && turnStartedAt === null) turnStartedAt = e.at;
@@ -131,6 +151,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
           text: [e.model, e.effort, e.permissionMode, ...Object.values(e.errors ?? {})].filter(Boolean).join(" · ") });
         break;
       case "notice":
+        if (e.code === "interrupted" || e.code === "host_restarted") finishStream();
         put({ type: "notice", key: `n${e.seq}`, ver: "1", code: e.code, ...(e.text ? { text: e.text } : {}) });
         break;
     }
@@ -139,7 +160,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
     if (seenUser.has(o.clientMsgId)) continue;
     put({ type: "user", key: `u${o.clientMsgId}`, ver: o.state, text: o.text, at: o.at, queued: o.state });
   }
-  for (const it of items) if ((it.type === "assistant" || it.type === "thinking") && it.streaming && state !== "running" && state !== "starting" && state !== "waiting") { it.streaming = false; it.ver += "s"; }
+  if (state !== "running" && state !== "starting") finishStream();
   const open = items.filter((i): i is Extract<Item, { type: "permission" }> => i.type === "permission" && i.decision === null);
   return { items, state, figures, model, effort, open, turnStartedAt, lastSeq };
 }

@@ -202,6 +202,61 @@ test("streamed deltas become one message, replaced by the final assistant event"
   assert.ok(items[0]!.type === "assistant" && items[0]!.text === "Hello!" && items[0]!.tools[0]!.result?.ok === false);
 });
 
+test("response streaming ends at a main-content boundary, not at the end of all turn activity", () => {
+  const bodies: EventBody[] = [
+    { kind: "state", state: "running" },
+    { kind: "delta", msg: "text", text: "Reviewing." },
+    // A separate tool-only SDK message must also settle the preceding text.
+    { kind: "assistant", msg: "tools", model: "main", text: "", tools: [{ id: "agent", name: "Agent", summary: "Review" }] },
+    { kind: "subagent", toolUseId: "agent", sub: "worker", description: "Review", model: null, status: "running", steps: 0 },
+    { kind: "tool_result", toolUseId: "agent", ok: true, text: "Started in background" },
+    { kind: "subagent", toolUseId: "agent", sub: "worker", description: "Review", model: null, status: "done", steps: 3 },
+    { kind: "delta", msg: "answer", text: "Done." },
+    { kind: "assistant", msg: "answer", model: "main", text: "Done.", tools: [] },
+    { kind: "result", ok: true, ms: 500, turns: 1 },
+  ];
+  const expected = [["atext"], [], [], [], [], ["aanswer"], [], []];
+  for (let end = 2; end <= bodies.length; end++) {
+    const view = reduce(ev(bodies.slice(0, end)));
+    assert.deepEqual(view.items.filter(item => (item.type === "assistant" || item.type === "thinking") && item.streaming).map(item => item.key), expected[end - 2]);
+    assert.equal(view.state, "running", "main activity is not response streaming");
+    assert.equal(view.items.find(item => item.key === "atext")?.type, "assistant", "completed prose is retained");
+  }
+});
+
+test("replayed terminal boundaries never revive a prior delta when a later turn is running", () => {
+  const boundaries: EventBody[] = [
+    { kind: "state", state: "idle" }, { kind: "state", state: "stopped" },
+    { kind: "state", state: "error" }, { kind: "state", state: "waiting" },
+    { kind: "notice", code: "interrupted" }, { kind: "notice", code: "host_restarted" },
+    { kind: "permission", id: "p", tool: "Bash", title: "", summary: "ls", input: "ls", canAlways: false },
+    { kind: "user", clientMsgId: "next", text: "Continue" },
+    { kind: "turn", model: "main", effort: null },
+  ];
+  for (const boundary of boundaries) {
+    const events = ev([{ kind: "state", state: "running" }, { kind: "delta", msg: "old", text: "Retained" }, boundary, { kind: "state", state: "running" }]);
+    const replayed = mergeEvents(events.slice(0, 2), events.slice(1));
+    const old = reduce(replayed).items.find(item => item.key === "aold");
+    assert.ok(old?.type === "assistant" && !old.streaming && old.text === "Retained", JSON.stringify(boundary));
+  }
+});
+
+test("only the current main segment streams; unrelated worker updates do not stop it", () => {
+  const bodies: EventBody[] = [
+    { kind: "state", state: "running" },
+    { kind: "assistant", msg: "old-message", model: "main", text: "", tools: [{ id: "old", name: "Agent", summary: "Background" }] },
+    { kind: "thinking", msg: "m", block: 0, text: "Reason", delta: true },
+    { kind: "delta", msg: "m", text: "Answer" },
+    { kind: "subagent", toolUseId: "old", sub: "worker", description: "Background", model: null, status: "done", steps: 5 },
+    { kind: "tool_result", toolUseId: "old", ok: true, text: "Background done" },
+  ];
+  const view = reduce(ev(bodies));
+  assert.ok(view.items.some(item => item.type === "assistant" && item.streaming && item.text === "Answer"));
+  assert.ok(view.items.some(item => item.type === "thinking" && !item.streaming && item.text === "Reason"));
+  const next = reduce(ev([...bodies, { kind: "thinking", msg: "next", block: 0, text: "Next", delta: true }]));
+  assert.deepEqual(next.items.filter(item => (item.type === "assistant" || item.type === "thinking") && item.streaming).map(item => item.key), ["hnext:0"]);
+});
+
 test("permissions: open until decided, then recorded with the decision", () => {
   const base = ev([{ kind: "permission", id: "p", tool: "Bash", title: "", summary: "ls", input: "ls", canAlways: false }]);
   assert.equal(reduce(base).open.length, 1);
