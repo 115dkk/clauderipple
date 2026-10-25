@@ -922,7 +922,12 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
-  return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
+  // A choice stays canonical for allow-lists, logs and effort (general-purpose:<model>).
+  // Dispatch an auto call's Claude choice through our own definition, which withholds Agent.
+  // A hook may change the definition and model, but cannot add disallowedTools to a spawn.
+  // Direct general-purpose calls keep their own definition and existing behaviour.
+  const executor = auto && (selected.agent === 'general-purpose' || /^(?:opus|sonnet|haiku)(?:@|$)|^claude-/.test(model ?? '')) ? 'ripple:auto' : selected.agent
+  return { input: { ...e, subagentType: executor, model, prompt }, pick: value }
 }
 
 async function toggleAuto($: EngineInterface): Promise<void> {
@@ -1538,7 +1543,7 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   const language = await read($, lang)
   if (e.agentId) {
     const a = (await read($, agents)).find(a => a.id === e.agentId)
-    return a?.pick && a.pick.target.agent === 'general-purpose' ? { ...e, effort: a.pick.effort } : e
+    return a?.pick && (a.pick.target.agent === 'general-purpose' || a.type === 'ripple:auto') ? { ...e, effort: a.pick.effort } : e
   }
   const previousModel = await read($, modelIs)
   const oldEffort = await read($, appEffort)

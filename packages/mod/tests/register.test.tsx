@@ -626,7 +626,7 @@ for (const prefix of ['ripple:', '']) for (const [tier, level, kind, rung, agent
   await start($)
   await $.agent.spawn({ ...SPAWN, subagentType: prefix + 'auto', prompt: `[[ripple: ${tier}]]\n${SPAWN.prompt}` })
   expect(judges.length).toBe(0)
-  expect(sent[0]).toMatchObject({ subagentType: agent, model, prompt: SPAWN.prompt })
+  expect(sent[0]).toMatchObject({ subagentType: agent === 'general-purpose' ? 'ripple:auto' : agent, model, prompt: SPAWN.prompt })
   expect(JSON.parse(b.logs.find(log => log.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level, kind, rung, by: 'session', effort })
   expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)).toMatchObject({ tier, by: 'session' })
   // Named workers carry effort in their model suffix; Claude's own agent gets it on turn.step.
@@ -1098,15 +1098,19 @@ test('the worker reads neither the routing marker nor the Model reason line, whe
 // A model marker names a worker file, a model id, or one of Claude's own aliases.
 for (const [model, target] of [
   ['gpt-6-1-sol', { subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' }],
-  ['opus', { subagentType: 'general-purpose', model: 'opus' }],
-  ['sonnet', { subagentType: 'general-purpose', model: 'sonnet' }],
-  ['haiku', { subagentType: 'general-purpose', model: 'haiku' }],
+  ['opus', { subagentType: 'ripple:auto', model: 'opus' }],
+  ['sonnet', { subagentType: 'ripple:auto', model: 'sonnet' }],
+  ['haiku', { subagentType: 'ripple:auto', model: 'haiku' }],
+  ['claude-opus-5-5', { subagentType: 'ripple:auto', model: 'claude-opus-5-5' }],
+  ['claude-sonnet-5-5', { subagentType: 'ripple:auto', model: 'claude-sonnet-5-5@xhigh' }],
 ] as const) test(`a user-reasoned [[ripple: ${model}@xhigh]] runs that model at xhigh, by user`, async ($, on) => {
   const b = boundaries(on, {}, { messages: [{ role: 'user', text: '솔한테 시켜', toolUses: [] }] })
   http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   const steps = stepStub(on)
+  let records: AgentRec[] = []
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => { records = e.value as AgentRec[]; return next(e) })
   await start($)
   await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: ${model}@xhigh]]\nModel reason: user "솔한테 시켜"\nReview this.` })
   expect(judges.length).toBe(0)
@@ -1115,9 +1119,17 @@ for (const [model, target] of [
   expect(row).toMatchObject({ by: 'user', namedModel: model, source: 'user', effort: 'xhigh' })
   expect(row).not.toHaveProperty('judge')
   // Claude's own agent gets its effort on turn.step; a routed worker's is in the model suffix.
-  if (target.subagentType === 'general-purpose') {
+  if (target.subagentType === 'ripple:auto') {
+    // Resolve the exact definition selected by the outgoing spawn, not just the requested model.
+    const definition = b.registered.find(spec => 'ripple:' + spec.name === sent[0]?.subagentType)
+    expect(definition).toBeDefined()
+    expect(definition?.disallowedTools).toContain('Agent')
     await step($, 'claude-opus-5-5', 'low', 'worker-1')
     expect(steps[0]?.effort).toBe('xhigh')
+    const rec = records.find(a => a.id === 'worker-1')
+    expect(rec?.type).toBe('ripple:auto')
+    expect(rec?.provider).toBe('anthropic')
+    expect(rec?.effort).toBe('xhigh')
   }
 })
 
@@ -1208,7 +1220,7 @@ test('the default tier uses the standard rung, and a missing worker moves one ru
   const sent = spawnStub(on)
   await start($)
   await $.agent.spawn(SPAWN)
-  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'sonnet' })
+  expect(sent[0]).toMatchObject({ subagentType: 'ripple:auto', model: 'sonnet' })
   expect(judges.length).toBe(0)
   const debug = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
   expect(debug.text).toContain('"effort": "high"')
