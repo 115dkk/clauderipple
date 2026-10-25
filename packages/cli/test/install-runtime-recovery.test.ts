@@ -31,25 +31,31 @@ function fixture(t: { after(fn: () => void): void }) {
   script(path.join(bin, "tar"), 'if [ "$FAIL_POINT" = extract ]; then exit 72; fi\nexec /usr/bin/tar "$@"');
   const osName = process.platform === "darwin" ? "darwin" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
-  const env = { HOME: home, PATH: `${bin}:/usr/bin:/bin`, CLAUDERIPPLE_HOME: prefix, CLAUDERIPPLE_PREFIX: prefix, CLAUDE_CONFIG_DIR: path.join(root, "claude"), TMPDIR: path.join(root, "tmp"), CLAUDERIPPLE_NO_SETUP: "1", CLAUDERIPPLE_NO_TRAY: "1", TEST_PREFIX: prefix, TEST_ARCHIVE: archive, TEST_CHECKSUM: checksum, TEST_OS: osName, TEST_ARCH: arch };
+  const env = { HOME: home, SHELL: "/bin/sh", PATH: `${bin}:/usr/bin:/bin`, CLAUDERIPPLE_HOME: prefix, CLAUDERIPPLE_PREFIX: prefix, CLAUDE_CONFIG_DIR: path.join(root, "claude"), TMPDIR: path.join(root, "tmp"), CLAUDERIPPLE_NO_SETUP: "1", CLAUDERIPPLE_NO_TRAY: "1", TEST_PREFIX: prefix, TEST_ARCHIVE: archive, TEST_CHECKSUM: checksum, TEST_OS: osName, TEST_ARCH: arch };
   const run = (point: string) => spawnSync("/bin/sh", [installer], { env: { ...env, FAIL_POINT: point }, encoding: "utf8" });
   const preserved = () => {
     assert.equal(fs.readFileSync(path.join(prefix, "runtime/identity"), "utf8"), "previous-runtime");
     assert.equal(fs.existsSync(path.join(prefix, "runtime/bin/node")), true);
     assert.deepEqual(fs.readdirSync(prefix).filter(name => /^runtime\.(old|new)\./.test(name)), []);
   };
-  return { root, prefix, run, preserved };
+  return { root, prefix, home, run, preserved };
 }
 
 test("install.sh keeps the committed runtime after partial backup cleanup fails", { skip: process.platform === "win32" }, t => {
   const f = fixture(t);
   const result = f.run("backup-cleanup");
-  assert.notEqual(result.status, 0);
+  // The backup is garbage beside a working install: reported on stderr, but not a reason to skip
+  // PATH setup and the rest of the run.
+  assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(fs.existsSync(path.join(f.prefix, "runtime/bin/node")), true);
   assert.equal(fs.existsSync(path.join(f.prefix, "runtime/identity")), false);
   assert.match(fs.readFileSync(path.join(f.prefix, "bin/clauderipple"), "utf8"), /exec/);
-  assert.equal(fs.readdirSync(f.prefix).filter(name => name.startsWith("runtime.old.")).length, 1);
-  assert.match(result.stderr, /runtime.old/);
+  const leftovers = fs.readdirSync(f.prefix).filter(name => name.startsWith("runtime.old."));
+  assert.equal(leftovers.length, 1);
+  assert.ok(result.stderr.includes(path.join(f.prefix, leftovers[0]!)), result.stderr);
+  assert.match(result.stdout, /Installed\. Finish with: clauderipple install/);
+  const profile = fs.readFileSync(path.join(f.home, ".profile"), "utf8");
+  assert.ok(profile.includes(path.join(f.prefix, "bin")), profile);
 });
 
 for (const point of ["first-rename", "second-rename", "npm", "extract"]) {

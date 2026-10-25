@@ -24,6 +24,7 @@ NODE_FALLBACK="v24.21.0"
 RUNTIME="$PREFIX/runtime"
 
 say() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 # The previous runtime survives until npm and the command wrapper have both succeeded. Record the
@@ -31,6 +32,7 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 STAGING=""
 BACKUP=""
 DOWNLOAD=""
+LEFTOVER_BACKUP=""
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -40,6 +42,11 @@ cleanup() {
   fi
   if [ -n "$STAGING" ]; then rm -rf "$STAGING"; fi
   if [ -n "$DOWNLOAD" ]; then rm -rf "$DOWNLOAD"; fi
+  # The install goes on after a backup that could not be deleted, so the path is repeated here,
+  # last, where it is the final thing the user reads rather than one line among the progress output.
+  if [ -n "$LEFTOVER_BACKUP" ]; then
+    warn "이전 Node 백업이 남아 있습니다. 필요 없으면 직접 삭제해 주세요. ($LEFTOVER_BACKUP)"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -173,11 +180,14 @@ case "$NODE" in
 esac
 
 # Commit the runtime only after npm and the executable wrapper are usable. Later setup errors must
-# not roll back Node beneath a successfully installed package.
+# not roll back Node beneath a successfully installed package. A backup that cannot be deleted is
+# garbage beside a working install, so it is reported and left for the user instead of ending the
+# run: the PATH change, the service install and the menu-bar app still have to happen.
 committed_backup="$BACKUP"
 BACKUP=""
 if [ -n "$committed_backup" ] && ! rm -rf "$committed_backup"; then
-  die "새 Node 설치는 유지했습니다. 이전 Node 백업을 모두 삭제하지 못했습니다. 남은 파일을 확인해 주세요. ($committed_backup)"
+  LEFTOVER_BACKUP="$committed_backup"
+  warn "새 Node 설치는 그대로 두고 설치를 계속합니다. 이전 Node 백업을 삭제하지 못했습니다. 필요 없으면 직접 삭제해 주세요. ($committed_backup)"
 fi
 
 # --- PATH ---------------------------------------------------------------------------------------
