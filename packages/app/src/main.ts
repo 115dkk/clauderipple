@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { claudeStartedAt, reopenClaude } from "./claude-desktop";
-import { readUpdateSeen, rememberUpdate, updateNotice, TrayReplacement, type RouterUpdate, type UpdateSeen } from "./update-model";
+import { readUpdateSeen, readReplacementTries, rememberUpdate, replacementExhausted, nextReplacementTries, resolveTrayVersion, updateNotice, TrayReplacement, REPLACEMENT_LIMIT, type ReplacementTries, type RouterUpdate, type UpdateSeen } from "./update-model";
 import { handleScheme, ORIGIN, registerScheme } from "./protocol";
 import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tailLines, trayState, type Action, type ActionResult, type AppState, type Busy, type DirectOutput, type Doctor, type RepairOutput } from "./status-model";
 import { mainWindow, openWindow, sendToWindow, windowVisible, type Bounds } from "./window";
@@ -46,6 +46,25 @@ type Status = {
 
 const home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
 const POLL_MS = 5000;
+
+/**
+ * The version of this tray, the one place it is asked for. `electron path/to/main.js` — how the CLI
+ * starts an npm install on every platform — makes app.getVersion() answer with Electron's version,
+ * not the package's: in 0.12.14 it said 38.8.6 while the router said 0.12.14, so the tray saw a new
+ * version on every poll and replaced itself about every two seconds (Discord report). The
+ * package.json beside the tray's dist/ is the one build-npm writes the published version into; a
+ * checkout keeps it in packages/app; a packaged build carries it in its bundle and needs no help.
+ */
+function trayVersion(): string {
+  let beside: string | null = null;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")) as { version?: unknown };
+    if (typeof pkg.version === "string") beside = pkg.version;
+  } catch {
+    /* no package.json beside the tray: Electron's own answer is all there is */
+  }
+  return resolveTrayVersion(app.isPackaged, app.getVersion(), beside);
+}
 
 // ---- i18n: tray menu, dialogs, tooltips -------------------------------------------------
 
@@ -131,6 +150,7 @@ const STRINGS = {
     autoAvailable: (v: string) => `New version ${v} — click to update`,
     updateDone: (v: string) => `Updated to ClaudeRipple ${v}`,
     updateFailed: "The update did not finish",
+    trayReplaceGaveUp: (v: string) => `The tray could not switch to the new version. It keeps running as version ${v}. The tray log has the details.`,
     updateCheckFailed: "Could not check for updates",
     updatePackaged: "This is the standalone app. Download the new version from the releases page.",
     updateCheckout: "This is a source checkout. Update it with git pull.",
@@ -216,6 +236,7 @@ const STRINGS = {
     autoAvailable: (v: string) => `새 버전 ${v} — 클릭해서 업데이트`,
     updateDone: (v: string) => `ClaudeRipple ${v} 업데이트 완료`,
     updateFailed: "업데이트를 완료하지 못했습니다",
+    trayReplaceGaveUp: (v: string) => `트레이를 새 버전으로 전환하지 못했습니다. 이 트레이는 ${v} 버전으로 계속 실행됩니다. 자세한 내용은 트레이 로그에서 확인할 수 있습니다.`,
     updateCheckFailed: "업데이트 정보를 확인하지 못했습니다",
     updatePackaged: "설치형 앱입니다. 릴리스 페이지에서 최신 버전을 다운로드해 주십시오.",
     updateCheckout: "소스 코드로 실행 중입니다. git pull 명령으로 업데이트해 주십시오.",
@@ -301,6 +322,7 @@ const STRINGS = {
     autoAvailable: (v: string) => `新版本 ${v} — 点击更新`,
     updateDone: (v: string) => `已更新到 ClaudeRipple ${v}`,
     updateFailed: "更新未完成",
+    trayReplaceGaveUp: (v: string) => `托盘无法切换到新版本，将以 ${v} 版本继续运行。详细信息已写入托盘日志。`,
     updateCheckFailed: "无法检查更新",
     updatePackaged: "这是独立打包的应用。请从发布页面下载新版本。",
     updateCheckout: "这是从仓库检出的源码版本，请用 git pull 更新。",
@@ -386,6 +408,7 @@ const STRINGS = {
     autoAvailable: (v: string) => `新バージョン ${v} — クリックして更新`,
     updateDone: (v: string) => `ClaudeRipple ${v} にアップデートしました`,
     updateFailed: "アップデートが完了しませんでした",
+    trayReplaceGaveUp: (v: string) => `トレイを新しいバージョンに切り替えられませんでした。トレイは ${v} バージョンで動き続けます。詳しくはトレイのログに残っています。`,
     updateCheckFailed: "アップデートを確認できませんでした",
     updatePackaged: "これはスタンドアロン版のアプリです。リリースページから新しいバージョンをダウンロードしてください。",
     updateCheckout: "これはソースから実行している環境です。git pullで更新してください。",
@@ -471,6 +494,7 @@ const STRINGS = {
     autoAvailable: (v: string) => `Nueva versión ${v} — haz clic para actualizar`,
     updateDone: (v: string) => `Actualizado a ClaudeRipple ${v}`,
     updateFailed: "La actualización no se completó",
+    trayReplaceGaveUp: (v: string) => `La bandeja no pudo cambiar a la nueva versión y sigue en la versión ${v}. Los detalles están en el registro de la bandeja.`,
     updateCheckFailed: "No se pudo comprobar si hay actualizaciones",
     updatePackaged: "Esta es la app independiente. Descarga la nueva versión desde la página de versiones.",
     updateCheckout: "Esta es una copia del código fuente. Actualízala con git pull.",
@@ -556,6 +580,7 @@ const STRINGS = {
     autoAvailable: (v: string) => `Nova versão ${v} — clique para atualizar`,
     updateDone: (v: string) => `Atualizado para o ClaudeRipple ${v}`,
     updateFailed: "A atualização não foi concluída",
+    trayReplaceGaveUp: (v: string) => `A bandeja não pôde mudar para a nova versão e continua na versão ${v}. Os detalhes estão no log da bandeja.`,
     updateCheckFailed: "Não foi possível verificar atualizações",
     updatePackaged: "Este é o app independente. Baixe a nova versão na página de releases.",
     updateCheckout: "Isto é um checkout do código-fonte. Atualize com git pull.",
@@ -864,11 +889,11 @@ async function reconcileRouter(s: Status): Promise<void> {
   if (!saved?.router || !looksPackaged(saved.router)) return;
   const installedElsewhere = !samePath(saved.router, packaged.router);
   const runningElsewhere = !!s.runtime?.router && !samePath(s.runtime.router, packaged.router);
-  const otherVersion = s.version !== app.getVersion();
+  const otherVersion = s.version !== trayVersion();
   if (!installedElsewhere && !runningElsewhere && !otherVersion) return;
   reconciled = true;
   const from = `${s.version}${s.runtime?.router ? ` (${s.runtime.router})` : ""}`;
-  if (Notification.isSupported()) new Notification({ title: L.updatedTitle(app.getVersion()), body: L.updatedRestarting(from), icon: notifyIcon() }).show();
+  if (Notification.isSupported()) new Notification({ title: L.updatedTitle(trayVersion()), body: L.updatedRestarting(from), icon: notifyIcon() }).show();
   const outputs: string[] = [];
   if (installedElsewhere || runningElsewhere) outputs.push(await runCli(["install"]));
   outputs.push(await runCli(["restart"]));
@@ -1007,7 +1032,7 @@ function bridgeState(): AppState {
     result: rec.result,
     restartClaude: rec.restartClaude,
     loginItem: loginItemOn(),
-    appVersion: app.getVersion(),
+    appVersion: trayVersion(),
     platform: process.platform,
   };
 }
@@ -1151,12 +1176,33 @@ let updateNotification: Notification | null = null;
 let updateSeen: UpdateSeen | undefined;
 const trayReplacement = new TrayReplacement();
 const updateSeenFile = path.join(home, "update-notifications.json");
+const replacementTriesFile = path.join(home, "tray-replacement.json");
+let replacementGaveUp = false;
 
 function loadUpdateSeen(): UpdateSeen {
   try { return readUpdateSeen(JSON.parse(fs.readFileSync(updateSeenFile, "utf8"))); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`update notification state: ${error}`);
     return { updated: [], available: [] };
+  }
+}
+
+function loadReplacementTries(): ReplacementTries | null {
+  try { return readReplacementTries(JSON.parse(fs.readFileSync(replacementTriesFile, "utf8"))); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`tray replacement state: ${error}`);
+    return null;
+  }
+}
+
+function saveReplacementTries(tries: ReplacementTries): void {
+  fs.mkdirSync(home, { recursive: true });
+  const tmp = `${replacementTriesFile}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(tries) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, replacementTriesFile);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
 }
 
@@ -1178,7 +1224,7 @@ async function handleRouterUpdate(status: Status): Promise<void> {
   else routerUpdateUntil = 0;
   if (updating) return;
   updateSeen ??= loadUpdateSeen();
-  const notice = updateNotice(status.version, app.getVersion(), status.autoUpdate, updateSeen);
+  const notice = updateNotice(status.version, trayVersion(), status.autoUpdate, updateSeen);
   if (!notice) {
     await replaceUpdatedTray(status);
     return;
@@ -1211,7 +1257,21 @@ async function handleRouterUpdate(status: Status): Promise<void> {
 }
 
 async function replaceUpdatedTray(status: Status): Promise<void> {
-  await trayReplacement.reconcile(status.version, app.getVersion(), status.autoUpdate, async () => {
+  const version = trayVersion();
+  // A replacement that starts but does not change the tray's version — this is what a wrong
+  // app.getVersion() looked like — came back as the same pair on every launch. Nothing could stop
+  // it inside one process, because each attempt ends the process, so the count lives on disk:
+  // after REPLACEMENT_LIMIT launches of the same pair the tray stays up and says why.
+  if (replacementExhausted(loadReplacementTries(), status.version, version)) {
+    if (!replacementGaveUp) {
+      replacementGaveUp = true;
+      console.error(`tray replacement gave up after ${REPLACEMENT_LIMIT} launches: router ${status.version}, tray ${version}`);
+      if (Notification.isSupported()) new Notification({ title: "ClaudeRipple", body: L.trayReplaceGaveUp(version), icon: notifyIcon() }).show();
+    }
+    return;
+  }
+  await trayReplacement.reconcile(status.version, version, status.autoUpdate, async () => {
+    saveReplacementTries(nextReplacementTries(loadReplacementTries(), status.version, version));
     updating = true;
     try { await relaunchTray(); } finally { updating = false; }
   });
@@ -1404,7 +1464,7 @@ function render(): void {
     { label: L.connectClaudeSubscription, click: async () => void dialog.showMessageBox({ message: await runCli(["claude-login"]) }) },
     { type: "separator" },
     { label: L.checkUpdates, enabled: !updating, click: () => void checkUpdatesInteractive() },
-    { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: `ClaudeRipple ${app.getVersion()}`, detail: L.aboutDetail }) },
+    { label: L.about, click: () => void dialog.showMessageBox({ title: "ClaudeRipple", message: `ClaudeRipple ${trayVersion()}`, detail: L.aboutDetail }) },
     { label: L.quit, role: "quit" },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(template));
