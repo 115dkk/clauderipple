@@ -263,7 +263,12 @@ function chevronIcon() { return svgIcon("0 0 8 13", ["M1.5 1.5l5 5-5 5"], "chevr
 
 function showView(name) {
   if (name !== "phone") { phoneGeneration++; hidePhoneQr(); }
-  for (const button of $all(".nav-btn")) button.classList.toggle("active", button.dataset.view === name);
+  for (const button of $all(".nav-btn")) {
+    const active = button.dataset.view === name;
+    button.classList.toggle("active", active);
+    // The style showed the current page; a screen reader was told nothing (G-D10).
+    if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+  }
   for (const view of $all(".view")) view.classList.toggle("active", view.id === `view-${name}`);
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   applyOffline();
@@ -333,9 +338,15 @@ async function refreshHealth() {
   ));
   $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) })]));
   renderHealthProviders();
+  renderDiagnostics();
   if (clientsLoaded) renderClients();
   if (modState.settings) renderModNotice();
   const details = $("#health-details");
+  // A start this page recorded is over once the router says so — a failure included — so the button
+  // is not left saying "running" with no way back (G-D07).
+  if (updateState.check && updateState.check.running && status.autoUpdate && status.autoUpdate.running === false) {
+    updateState.check = { ...updateState.check, running: false };
+  }
   modRedraw(details, [
     versionRow(),
     autoUpdateRow(),
@@ -345,6 +356,74 @@ async function refreshHealth() {
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.cli") }), el("span", { class: "v", text: status.cliVersion })]),
   ]);
 }
+
+// ---- Diagnostics: what the router says is in the way, and a copy that carries no secrets -------
+
+/** One readiness problem in words, with the action that clears it; an unknown code stays as it is. */
+function readinessProblemText(code) {
+  if (code === "settings") return t("health.diagnosticSettings");
+  if (code === "upstream") return t("health.diagnosticUpstream");
+  if (code === "picker-ca") return t("health.diagnosticPickerCa");
+  if (code === "picker-proxy") return t("health.diagnosticPickerProxy");
+  if (code === "config") return t("health.diagnosticConfig");
+  if (String(code).startsWith("provider:")) return t("health.diagnosticProvider", { name: String(code).slice(9) });
+  return String(code);
+}
+/**
+ * The problems the router reports, and the validation errors in its config: readiness once said
+ * "ready" while nothing could connect and did not say why the picker showed no models (G-D08), and a
+ * config the router could not read was adopted without a word (G-D14). A reason and its fix, or
+ * nothing at all.
+ */
+function renderDiagnostics() {
+  const box = $("#health-diagnostics");
+  const wrap = $("#health-diagnostics-section");
+  if (!box || !wrap || !status) return;
+  const problems = (status.readiness && Array.isArray(status.readiness.problems)) ? status.readiness.problems : [];
+  const configErrors = (status.config && Array.isArray(status.config.errors)) ? status.config.errors : [];
+  wrap.hidden = problems.length === 0 && configErrors.length === 0;
+  if (wrap.hidden) { box.replaceChildren(); return; }
+  const rows = problems.map((code) => cell(readinessProblemText(code), badge("warn", String(code))));
+  for (const error of configErrors) rows.push(cell(t("health.diagnosticConfig"), badge("bad", "config"), [el("span", { class: "cell-sub mono", text: String(error) })]));
+  box.replaceChildren(...rows);
+}
+/**
+ * What a person can paste into a report without handing over a credential: versions, readiness,
+ * config errors, proxy state (whether it points here, never the keys) and provider names with their
+ * connection state. Token values, headers, request bodies and file paths stay out (G-D15).
+ */
+function diagnosticBundle() {
+  const providers = Object.entries((status && status.providers) || {}).map(([name, entry]) => ({
+    name,
+    type: entry.type || null,
+    reachable: entry.reachable === undefined ? null : entry.reachable,
+    usable: entry.usable === undefined ? null : entry.usable,
+    needsLogin: Boolean(entry.needsLogin),
+  }));
+  return {
+    app: "ClaudeRipple",
+    version: status.version,
+    cli: status.cliVersion,
+    readiness: status.readiness || null,
+    config: status.config || null,
+    settings: { pointsAtRouter: Boolean(status.settings && status.settings.pointsAtRouter) },
+    autoUpdate: status.autoUpdate ? { enabled: Boolean(status.autoUpdate.enabled), running: Boolean(status.autoUpdate.running), kind: status.autoUpdate.kind || null, failed: Boolean(status.autoUpdate.lastError) } : null,
+    listen: status.listen || null,
+    providers,
+  };
+}
+async function copyDiagnostics() {
+  if (!status) return;
+  if (!confirm(t("health.copyDiagnosticsConfirm"))) return;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(diagnosticBundle(), null, 2));
+    toast(t("health.copyDiagnosticsDone"));
+  } catch (error) {
+    toast(t("common.actionFailed"), true, error.message);
+  }
+}
+const diagnosticsCopy = $("#diagnostics-copy");
+if (diagnosticsCopy) diagnosticsCopy.addEventListener("click", () => void copyDiagnostics());
 
 // The update check runs on a click, not with the 5-second refresh: it asks the npm registry. What an
 // update means depends on how this copy was installed, so the router's CLI decides and runs it; the
@@ -396,6 +475,10 @@ function versionRow() {
     button.addEventListener("click", () => void (action ? startUpdate() : checkForUpdate()));
     if (check && !check.newer && !updateState.busy) note = t("update.latest");
   }
+  // An install that ran and failed is not "the latest version": the reason stays in reach, and the
+  // button is the retry (G-D07). The router's own text is shown, as it is the only detail there is.
+  const failed = status.autoUpdate && status.autoUpdate.lastError && !status.autoUpdate.running && !updateState.busy;
+  if (failed && button) note = `${t("update.lastFailed")} ${shortError(status.autoUpdate.lastError)}`;
   const row = cell(el("span", { class: "cell-label", text: `${t("health.version")} ${status.version}` }), button, note);
   row.id = "health-version-row";
   return row;
@@ -2266,7 +2349,7 @@ function providerTabs(name, provider) {
   if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity") || isKeyProvider(provider)) tabs.push({ id: "accounts", label: t("providers.accounts") });
   tabs.push({ id: "models", label: t("providers.modelsTab") });
   return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
-    const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
+    const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", id: `provider-tab-${tab.id}`, "aria-controls": "provider-tab-panel", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
     button.addEventListener("click", () => { providerDetailTab = tab.id; renderProviderDetail(); });
     return button;
   }));
@@ -3081,7 +3164,7 @@ function renderProviderDetail() {
   else if (providerDetailTab === "accounts" && isKeyProvider(provider)) content = keyAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
-  detail.replaceChildren(back, header, providerTabs(name, provider), content, el("div", { class: "group provider-remove" }, [remove]));
+  detail.replaceChildren(back, header, providerTabs(name, provider), el("div", { id: "provider-tab-panel", role: "tabpanel", "aria-labelledby": `provider-tab-${providerDetailTab}` }, [content]), el("div", { class: "group provider-remove" }, [remove]));
 }
 
 function renderProviderWorkspace() {
@@ -3127,9 +3210,13 @@ $("#providers-refresh").addEventListener("click", async () => {
 // ---- Provider modal -----------------------------------------------------------------
 
 let modalCleanup = null;
+/** What had focus when the dialog opened, restored when it closes (G-D10). */
+let modalOpener = null;
 function showModal(content, cleanup) {
   if (modalCleanup) modalCleanup();
   modalCleanup = cleanup || null;
+  // Where the keyboard was before the dialog opened: closing puts it back there instead of on <body> (G-D10).
+  modalOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   $("#modal-content").replaceChildren(content);
   $("#modal-backdrop").hidden = false;
   const first = $("#modal-content input, #modal-content button, #modal-content select");
@@ -3141,6 +3228,17 @@ function closeModal() {
   if (cleanup) cleanup();
   $("#modal-backdrop").hidden = true;
   $("#modal-content").replaceChildren();
+  const opener = modalOpener;
+  modalOpener = null;
+  if (opener && opener.isConnected) opener.focus();
+}
+/**
+ * The dialog's own focusables, in tab order. Hidden and disabled controls stay out: Tab must not
+ * land on a field the screen does not show.
+ */
+function modalFocusables() {
+  return $all("#modal-content button, #modal-content input, #modal-content select, #modal-content textarea, #modal-content a[href]", $("#modal-content"))
+    .filter((node) => !node.disabled && node.getClientRects().length > 0);
 }
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-backdrop").addEventListener("click", (event) => { if (event.target === $("#modal-backdrop")) closeModal(); });
@@ -3148,6 +3246,20 @@ window.addEventListener("keydown", (event) => {
   // keyCode 229 also covers the IME commit key on browsers that already cleared isComposing.
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || $("#modal-backdrop").hidden) return;
   if (event.key === "Escape") { closeModal(); return; }
+  // Tab stays inside the dialog: the page behind it is inert to the pointer, and a keyboard that
+  // walked out into it could press something the dialog is covering (G-D10).
+  if (event.key === "Tab") {
+    const focusables = modalFocusables();
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey ? active === first || !$("#modal-content").contains(active) : active === last || !$("#modal-content").contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+    return;
+  }
   if (event.key !== "Enter" || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
   // Only single-line text entry gets the shortcut. Buttons (including Cancel), selects, links,
   // checkboxes, textareas and editable regions keep their own native keyboard behaviour.
