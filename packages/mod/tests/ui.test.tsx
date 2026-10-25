@@ -1208,6 +1208,26 @@ test('within a minute the band draws the same tree; a minute on, only the countd
   }
 })
 
+test('activity is a fixed line at the actual capsule bottom, not a restarting progress sweep over the limits', async ($, on) => {
+  for (const skin of SKINS) for (const active of [false, true]) for (const extra of [false, true]) {
+    const id = ['activity', skin, active, extra].join('-')
+    const view: DashboardView = { ...DASH, isWorking: active, ...(extra ? { effortMenu: true, delegationPin: 'Opus', extras: ['limits'], limits: [{ provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 }] } : {}) }
+    drawPane(on, id, el => renderBand(el, frameOf('desktop', 94, 12, skin), view, BAND_ACTIONS))
+  }
+  for (const skin of SKINS) for (const active of [false, true]) for (const extra of [false, true]) {
+    const ui = await mount($, ['activity', skin, active, extra].join('-'), 'desktop', 94)
+    const line = await ui.find({ key: 'band-activity' })
+    if (active) {
+      expect(line?.props).toMatchObject({ position: 'absolute', bottom: 0, left: 0, right: 0, height: 0.084 })
+      // The line fills the actual capsule width at every update; there is no phase or percentage.
+      expect(line?.props.width).toBeUndefined()
+      expect(line?.props.top).toBeUndefined()
+    } else expect(line).toBeUndefined()
+    for (const picture of await ui.findAll({ type: 'Svg' })) expect(String(picture.props.source).includes('class="cu"')).toBe(false)
+    await ui.unmount()
+  }
+})
+
 test('리플이 acts out the band: thinking, working, drowsy, asleep or idle, one fixed source per mood in a slot that never moves', async ($, on) => {
   const cache = (minutes: number) => ({ cache: { expiresAt: NOW + minutes * 60_000 - 1, ttlMs: 3_600_000 } })
   const cases: [string, DashboardView, ReturnType<typeof bandMood>][] = [

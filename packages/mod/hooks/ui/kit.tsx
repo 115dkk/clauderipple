@@ -170,7 +170,9 @@ export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 
   const visible = Math.round(c.rows * ROW_PX)
   const height = visible + 220
   const at = c.sea.at ?? { x: padX * CELL_PX + 12, y: padY * ROW_PX * 0.5 + 13 }
-  const sea = look.art.sea(width, height, { ...c.sea, at, visible })
+  // A current drawn at the estimated SVG height crossed the limits' words when the host's
+  // row metrics differed. Seat the work indicator at the capsule's actual bottom instead.
+  const sea = look.art.sea(width, height, { ...c.sea, current: false, at, visible })
   return (
     <Box key={c.key} position="relative" flexDirection="column" paddingX={0} paddingY={0} overflow="hidden" width="100%" minWidth={0} {...look.capsule}>
       {sea ? (
@@ -182,6 +184,9 @@ export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 
         {lift(el)}
         {c.children}
       </Box>
+      {/* This is activity, not measured progress: a fixed line cannot jump backwards when
+          a new request or state update replaces the host tree and restarts SVG motion. */}
+      {c.sea.current ? <Box key={c.key + '-activity'} position="absolute" bottom={0} left={0} right={0} height={rowsOf(1.6)} backgroundColor="rgba(103,232,249,0.45)" /> : null}
     </Box>
   )
 }
