@@ -34,6 +34,19 @@ test("TaskCreate, Update, List and deletion normalize exact subjects only after 
   assert.equal(state.list.length, 0);
 });
 
+test("a new turn invalidates late per-turn plan results but retains session-scoped task acknowledgements", () => {
+  const state = new TaskPlan();
+  state.call("old-plan", "update_plan", { plan: [{ step: "Old turn", status: "pending" }] });
+  state.call("session-task", "TaskCreate", { subject: "Session task" });
+  state.newTurn();
+  state.result("old-plan", true, "ok");
+  assert.equal(state.list.length, 0);
+  accepted(state, "old-plan", "update_plan", { plan: [{ step: "Old turn again", status: "pending" }] });
+  assert.equal(state.list.length, 0, "replayed calls from the retired turn remain retired");
+  state.result("session-task", true, "Task #1 created successfully: Session task");
+  assert.deepEqual(state.list, [{ id: "1", text: "Session task", status: "pending" }]);
+});
+
 test("TaskList understands native text output and duplicate results cannot recreate deleted tasks", () => {
   const state = new TaskPlan();
   accepted(state, "list", "TaskList", {}, "#1 [pending] First\n#2 [completed] Second");

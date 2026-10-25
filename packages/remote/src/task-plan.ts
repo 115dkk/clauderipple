@@ -69,6 +69,11 @@ export class TaskPlan {
 
   /** A new human turn clears Code's per-turn plan, not session-scoped TaskCreate/TodoWrite work. */
   newTurn(): void {
+    for (const [id, call] of this.calls) {
+      if (call.name !== PLAN_TOOL && call.name !== "update_plan") continue;
+      this.calls.delete(id);
+      this.applied.add(id);
+    }
     if (this.source === PLAN_TOOL || this.source === "update_plan") this.replace([], this.source);
   }
   call(id: string, name: string, input: Input): void {
