@@ -464,7 +464,7 @@ test("a task definition that cannot be read is unknown, never absent", () => {
   assert.deepEqual(schtasks.readTaskDefinition(undefined, failing), { state: "error", error: "Access is denied" });
   assert.deepEqual(schtasks.taskOwnership(winB, failing), { state: "unknown", home: null });
   assert.equal(schtasks.taskRouterPid(undefined, { home: winB, deps: failing }), null);
-  assert.throws(() => schtasks.installAgent({ program, args: [], home: winB }, failing), /could not read the scheduled task/);
+  assert.throws(() => schtasks.installAgent({ program, args: [], home: winB }, failing), /lookup failed/);
   // Truly missing stays absent: the task scheduler said so.
   const missing = { run: () => ({ ok: true, out: "null" }) };
   assert.deepEqual(schtasks.readTaskDefinition(undefined, missing), { state: "absent" });

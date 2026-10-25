@@ -10,6 +10,7 @@ import path from "node:path";
 import { homeDir } from "../../router/src/config.ts";
 import { type AgentRemove, type AgentRestart, type AgentStart, type AgentStop, type Ownership, ownerOf, unitEnvironment } from "./ownership.ts";
 import { type RouterIdentity, routerIdentity } from "./router-state.ts";
+import { withServiceFile } from "./service-definition.ts";
 
 /** Whose router answers this installation's admin port. Injected in tests that must not probe. */
 export type IdentityCheck = (expectedPid: number | null) => RouterIdentity;
@@ -99,59 +100,65 @@ export function unitOwnership(home: string = homeDir()): Ownership {
 }
 
 export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string> }, run: Systemctl = realSystemctl, identity: IdentityCheck = expectedPid => routerIdentity(opts.home, { expectedPid })): string {
-  // No user manager (an ssh login without lingering, a container) means nothing would ever start
-  // the router: fail here, before any file is written.
-  mustSystemctl(["show-environment"], run);
-  const file = unitPath();
-  if (fs.existsSync(file)) {
-    let text: string;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch (error) {
-      throw new Error(`${file} could not be read (${(error as Error).message}); refusing to replace it`);
+  return withServiceFile(unitPath(), run, guard => {
+    run = guard.run;
+    // No user manager (an ssh login without lingering, a container) means nothing would ever start
+    // the router: fail here, before any file is written.
+    mustSystemctl(["show-environment"], run);
+    const file = unitPath();
+    if (fs.existsSync(file)) {
+      let text: string;
+      try {
+        text = fs.readFileSync(file, "utf8");
+      } catch (error) {
+        throw new Error(`${file} could not be read (${(error as Error).message}); refusing to replace it`);
+      }
+      if (!text.startsWith(HEADER)) {
+        throw new Error(`${file} exists and is not ClaudeRipple's; refusing to replace it`);
+      }
     }
-    if (!text.startsWith(HEADER)) {
-      throw new Error(`${file} exists and is not ClaudeRipple's; refusing to replace it`);
+    const owner = unitOwnership(opts.home);
+    if (owner.state === "other") {
+      throw new Error(`${file} belongs to another ClaudeRipple installation (${owner.home}); remove it with that installation's uninstall, or use its own unit name for this one`);
     }
-  }
-  const owner = unitOwnership(opts.home);
-  if (owner.state === "other") {
-    throw new Error(`${file} belongs to another ClaudeRipple installation (${owner.home}); remove it with that installation's uninstall, or use its own unit name for this one`);
-  }
-  if (owner.state === "unknown") {
-    throw new Error(`${file} does not record an installation, so it cannot be identified; refusing to replace it`);
-  }
-  if (owner.state === "ours") {
-    const pid = agentPid(run);
-    if (pid !== null && identity(pid) !== "ours") throw new Error("running systemd instance identity is unknown; unit left untouched");
-  }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, renderUnit(opts), { mode: 0o600 });
-  mustSystemctl(["daemon-reload"], run);
-  mustSystemctl(["enable", unitName()], run);
-  return file;
+    if (owner.state === "unknown") {
+      throw new Error(`${file} does not record an installation, so it cannot be identified; refusing to replace it`);
+    }
+    if (owner.state === "ours") {
+      const pid = agentPid(run);
+      if (pid !== null && identity(pid) !== "ours") throw new Error("running systemd instance identity is unknown; unit left untouched");
+    }
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    guard.write(renderUnit(opts));
+    mustSystemctl(["daemon-reload"], run);
+    mustSystemctl(["enable", unitName()], run);
+    return file;
+  });
 }
 
 export function removeAgent(home: string = homeDir(), run: Systemctl = realSystemctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentRemove {
-  const file = unitPath();
-  const owner = unitOwnership(home);
-  if (owner.state === "absent") return "absent";
-  if (owner.state === "other") return "other-installation";
-  if (owner.state === "unknown") return "ownership-unknown";
-  // `disable --now` terminates the unit's process. The unit file can have been replaced under a
-  // running instance, so a running unit is only stopped when its own id proves it is ours.
-  const pid = agentPid(run);
-  if (pid !== null) {
-    const who = identity(pid);
-    if (who === "other") return "other-installation";
-    if (who !== "ours") return "identity-unknown";
-  }
-  const definition = fs.readFileSync(file, "utf8");
-  mustSystemctl(["disable", "--now", unitName()], run);
-  if (unitOwnership(home).state !== "ours" || fs.readFileSync(file, "utf8") !== definition) return "ownership-unknown";
-  fs.unlinkSync(file);
-  mustSystemctl(["daemon-reload"], run);
-  return "removed";
+  return withServiceFile(unitPath(), run, guard => {
+    run = guard.run;
+    const file = unitPath();
+    const owner = unitOwnership(home);
+    if (owner.state === "absent") return "absent";
+    if (owner.state === "other") return "other-installation";
+    if (owner.state === "unknown") return "ownership-unknown";
+    // `disable --now` terminates the unit's process. The unit file can have been replaced under a
+    // running instance, so a running unit is only stopped when its own id proves it is ours.
+    const pid = agentPid(run);
+    if (pid !== null) {
+      const who = identity(pid);
+      if (who === "other") return "other-installation";
+      if (who !== "ours") return "identity-unknown";
+    }
+    const definition = fs.readFileSync(file, "utf8");
+    mustSystemctl(["disable", "--now", unitName()], run);
+    if (unitOwnership(home).state !== "ours" || fs.readFileSync(file, "utf8") !== definition) return "ownership-unknown";
+    guard.remove();
+    mustSystemctl(["daemon-reload"], run);
+    return "removed";
+  });
 }
 
 export function agentState(run: Systemctl = realSystemctl): "running" | "loaded" | "not-loaded" {
@@ -176,27 +183,33 @@ export function agentPid(run: Systemctl = realSystemctl): number | null {
  * "started" at that point — so the MainPID is waited for, as on Windows (#80).
  */
 export function startAgent(home: string = homeDir(), opts: { waitMs?: number } = {}, run: Systemctl = realSystemctl): AgentStart {
-  const owner = unitOwnership(home);
-  if (owner.state === "other") return "other-installation";
-  if (owner.state === "unknown") return "ownership-unknown";
-  if (agentState(run) === "running") return "already-running";
-  if (!run(["start", unitName()]).ok) return "failed";
-  return waitForPid(opts.waitMs ?? START_BUDGET_MS, run) ? "started" : "failed";
+  return withServiceFile(unitPath(), run, guard => {
+    run = guard.run;
+    const owner = unitOwnership(home);
+    if (owner.state === "other") return "other-installation";
+    if (owner.state === "unknown") return "ownership-unknown";
+    if (agentState(run) === "running") return "already-running";
+    if (!run(["start", unitName()]).ok) return "failed";
+    return waitForPid(opts.waitMs ?? START_BUDGET_MS, run) ? "started" : "failed";
+  });
 }
 
 export function stopAgent(home: string = homeDir(), opts: Record<string, never> = {}, run: Systemctl = realSystemctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentStop {
-  const owner = unitOwnership(home);
-  if (owner.state === "absent") return "not-loaded";
-  if (owner.state === "other") return "other-installation";
-  if (owner.state === "unknown") return "ownership-unknown";
-  // Stopping terminates the unit's process; require the running instance to prove it is ours.
-  const pid = agentPid(run);
-  if (pid !== null) {
-    const who = identity(pid);
-    if (who === "other") return "other-installation";
-    if (who !== "ours") return "identity-unknown";
-  }
-  return run(["stop", unitName()]).ok ? "stopped" : "not-loaded";
+  return withServiceFile(unitPath(), run, guard => {
+    run = guard.run;
+    const owner = unitOwnership(home);
+    if (owner.state === "absent") return "not-loaded";
+    if (owner.state === "other") return "other-installation";
+    if (owner.state === "unknown") return "ownership-unknown";
+    // Stopping terminates the unit's process; require the running instance to prove it is ours.
+    const pid = agentPid(run);
+    if (pid !== null) {
+      const who = identity(pid);
+      if (who === "other") return "other-installation";
+      if (who !== "ours") return "identity-unknown";
+    }
+    return run(["stop", unitName()]).ok ? "stopped" : "not-loaded";
+  });
 }
 
 /**
@@ -204,28 +217,31 @@ export function stopAgent(home: string = homeDir(), opts: Record<string, never> 
  * a new one, so the drain is never cut the way `launchctl kickstart -k` cut it.
  */
 export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}, run: Systemctl = realSystemctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentRestart {
-  const owner = unitOwnership(home);
-  if (owner.state === "other") return "other-installation";
-  if (owner.state === "unknown") return "ownership-unknown";
-  // `systemctl restart` stops the running unit first: a running instance must prove it is ours.
-  const pid = agentPid(run);
-  if (pid !== null) {
-    const who = identity(pid);
-    if (who === "other") return "other-installation";
-    if (who !== "ours") return "identity-unknown";
-  }
-  opts.onProgress?.("waiting for in-flight model calls to finish (up to 120s)…");
-  if (!run(["restart", unitName()]).ok) return "failed";
-  // The restart command returned; the successor still has to appear. A unit that cannot start
-  // answers "failed" here rather than being reported as a restart (2026-10-22, #80).
-  if (!waitForPid(START_BUDGET_MS, run)) return "failed";
-  const again = unitOwnership(home);
-  if (again.state === "other") return "other-installation";
-  if (again.state !== "ours") return "ownership-unknown";
-  const successor = agentPid(run);
-  if (successor === null) return "identity-unknown";
-  const who = identity(successor);
-  return who === "ours" ? "drained" : who === "other" ? "other-installation" : "identity-unknown";
+  return withServiceFile(unitPath(), run, guard => {
+    run = guard.run;
+    const owner = unitOwnership(home);
+    if (owner.state === "other") return "other-installation";
+    if (owner.state === "unknown") return "ownership-unknown";
+    // `systemctl restart` stops the running unit first: a running instance must prove it is ours.
+    const pid = agentPid(run);
+    if (pid !== null) {
+      const who = identity(pid);
+      if (who === "other") return "other-installation";
+      if (who !== "ours") return "identity-unknown";
+    }
+    opts.onProgress?.("waiting for in-flight model calls to finish (up to 120s)…");
+    if (!run(["restart", unitName()]).ok) return "failed";
+    // The restart command returned; the successor still has to appear. A unit that cannot start
+    // answers "failed" here rather than being reported as a restart (2026-10-22, #80).
+    if (!waitForPid(START_BUDGET_MS, run)) return "failed";
+    const again = unitOwnership(home);
+    if (again.state === "other") return "other-installation";
+    if (again.state !== "ours") return "ownership-unknown";
+    const successor = agentPid(run);
+    if (successor === null) return "identity-unknown";
+    const who = identity(successor);
+    return who === "ours" ? "drained" : who === "other" ? "other-installation" : "identity-unknown";
+  });
 }
 
 /** How long a unit systemd accepted is given to produce a process before it counts as a failure. */

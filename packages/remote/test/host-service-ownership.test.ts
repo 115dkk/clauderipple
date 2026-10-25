@@ -1,7 +1,7 @@
 // The phone host is a second account-wide service, beside the router's. A main install's uninstall
 // removes it only when its definition records that installation's home; a release check under its
-// own home must leave the real one alone, and an unrecorded one is only removed when the user asks
-// explicitly (`remote uninstall`) (G-D01, 2026-10-25).
+// own home must leave the real one alone. An explicit request does not prove an unrecorded
+// definition belongs to this installation (G-D01, 2026-10-25).
 //
 // Nothing here runs launchd, systemd or PowerShell: the definition is a string and removal is
 // injected.
@@ -73,7 +73,7 @@ test("Windows host start stop and remove consistently use the task runtime home 
     stopAgent: (name, opts) => { assert.equal(opts?.home, p.runtime); return windows.stopAgent(name, opts); },
     removeAgent: (name, opts) => { assert.equal(opts?.home, p.runtime); return refuse === "remove" ? "ownership-unknown" : windows.removeAgent(name, opts); },
   };
-  const deps: HostServiceDeps = { platform: "win32", installationHome: home, userHome, readDefinition: () => installed ? launcher(home) : null, windows: task, taskDeps, shutdown: async () => {}, waitForHost: async () => {} };
+  const deps: HostServiceDeps = { platform: "win32", installationHome: home, userHome, readDefinition: () => fs.existsSync(p.definition) ? fs.readFileSync(p.definition, "utf8") : null, windows: task, taskDeps, shutdown: async () => {}, waitForHost: async () => {} };
   await installService(spec, deps);
   assert.equal(running, true);
   await uninstallService({ ...deps, removeDefinition: () => {} });
@@ -83,6 +83,23 @@ test("Windows host start stop and remove consistently use the task runtime home 
   refuse = "remove";
   let removed = false;
   await assert.rejects(uninstallService({ ...deps, removeDefinition: () => { removed = true; } }), /제거하지 못했습니다/);
+  assert.equal(removed, false);
+});
+
+test("host removal retains the definition replaced during asynchronous shutdown and holds its lock", async () => {
+  let text = unit(home);
+  let removed = false;
+  let entered: (() => void) | undefined;
+  let resume: (() => void) | undefined;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const release = new Promise<void>(resolve => { resume = resolve; });
+  const deps: HostServiceDeps = { platform: "linux", installationHome: home, readDefinition: () => text, stop: async () => { entered?.(); await release; }, removeDefinition: () => { removed = true; } };
+  const first = uninstallService(deps);
+  await waiting;
+  await assert.rejects(uninstallService(deps), /잠금/);
+  text = unit(other);
+  resume?.();
+  await assert.rejects(first, /변경/);
   assert.equal(removed, false);
 });
 
@@ -98,7 +115,7 @@ test("the host service records the installation home it was written for", () => 
   assert.equal(hostServiceOwnership(null, "darwin", home).state, "absent");
 });
 
-test("uninstall removes this home's host service, keeps another's, and takes an unknown one only when explicit", async () => {
+test("uninstall removes this home's host service and preserves foreign or unknown definitions even when explicit", async () => {
   const calls: string[] = [];
   const deps = (text: string | null, extra: Record<string, unknown> = {}) => ({
     platform: "linux" as const,
@@ -114,7 +131,7 @@ test("uninstall removes this home's host service, keeps another's, and takes an 
   await assert.rejects(uninstallService(deps(unit(other))), /another ClaudeRipple installation/);
   assert.deepEqual(calls, [], "another installation's host is never stopped or removed");
 
-  await assert.rejects(uninstallService(deps(unit(null))), /does not record which installation/);
+  await assert.rejects(uninstallService(deps(unit(null))), /소유권/);
   assert.deepEqual(calls, [], "an unrecorded host is preserved, not guessed at");
 
   await assert.rejects(uninstallService({ ...deps(unit(null)), readDefinition: () => { throw new Error("permission denied"); } }), /could not be read/);
@@ -125,6 +142,6 @@ test("uninstall removes this home's host service, keeps another's, and takes an 
   assert.match(lines[0]!, /removed .*clauderipple-host\.service/);
 
   calls.length = 0;
-  await uninstallService(deps(unit(null), { explicit: true }));
-  assert.deepEqual(calls, ["stop", "remove"], "remote uninstall is the explicit request that may take an unrecorded host");
+  await assert.rejects(uninstallService(deps(unit(null), { explicit: true })), /소유권/);
+  assert.deepEqual(calls, [], "an explicit request is not proof of ownership");
 });

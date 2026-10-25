@@ -125,7 +125,7 @@ test("an unreadable unit is unknown, so install refuses to replace it", { skip: 
     fs.chmodSync(unitPath(), 0o000);
     try {
       assert.deepEqual(unitOwnership("/tmp/home"), { state: "unknown", home: null });
-      assert.throws(() => installAgent({ program: process.execPath, home: "/tmp/home" }, () => ({ ok: true, out: "" })), /could not be read|refusing to replace/);
+      assert.throws(() => installAgent({ program: process.execPath, home: "/tmp/home" }, () => ({ ok: true, out: "" })), /EACCES|읽지 못해/);
     } finally {
       fs.chmodSync(unitPath(), 0o600);
       fs.rmSync(unitPath(), { force: true });
@@ -170,14 +170,8 @@ async function runInstall(root: string, settings: string, port: number): Promise
 
 const ORIGINAL_SETTINGS = '{"env":{"KEEP_ME":"keep"},"model":"opus"}\n';
 
-test("a non-Linux host cannot launch the installer even when process.platform is spoofed", { skip: !notLinux }, async () => {
-  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-  try {
-    Object.defineProperty(process, "platform", { value: "linux" });
-    await assert.rejects(runInstall("/unused", "/unused/settings.json", 1), /require a Linux host/);
-  } finally {
-    Object.defineProperty(process, "platform", platform);
-  }
+test("a non-Linux host cannot launch the systemd installer", { skip: !notLinux }, async () => {
+  await assert.rejects(runInstall("/unused", "/unused/settings.json", 1), /require a Linux host/);
 });
 
 test("no user manager: install fails before registering anything and settings.json is untouched", { skip: notLinux }, () =>

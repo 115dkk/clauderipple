@@ -22,6 +22,7 @@ import { type AgentRemove, type AgentStart, type AgentStop, type Ownership, laun
 import { type RouterIdentity, routerIdentity } from "./router-state.ts";
 import { runtime } from "./runtime.ts";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
+import { assertGeneration, definitionGeneration, withServiceLock, writeServiceFile } from "./service-definition.ts";
 
 export const TASK_NAME = "ClaudeRippleRouter";
 
@@ -175,7 +176,7 @@ export function writeLauncher(opts: { program: string; args: string[]; home: str
   const launcher = path.join(opts.home, `${opts.name ?? "clauderipple-router"}.ps1`);
   const logDir = path.join(opts.home, "logs");
   fs.mkdirSync(logDir, { recursive: true });
-  fs.writeFileSync(launcher, renderLauncher(opts));
+  writeServiceFile(launcher, renderLauncher(opts));
   return launcher;
 }
 
@@ -230,6 +231,37 @@ export function existingTaskDefinition(name = taskName(), deps: TaskDeps = {}): 
   return read.state === "found" ? read.definition : null;
 }
 
+/** One lock for every home using this account-wide task name, never a lock under a custom home. */
+function withTaskDefinition<T>(name: string, deps: TaskDeps, body: (guarded: TaskDeps) => T): T {
+  const key = path.join(os.homedir(), ".clauderipple", "service-locks", encodeURIComponent(name.toLowerCase()));
+  return withServiceLock(key, () => {
+    const read = () => {
+      const result = readTaskDefinition(name, deps);
+      if (result.state === "error") throw new Error(`scheduled task lookup failed: ${result.error}`);
+      return result;
+    };
+    const initial = read();
+    const generation = definitionGeneration(initial);
+    const check = () => assertGeneration(read, generation);
+    let registered = false;
+    const result = body({
+      ...deps,
+      definition: () => { check(); return initial.definition ?? null; },
+      run: script => {
+        check();
+        const result = invoke(script, deps);
+        // Registration and unregistration intentionally change this generation and end the
+        // operation. Every state/PID query and start/stop must retain the original definition.
+        if (result.ok && /Register-ScheduledTask|Unregister-ScheduledTask/.test(script)) registered = true;
+        else check();
+        return result;
+      },
+    });
+    if (!registered) check();
+    return result;
+  });
+}
+
 /** Who the task registered under this name belongs to (B01). */
 export function taskOwnership(home: string = homeDir(), deps: TaskDeps = {}): Ownership {
   const read = readTaskDefinition(deps.name ?? taskName(), deps);
@@ -240,7 +272,12 @@ export function taskOwnership(home: string = homeDir(), deps: TaskDeps = {}): Ow
   return ownerOf(typeof args === "string" ? launcherHome(args) : null, home);
 }
 
-export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string>; name?: string }, deps: TaskDeps = {}): string {
+export function installAgent(...args: Parameters<typeof installAgentLocked>): string {
+  const [opts, deps = {}] = args;
+  return withTaskDefinition(opts.name ?? deps.name ?? taskName(), deps, guarded => installAgentLocked(opts, guarded));
+}
+
+function installAgentLocked(opts: { program: string; args?: string[]; home: string; env?: Record<string, string>; name?: string }, deps: TaskDeps = {}): string {
   const name = opts.name ?? deps.name ?? taskName();
   // Before the launcher and the registration: a same-named task may belong to another home (B01),
   // and a definition that cannot be read must not be replaced as if there were none.
@@ -292,7 +329,12 @@ export function renderTaskRegistration(name: string, user: string, execute: stri
   ].join("; ");
 }
 
-export function removeAgent(name = taskName(), opts: { home?: string; deps?: TaskDeps; identity?: (expectedPid: number | null) => RouterIdentity } = {}): AgentRemove {
+export function removeAgent(...args: Parameters<typeof removeAgentLocked>): AgentRemove {
+  const [name = taskName(), opts = {}] = args;
+  return withTaskDefinition(name, opts.deps ?? {}, guarded => removeAgentLocked(name, { ...opts, deps: guarded }));
+}
+
+function removeAgentLocked(name = taskName(), opts: { home?: string; deps?: TaskDeps; identity?: (expectedPid: number | null) => RouterIdentity } = {}): AgentRemove {
   const deps = opts.deps ?? {};
   const home = opts.home ?? homeDir();
   const owner = taskOwnership(home, { ...deps, name });
@@ -446,7 +488,13 @@ function waitUntil(ok: () => boolean, budgetMs: number, pollMs = 500): boolean {
  * router, the task start was accepted, nothing came up, and the update reported success while
  * Claude had no router for 11h47m (#80). So "started" means the router's process exists.
  */
-export function startAgent(name = taskName(), opts: { waitMs?: number; probe?: StartProbe; home?: string; deps?: TaskDeps; up?: () => boolean } = {}): AgentStart {
+export function startAgent(...args: Parameters<typeof startAgentLocked>): AgentStart {
+  const [name = taskName(), opts = {}] = args;
+  if (opts.probe) return startAgentLocked(name, opts);
+  return withTaskDefinition(name, opts.deps ?? {}, guarded => startAgentLocked(name, { ...opts, deps: guarded }));
+}
+
+function startAgentLocked(name = taskName(), opts: { waitMs?: number; probe?: StartProbe; home?: string; deps?: TaskDeps; up?: () => boolean } = {}): AgentStart {
   const home = opts.home ?? homeDir();
   // An injected probe models the supervisor, so it also stands in for what is registered. One
   // definition read is shared with the answer poll: a start waits, and each poll must not re-read it.
@@ -469,7 +517,12 @@ export function startAgent(name = taskName(), opts: { waitMs?: number; probe?: S
  * instance, so it is only called by `stopWindowsRouter`, after that router proved (installation id)
  * to be ours. Do not call it directly: the definition's home is not proof of the running instance.
  */
-export function stopAgent(name = taskName(), opts: { home?: string; deps?: TaskDeps } = {}): AgentStop {
+export function stopAgent(...args: Parameters<typeof stopAgentLocked>): AgentStop {
+  const [name = taskName(), opts = {}] = args;
+  return withTaskDefinition(name, opts.deps ?? {}, guarded => stopAgentLocked(name, { ...opts, deps: guarded }));
+}
+
+function stopAgentLocked(name = taskName(), opts: { home?: string; deps?: TaskDeps } = {}): AgentStop {
   const deps = opts.deps ?? {};
   const owner = taskOwnership(opts.home ?? homeDir(), { ...deps, name });
   if (owner.state === "absent") return "not-loaded";

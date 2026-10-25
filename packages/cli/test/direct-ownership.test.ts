@@ -207,7 +207,7 @@ test("definition replacement during service drain is never deleted", () => {
     if (args[0] === "disable") fs.writeFileSync(systemd.unitPath(), foreign);
     return { ok: true, out: "0" };
   };
-  assert.equal(systemd.removeAgent(c.a, run), "ownership-unknown");
+  assert.throws(() => systemd.removeAgent(c.a, run), /변경/);
   assert.equal(fs.readFileSync(systemd.unitPath(), "utf8"), foreign);
 });
 

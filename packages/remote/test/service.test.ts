@@ -65,6 +65,8 @@ test("install replaces a loaded agent and bootstraps; uninstall boots out and re
     return { status: 0, out: "" };
   };
   const spec = { ...specFor({ script: "/x/packages/remote/src/main.ts", claudePath: undefined, node: "/n/node", home: dir }), log: p.log };
+  fs.mkdirSync(path.dirname(p.plist), { recursive: true });
+  fs.writeFileSync(p.plist, plist(spec));
   install(spec, run, p);
   assert.deepEqual(calls.map((c) => c[1]), ["print", "bootout", "bootstrap"]);
   assert.equal(calls[2]![3], p.plist);
