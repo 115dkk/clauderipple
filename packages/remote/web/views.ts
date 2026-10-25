@@ -286,7 +286,12 @@ export function item(it: TimelineItem, ui: UI): string {
       const html = text ? markdown(text) : "";
       const withCaret = caret ? (html.endsWith("</p>") ? html.slice(0, -4) + caret + "</p>" : html + caret) : html;
       const tools = it.tools.length ? `<div class="tools">${it.tools.map((tl) => toolRow(tl, ui)).join("")}</div>` : "";
-      return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}</div>`;
+      // Copy is offered while the answer streams too: the words are already readable, and the
+      // browser's own selection keeps working across blocks (patchList carries it over a delta).
+      const copy = text.trim()
+        ? `<div class="msg-acts"><button class="msg-copy" data-act="copy-answer" data-key="${esc(it.key)}" aria-label="${esc(t("answer.copy"))}">${icon.copy(16)}${esc(t("answer.copyShort"))}</button></div>`
+        : "";
+      return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}${copy}</div>`;
     }
     case "subagent": {
       const st = it.status === "running" ? t("sub.running") : it.status === "done" ? t("sub.done") : t("sub.failed");

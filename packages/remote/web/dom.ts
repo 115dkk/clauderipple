@@ -27,6 +27,7 @@ export const icon = {
   home: (s?: number) => svg(`<path d="M4 11l8-6.5 8 6.5"/><path d="M6 9.5V19h12V9.5"/>`, s),
   bell: (s?: number) => svg(`<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>`, s),
   up: (s?: number) => svg(`<path d="M12 19V7M7 11l5-5 5 5"/><path d="M5 4.5h14"/>`, s),
+  copy: (s?: number) => svg(`<path d="M8 8h12v12H8z"/><path d="M16 8V4H4v12h4"/>`, s),
 };
 
 export function toolIcon(name: string): string {

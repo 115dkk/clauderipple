@@ -782,6 +782,31 @@ export class App {
     this.renderSheet(false);
   }
 
+  /** Text the host moved out of an event (INLINE_CAP): read it back whole, page by page. */
+  private async readBlob(session: string, id: string): Promise<string> {
+    let offset = 0, text = "";
+    for (;;) {
+      const chunk = await this.req<BlobChunk>({ op: "blob", session, id, offset });
+      text += chunk.text;
+      if (chunk.next === null) return text;
+      offset = chunk.next;
+    }
+  }
+
+  /** The whole answer behind a copy button, even when only its preview is in this page's memory. */
+  private async copyAnswer(key: string): Promise<void> {
+    if (this.screen.name !== "session") return;
+    const session = this.screen.id;
+    const item = timelineItems(this.view(session)).find(entry => entry.key === key);
+    if (item?.type !== "assistant") return;
+    try {
+      const text = typeof item.text === "string" ? item.text : await this.readBlob(session, item.text.blob);
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      this.toast(t("error.generic", { text: e instanceof Error && e.name ? e.name : "clipboard" }));
+    }
+  }
+
   private async copyDiff(path: string): Promise<void> {
     const sheet = this.ui.sheet;
     const file = sheet?.kind === "diff" ? sheet.view?.files.find(entry => entry.path === path) : undefined;
@@ -1101,6 +1126,7 @@ export class App {
         break;
       }
       case "tool": await this.toggleTool(id); break;
+      case "copy-answer": await this.copyAnswer(el.dataset.key ?? id); break;
       case "sub": await this.openSub(id); break;
       case "worker-back": this.workerBack(); break;
       case "worker-retry": if (this.ui.sheet?.kind === "worker") await this.loadWorker(this.ui.sheet, session); break;

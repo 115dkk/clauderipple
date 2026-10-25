@@ -310,8 +310,13 @@ button.banner { font: inherit; color: inherit; text-align: left; width: calc(100
 .filter { margin: 2px 12px 10px; display: flex; align-items: center; gap: 8px; background: var(--surface-2); border-radius: 12px; padding: 0 12px; height: 42px; color: var(--muted); }
 .filter input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 16px; color: var(--ink); min-width: 0; }
 
-/* ---- changes: the session folder's diff, the way the app's own pane is read ------------------- */
-.diff-scope { margin: 4px 12px 10px; }
+/* Copy sits under the answer, on the text edge, as the app draws it; 44 px is the whole target. */
+.msg-acts { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+.msg-copy { min-height: 44px; padding: 0 10px 0 8px; border-radius: 10px; font-size: 13px; font-weight: 600; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.msg-copy:active { background: var(--surface-2); }
+.msg-copy .ic { color: var(--muted); }
+
+/* ---- changes: the session folder's diff, the way the app's own pane is read ------------------- */.diff-scope { margin: 4px 12px 10px; }
 .diff-sum { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); padding: 2px 16px 8px; }
 .diff-sum .sep { color: var(--faint); }
 .diff-file { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; min-height: 56px; padding: 8px 14px; position: relative; }
