@@ -1109,8 +1109,8 @@ export class App {
       case "diff-step": {
         const sheet = this.ui.sheet;
         if (sheet?.kind !== "diff" || !sheet.view || sheet.open === null) break;
-        const next = sheet.view.files[sheet.view.files.findIndex(entry => entry.path === sheet.open) + Number(el.dataset.step ?? 0)];
-        if (!next) break;
+        const next = sheet.view.files[Number(el.dataset.index)];
+        if (!next || !next.patch) break;
         this.rememberDiffPosition();
         this.ui.sheet = { ...sheet, open: next.path };
         this.renderSheet(false);

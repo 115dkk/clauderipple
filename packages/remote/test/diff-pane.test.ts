@@ -56,7 +56,7 @@ test("the changes list offers both comparisons, names partial files, and opens e
   assert.ok(file.includes("line 1<"), "and so is the first");
   assert.ok(file.includes('data-act="diff-back"'));
   assert.ok(file.includes('aria-label="이전 파일" disabled'), "the first file has no previous");
-  assert.ok(file.includes('data-act="diff-step" data-step="1" aria-label="다음 파일" >'), "the next file is offered");
+  assert.ok(file.includes('data-act="diff-step" data-index="1" aria-label="다음 파일">'), "the next file is offered");
   assert.ok(file.includes("1/3"));
   assert.ok(!file.includes("앞부분만"), "a complete patch claims nothing was cut");
 
@@ -163,12 +163,16 @@ function install(storage: Storage): { sheet(): Element; diff(): Element } {
 }
 const copied: string[] = [];
 
-/** The app as its buttons call it; app.ts is browser code, type-checked by the web project. */
+/** The app as its buttons call it. app.ts is browser code, type-checked by the web project (its
+ * import specifier is a variable on purpose, so this Node program does not type-check it). */
 interface AppBoundary {
   start(): Promise<void>;
   go(screen: { name: "home" } | { name: "session"; id: string }): void;
   act(name: string, el: { dataset: Record<string, string> }): Promise<void>;
-  ui: { sheet: { kind: string; open?: string | null; scroll?: number; scope?: string; view?: DiffView | null } | null };
+  ui: {
+    models: unknown[];
+    sheet: { kind: string; open?: string | null; scroll?: number; scope?: string; view?: DiffView | null } | null;
+  };
   link: { stop(): void } | null;
 }
 type AppCtor = new (status: unknown) => AppBoundary;
@@ -181,7 +185,8 @@ async function launch(): Promise<{ app: AppBoundary; socket: Socket; sheet: () =
   storage.setItem("rr.token", JSON.stringify(TOKEN));
   if (AppClass === null) {
     storage.setItem("rr.token", JSON.stringify(""));
-    const module: { App: AppCtor } = await import("../web/app.ts");
+    const specifier = "../web/app.ts";
+    const module: { App: AppCtor } = await import(specifier);
     AppClass = module.App;
     storage.setItem("rr.token", JSON.stringify(TOKEN));
   }
@@ -224,7 +229,7 @@ test("the app asks for one comparison at a time and keeps both reading positions
     assert.equal(running.app.ui.sheet?.open, "src/long.txt");
     assert.ok(running.sheet().innerHTML.includes("line 900"), "the whole patch is drawn");
     running.diff().scrollTop = 128;
-    await running.app.act("diff-step", { dataset: { step: "1" } });
+    await running.app.act("diff-step", { dataset: { index: "1" } });
     assert.equal(running.app.ui.sheet?.open, "src/cut.txt", "the next file opens in place");
     assert.ok(running.sheet().innerHTML.includes("앞부분만 받았습니다"));
     running.diff().scrollTop = 0;

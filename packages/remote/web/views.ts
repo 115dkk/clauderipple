@@ -388,14 +388,22 @@ function diffSheet(ui: UI, s: Extract<Sheet, { kind: "diff" }>): string {
     const index = view.files.indexOf(file);
     const lines = patchLines(file.patch);
     const name = file.path.split("/").at(-1) ?? file.path;
-    const step = (delta: number, label: string, disabled: boolean, glyph: string): string =>
-      `<button class="icon-btn" data-act="diff-step" data-step="${delta}" aria-label="${esc(label)}" ${disabled ? "disabled" : ""}>${glyph}</button>`;
+    // Walking the change lands on files that can be read: a binary beside them has no patch.
+    const reachable = (from: number, delta: number): number | null => {
+      for (let at = from + delta; at >= 0 && at < view.files.length; at += delta) if (view.files[at]?.patch) return at;
+      return null;
+    };
+    const prev = reachable(index, -1), next = reachable(index, 1);
+    const step = (target: number | null, label: string, glyph: string): string =>
+      target === null
+        ? `<button class="icon-btn" aria-label="${esc(label)}" disabled>${glyph}</button>`
+        : `<button class="icon-btn" data-act="diff-step" data-index="${target}" aria-label="${esc(label)}">${glyph}</button>`;
     const where = `${file.oldPath ? `${file.oldPath} → ${file.path}` : file.path} · ${t("perm.of", { i: index + 1, n: view.files.length })}`;
     const drawn = lines.map(line => {
       const hunk = line.startsWith("@@"), add = !hunk && line.startsWith("+"), del = !hunk && line.startsWith("-");
       return `<div class="ln${add ? " add" : del ? " del" : hunk ? " hunk" : ""}"><span class="mk">${add ? "+" : del ? "−" : " "}</span><span class="tx">${esc(hunk ? line : line.slice(1))}</span></div>`;
     }).join("");
-    return frame(`<div class="diff-head"><button class="btn ghost" data-act="diff-back" aria-label="${esc(t("diff.back"))}">${icon.back(18)}<span>${esc(t("diff.back"))}</span></button><div class="body"><div class="t1">${esc(name)}</div><div class="t2">${esc(where)}</div></div>${countsPill(file.added, file.removed)}${step(-1, t("diff.prev"), index === 0, icon.up(18))}${step(1, t("diff.next"), index === view.files.length - 1, icon.down(18))}${file.patch ? `<button class="btn ghost" data-act="diff-copy" data-id="${esc(file.path)}">${esc(t("diff.copyShort"))}</button>` : ""}</div><div class="patch">${drawn}</div>${lines.length ? "" : `<div class="note">${esc(t("diff.empty"))}</div>`}${file.cut ? `<div class="note">${esc(t("diff.cut"))}</div>` : ""}`);
+    return frame(`<div class="diff-head"><button class="btn ghost" data-act="diff-back" aria-label="${esc(t("diff.back"))}">${icon.back(18)}<span>${esc(t("diff.back"))}</span></button><div class="body"><div class="t1">${esc(name)}</div><div class="t2">${esc(where)}</div></div>${countsPill(file.added, file.removed)}${step(prev, t("diff.prev"), icon.up(18))}${step(next, t("diff.next"), icon.down(18))}${file.patch ? `<button class="btn ghost" data-act="diff-copy" data-id="${esc(file.path)}">${esc(t("diff.copyShort"))}</button>` : ""}</div><div class="patch">${drawn}</div>${lines.length ? "" : `<div class="note">${esc(t("diff.empty"))}</div>`}${file.cut ? `<div class="note">${esc(t("diff.cut"))}</div>` : ""}`);
   }
   const options = ui.host?.capabilities?.diffScope === true
     ? `<div class="seg diff-scope" role="radiogroup" aria-label="${esc(t("diff.title"))}">${([["uncommitted", t("diff.scope.uncommitted")], ["branch", t("diff.scope.branch")]] as const).map(([scope, label]) => {
