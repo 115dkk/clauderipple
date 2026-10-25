@@ -66,14 +66,15 @@ test("install.sh stops on a failed setup with a non-zero code and the next comma
 test("install.sh stages the runtime swap and replaces the command by rename", () => {
   const sh = read("install.sh");
   assert.match(sh, /^cleanup\(\) \{/m);
-  assert.match(sh, /trap cleanup EXIT INT TERM/);
+  assert.match(sh, /trap cleanup EXIT/);
   const extract = sh.slice(sh.indexOf("download_node()"), sh.indexOf('NODE="$(find_node'));
   assert.match(extract, /STAGING="\$RUNTIME\.new\.\$\$"/);
   assert.match(extract, /tar -xzf "\$tmp\/node\.tar\.gz" -C "\$STAGING"/);
   assert.doesNotMatch(extract, /rm -rf "\$RUNTIME"$/m, "the runtime is not deleted before a new one is unpacked");
-  assert.match(extract, /mv "\$RUNTIME" "\$RUNTIME\.old\.\$\$"/);
+  assert.match(extract, /BACKUP="\$RUNTIME\.old\.\$\$"/);
+  assert.match(extract, /mv "\$RUNTIME" "\$BACKUP"/);
   assert.match(extract, /mv "\$STAGING" "\$RUNTIME"/);
-  assert.match(extract, /mv "\$RUNTIME\.old\.\$\$" "\$RUNTIME"/, "a failed swap puts the previous runtime back");
+  assert.match(sh, /mv "\$BACKUP" "\$RUNTIME"/, "a failed install puts the previous runtime back");
   const wrapperAt = sh.indexOf('WRAPPER="$BIN');
   const wrapper = sh.slice(wrapperAt, sh.indexOf(";;", wrapperAt));
   assert.match(wrapper, /WRAPPER="\$BIN\/\.clauderipple\.new\.\$\$"/);

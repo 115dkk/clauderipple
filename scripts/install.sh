@@ -26,12 +26,37 @@ RUNTIME="$PREFIX/runtime"
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-# A half-finished staging directory is never left behind, and never replaces anything (G-D03).
+# The previous runtime survives until npm and the command wrapper have both succeeded. Record the
+# backup name before the first rename so even a failure immediately after that rename rolls back.
 STAGING=""
+BACKUP=""
+DOWNLOAD=""
 cleanup() {
-  if [ -n "${STAGING:-}" ]; then rm -rf "$STAGING"; fi
+  status=$?
+  trap - EXIT INT TERM
+  if [ -n "$BACKUP" ] && [ -d "$BACKUP" ]; then
+    if [ -e "$RUNTIME" ]; then rm -rf "$RUNTIME"; fi
+    if ! mv "$BACKUP" "$RUNTIME"; then status=1; fi
+  fi
+  if [ -n "$STAGING" ]; then rm -rf "$STAGING"; fi
+  if [ -n "$DOWNLOAD" ]; then rm -rf "$DOWNLOAD"; fi
+  exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# A hard interruption may bypass traps. Restore the single old-only runtime before using Node.
+# Ambiguous backups are preserved rather than guessed at.
+if [ ! -e "$RUNTIME" ]; then
+  recovered=""
+  for old in "$RUNTIME".old.*; do
+    [ -d "$old" ] || continue
+    [ -z "$recovered" ] || die "기존 Node 복사본이 여러 개 있어 자동 복구를 중단했습니다. 설치 폴더를 확인해 주세요."
+    recovered="$old"
+  done
+  if [ -n "$recovered" ]; then mv "$recovered" "$RUNTIME"; fi
+fi
 
 # --- the Node to install with -------------------------------------------------------------------
 
@@ -61,6 +86,7 @@ download_node() {
   name="node-$version-$os-$arch"
   base="https://nodejs.org/dist/$version"
   tmp="$(mktemp -d)"
+  DOWNLOAD="$tmp"
   say "Downloading Node $version ($os-$arch)…"
   curl -fsSL "$base/$name.tar.gz" -o "$tmp/node.tar.gz" || die "could not download Node from $base"
   # The download is verified against the release's own checksum file before anything is unpacked.
@@ -80,16 +106,10 @@ download_node() {
   tar -xzf "$tmp/node.tar.gz" -C "$STAGING" --strip-components 1 || { rm -rf "$STAGING"; die "could not unpack Node from $base"; }
   [ -x "$STAGING/bin/node" ] || { rm -rf "$STAGING"; die "unpacked Node but found no executable at $STAGING/bin/node"; }
   if [ -e "$RUNTIME" ]; then
-    mv "$RUNTIME" "$RUNTIME.old.$$"
-    if mv "$STAGING" "$RUNTIME"; then
-      rm -rf "$RUNTIME.old.$$"
-    else
-      mv "$RUNTIME.old.$$" "$RUNTIME"
-      die "could not move the new Node into $RUNTIME; the previous one was put back"
-    fi
-  else
-    mv "$STAGING" "$RUNTIME"
+    BACKUP="$RUNTIME.old.$$"
+    mv "$RUNTIME" "$BACKUP"
   fi
+  mv "$STAGING" "$RUNTIME"
   STAGING=""
   rm -rf "$tmp"
 }
@@ -151,6 +171,10 @@ case "$NODE" in
     mv -f "$WRAPPER" "$BIN/clauderipple"
     ;;
 esac
+
+# Commit the runtime only after npm and the executable wrapper are usable. Later setup errors must
+# not roll back Node beneath a successfully installed package.
+if [ -n "$BACKUP" ]; then rm -rf "$BACKUP"; BACKUP=""; fi
 
 # --- PATH ---------------------------------------------------------------------------------------
 
