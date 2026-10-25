@@ -309,6 +309,9 @@ button.banner { font: inherit; color: inherit; text-align: left; width: calc(100
 .crumbs .sl { color: var(--faint); }
 .filter { margin: 2px 12px 10px; display: flex; align-items: center; gap: 8px; background: var(--surface-2); border-radius: 12px; padding: 0 12px; height: 42px; color: var(--muted); }
 .filter input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 16px; color: var(--ink); min-width: 0; }
+.pathbar { margin: 2px 12px 8px; display: flex; align-items: center; gap: 8px; background: var(--surface-2); border-radius: 12px; padding: 0 6px 0 12px; height: 42px; color: var(--muted); }
+.pathbar input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 15.5px; color: var(--ink); min-width: 0; font-family: var(--mono); }
+.pathbar button { flex: none; height: 30px; padding: 0 12px; border-radius: 9px; background: var(--surface); color: var(--accent); font-size: 14px; font-weight: 650; }
 
 .seg { display: flex; background: var(--surface-2); border-radius: 13px; padding: 3px; gap: 2px; }
 .seg button { flex: 1; height: 40px; border-radius: 10px; font-size: 14.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }

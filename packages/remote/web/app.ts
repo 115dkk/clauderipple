@@ -764,7 +764,7 @@ export class App {
     this.ui.sheet = { kind: "folder", recent: [], browse: null, filter: "", loading: true };
     this.renderSheet();
     try {
-      const [recent, browse] = await Promise.all([this.req<FolderEntry[]>({ op: "folders" }), this.req<BrowseResult>({ op: "browse", ...(this.ui.draft.cwd ? { path: this.ui.draft.cwd } : {}) })]);
+      const [recent, browse] = await Promise.all([this.req<FolderEntry[]>({ op: "folders" }), this.browseAt(this.ui.draft.cwd ?? undefined)]);
       if (this.ui.sheet?.kind !== "folder") return;
       this.ui.home = browse.home;
       this.ui.sheet = { ...this.ui.sheet, recent, browse, loading: false };
@@ -772,13 +772,34 @@ export class App {
     } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
   }
 
+  /** Browsing the folder a session last used: if it is gone (moved, renamed, an unplugged drive), the
+   * home folder is shown instead of a sheet that never fills. */
+  private async browseAt(path: string | undefined): Promise<BrowseResult> {
+    try { return await this.req<BrowseResult>({ op: "browse", ...(path ? { path } : {}) }); }
+    catch (error) { if (!path) throw error; return this.req<BrowseResult>({ op: "browse" }); }
+  }
+
   async browse(path: string): Promise<void> {
     try {
       const browse = await this.req<BrowseResult>({ op: "browse", path });
       if (this.ui.sheet?.kind !== "folder") return;
-      this.ui.sheet = { ...this.ui.sheet, browse, filter: "" };
+      this.ui.sheet = { ...this.ui.sheet, browse, filter: "", pathDraft: browse.path };
       this.renderSheet();
     } catch { this.toast(t("error.cwd")); }
+  }
+
+  /**
+   * Go to a path typed into the folder sheet. The host opens it the way it opens any browse — a
+   * missing folder or a file comes back as an error, which is what the field reports; nothing is
+   * invented on this side.
+   */
+  async browseTyped(typed: string): Promise<void> {
+    try {
+      const browse = await this.req<BrowseResult>({ op: "browse", ...(typed.trim() ? { path: typed.trim() } : {}) });
+      if (this.ui.sheet?.kind !== "folder") return;
+      this.ui.sheet = { ...this.ui.sheet, browse, filter: "", pathDraft: browse.path };
+      this.renderSheet();
+    } catch { this.toast(t("folder.pathFailed")); }
   }
 
   openModelSheet(forSession: string | null): void {
@@ -812,6 +833,9 @@ export class App {
         again?.focus();
         if (again && pos !== null) again.setSelectionRange(pos, pos);
       }
+      // The typed path is kept in the sheet, so a redraw from elsewhere does not lose it; the field
+      // itself is not redrawn per keystroke.
+      if (el.id === "folder-path" && this.ui.sheet?.kind === "folder") this.ui.sheet.pathDraft = (el as HTMLInputElement).value;
     });
     root.addEventListener("keydown", (ev) => {
       const el = ev.target as HTMLElement;
@@ -819,6 +843,10 @@ export class App {
       if (el.id === "input" && ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && matchMedia("(pointer: fine)").matches) {
         ev.preventDefault();
         void this.act("send", el);
+      }
+      if (el.id === "folder-path" && ev.key === "Enter" && !ev.isComposing) {
+        ev.preventDefault();
+        void this.browseTyped((el as HTMLInputElement).value);
       }
     });
     root.addEventListener("scroll", (ev) => {
@@ -970,6 +998,11 @@ export class App {
       case "pick-model-session": if (session && !session.startsWith("local:")) this.openModelSheet(session); break;
       case "close-sheet": this.ui.sheet = null; this.renderSheet(); break;
       case "browse": await this.browse(el.dataset.path ?? ""); break;
+      case "browse-path": {
+        const input = document.getElementById("folder-path") as HTMLInputElement | null;
+        await this.browseTyped(input?.value ?? "");
+        break;
+      }
       case "choose-folder":
         this.ui.draft.cwd = el.dataset.path ?? null;
         store.set("rr.draft", this.ui.draft);

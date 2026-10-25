@@ -395,3 +395,13 @@ test('Escape during composition does not close the modal; ordinary Escape does',
   assert.equal(view.nodes['modal-backdrop']!.hidden, false);
   view.key(keyEvent(view.input, 'Escape')); assert.equal(view.nodes['modal-backdrop']!.hidden, true);
 });
+
+test('the dashboard recognises Ollama so an empty ladder there is measured, not a decision', () => {
+  const isOllama = new Function(`${block('function isOllamaProvider', 'async function startMeasurement')}\nreturn isOllamaProvider;`)() as (provider: unknown) => boolean;
+  for (const provider of [{ preset: 'ollama' }, { url: 'https://ollama.com/v1' }, { url: 'https://ollama.com' }, { url: 'http://127.0.0.1:11434/v1' }, { url: 'http://localhost:11434' }]) {
+    assert.equal(isOllama(provider), true, JSON.stringify(provider));
+  }
+  for (const provider of [undefined, {}, { url: '' }, { url: 'https://api.deepseek.com/v1' }, { url: 'https://notollama.com/v1' }, { url: 'http://127.0.0.1:8080/v1' }]) {
+    assert.equal(isOllama(provider), false, JSON.stringify(provider));
+  }
+});

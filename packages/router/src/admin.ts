@@ -53,7 +53,7 @@ import { resolveCompatibleCaps } from "./compat.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
-import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
+import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
@@ -1517,6 +1517,11 @@ function effortUndeclared(p: Provider): boolean {
   return false;
 }
 
+/** Ollama's native API base when this provider is Ollama (local daemon or cloud), else null. */
+function ollamaBase(p: Provider): string | null {
+  return p.type === "openai-compatible" ? ollamaApiBase(p.url, p.preset) : null;
+}
+
 /**
  * Fold measurements into the config on disk.
  *
@@ -1525,11 +1530,13 @@ function effortUndeclared(p: Provider): boolean {
  * Only a model that is still present is touched, and only into a blank field — a `wire`,
  * `effortLevels` or `contextWindow` already on the model is the user's or the vendor's, and an
  * explicitly empty ladder is a decision
- * (it disables the provider fallback), not an empty slot. A model whose measurement errored is
- * left entirely alone. The result is validated with the same `validate` the GUI's save uses, so a
- * bad edit is refused rather than written.
+ * (it disables the provider fallback), not an empty slot. Ollama is the exception
+ * (`replaceEmptyEffort`): there the empty ladder is what an unread capability was saved as, so the
+ * vendor's own `/api/show` answer takes its place. A model whose measurement errored is left
+ * entirely alone. The result is validated with the same `validate` the GUI's save uses, so a bad
+ * edit is refused rather than written.
  */
-function applyMeasurements(configFile: string, providerName: string, results: Measured[]): { applied: number } | { error: string } {
+function applyMeasurements(configFile: string, providerName: string, results: Measured[], options: { replaceEmptyEffort?: boolean } = {}): { applied: number } | { error: string } {
   let current: Config;
   try {
     current = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
@@ -1545,7 +1552,8 @@ function applyMeasurements(configFile: string, providerName: string, results: Me
     if (!model) continue;
     const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
     if (model.wire === undefined) model.wire = result.wire;
-    if (model.effortLevels === undefined && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
+    const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
+    if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
     if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
     if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
   }
@@ -1570,14 +1578,20 @@ function startMeasureJob(providerName: string, models: string[], deps: AdminDeps
  * for a save in the GUI. A model was measured only when its provider was saved, so a provider set up
  * before effort discovery — every DeepSeek, Kimi or GLM key on 0.8.1 and earlier — would otherwise
  * stay without effort until its owner happened to save it again. A model with a ladder (measured,
- * or typed) is the config's and left alone; so is one whose provider declares a ladder.
+ * or typed) is the config's and left alone; so is one whose provider declares a ladder. Ollama is
+ * the exception: an empty ladder there is what a probe that could never see its thinking levels left
+ * behind, so it is measured again and replaced by what `/api/show` states.
  */
 export function measureUnsettledModels(deps: AdminDeps): number {
   let started = 0;
   for (const [name, provider] of Object.entries(deps.config().providers)) {
     if (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible") continue;
-    if (!effortUndeclared(provider)) continue;
-    const models = (provider.models ?? []).filter((model) => model.effortLevels === undefined).map((model) => model.id);
+    const ollama = ollamaBase(provider) !== null;
+    const undeclared = effortUndeclared(provider);
+    if (!undeclared && !ollama) continue;
+    const models = (provider.models ?? [])
+      .filter((model) => (undeclared && model.effortLevels === undefined) || (ollama && model.effortLevels !== undefined && model.effortLevels.length === 0))
+      .map((model) => model.id);
     if (models.length === 0) continue;
     startMeasureJob(name, models, deps);
     started++;
@@ -1693,6 +1707,7 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
   const headers = "headers" in provider ? provider.headers : undefined;
   const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
   const preset = "preset" in provider ? provider.preset : undefined;
+  const ollama = ollamaBase(provider);
   const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
   const measureOne = async (id: string): Promise<void> => {
     const listed = catalogEntry(catalog, preset, id);
@@ -1702,14 +1717,23 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     // one request is also what finds a model the plan refuses (403 FreeTierError, DataPolicyError).
     const stated = ladder.length > 0 || discover ? listed?.effortLevels : undefined;
     const known = stated !== undefined;
-    const measured = await measureModel(id, candidates, known ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }, { discover: discover && !known });
+    // Ollama states thinking levels and the context length itself; a probe cannot see either, and
+    // its unknown-field probe measures every thinking model as taking no effort. Its own `/api/show`
+    // answers first, and the ladder probing it would only answer wrongly is skipped.
+    const facts = ollama ? await ollamaModelFacts(ollama, id, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }) : undefined;
+    const measured = await measureModel(id, candidates, known || facts ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }, { discover: discover && !known && !facts });
     if (stated && measured.wire) measured.effortLevels = stated;
+    if (facts) {
+      // An answer without levels is a model that takes no effort: a fact, not a blank.
+      measured.effortLevels = facts.effortLevels ?? [];
+      if (facts.contextWindow !== undefined) measured.contextWindow = facts.contextWindow;
+    }
     // The wire was answered, so the model exists: the catalogue's own window travels with the result
     // and is written only into a model that has none (see applyMeasurements).
     if (measured.wire && listed?.contextWindow !== undefined) measured.contextWindow = listed.contextWindow;
     job.results.push(measured);
     job.done++;
-    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : ""}` : ""}`}`);
+    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : facts ? " (ollama)" : ""}` : ""}`}`);
   };
   // Models are independent, so a few run at once and a slow upstream answer holds up only its own
   // model. Levels inside one model stay sequential: a burst there invites 429s, and a level that
@@ -1719,7 +1743,7 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     for (let id = queue.shift(); id !== undefined; id = queue.shift()) await measureOne(id);
   }));
   try {
-    const outcome = applyMeasurements(deps.configFile, providerName, job.results);
+    const outcome = applyMeasurements(deps.configFile, providerName, job.results, { replaceEmptyEffort: ollama !== null });
     if ("error" in outcome) {
       MEASURE_JOBS.set(jobId, { ...job, state: "failed", error: outcome.error, finishedAt: Date.now() });
       deps.log.warn(`admin: measurement for ${providerName} was not applied: ${outcome.error}`);

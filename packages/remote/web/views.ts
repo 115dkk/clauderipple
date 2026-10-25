@@ -15,8 +15,11 @@ import type { TimelineItem, SessionView, ToolView } from "./timeline.ts";
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }
 
+/** A Windows drive root as the browse list reports it — `E:\`, and `E:/` if it is spelled that way. */
+function isDrivePath(p: string): boolean { return /^[A-Za-z]:[\\/]$/.test(p); }
+
 export type Sheet =
-  | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean }
+  | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean; /** What is typed in the path field, before it is opened; absent follows the folder on screen. */ pathDraft?: string }
   | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
   /** Unsent messages kept from earlier connections: what is preserved, what this computer already
    * holds after an import, and any stored text that could not be read (never parsed, never sent). */
@@ -342,12 +345,16 @@ export function sheet(ui: UI): string {
         const full = rel.startsWith("~") ? b.home + "/" + parts.slice(1, i + 1).join("/") : "/" + parts.slice(0, i + 1).join("/");
         return `${i ? `<span class="sl">/</span>` : ""}<button data-act="browse" data-path="${esc(i === 0 && rel.startsWith("~") ? b.home : full.replace(/\/$/, ""))}">${esc(p)}</button>`;
       }).join("");
-      const entries = b.entries.filter((e) => !f || e.name.toLowerCase().includes(f));
-      browse = `<div class="sec">${esc(t("folder.browse"))}</div><div class="crumbs">${crumbs}</div><div class="list">${b.parent ? `<button class="opt" data-act="browse" data-path="${esc(b.parent)}">${icon.up(20)}<div class="body"><div class="t1">${esc(t("folder.up"))}</div></div></button>` : ""}${entries.map((e) => `<button class="opt" data-act="browse" data-path="${esc(e.path)}">${icon.folder(20)}<div class="body"><div class="t1">${esc(e.name)}</div></div>${icon.chevron(18)}</button>`).join("") || `<div class="opt"><div class="body"><div class="t2">${esc(t("folder.empty"))}</div></div></div>`}</div>${b.truncated ? `<div class="sec">${esc(t("folder.truncated", { n: b.entries.length }))}</div>` : ""}`;
+      const entries = b.entries.filter((e) => isDrivePath(e.path) || !f || e.name.toLowerCase().includes(f));
+      browse = `<div class="sec">${esc(t("folder.browse"))}</div><div class="crumbs">${crumbs}</div><div class="list">${b.parent ? `<button class="opt" data-act="browse" data-path="${esc(b.parent)}">${icon.up(20)}<div class="body"><div class="t1">${esc(t("folder.up"))}</div></div></button>` : ""}${entries.map((e) => `<button class="opt" data-act="browse" data-path="${esc(e.path)}">${isDrivePath(e.path) ? icon.disk(20) : icon.folder(20)}<div class="body"><div class="t1">${esc(e.name)}</div></div>${icon.chevron(18)}</button>`).join("") || `<div class="opt"><div class="body"><div class="t2">${esc(t("folder.empty"))}</div></div></div>`}</div>${b.truncated ? `<div class="sec">${esc(t("folder.truncated", { n: b.entries.length }))}</div>` : ""}`;
     }
     const target = s.browse?.path ?? ui.draft.cwd;
+    // A path can be typed as well as browsed to: on Windows another drive is otherwise a walk up to
+    // the root, and a folder nobody visited is not in "recent" either (Discord, 2026-10-25). The
+    // host checks the path — a missing one comes back as an error, not an empty list.
+    const pathbar = `<div class="pathbar">${icon.terminal(18)}<input id="folder-path" value="${esc(s.pathDraft ?? target ?? "")}" placeholder="${esc(t("folder.path"))}" aria-label="${esc(t("folder.path"))}" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go"><button data-act="browse-path">${esc(t("folder.go"))}</button></div>`;
     const foot = target ? `<div class="sfoot"><div class="path">${esc(shortPath(target, ui.home))}</div><button class="btn primary" data-act="choose-folder" data-path="${esc(target)}">${esc(t("folder.here"))}</button></div>` : "";
-    return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("folder.title"))}<div class="filter">${icon.search(18)}<input id="folder-filter" placeholder="${esc(t("folder.filter"))}" value="${esc(s.filter)}" autocomplete="off"></div><div class="sbody">${recentHtml}${browse}</div>${foot}</div>`;
+    return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("folder.title"))}${pathbar}<div class="filter">${icon.search(18)}<input id="folder-filter" placeholder="${esc(t("folder.filter"))}" value="${esc(s.filter)}" autocomplete="off"></div><div class="sbody">${recentHtml}${browse}</div>${foot}</div>`;
   }
   if (s.kind === "recovery") {
     // Everything the person can read or copy of what was saved for another connection (or an
