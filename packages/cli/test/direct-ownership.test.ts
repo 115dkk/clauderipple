@@ -94,6 +94,21 @@ test("direct refuses shared routed slots and preserves the existing connection",
   assert.equal(fs.existsSync(directStatePath(c.a)), false);
 });
 
+for (const model of ["opus", "sonnet", "haiku", "sonnet[1m]", "opus[1m]", "claude-sonnet-4-6[1m]"]) {
+  test(`direct accepts native Claude slot ${model} and preserves it`, () => {
+    const c = setup();
+    c.apply(c.a);
+    const settings = JSON.parse(fs.readFileSync(c.settings, "utf8"));
+    settings.env.ANTHROPIC_MODEL = model;
+    fs.writeFileSync(c.settings, JSON.stringify(settings));
+    const result = directOn(c.a);
+    assert.equal(result.ok, true);
+    assert.equal(result.mode, "direct");
+    assert.equal(settingsEnv().ANTHROPIC_MODEL, model);
+    assert.equal(settingsEnv().HTTPS_PROXY, undefined);
+  });
+}
+
 test("direct rejects corrupt snapshots without modifying their raw text or clients", async () => {
   const c = setup();
   c.apply(c.a);

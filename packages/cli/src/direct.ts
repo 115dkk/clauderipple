@@ -17,7 +17,7 @@ import { classifyMode, cliProxyState, desktopProxyState, fetchRouterStatus, prox
 import { writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { claimedElsewhere, claimsOf, readOwners } from "./owners.ts";
 import { applyAppProxy, appProxyOwner, currentAppProxy, removeAppProxy } from "./picker.ts";
-import { MODEL_SLOT_ENV, editSettingsEnv, settingsEnv, settingsPath } from "./settings.ts";
+import { MODEL_SLOT_ENV, editSettingsEnv, isNativeClaudeModel, settingsEnv, settingsPath } from "./settings.ts";
 
 export type DirectResult = { ok: boolean; mode: Mode; restartClaude: true; detail: string };
 
@@ -80,7 +80,7 @@ export function directOn(home: string): DirectResult {
     // Validate the whole transition before changing either client or the restoration snapshot.
     for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
       const value = env[name];
-      if (value === undefined || value.startsWith("claude-")) continue;
+      if (value === undefined || isNativeClaudeModel(value)) continue;
       if (mine.slots?.[slot] !== value || claimedElsewhere(record.store, home, c => c.slots?.[slot], value)) {
         notes.push(`left ${name} (ownership unknown or shared)`);
         blocked = true;
@@ -100,7 +100,7 @@ export function directOn(home: string): DirectResult {
     if (!env.HTTPS_PROXY) {
       for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
         const value = env[name];
-        if (value === undefined) continue;
+        if (value === undefined || isNativeClaudeModel(value)) continue;
         const ours = mine.slots?.[slot] === value && !claimedElsewhere(record.store, home, c => c.slots?.[slot], value);
         if (!ours) {
           notes.push(`left ${name} (ownership unknown or shared)`);
