@@ -11,7 +11,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { hostServiceOwnership, servicePaths, uninstallService } from "../src/host-service.ts";
+import * as windows from "../../cli/src/schtasks.ts";
+import { hostServiceOwnership, installService, servicePaths, uninstallService, type HostServiceDeps } from "../src/host-service.ts";
 
 const home = "/tmp/cr-host-install-a";
 const other = "/tmp/cr-host-install-b";
@@ -39,6 +40,50 @@ test("macOS host removal propagates lookup and bootout failures without deleting
     await assert.rejects(uninstallService({ platform: "darwin", installationHome: home, userHome, launchctl: (_cmd, args) => ({ status: args[0] === failure ? 1 : 0, out: "permission denied" }) }), /보존했습니다/);
     assert.equal(fs.readFileSync(file, "utf8"), plist(home));
   }
+});
+
+test("host removal never treats a supervisor refusal string as success", async () => {
+  let removed = false;
+  await assert.rejects(uninstallService({ platform: "win32", installationHome: home, readDefinition: () => launcher(home), stop: () => "other-installation", removeDefinition: () => { removed = true; } }));
+  assert.equal(removed, false);
+});
+
+test("Windows host start stop and remove consistently use the task runtime home and reject refusals", async t => {
+  const userHome = fs.mkdtempSync(path.join(os.tmpdir(), "cr-host-windows-"));
+  t.after(() => fs.rmSync(userHome, { recursive: true, force: true }));
+  const p = servicePaths("win32", userHome);
+  const spec = { node: "/node", script: "/host.ts", args: [], workingDir: userHome, log: p.log, env: { CLAUDERIPPLE_HOME: home } };
+  let installed = false;
+  let running = false;
+  let refuse: "start" | "remove" | null = null;
+  const taskDeps: windows.TaskDeps = {
+    definition: () => installed ? { arguments: `-File "${path.join(p.runtime, "ClaudeRippleHost.ps1")}"` } : null,
+    run: script => {
+      if (script.includes(".State")) return { ok: true, out: running ? "Running" : "Ready" };
+      if (script.includes("Register-ScheduledTask")) installed = true;
+      if (script.includes("Start-ScheduledTask")) running = true;
+      if (script.includes("Stop-ScheduledTask")) running = false;
+      if (script.includes("Unregister-ScheduledTask")) installed = false;
+      return { ok: true, out: "ok" };
+    },
+  };
+  const task: NonNullable<HostServiceDeps["windows"]> = {
+    ...windows,
+    startAgent: (name, opts) => { assert.equal(opts?.home, p.runtime); return refuse === "start" ? "other-installation" : windows.startAgent(name, { ...opts, waitMs: 0 }); },
+    stopAgent: (name, opts) => { assert.equal(opts?.home, p.runtime); return windows.stopAgent(name, opts); },
+    removeAgent: (name, opts) => { assert.equal(opts?.home, p.runtime); return refuse === "remove" ? "ownership-unknown" : windows.removeAgent(name, opts); },
+  };
+  const deps: HostServiceDeps = { platform: "win32", installationHome: home, userHome, readDefinition: () => installed ? launcher(home) : null, windows: task, taskDeps, shutdown: async () => {}, waitForHost: async () => {} };
+  await installService(spec, deps);
+  assert.equal(running, true);
+  await uninstallService({ ...deps, removeDefinition: () => {} });
+  assert.equal(installed, false);
+  refuse = "start";
+  await assert.rejects(installService(spec, deps), /시작하지 못했습니다/);
+  refuse = "remove";
+  let removed = false;
+  await assert.rejects(uninstallService({ ...deps, removeDefinition: () => { removed = true; } }), /제거하지 못했습니다/);
+  assert.equal(removed, false);
 });
 
 test("the host service records the installation home it was written for", () => {

@@ -8,7 +8,7 @@ import * as launchd from "./service.ts";
 import * as windows from "../../cli/src/schtasks.ts";
 import { renderUnit } from "../../cli/src/systemd.ts";
 import { recordedLaunchHome } from "../../cli/src/launcher.ts";
-import { type Ownership, ownerOf, plistEnvironment, unitEnvironment } from "../../cli/src/ownership.ts";
+import { type AgentStop, type Ownership, ownerOf, plistEnvironment, unitEnvironment } from "../../cli/src/ownership.ts";
 import { loadConfig, remoteHome } from "./config.ts";
 
 export const TASK = "ClaudeRippleHost";
@@ -155,18 +155,21 @@ export async function refreshRunningHost(version: string, dir = remoteHome()): P
   throw new Error("host did not start the target version; application remains pending");
 }
 
-export async function installService(spec: Spec): Promise<string[]> {
-  const platform = process.platform;
+export async function installService(spec: Spec, deps: HostServiceDeps = {}): Promise<string[]> {
+  const platform = deps.platform ?? process.platform;
   const installationHome = spec.env.CLAUDERIPPLE_HOME ?? defaultInstallationHome();
-  const p = servicePaths();
-  const owner = hostServiceOwnership(readDefinition(p.definition), platform, installationHome);
+  const p = servicePaths(platform, deps.userHome);
+  const owner = hostServiceOwnership((deps.readDefinition ?? (() => readDefinition(p.definition)))(), platform, installationHome);
   if (owner.state === "other") throw new Error(`the phone host service belongs to another ClaudeRipple installation (${owner.home}); remove it with that installation's uninstall`);
   if (platform === "darwin") return launchd.install(spec);
   if (platform === "win32") {
-    await controlShutdown();
-    windows.stopAgent(TASK);
-    windows.installAgent({ name: TASK, program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: p.runtime, env: spec.env });
-    if (windows.startAgent(TASK) === "failed") throw new Error("could not start the host scheduled task");
+    await (deps.shutdown ?? controlShutdown)();
+    const task = deps.windows ?? windows;
+    const stopped = task.stopAgent(TASK, { home: p.runtime, ...(deps.taskDeps ? { deps: deps.taskDeps } : {}) });
+    if (stopped !== "stopped" && stopped !== "not-loaded") throw new Error(`휴대폰 호스트의 작업을 중지하지 못했습니다. (${stopped})`);
+    task.installAgent({ name: TASK, program: spec.node, args: ["--disable-warning=ExperimentalWarning", spec.script, ...spec.args], home: p.runtime, env: spec.env }, deps.taskDeps);
+    const started = task.startAgent(TASK, { home: p.runtime, ...(deps.taskDeps ? { deps: deps.taskDeps } : {}) });
+    if (started !== "started" && started !== "already-running") throw new Error(`휴대폰 호스트의 작업을 시작하지 못했습니다. (${started})`);
   } else if (platform === "linux") {
     systemctl(["show-environment"]); // Fail before writing when there is no user manager.
     if (fs.existsSync(p.definition) && !fs.readFileSync(p.definition, "utf8").startsWith("[Unit]\nDescription=Ripple Remote host\n")) throw new Error("refusing to replace a foreign host unit");
@@ -176,7 +179,7 @@ export async function installService(spec: Spec): Promise<string[]> {
     systemctl(["enable", UNIT]);
     systemctl(["restart", UNIT]);
   } else throw new Error(`host service is unsupported on ${platform}`);
-  await waitForHost();
+  await (deps.waitForHost ?? waitForHost)();
   return [`installed and started ${p.definition}`, `logs: ${p.log}`];
 }
 /** What a caller may inject so an uninstall can be tested without launchd, systemd or PowerShell. */
@@ -186,7 +189,11 @@ export type HostServiceDeps = {
   launchctl?: launchd.Run;
   installationHome?: string;
   readDefinition?: () => string | null;
-  stop?: () => Promise<void> | void;
+  windows?: Pick<typeof windows, "stopAgent" | "startAgent" | "installAgent" | "removeAgent">;
+  taskDeps?: windows.TaskDeps;
+  shutdown?: () => Promise<void>;
+  waitForHost?: () => Promise<void>;
+  stop?: () => Promise<void | AgentStop> | void | AgentStop;
   removeDefinition?: () => void;
   /** `remote uninstall` is an explicit request: an unrecorded service (an older version's) is removed. */
   explicit?: boolean;
@@ -220,11 +227,17 @@ export async function uninstallService(deps: HostServiceDeps = {}): Promise<stri
     if ("detail" in result) throw new Error(result.detail);
     return result.lines;
   }
-  if (deps.stop) await deps.stop();
-  else if (platform === "win32") {
-    await controlShutdown();
-    windows.stopAgent(TASK);
-    if (windows.agentState(TASK) !== "not-loaded" && !windows.removeAgent(TASK)) throw new Error("could not remove the host scheduled task");
+  if (deps.stop) {
+    const stopped = await deps.stop();
+    if (stopped !== undefined && stopped !== "stopped" && stopped !== "not-loaded") throw new Error(`휴대폰 호스트의 작업을 중지하지 못했습니다. (${stopped})`);
+  } else if (platform === "win32") {
+    await (deps.shutdown ?? controlShutdown)();
+    const task = deps.windows ?? windows;
+    const options = { home: p.runtime, ...(deps.taskDeps ? { deps: deps.taskDeps } : {}) };
+    const stopped = task.stopAgent(TASK, options);
+    if (stopped !== "stopped" && stopped !== "not-loaded") throw new Error(`휴대폰 호스트의 작업을 중지하지 못했습니다. (${stopped})`);
+    const removed = task.removeAgent(TASK, options);
+    if (removed !== "removed" && removed !== "absent") throw new Error(`휴대폰 호스트의 작업을 제거하지 못했습니다. (${removed})`);
   } else if (platform === "linux") systemctl(["disable", "--now", UNIT]);
   else throw new Error(`host service is unsupported on ${platform}`);
   if (deps.removeDefinition) deps.removeDefinition();
