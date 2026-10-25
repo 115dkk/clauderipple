@@ -1069,6 +1069,7 @@ export class Sessions {
     const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
     if (!item) throw new Error("That message is no longer queued.");
     this.sendQueue.resume(id);
+    if (this.handingOff.has(id)) { this.opts.onSessions(); return id; }
     return this.dispatchQueued(id, item, false);
   }
 
@@ -1124,7 +1125,7 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.handingOff.has(id) || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
@@ -1172,7 +1173,7 @@ export class Sessions {
     let before = 0;
     try { before = this.log(id).lastSeq; } catch { /* the send below creates it */ }
     try {
-      const sent = await this.send(id, item.id, item.text, attachments, "steer");
+      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true);
       this.sendQueue.remove(id, item.id);
       // Only a message sent from here waits for its own turn; one sent now rides the running turn.
       if (fromQueue) this.sendQueue.sent(id, before, this.now());
@@ -1246,8 +1247,13 @@ export class Sessions {
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live.
    * The receipt is written pending before the input reaches the SDK and completed once the SDK
    * has accepted it; a resend of a completed id returns without running again, and a resend that
-   * finds a pending receipt from before a host restart throws OutcomeUnknownError. */
+   * finds a pending receipt from before a host restart throws OutcomeUnknownError.
+   * During Desktop handoff, ACK means durable queue ownership; its send receipt starts only at dispatch. */
   send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
+    return this.deliver(id, clientMsgId, text, attachments, behavior);
+  }
+
+  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false): string | Promise<string> {
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
     const key = `send:${id}:${clientMsgId}`;
     if (this.receipts.status(key) === "completed") return id;
@@ -1257,6 +1263,7 @@ export class Sessions {
       throw new OutcomeUnknownError();
     }
     if (this.seen(id, clientMsgId)) return id;
+    if (!queued && this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
     // Delegated turns own their own receipts; this wrapper only forwards them.
     if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
       const s = this.list().find(s => s.id === id);
@@ -1268,6 +1275,12 @@ export class Sessions {
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
     if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
+    // A Desktop handoff may finish before its RC transport exists. Acknowledge durable queue
+    // ownership, not an in-memory transfer that would later fail despite the phone's ACK.
+    if (!queued && this.handingOff.has(id) && this.records.get(id)?.desktopHandoff === "opening") {
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
     this.receipts.begin(key, id);
     try {
       return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
@@ -2241,6 +2254,7 @@ export class Sessions {
       } finally {
         this.handingOff.delete(r.id);
         if (transfer.messages.length && !this.shuttingDown) await this.resumeAfterHandoff(r, transfer.messages);
+        if (!this.shuttingDown) void this.drainQueue(r.id);
       }
     });
   }

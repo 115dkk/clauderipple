@@ -853,7 +853,7 @@ test("handoff closes an idle SDK writer and waits for real process exit before i
   assert.equal(calls, 1);
 });
 
-for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "fails visibly when the app is not reachable"}, never a second SDK writer`, async t => {
+for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "waits durably for the app bridge"}, never a second SDK writer`, async t => {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-app-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -877,17 +877,43 @@ for (const reachable of [true, false]) test(`input accepted during handoff ${rea
   first.emit({ type: "system", subtype: "init", session_id: sdkId });
   first.emit({ type: "result", subtype: "success" });
   await waitFor(() => called);
-  await f.sessions.send(id, "during-app-handoff", "accepted during handoff");
+  const photo = Buffer.from("photo accepted during handoff").toString("base64");
+  const attachments = [{ blob: f.sessions.log(id).image(photo), name: "photo.png", mediaType: "image/png" }];
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments);
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments, "interrupt");
+  assert.equal(await f.sessions.sendQueued(id, "during-app-handoff"), id, "send-now cannot bypass the writer-exit barrier");
+  assert.deepEqual(f.sessions.summaryOf(id)?.queue?.map(item => item.id), ["during-app-handoff"]);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-app-handoff`), null, "queued acceptance does not pretend the input reached a worker");
   registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(reachable ? { bridgeSessionId: "bridge" } : {}) });
   finish.resolve();
-  await waitFor(() => reachable ? posts.length === 1 : f.sessions.summaryOf(id)?.state === "error");
+  await waitFor(() => reachable ? posts.length === 1 : !!f.sessions.summaryOf(id)?.queue?.[0]?.error);
   assert.equal(first.closed, true);
   assert.equal(boundary.queries.length, 1);
+  let active = f.sessions;
   if (reachable) {
     assert.match(posts[0]!, /accepted during handoff/);
     assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
     assert.equal(f.sessions.list().length, 1);
-  } else assert.ok(f.sessions.log(id).tail().events.some(event => event.kind === "result" && event.ok === false));
+  } else {
+    assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
+    assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "accepted during handoff");
+    f.sessions.shutdown();
+    fs.rmSync(path.join(f.dir, "sessions", id, "blobs"), { recursive: true, force: true });
+    active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
+      desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient, onEvent() {}, onSessions() {}, log() {} });
+    f.instances.push(active);
+    active.recover();
+    assert.equal(await active.send(id, "during-app-handoff", "accepted during handoff", attachments), id, "a resend after restart still belongs to the saved queue");
+    registry.get(sdkId)!.bridgeSessionId = "bridge";
+    active.pollQueued();
+    await waitFor(() => posts.length === 1);
+    assert.equal(active.summaryOf(id)?.queue, undefined);
+  }
+  await active.send(id, "during-app-handoff", "accepted during handoff", attachments);
+  await active.pollDesktop();
+  assert.ok(posts[0]!.includes(photo), "queue-owned photo bytes survive the Desktop log rebase");
+  assert.equal(posts.length, 1, "the original phone id completes exactly once");
+  assert.equal(boundary.queries.length, 1);
 });
 
 test("a successful later handoff clears the durable failure and is not attempted again", async t => {
