@@ -340,6 +340,9 @@ function timeBox(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNod
  * the agent does now is the conversation's: a line that changed each step made the pane jump. A list
  * tile draws these same rows under its own head.
  */
+/** Widest a card body row's press is drawn: wider than any Agents pane a person keeps open. */
+const BODY_PRESS_PX = 640
+
 function cardBody(el: Els, frame: Frame, agent: AgentRec, onPress?: () => void): RenderNode[] {
   const { Box, Text } = el
   const k = lookOf(frame)
@@ -347,8 +350,10 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec, onPress?: () => void):
   const model = modelOf(agent, L)
   const effort = effortOf(agent)
   // In the list each row carries the head's blank press too, so the whole card opens the
-  // conversation, not only its title (a host Button is one row tall and cannot span the card).
-  const open = (key: string) => onPress ? press(el, key + '-' + agent.id, (frame.columns - 2) * CELL_PX, onPress) : null
+  // conversation, not only its title (a host Button is one row tall and cannot span the card). A
+  // blank press is a run of spaces as wide as it is, and the engine draws a render's text only up to
+  // a budget, so these two are capped: uncapped, a 600-column pane of forty cards lost its last ones.
+  const open = (key: string) => onPress ? press(el, key + '-' + agent.id, Math.min((frame.columns - 2) * CELL_PX, BODY_PRESS_PX), onPress) : null
   const rows: RenderNode[] = [
     // The row starts where the title does; the model's name takes what the effort leaves and the
     // engine cuts it at the edge, so a name is not shortened while there is room for it.
