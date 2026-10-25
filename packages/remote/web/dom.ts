@@ -10,6 +10,7 @@ export const icon = {
   chevron: (s?: number) => svg(`<path d="M9 6l6 6-6 6"/>`, s),
   down: (s?: number) => svg(`<path d="M6 9l6 6 6-6"/>`, s),
   folder: (s?: number) => svg(`<path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.2h7a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>`, s),
+  disk: (s?: number) => svg(`<rect x="3.5" y="6" width="17" height="12" rx="2.4"/><path d="M3.5 12.5h17"/><circle cx="7.6" cy="15.4" r="0.9" fill="currentColor"/>`, s),
   model: (s?: number) => svg(`<path d="M12 3.5l7.5 4.3v8.4L12 20.5l-7.5-4.3V7.8z"/><path d="M12 12l7.3-4.1M12 12v8.3M12 12L4.7 7.9"/>`, s),
   send: (s?: number) => svg(`<path d="M12 19V5M6 11l6-6 6 6"/>`, s),
   stop: (s?: number) => `<svg class="ic" width="${s ?? 20}" height="${s ?? 20}" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2.2" fill="currentColor"/></svg>`,
