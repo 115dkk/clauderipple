@@ -30,6 +30,7 @@ export const icon = {
   up: (s?: number) => svg(`<path d="M12 19V7M7 11l5-5 5 5"/><path d="M5 4.5h14"/>`, s),
   /** A row's own actions: three dots, so the row is not one button with a second button inside it. */
   more: (s?: number) => `<svg class="ic" width="${s ?? 20}" height="${s ?? 20}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor"/></svg>`,
+  copy: (s?: number) => svg(`<path d="M8 8h12v12H8z"/><path d="M16 8V4H4v12h4"/>`, s),
 };
 
 export function toolIcon(name: string): string {

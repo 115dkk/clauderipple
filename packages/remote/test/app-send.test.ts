@@ -464,7 +464,7 @@ test("typing in the search narrows the list to its first page, and only the list
     assert.match(running.main().innerHTML, /id="home-search"/);
     await running.app.act("home-more", { dataset: {} });
     assert.equal(running.app.ui.homeLimit, 80);
-    running.fire("#app", "input", { target: { id: "home-search", value: "claUdeRipple P1" } });
+    running.fire("#app", "input", { target: { id: "home-search", value: "claUdeRipple P1", dataset: {} } });
     assert.equal(running.app.ui.query, "claUdeRipple P1");
     assert.equal(running.app.ui.homeLimit, 40, "a new search starts at its first page");
     assert.ok(running.list().innerHTML.includes("작업 1"), "the title is in the results");

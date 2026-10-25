@@ -255,6 +255,12 @@ button.sec:active { background: var(--surface-2); }
 .foot { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: -6px; }
 .foot.bad { color: var(--bad); }
 .notice { align-self: center; font-size: 13px; color: var(--muted); background: var(--surface-2); padding: 5px 12px; border-radius: 99px; text-align: center; max-width: 92%; }
+/* A session command: what happened to the conversation, not what somebody said. */
+.notice.control { display: inline-flex; align-items: center; gap: 6px; }
+.notice.control .ic { color: var(--muted); }
+.notice.control.done .ic { color: var(--ok); }
+.notice.control.failed { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.notice.control.failed .ic { color: var(--bad); }
 .start { align-self: center; font-size: 12.5px; color: var(--faint); padding: 4px 0; }
 .loading-older { text-align: center; font-size: 13px; color: var(--muted); padding: 8px; }
 .loading-older.failed { display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--bad); }
@@ -328,6 +334,46 @@ button.banner { font: inherit; color: inherit; text-align: left; width: calc(100
 .pathbar { margin: 2px 12px 8px; display: flex; align-items: center; gap: 8px; background: var(--surface-2); border-radius: 12px; padding: 0 6px 0 12px; height: 42px; color: var(--muted); }
 .pathbar input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 15.5px; color: var(--ink); min-width: 0; font-family: var(--mono); }
 .pathbar button { flex: none; height: 30px; padding: 0 12px; border-radius: 9px; background: var(--surface); color: var(--accent); font-size: 14px; font-weight: 650; }
+
+/* Copy sits under the answer, on the text edge, as the app draws it; 44 px is the whole target. */
+.msg-acts { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+.msg-copy { min-height: 44px; padding: 0 10px 0 8px; border-radius: 10px; font-size: 13px; font-weight: 600; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.msg-copy:active { background: var(--surface-2); }
+.msg-copy .ic { color: var(--muted); }
+
+/* ---- changes: the session folder's diff, the way the app's own pane is read ------------------- */.diff-scope { margin: 4px 12px 10px; }
+.diff-sum { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); padding: 2px 16px 8px; }
+.diff-sum .sep { color: var(--faint); }
+.diff-file { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; min-height: 56px; padding: 8px 14px; position: relative; }
+.diff-file + .diff-file::before { content: ""; position: absolute; left: 44px; right: 0; top: 0; border-top: 1px solid var(--line); }
+.diff-file .ic { color: var(--muted); flex: none; }
+.diff-file .body { flex: 1; min-width: 0; }
+.diff-file .t1 { font-size: 15.5px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-file .t2 { font-size: 12.5px; color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-file:active { background: var(--surface-2); }
+.diff-file > .ic:last-child { color: var(--faint); }
+.counts { display: inline-flex; flex: none; font-family: var(--mono); font-size: 12px; font-weight: 600; border-radius: 6px; overflow: hidden; }
+.counts .add { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); padding: 1px 6px; }
+.counts .del { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); padding: 1px 6px; }
+.diff-head { display: flex; align-items: center; gap: 8px; padding: 2px 8px 8px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.diff-head .btn.ghost { height: 40px; flex: none; padding: 0 8px; }
+.diff-head .body { flex: 1; min-width: 0; }
+.diff-head .t1 { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-head .t2 { font-size: 12.5px; color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-head .icon-btn { width: 44px; height: 44px; display: grid; place-items: center; color: var(--ink-2); flex: none; }
+.diff-head .icon-btn:disabled { opacity: 0.3; }
+/* A patch keeps its lines whole: one line per row, long lines scrolled sideways, never cut. */
+.patch { margin: 0 8px 8px; background: var(--sunk); border-radius: var(--r-sm); padding: 8px 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; overflow-x: auto; }
+.patch .ln { display: flex; content-visibility: auto; contain-intrinsic-size: auto 20px; }
+.patch .mk { width: 26px; flex: none; text-align: center; color: var(--faint); }
+.patch .tx { white-space: pre; padding-right: 12px; color: var(--ink); }
+.patch .ln.add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.patch .ln.add .mk { color: var(--ok); }
+.patch .ln.del { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.patch .ln.del .mk { color: var(--bad); }
+.patch .ln.hunk .tx { color: var(--muted); }
+.dfoot { padding: 4px 12px 10px; }
+.sheet .note.bad { color: var(--bad); }
 
 .seg { display: flex; background: var(--surface-2); border-radius: 13px; padding: 3px; gap: 2px; }
 .seg button { flex: 1; height: 40px; border-radius: 10px; font-size: 14.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }

@@ -1,7 +1,7 @@
 // The phone app: one screen at a time (pair, home, session), a docked composer, sheets for
 // folder and model. State that must survive closing the app (the token, unsent messages, the
 // last folder and model) lives in localStorage; everything else is rebuilt from the host.
-import type { BlobChunk, BrowseResult, ClientMsg, Effort, FolderEntry, HostMsg, ProviderGroup, Question, ReqOp, SessionEvent, SessionSummary, SubPage } from "../src/protocol.ts";
+import type { BlobChunk, BrowseResult, ClientMsg, DiffScope, DiffView, Effort, FolderEntry, HostMsg, ProviderGroup, Question, ReqOp, SessionEvent, SessionSummary, SubPage } from "../src/protocol.ts";
 import { Link } from "./conn.ts";
 import type { LinkStatus } from "./conn.ts";
 import { esc, icon } from "./dom.ts";
@@ -133,6 +133,8 @@ export class App {
   /** The deadline on the page of earlier history this phone asked for. */
   private olderTimer: ReturnType<typeof setTimeout> | null = null;
   private imageUrls = new Map<string, Promise<string>>();
+  /** Where a diff file was last left, by session and path, so it opens where it was read. */
+  private diffOffsets = new Map<string, number>();
 
   private clearImages(): void {
     for (const url of this.imageUrls.values()) void url.then(value => URL.revokeObjectURL(value), () => undefined);
@@ -895,13 +897,91 @@ export class App {
 
   renderSheet(preservePosition = true): void {
     const frame = this.ui.sheet?.kind === "worker" ? this.ui.sheet : null;
+    const diff = this.ui.sheet?.kind === "diff" ? this.ui.sheet : null;
     if (frame && preservePosition) this.rememberWorkerPosition();
+    if (diff && preservePosition) this.rememberDiffPosition();
     const html = V.sheet(this.ui);
     // A session that left the list takes its own menu with it, rather than reopening it later.
     if (!html && this.ui.sheet?.kind === "session") this.ui.sheet = null;
     setHTML($("#sheet"), html);
     const body = document.getElementById("worker-body");
     if (body && frame) body.scrollTop = frame.scroll;
+    // The diff pane is redrawn whole, so its two readings are put back by hand: the file list's own
+    // place, and the file's line when one is open on top of it.
+    const changes = document.getElementById("diff-body");
+    if (changes && diff) changes.scrollTop = diff.open === null ? diff.scroll : this.diffOffsets.get(this.diffKey(diff.open)) ?? 0;
+  }
+
+  private diffKey(path: string): string {
+    return `${this.screen.name === "session" ? this.screen.id : ""}:${path}`;
+  }
+
+  private rememberDiffPosition(): void {
+    const sheet = this.ui.sheet;
+    if (sheet?.kind !== "diff") return;
+    const body = document.getElementById("diff-body");
+    if (!body) return;
+    if (sheet.open === null) sheet.scroll = body.scrollTop;
+    else this.diffOffsets.set(this.diffKey(sheet.open), body.scrollTop);
+  }
+
+  /** The session folder's changes, as the host reads them; the phone names only the session. */
+  private async openDiff(scope: DiffScope = "auto"): Promise<void> {
+    if (this.screen.name !== "session") return;
+    const session = this.screen.id;
+    if (session.startsWith("local:")) return;
+    const before = this.ui.sheet;
+    const sheet = before?.kind === "diff" ? before : { kind: "diff" as const, view: null, scope: "auto" as DiffScope, loading: true, error: "", open: null, scroll: 0 };
+    // The list shows its last answer while a new one arrives: a spinner over an empty pane would
+    // lose the person's place for a comparison they did not ask to leave.
+    this.ui.sheet = { ...sheet, scope, loading: true, error: "" };
+    this.renderSheet(false);
+    try {
+      const view = await this.req<DiffView>({ op: "diff", session, ...(scope === "auto" ? {} : { scope }) });
+      if (this.screen.name !== "session" || this.screen.id !== session || this.ui.sheet?.kind !== "diff") return;
+      this.ui.sheet = { ...this.ui.sheet, view, loading: false, error: "" };
+    } catch (error) {
+      if (this.screen.name !== "session" || this.screen.id !== session || this.ui.sheet?.kind !== "diff") return;
+      this.ui.sheet = { ...this.ui.sheet, loading: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    this.renderSheet(false);
+  }
+
+  /** Text the host moved out of an event (INLINE_CAP): read it back whole, page by page. */
+  private async readBlob(session: string, id: string): Promise<string> {
+    let offset = 0, text = "";
+    for (;;) {
+      const chunk = await this.req<BlobChunk>({ op: "blob", session, id, offset });
+      text += chunk.text;
+      if (chunk.next === null) return text;
+      offset = chunk.next;
+    }
+  }
+
+  /** The whole answer behind a copy button, even when only its preview is in this page's memory. */
+  private async copyAnswer(key: string): Promise<void> {
+    if (this.screen.name !== "session") return;
+    const session = this.screen.id;
+    const item = timelineItems(this.view(session)).find(entry => entry.key === key);
+    if (item?.type !== "assistant") return;
+    try {
+      const text = typeof item.text === "string" ? item.text : await this.readBlob(session, item.text.blob);
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      this.toast(t("error.generic", { text: e instanceof Error && e.name ? e.name : "clipboard" }));
+    }
+  }
+
+  private async copyDiff(path: string): Promise<void> {
+    const sheet = this.ui.sheet;
+    const file = sheet?.kind === "diff" ? sheet.view?.files.find(entry => entry.path === path) : undefined;
+    if (!file) return;
+    try {
+      await navigator.clipboard.writeText(V.patchLines(file.patch).join("\n"));
+    } catch (e) {
+      // The browser's own refusal is named instead of claiming a copy that did not happen.
+      this.toast(t("error.generic", { text: e instanceof Error && e.name ? e.name : "clipboard" }));
+    }
   }
 
   private rememberWorkerPosition(): void {
@@ -1075,13 +1155,14 @@ export class App {
         Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-act="question-option"]')).find(button => button.dataset.id === el.dataset.id && button.dataset.index === el.dataset.index && Number(button.dataset.option) === option)?.focus({ preventScroll: true });
         return;
       }
-      if (this.ui.sheet?.kind === "worker" && ev.key === "Escape") {
+      const modal = this.ui.sheet?.kind === "worker" || this.ui.sheet?.kind === "diff";
+      if (modal && ev.key === "Escape") {
         ev.preventDefault();
         if (this.workerPath.length > 1) this.workerBack();
         else void this.act("close-sheet", el);
         return;
       }
-      if (this.ui.sheet?.kind === "worker" && ev.key === "Tab") {
+      if (modal && ev.key === "Tab") {
         const buttons = Array.from($("#sheet").querySelectorAll<HTMLButtonElement>("button:not([disabled])"));
         const first = buttons[0], last = buttons.at(-1);
         if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last?.focus(); }
@@ -1298,6 +1379,45 @@ export class App {
         break;
       case "perm-more": this.ui.permOpen.add(id); this.renderSession(true); break;
       case "workers": this.ui.workersOpen = !this.ui.workersOpen; this.renderSession(true); break;
+      case "diff": await this.openDiff(); break;
+      case "diff-scope": {
+        const sheet = this.ui.sheet;
+        if (sheet?.kind !== "diff") break;
+        // A different comparison is a different question, so its list starts at the top.
+        this.ui.sheet = { ...sheet, open: null, scroll: 0 };
+        await this.openDiff((el.dataset.scope as DiffScope) ?? "uncommitted");
+        break;
+      }
+      case "diff-file": {
+        const sheet = this.ui.sheet;
+        // Only a file with a patch is a way in: a binary has nothing to read.
+        if (sheet?.kind !== "diff" || !sheet.view?.files.some(entry => entry.path === id && entry.patch)) break;
+        // The list's place is kept, then the file draws over it from where it was last read.
+        this.rememberDiffPosition();
+        this.ui.sheet = { ...sheet, open: id };
+        this.renderSheet(false);
+        break;
+      }
+      case "diff-back": {
+        const sheet = this.ui.sheet;
+        if (sheet?.kind !== "diff") break;
+        this.rememberDiffPosition();
+        this.ui.sheet = { ...sheet, open: null };
+        this.renderSheet(false);
+        break;
+      }
+      case "diff-step": {
+        const sheet = this.ui.sheet;
+        if (sheet?.kind !== "diff" || !sheet.view || sheet.open === null) break;
+        const next = sheet.view.files[Number(el.dataset.index)];
+        if (!next || !next.patch) break;
+        this.rememberDiffPosition();
+        this.ui.sheet = { ...sheet, open: next.path };
+        this.renderSheet(false);
+        break;
+      }
+      case "diff-copy": await this.copyDiff(id); break;
+      case "diff-retry": if (this.ui.sheet?.kind === "diff") await this.openDiff(this.ui.sheet.scope); break;
       case "tool-group": {
         const expanded = this.ui.sheet?.kind === "worker" ? this.ui.sheet.expanded : this.ui.expanded;
         if (expanded.has(id)) expanded.delete(id);
@@ -1306,6 +1426,7 @@ export class App {
         break;
       }
       case "tool": await this.toggleTool(id); break;
+      case "copy-answer": await this.copyAnswer(el.dataset.key ?? id); break;
       case "sub": await this.openSub(id); break;
       case "worker-back": this.workerBack(); break;
       case "worker-retry": if (this.ui.sheet?.kind === "worker") await this.loadWorker(this.ui.sheet, session); break;
@@ -1314,8 +1435,11 @@ export class App {
       case "pick-model-session": if (session && !session.startsWith("local:")) this.openModelSheet(session); break;
       case "close-sheet": {
         const sub = this.workerPath[0]?.worker.sub;
+        const wasDiff = this.ui.sheet?.kind === "diff";
         this.workerPath = []; this.ui.sheet = null; this.renderSheet();
         if (sub) this.focusWorkerLink(sub);
+        // Back where the sheet was opened from, as a keyboard user expects.
+        if (wasDiff) document.querySelector<HTMLButtonElement>("button[data-act=diff]")?.focus({ preventScroll: true });
         break;
       }
       case "browse": await this.browse(el.dataset.path ?? ""); break;

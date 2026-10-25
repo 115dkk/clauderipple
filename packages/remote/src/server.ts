@@ -14,7 +14,7 @@ import type { Phone } from "./local-control.ts";
 import { browse, macConsent, makeFolder, recentFolders } from "./folders.ts";
 import { listSessionFolder, readSessionFolderFile } from "./session-folder.ts";
 import type { RecentSource } from "./folders.ts";
-import { diffView } from "./diff.ts";
+import { diffScope, diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
 import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
@@ -157,7 +157,7 @@ export class HostServer {
   constructor(opts: ServerOptions) {
     this.opts = opts;
     const desktopProblem = opts.sessions.desktopProblem?.();
-    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true }, ...(desktopProblem ? { desktopProblem } : {}) };
+    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true, diffScope: true }, ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
     this.http.on("upgrade", (req, socket, head) => {
@@ -588,7 +588,7 @@ export class HostServer {
       case "diff": {
         const summary = s.summaryOf(op.session);
         if (!summary) throw new Error("no such session");
-        return diffView(summary.cwd);
+        return diffView(summary.cwd, { scope: diffScope(op.scope) });
       }
       case "expo_push_subscribe":
         if (!this.opts.expoPush) throw new Error("native push is off on this host");

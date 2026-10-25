@@ -757,7 +757,7 @@ test('a worker that ends before its spawn is recorded is listed as ended, not ru
 
 // 2026-10-25: a flat slice(-40) over every record dropped the oldest running worker the moment 41
 // ran at once: its card, the band's live count and every later step's tokens and effort vanished.
-test('running and waiting workers all stay listed past forty, counted, and still take their steps', async ($, on) => {
+test('workers all stay listed past forty, counted, and still take their steps during long tools', async ($, on) => {
   const b = boundaries(on)
   http(on)
   judgeStub(on)
@@ -774,15 +774,15 @@ test('running and waiting workers all stay listed past forty, counted, and still
   await step($, 'claude-opus-5-5', 'high', 'run-1')
   expect(seen.records().find(a => a.id === 'run-1')).toMatchObject({ effort: 'high' })
   expect(seen.records().find(a => a.id === 'run-1')?.usage).toEqual({ input: 100, cached: 40000, cacheWrite: 0, output: 10 })
-  // A worker waiting on a long tool is live too: it must not be the one dropped past forty.
+  // A worker executing a long tool stays running: it must not be the one dropped past forty.
   const waiting = $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'run-2', tool_use_id: 'tool-wait' })
   await b.clock.settle()
   await b.clock.advance(15000)
-  expect(seen.records().find(a => a.id === 'run-2')?.state).toBe('waiting')
-  // A forty-second worker joins them; both states count as live.
+  expect(seen.records().find(a => a.id === 'run-2')?.state).toBe('running')
+  // A forty-second worker joins them; long-running tools still count as live.
   await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Worker 42' })
   expect(seen.records()).toHaveLength(42)
-  expect(seen.records().some(a => a.id === 'run-2' && a.state === 'waiting')).toBe(true)
+  expect(seen.records().some(a => a.id === 'run-2' && a.state === 'running')).toBe(true)
   expect(seen.counts()).toEqual({ live: 42, total: 42 })
   await b.clock.advance(15000)
   await waiting

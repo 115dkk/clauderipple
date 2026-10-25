@@ -280,7 +280,11 @@ export interface FolderFile { path: string; name: string; mediaType: string; byt
 export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string;
   /** The host keeps queued messages (ReqOp enqueue/queue_*); an older host leaves the queue to the phone. */
   queue?: boolean;
-  capabilities?: { sessionFiles: boolean; /** read-only session folder listing and small-file reads */ folderFiles?: boolean };
+  capabilities?: { sessionFiles: boolean;
+    /** read-only session folder listing and small-file reads */ folderFiles?: boolean;
+    /** `op: "diff"` takes a `scope`, so the diff pane can switch between uncommitted work and the
+     * branch. Absent on an older host, which always answers with its own order. */
+    diffScope?: boolean };
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 
@@ -326,8 +330,10 @@ export type ReqOp =
   | { op: "blob"; session: string; id: string; offset?: number }
   | { op: "sub"; session: string; sub: string; afterSeq?: number }
   /** What changed in this session's own folder; the host reads the folder from the session, never
-   * from the phone. Read-only: a scope, a base branch, and one patch per file (see DiffView). */
-  | { op: "diff"; session: string }
+   * from the phone. Read-only: a scope, a base branch, and one patch per file (see DiffView).
+   * `scope` picks the comparison (`auto` is the host's own order); hosts that do not know it answer
+   * as `auto`, and the answer's own `scope` is what was actually shown. */
+  | { op: "diff"; session: string; scope?: DiffScope }
   /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
   | { op: "commands"; session: string }
   /** Read-only listing of a session folder; `path` is relative to it. */
@@ -400,7 +406,14 @@ export interface DiffFile {
   removed: number;
   /** the unified diff text; empty for binary files and for a file the limits cut away */
   patch: string;
+  /** This file's patch is not all of it: a size limit, a deadline or the frame budget stopped it.
+   * Absent when the patch (or its absence, for a binary) is complete. */
+  cut?: boolean;
 }
+
+/** Which comparison a diff view makes. `auto` is the host's own order: uncommitted work first,
+ * else the branch against its base. The other two ask for one of them, even when it is empty. */
+export type DiffScope = "auto" | "uncommitted" | "branch";
 
 // ---- host → client --------------------------------------------------------------------
 

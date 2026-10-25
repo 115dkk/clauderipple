@@ -1,6 +1,6 @@
 // Screens as strings of markup. The app and the screenshot fixtures both call these, so the
 // mockups in docs/media/remote are the shipped UI, not a drawing of it.
-import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionEvent, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
+import type { BrowseResult, DiffFile, DiffScope, DiffView, Effort, FolderEntry, HostInfo, ProviderGroup, SessionEvent, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
 import type { LinkStatus } from "./conn.ts";
 import type { OutboxEntry, PreservedItem } from "./outbox.ts";
 import type { PushAvail } from "./pushstate.ts";
@@ -44,6 +44,9 @@ export type Sheet =
   | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean; /** What is typed in the path field, before it is opened; absent follows the folder on screen. */ pathDraft?: string }
   /** One session's own actions, opened from its row's menu: pin, archive, put the unread mark back. */
   | { kind: "session"; id: string }
+  /** The session folder's changes: either the file list, or one file's whole patch over it
+   * (`open`), with `scroll` where the list was left. */
+  | { kind: "diff"; view: DiffView | null; scope: DiffScope; loading: boolean; error: string; open: string | null; scroll: number }
   | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
   /** Unsent messages kept from earlier connections: what is preserved, what this computer already
    * holds after an import, and any stored text that could not be read (never parsed, never sent). */
@@ -284,8 +287,11 @@ export function sessionTop(ui: UI, s: SessionSummary | undefined, view: SessionV
   const model = view.model ?? s?.model ?? null;
   const eff = view.effort ?? s?.effort ?? null;
   const state = s?.desktopBridge ? s.state : view.open.length ? "waiting" : view.state ?? s?.state ?? "stopped";
-  if (s?.readOnly) return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s.title || folderName(s.cwd, ui.home))}</b><span>${esc(modelName(ui.models, model))}</span></div>${stateRing("stopped", 24)}`;
-  return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s ? s.title || folderName(s.cwd, ui.home) : "")}</b><button data-act="pick-model-session"><span>${esc(modelName(ui.models, model))}${eff ? ` · ${esc(effortLabel(eff))}` : ""}</span>${icon.down(14)}</button></div><span class="icon-btn${ui.link.state === "open" ? "" : " stale"}" aria-label="${esc(t(`state.${state}` as Key))}">${stateRing(state, 24)}</span>`;
+  // A session the host has not made yet (the phone is waiting on its create) has no folder to read.
+  const changes = s && !s.id.startsWith("local:")
+    ? `<button class="icon-btn" data-act="diff" aria-label="${esc(t("a11y.changes"))}">${icon.file(21)}</button>` : "";
+  if (s?.readOnly) return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s.title || folderName(s.cwd, ui.home))}</b><span>${esc(modelName(ui.models, model))}</span></div>${changes}${stateRing("stopped", 24)}`;
+  return `<button class="icon-btn" data-act="home" aria-label="${esc(t("a11y.back"))}">${icon.back(22)}</button><div class="title"><b>${esc(s ? s.title || folderName(s.cwd, ui.home) : "")}</b><button data-act="pick-model-session"><span>${esc(modelName(ui.models, model))}${eff ? ` · ${esc(effortLabel(eff))}` : ""}</span>${icon.down(14)}</button></div>${changes}<span class="icon-btn${ui.link.state === "open" ? "" : " stale"}" aria-label="${esc(t(`state.${state}` as Key))}">${stateRing(state, 24)}</span>`;
 }
 
 function pct(v: number | null): string {
@@ -363,7 +369,12 @@ export function item(it: TimelineItem, ui: UI): string {
       const html = text ? markdown(text) : "";
       const withCaret = caret ? (html.endsWith("</p>") ? html.slice(0, -4) + caret + "</p>" : html + caret) : html;
       const tools = it.tools.length ? `<div class="tools">${it.tools.map((tl) => toolRow(tl, ui)).join("")}</div>` : "";
-      return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}</div>`;
+      // Copy is offered while the answer streams too: the words are already readable, and the
+      // browser's own selection keeps working across blocks (patchList carries it over a delta).
+      const copy = text.trim()
+        ? `<div class="msg-acts"><button class="msg-copy" data-act="copy-answer" data-key="${esc(it.key)}" aria-label="${esc(t("answer.copy"))}">${icon.copy(16)}${esc(t("answer.copyShort"))}</button></div>`
+        : "";
+      return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}${copy}</div>`;
     }
     case "subagent": {
       const st = t(`sub.${it.status}`);
@@ -381,9 +392,17 @@ export function item(it: TimelineItem, ui: UI): string {
       const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</span>` : "";
       return `<div class="perm-done ${cls}">${it.decision === "allow" || it.decision === "allow_always" ? icon.check(16) : icon.x(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(label)}</span></div>${why ? `<div class="foot">${why}</div>` : ""}`;
     }
-    case "result":
-      if (!it.ok) return `<div class="foot bad">${icon.x(14)}${esc(t("turn.failed", { error: it.error ?? "" }))}</div>`;
-      return `<div class="foot">${esc(t("turn.footer", { model: modelName(ui.models, it.model), effort: effortLabel(it.effort) || "—", dur: duration(it.ms) }))}</div>`;
+    case "result": {
+      const turn = it.turn === undefined ? "" : `${t("turn.number", { n: it.turn })} · `;
+      if (!it.ok) return `<div class="foot bad">${icon.x(14)}${esc(turn + t("turn.failed", { error: it.error ?? "" }))}</div>`;
+      return `<div class="foot">${esc(turn + t("turn.footer", { model: modelName(ui.models, it.model), effort: effortLabel(it.effort) || "—", dur: duration(it.ms) }))}</div>`;
+    }
+    case "control": {
+      // A session command drawn as the state of what it asked for; it is never a button, because
+      // undoing files or turns is designed apart from this display.
+      const state = it.state === "running" ? icon.clock(15) : it.state === "done" ? icon.check(15) : icon.x(15);
+      return `<div class="notice control ${it.state}">${state}${esc(t(`control.${it.command}.${it.state}` as Key))}</div>`;
+    }
     case "notice":
       return `<div class="notice">${esc(t(`notice.${it.code}` as Key, { text: it.text ?? "", host: hostName(ui) }))}</div>`;
     case "chapter":
@@ -446,12 +465,90 @@ export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean, item
   return `${rows}<button class="tasks-chip${unread ? " bad" : ""}" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
 }
 
+// ---- changes -----------------------------------------------------------------------------------
+
+/** A patch's own lines, git's headers left out; a hunk keeps its `@@` so a change's place is visible. */
+export function patchLines(patch: string): string[] {
+  const lines = patch.split("\n").filter(line => !/^(diff --git |index |--- |\+\+\+ |new file mode |deleted file mode |similarity index |rename (from|to) |old mode |new mode )/.test(line));
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+/** The +/− capsule a changed file ends with, as the app draws it. */
+function countsPill(added: number, removed: number): string {
+  if (added <= 0 && removed <= 0) return "";
+  const add = added > 0 ? `<span class="add">+${added}</span>` : "";
+  const del = removed > 0 ? `<span class="del">−${removed}</span>` : "";
+  return `<span class="counts" aria-label="${esc(t("diff.counts", { added, removed }))}">${add}${del}</span>`;
+}
+
+/**
+ * The session folder's changes: a scope switch (when the host offers one), the files, and one file's
+ * whole patch over that list. The list is drawn again from `scroll`, so a person comes back from a
+ * file where they were, and a file opens where it was last read (the app holds that offset).
+ */
+function diffSheet(ui: UI, s: Extract<Sheet, { kind: "diff" }>): string {
+  const head = `<div class="grab"></div><div class="sh"><b>${esc(t("diff.title"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div>`;
+  const frame = (body: string): string => `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(t("diff.title"))}">${head}<div class="sbody" id="diff-body">${body}</div></div>`;
+  if (s.error) {
+    const message = /not a git repository/.test(s.error) ? t("diff.notGit") : s.error;
+    return frame(`<div class="note bad" role="alert">${esc(message)}</div><div class="dfoot"><button class="btn ghost" data-act="diff-retry">${esc(t("conn.retryNow"))}</button></div>`);
+  }
+  const view = s.view;
+  if (!view) return frame(`<div class="note" role="status">${esc(t("tool.loading"))}</div>`);
+  const file = s.open === null ? undefined : view.files.find(entry => entry.path === s.open);
+  if (file) {
+    const index = view.files.indexOf(file);
+    const lines = patchLines(file.patch);
+    const name = file.path.split("/").at(-1) ?? file.path;
+    // Walking the change lands on files that can be read: a binary beside them has no patch.
+    const reachable = (from: number, delta: number): number | null => {
+      for (let at = from + delta; at >= 0 && at < view.files.length; at += delta) if (view.files[at]?.patch) return at;
+      return null;
+    };
+    const prev = reachable(index, -1), next = reachable(index, 1);
+    const step = (target: number | null, label: string, glyph: string): string =>
+      target === null
+        ? `<button class="icon-btn" aria-label="${esc(label)}" disabled>${glyph}</button>`
+        : `<button class="icon-btn" data-act="diff-step" data-index="${target}" aria-label="${esc(label)}">${glyph}</button>`;
+    const where = `${file.oldPath ? `${file.oldPath} → ${file.path}` : file.path} · ${t("perm.of", { i: index + 1, n: view.files.length })}`;
+    const drawn = lines.map(line => {
+      const hunk = line.startsWith("@@"), add = !hunk && line.startsWith("+"), del = !hunk && line.startsWith("-");
+      return `<div class="ln${add ? " add" : del ? " del" : hunk ? " hunk" : ""}"><span class="mk">${add ? "+" : del ? "−" : " "}</span><span class="tx">${esc(hunk ? line : line.slice(1))}</span></div>`;
+    }).join("");
+    return frame(`<div class="diff-head"><button class="btn ghost" data-act="diff-back" aria-label="${esc(t("diff.back"))}">${icon.back(18)}<span>${esc(t("diff.back"))}</span></button><div class="body"><div class="t1">${esc(name)}</div><div class="t2">${esc(where)}</div></div>${countsPill(file.added, file.removed)}${step(prev, t("diff.prev"), icon.up(18))}${step(next, t("diff.next"), icon.down(18))}${file.patch ? `<button class="btn ghost" data-act="diff-copy" data-id="${esc(file.path)}">${esc(t("diff.copyShort"))}</button>` : ""}</div><div class="patch">${drawn}</div>${lines.length ? "" : `<div class="note">${esc(t("diff.empty"))}</div>`}${file.cut ? `<div class="note">${esc(t("diff.cut"))}</div>` : ""}`);
+  }
+  const options = ui.host?.capabilities?.diffScope === true
+    ? `<div class="seg diff-scope" role="radiogroup" aria-label="${esc(t("diff.title"))}">${([["uncommitted", t("diff.scope.uncommitted")], ["branch", t("diff.scope.branch")]] as const).map(([scope, label]) => {
+      const on = s.scope === "auto" ? (view.scope === "branch" ? "branch" : "uncommitted") === scope : s.scope === scope;
+      return `<button role="radio" aria-checked="${on}" class="${on ? "on" : ""}" data-act="diff-scope" data-scope="${scope}">${esc(label)}</button>`;
+    }).join("")}</div>` : "";
+  const where = view.scope === "branch" && view.base ? t("diff.base", { base: view.base })
+    : view.scope === "uncommitted" ? t("diff.uncommitted") : t("diff.clean");
+  const rows = view.files.map(file => {
+    const name = file.path.split("/").at(-1) ?? file.path;
+    const folder = file.path.slice(0, Math.max(0, file.path.length - name.length - 1));
+    const sub = [t(`diff.status.${file.status}` as Key), file.oldPath ? `← ${file.oldPath}` : folder, file.cut ? t("diff.partial") : ""].filter(Boolean).join(" · ");
+    const body = `${icon.file(20)}<div class="body"><div class="t1">${esc(name)}</div><div class="t2">${esc(sub)}</div></div>${countsPill(file.added, file.removed)}`;
+    // A binary has no patch, so its row is a fact, not a way in.
+    return file.patch
+      ? `<button class="diff-file" data-act="diff-file" data-id="${esc(file.path)}" aria-label="${esc(`${file.path}, ${t(`diff.status.${file.status}` as Key)}`)}">${body}${icon.chevron(18)}</button>`
+      : `<div class="diff-file">${body}</div>`;
+  }).join("");
+  const empty = view.files.length ? "" : `<div class="note">${esc(s.scope === "branch" ? t("diff.cleanBranch") : s.scope === "uncommitted" ? t("diff.cleanUncommitted") : t("diff.clean"))}</div>`;
+  const summary = view.files.length
+    ? `<div class="diff-sum"><span>${esc(view.branch ? t("diff.branch", { branch: view.branch }) : t("diff.noBranch"))}</span><span class="sep">·</span><span>${esc(where)}</span><span class="sep">·</span><span>${esc(t("diff.files", { n: view.files.length }))}</span></div>`
+    : `<div class="diff-sum"><span>${esc(where)}</span></div>`;
+  return frame(`${options}${summary}${rows}${empty}${view.truncated ? `<div class="note">${esc(t("diff.truncated"))}</div>` : ""}`);
+}
+
 // ---- sheets ------------------------------------------------------------------------------------
 
 export function sheet(ui: UI): string {
   const s = ui.sheet;
   if (!s) return "";
   const head = (title: string): string => `<div class="grab"></div><div class="sh"><b>${esc(title)}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div>`;
+  if (s.kind === "diff") return diffSheet(ui, s);
   if (s.kind === "worker") {
     const worker = s.worker;
     const facts = [worker.model, t(`sub.${worker.status}`), t("sub.steps", { n: worker.steps })].filter(Boolean).join(" · ");

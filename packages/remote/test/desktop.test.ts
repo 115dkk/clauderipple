@@ -8,7 +8,7 @@ import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
 import { reduce } from "../web/timeline.ts";
-import { BridgeClient } from "../src/bridge-client.ts";
+import { BridgeClient, DesktopBlockedError } from "../src/bridge-client.ts";
 import { fileSymlinks } from "../../../test/capabilities.ts";
 
 const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -376,7 +376,7 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
   if (mode === "process") {
     await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Claude 앱/);
-    assert.throws(() => sessions.send(id, "first-phone", "continue"), /지금은 보낼 수 없습니다/);
+    assert.throws(() => sessions.send(id, "first-phone", "continue"), DesktopBlockedError);
     assert.equal(options.length, 0);
     assert.equal(sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "first-phone"), false);
     return;

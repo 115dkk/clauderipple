@@ -5,13 +5,31 @@ import { stringField, toolInput } from "../src/tool-details.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
 
+/**
+ * A session command the person sent, drawn as what it does rather than as their words: compaction,
+ * a fresh conversation, and rewinding to an earlier point are things that happen to the session,
+ * not messages in it. The state is what is known — the turn it started has not finished, finished,
+ * or failed. Nothing here can be pressed: the file-level undo a rewind implies is designed apart.
+ */
+export type ControlCommand = "compact" | "clear" | "rewind";
+
+/** The command a message holds, when the whole message is one, or null for ordinary words. */
+export function controlCommand(text: string): ControlCommand | null {
+  const value = text.trim().toLowerCase();
+  if (value === "/compact") return "compact";
+  if (value === "/clear") return "clear";
+  if (value === "/rewind") return "rewind";
+  return null;
+}
+
 export type Item =
   | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string }
+  | { type: "control"; key: string; ver: string; command: ControlCommand; state: "running" | "done" | "failed"; at: number }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
   | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; ruleStatus?: RuleStatus; reason?: string; at: number })
-  | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
+  | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null; /** which finished turn this is, when the conversation's first page is loaded; absent otherwise */ turn?: number }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
   | { type: "start"; key: string; ver: string };
 
@@ -49,6 +67,11 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
   let lastSeq = 0;
   // A main response has one current text/thinking segment, independent of turn activity.
   let streamingKey: string | null = null;
+  // The session commands still waiting for their turn to end, and how many turns have finished.
+  // Turns are numbered only when the conversation's first page is loaded (atStart), so a scrolled
+  // window does not claim to be the whole story.
+  let awaiting: number[] = [];
+  let turns = 0;
   const finishStream = (): void => {
     if (streamingKey === null) return;
     const index = byKey.get(streamingKey);
@@ -78,6 +101,15 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         seenUser.add(e.clientMsgId);
         // The app counts "working for" from the person's message; Mac sessions have no turn event to say so.
         turnStartedAt = e.at;
+        // A session command is a thing that happens to the conversation, not a message in it.
+        {
+          const command = controlCommand(e.text);
+          if (command) {
+            awaiting.push(items.length);
+            put({ type: "control", key: `c${e.clientMsgId}`, ver: `u${e.seq}`, command, state: "running", at: e.at });
+            break;
+          }
+        }
         put({ type: "user", key: `u${e.clientMsgId}`, ver: `u${e.seq}`, text: e.text, ...(e.images ? { images: e.images } : {}), ...(e.files ? { files: e.files } : {}), at: e.at });
         break;
       case "turn":
@@ -131,13 +163,22 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
         if (item?.type === "permission") items[at!] = { ...item, decision: e.decision, ...(e.ruleStatus ? { ruleStatus: e.ruleStatus } : {}), ...(e.reason ? { reason: e.reason } : {}), ver: `${item.ver}d${e.seq}` };
         break;
       }
-      case "result":
+      case "result": {
         // A queued next turn can already be running in the final snapshot.
         // Completion belongs to this point in the log, not only to the final state.
         finishStream();
-        put({ type: "result", key: `r${e.seq}`, ver: "1", ok: e.ok, ...(e.error ? { error: e.error } : {}), ms: e.ms, model: model ?? "", effort });
+        turns++;
+        const turn = atStart ? turns : undefined;
+        put({ type: "result", key: `r${e.seq}`, ver: "1", ok: e.ok, ...(e.error ? { error: e.error } : {}), ms: e.ms, model: model ?? "", effort, ...(turn === undefined ? {} : { turn }) });
+        // The commands that started this turn are answered by its end, each in its own words.
+        for (const index of awaiting) {
+          const item = items[index];
+          if (item?.type === "control" && item.state === "running") items[index] = { ...item, state: e.ok ? "done" : "failed", ver: `${item.ver}:${e.ok ? "ok" : "no"}` };
+        }
+        awaiting = [];
         turnStartedAt = null;
         break;
+      }
       case "state":
         state = e.state;
         if (state !== "running" && state !== "starting") finishStream();
@@ -208,6 +249,9 @@ function wrapUpOf(tool: ToolView, ver: string): WrapUp | null | undefined {
   return { type: "wrapUp", key: `w${tool.id}`, ver, recap, ask, replies, blocked, answered: false };
 }
 
+/** The i18n key for a command's state word, shared by both clients. */
+export const controlTextKey = (command: ControlCommand, state: Extract<Item, { type: "control" }>["state"]): string => `control.${command}.${state}`;
+
 /** Presentation only: text, permissions and turn boundaries separate consecutive activity. */
 export function timelineItems(view: Pick<SessionView, "items" | "state">): TimelineItem[] {
   const result: TimelineItem[] = [];
@@ -270,7 +314,7 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
     // As in the Claude app's default view, thinking is not drawn and does not split a run (most of it
     // has its text withheld anyway). Only thinking still streaming at the very end shows, as a live line.
     if (item.type === "thinking") continue;
-    if (item.type === "user" || item.type === "result") flushWrap();
+    if (item.type === "user" || item.type === "result" || item.type === "control") flushWrap();
     group = null;
     result.push(item);
   }
