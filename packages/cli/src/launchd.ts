@@ -248,7 +248,7 @@ export function removeAgent(home: string = homeDir(), run: Launchctl = launchctl
   }
   const definition = fs.readFileSync(file, "utf8");
   const stopped = run(["bootout", domain(), file]);
-  if (!stopped.ok) throw new Error(`launchd bootout failed: ${stopped.out}; definition preserved`);
+  if (!stopped.ok && !missingService(stopped)) throw new Error(`launchd bootout failed: ${stopped.out}; definition preserved`);
   if (agentOwnership(home).state !== "ours" || fs.readFileSync(file, "utf8") !== definition) return "ownership-unknown";
   try {
     fs.unlinkSync(file);
@@ -403,5 +403,6 @@ export function stopAgent(home: string = homeDir(), run: Launchctl = launchctl, 
     if (who === "other") return "other-installation";
     if (who !== "ours") return "identity-unknown";
   }
-  return run(["bootout", domain(), plistPath()]).ok ? "stopped" : "not-loaded";
+  const result = run(["bootout", domain(), plistPath()]);
+  return result.ok ? "stopped" : missingService(result) ? "not-loaded" : "failed";
 }

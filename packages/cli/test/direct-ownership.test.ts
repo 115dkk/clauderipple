@@ -150,6 +150,29 @@ test("integration removal reports unconfirmed CA removal and removes only this h
   assert.equal(fs.existsSync(path.join(c.a, "generated-agents.json")), false);
 });
 
+test("launchd stop then remove accepts confirmed absence but preserves on bootout failure", () => {
+  const c = setup();
+  const file = launchd.plistPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const definition = launchd.renderPlist({ home: c.a, program: "/node", stdoutLog: "/unused" });
+  fs.writeFileSync(file, definition);
+  let loaded = true;
+  const run: launchd.Launchctl = args => {
+    if (args[0] === "print") return loaded ? { ok: true, out: "state = waiting" } : { ok: false, out: "", code: 113 };
+    if (!loaded) return { ok: false, out: "", code: 113 };
+    loaded = false;
+    return { ok: true, out: "" };
+  };
+  assert.equal(launchd.stopAgent(c.a, run), "stopped");
+  assert.equal(launchd.removeAgent(c.a, run), "removed");
+  assert.equal(fs.existsSync(file), false);
+  fs.writeFileSync(file, definition);
+  const denied: launchd.Launchctl = args => args[0] === "print" ? { ok: true, out: "state = waiting" } : { ok: false, out: "permission denied" };
+  assert.throws(() => launchd.removeAgent(c.a, denied), /definition preserved/);
+  assert.equal(launchd.stopAgent(c.a, denied), "failed");
+  assert.equal(fs.readFileSync(file, "utf8"), definition);
+});
+
 test("service PID lookup errors cause zero control calls and preserve definitions", () => {
   const c = setup();
   fs.mkdirSync(path.dirname(launchd.plistPath()), { recursive: true });
