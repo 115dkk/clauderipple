@@ -32,6 +32,7 @@ import { AutoUpdater } from "./autoupdate.ts";
 export { parseUpdateCheck, type UpdateCheck } from "./cli-control.ts";
 import { fileURLToPath } from "node:url";
 import type { Config, Provider, ProviderModel } from "./config.ts";
+import { withFileLock } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
@@ -117,6 +118,12 @@ export type AdminDeps = {
   health: () => number;
   providerHealth?: () => Record<string, ProviderExhaustion>;
   version: string;
+  /**
+   * The installation identity this process captured at start: its home's opaque id (immutable for
+   * this process, even if the file changes) and its own pid. Status reports both, and a shutdown
+   * request is accepted only from the installation this process actually is (B01/D6).
+   */
+  instance?: { installId: string | null; pid: number };
   requests: RequestLog;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
   chatgpt?: () => {
@@ -875,6 +882,11 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     // an update: a zip unpacked next to the previous install left the old one serving (2026-09-15).
     runtime: { node: process.execPath, router: process.argv[1] ?? null, startedAt: STARTED_AT },
     home: homeDir(),
+    // The identity captured when this process started: a caller accepts this status as its own only
+    // when both the installation id and the pid match what it would act on. A file changed while
+    // this process runs does not rewrite what it is.
+    installId: deps.instance?.installId ?? null,
+    pid: deps.instance?.pid ?? null,
     listen: cfg.listen,
     upstream: cfg.upstream,
     adminPort: adminPort(cfg),
@@ -1020,9 +1032,14 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(out);
 }
 
-/** Write the config file atomically. The one save path: the GUI's PUT and the capability
- * measurement both go through it, so the router never picks up a half-written file either way. */
+/** Write the config file atomically under its lock. The one save path: the GUI's PUT, the
+ * capability measurements and the CLI's picker toggle all go through it or take the same lock, so
+ * the router never picks up a half-written file and two writers never replace it mid-change. */
 function writeConfigFile(configFile: string, config: Config): void {
+  withFileLock(configFile, () => writeConfigFileLocked(configFile, config));
+}
+
+function writeConfigFileLocked(configFile: string, config: Config): void {
   const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n");
@@ -1951,6 +1968,16 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (!deps.shutdown) {
           sendJson(res, 501, { error: "shutdown not available" });
           return;
+        }
+        // A caller that names an installation must name the one this process actually is (captured
+        // at start, not read from disk now). A caller that names none is an older CLI.
+        const claimed = req.headers["x-clauderipple-install-id"];
+        if (typeof claimed === "string") {
+          const ours = deps.instance?.installId ?? null;
+          if (ours && claimed !== ours) {
+            sendJson(res, 409, { error: "installation mismatch" });
+            return;
+          }
         }
         // Answer before draining: the caller needs to know the request was accepted, and the
         // drain can outlive the connection (it waits for in-flight model calls, up to 90s).

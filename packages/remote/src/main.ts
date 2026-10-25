@@ -299,7 +299,7 @@ async function main(): Promise<void> {
     case null: return runHost();
     case "install": return installCmd();
     case "refresh": return refreshCmd();
-    case "uninstall": for (const line of await uninstallService()) out(`${line}\n`); return;
+    case "uninstall": for (const line of await uninstallService({ explicit: true })) out(`${line}\n`); return;
     case "status": return status();
     case "pair": { const dir = remoteHome(); printPairing(configFromArgs(dir), dir); return; }
     default: throw new Error(`unknown command "${sub}" (install, uninstall, status, pair)`);

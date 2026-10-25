@@ -10,6 +10,7 @@ import path from "node:path";
 import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src/codex.ts";
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
+import { ensureInstallationId } from "./installation-id.ts";
 import { AwakeController, execRunner, type Activity } from "./awake.ts";
 import { TetherController } from "./tether.ts";
 import { AutoUpdater } from "./autoupdate.ts";
@@ -248,8 +249,21 @@ proxy
     const catalogEvery = 2 * 60 * 60_000;
     proxy.chatgptRefreshCatalog();
     setInterval(() => proxy.chatgptRefreshCatalog(), catalogEvery).unref();
+    // Captured once, at start: this process's installation id and pid are what it reports and what
+    // a control request is checked against, whatever the files say later (B01/D6).
+    const instance = {
+      installId: (() => {
+        try {
+          return ensureInstallationId(homeDir());
+        } catch {
+          return null;
+        }
+      })(),
+      pid: process.pid,
+    };
     const adminDeps: AdminDeps = {
       autoUpdater,
+      instance,
       config: () => store.get(),
       configErrors: () => configErrors,
       configFile: configPath(),

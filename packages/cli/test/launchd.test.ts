@@ -70,12 +70,12 @@ test("tray toggle only writes/removes the plist in the overridden directory and 
   const file = path.join(root, "LaunchAgents", "com.clauderipple.tray-test.plist");
   const home = path.join(root, "home");
   assert.equal(trayPlistPath(), file);
-  assert.equal(removeTrayAgent(), false);
+  assert.equal(removeTrayAgent(home), "absent");
   assert.equal(installTrayAgent(home), file);
   assert.equal(fs.readFileSync(file, "utf8"), renderTrayPlist(home));
   assert.equal(fs.statSync(path.join(home, "logs")).isDirectory(), true);
   assert.equal(installTrayAgent(home), file);
-  assert.equal(removeTrayAgent(), true);
+  assert.equal(removeTrayAgent(home), "removed");
   assert.equal(fs.existsSync(file), false);
-  assert.equal(removeTrayAgent(), false);
+  assert.equal(removeTrayAgent(home), "absent");
 });

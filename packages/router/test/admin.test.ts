@@ -36,6 +36,7 @@ async function withAdmin(
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
     shutdown?: () => void;
+    instance?: NonNullable<AdminDeps["instance"]>;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
     startCliDetached?: (args: string[], log: string) => void;
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
@@ -1713,6 +1714,50 @@ test("POST /api/shutdown reports 501 when the router supplied no drain hook", as
     const res = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST" });
     assert.equal(res.status, 501);
   });
+});
+
+test("POST /api/shutdown refuses another installation's id, accepts its own and an older CLI", async () => {
+  let called = 0;
+  const ours = "a".repeat(32);
+  await withAdmin(
+    makeCfg(),
+    async ({ port, home }) => {
+      // A file rewritten while the process runs must not change what this process is.
+      fs.writeFileSync(path.join(home, "installation-id"), `${"d".repeat(32)}\n`, { mode: 0o600 });
+      const post = (id?: string) => fetch(`${base()}:${port}/api/shutdown`, { method: "POST", ...(id ? { headers: { "x-clauderipple-install-id": id } } : {}) });
+
+      const foreign = await post("b".repeat(32));
+      assert.equal(foreign.status, 409);
+      assert.equal(called, 0, "another installation's request never drains this router");
+      const disk = await post("d".repeat(32));
+      assert.equal(disk.status, 409, "the id captured at start, not the file on disk, decides");
+
+      const own = await post(ours);
+      assert.equal(own.status, 202);
+      assert.equal(called, 1);
+
+      // A CLI from before the id existed sends no header; it keeps working as it did.
+      const legacy = await post();
+      assert.equal(legacy.status, 202);
+      assert.equal(called, 2);
+    },
+    { shutdown: () => void called++, instance: { installId: ours, pid: 4242 } },
+  );
+});
+
+test("status reports the identity this process captured at start", async () => {
+  const ctx = { installId: "c".repeat(32), pid: 5150 };
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const read = async () => (await (await fetch(`${base()}:${port}/api/status`)).json()) as { installId?: unknown; pid?: unknown };
+    const before = await read();
+    assert.equal(before.installId, ctx.installId);
+    assert.equal(before.pid, ctx.pid);
+    // The file changing later is not this process's identity.
+    fs.writeFileSync(path.join(home, "installation-id"), `${"e".repeat(32)}\n`, { mode: 0o600 });
+    const after = await read();
+    assert.equal(after.installId, ctx.installId);
+    assert.equal(after.pid, ctx.pid);
+  }, { instance: ctx });
 });
 
 test("admin rejects rebinding Hosts and foreign write Origins but accepts dashboard and tray requests", async () => {

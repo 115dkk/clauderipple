@@ -1,5 +1,49 @@
 # 솔 전환 인계 — ClaudeRipple·Ripple Remote 품질 개선
 
+## 최신 재개 — 2026-10-25 21시대 (설치 소유권 미커밋 변경 전체 검수)
+
+이 절이 아래 모든 절보다 우선한다. 이번 재개에서는 **코드 수정·커밋·워커 위임을 하지 않았다.** 검수만 했다.
+
+### 현재 상태
+
+- 본체 `fix/remote-session-consistency`, HEAD `6bf8527`. 모바일 `fix/mobile-session-polish`, HEAD `8ecfa8b`(깨끗함).
+- 설치 소유권 변경은 그대로 **미커밋**: 수정 19파일(+1592/−432), 신규 `cli/src/{owners,ownership,router-state}.ts`, `router/src/installation-id.ts`, 테스트 4개. 18:34~18:43에 `launcher.ts`·`direct.ts`·`integrations.ts`가 추가로 바뀌어 B22·B23 작업이 들어가 있다.
+- 이전 세션 딥시크 워커는 실행 중이 아니다. 새 워커를 맡기지 않았다.
+- 검증 결과
+  - `npm run typecheck`: 통과.
+  - 격리 HOME(scratchpad)에서 관련 테스트 13파일(`ownership, settings-ownership, direct-ownership, launcher, launchd, recovery, systemd, codex, settings, purge, supervisor-start, schtasks-definition` + router `admin`)을 돌린 결과 248개 중 **239 통과·3 실패·6 건너뜀**. 이전 기록의 "94개 중 91 통과"보다 나중 상태다.
+
+### 실패 3건과 원인
+
+1. `settings.test.ts` "uninstall removes only model values recorded as ours": `applyProxyEnv`가 **현재 값과 원하는 값이 같기만 하면** 그 슬롯을 우리 소유로 기록한다. 그래서 사용자가 손으로 쓴 `user-main`을 제거 때 지운다. 고칠 방향: 우리가 실제로 쓴 값이거나, 이미 이 홈이 기록한 값이거나, **다른 설치가 기록한 같은 값**(두 번째 설치 claim)일 때만 기록한다. 아무도 기록하지 않은 손 입력 값은 기록하지 않는다.
+2. `settings-ownership.test.ts` "another installation's status mod and hook survive an uninstall": `integrations.ts`가 notes 문구를 정규식(`did not record|older version…`)으로 훑어 ok=false를 만든다. 그런데 `setStatusMod`는 다른 설치가 정상적으로 기록한 폴더까지 "did not record"로 적는다. 고칠 방향: 결과를 구조화(제거/다른 설치 보존/소유 불명 보존/실패)하고, 다른 설치의 정당한 claim 보존은 성공으로 친다.
+3. `recovery.test.ts` "CLI: doctor, direct on/off and app…": 새 `agentState`/`agentPid`는 launchctl 실패를 "not found" 문구로만 판별하고 그 외에는 throw한다. 실제 launchctl은 서비스가 없으면 **exit 113**을 내는데, 가짜 launchctl은 출력 없이 113만 낸다. 고칠 방향: exit 113도 미등록으로 본다. doctor는 조회 실패에서 죽지 말고 "상태 불명" 문제로 보고한다.
+
+### 검수에서 찾은 커밋 차단 결함 (테스트로 안 잡힘)
+
+- **[최우선] 운영 업그레이드 경로가 막힌다.** 운영 라우터 0.12.14의 `/api/status`를 읽기 전용으로 조회했다. `home`은 보고하지만 `installId`·`pid`가 없다. 그래서 새 CLI의 `probeRouter`가 "other"로 판정하고, `npm install` 뒤 `clauderipple restart`·`install`·`update`(자동 업데이트 포함)·`uninstall`이 모두 거부된다. 결정한 방향: status에 `installId` 키가 **아예 없고**(구버전), `status.home`이 이 홈과 같고(`sameHome`), 관리자 포트를 LISTEN하는 PID(darwin·linux는 `lsof`, linux 대체로 `ss`, win32는 `Get-NetTCPConnection`, 주입 가능하게)가 `expectedPid`와 같을 때만 "ours"(legacy)로 인정한다. 그 외에는 지금처럼 거부한다. 운영 plist와 트레이 plist에는 `CLAUDERIPPLE_HOME`이 있음을 확인했다. launchd는 번들 스크립트가 `exec`로 node를 띄우므로 PID가 같다.
+- **Desktop proxy 구형 항목.** 운영 `_meta.json`에는 `installationHome`이 없다. 그래서 `applyAppProxy`가 "ownership unknown"으로 throw하고(install·repair·picker on 실패), 제거도 영원히 보존된다. 승인 설계 5("Desktop proxy는 기존 proxy 포트 기준 유지")에 따라, `ours` 표식이 있고 URL이 이 홈의 proxy URL과 같으면 legacy로 인정한다. apply는 이때 `installationHome`을 기록해 인수한다. 비교는 `path.resolve`가 아니라 `normalizeHome`/`sameHome`으로 한다(picker.ts, direct.ts의 `=== path.resolve(home)` 여러 곳).
+- **Codex 구형 블록.** 지금은 표식 없는 블록을 절대 지우지 않는다. 그래서 기본 설치를 제거하면 Codex가 죽은 포트를 가리킨 채 남는다. 승인 기준은 "포트 + 명확한 증거"이고, 결정한 방향은 두 가지다. ① uninstall: base_url 포트가 `ingressPort(cfg)`와 같고, **uninstall 시작 시점에 서비스 정의가 이 홈 소유(`agentOwnership==='ours'`)**였을 때만 제거한다. 서비스 제거 전에 이 값을 캡처해 `removeClientIntegrations`에 넘긴다. ② `codex off`(이 홈에서 사용자가 명시적으로 실행): 포트가 일치하면 제거한다.
+- **CA 제거 결과가 두 값뿐이다.** `untrustCa`가 이제 "인증서가 원래 없음"도 false로 돌려준다. 그래서 CA가 이미 없는 설치는 "removal was not confirmed"로 ok=false가 되고 `--purge`가 막힌다. removed/absent/failed 세 값으로 나눠야 한다. 이름 기준 sweep 제거(fingerprint만 사용)는 유지한다.
+- **생성 워커 파일.** 지금은 manifest가 있으면 무조건 보존한다. 그래서 제거 뒤 `~/.claude/agents`에 죽은 라우터를 가리키는 워커가 남는다. 결정한 방향: 이 홈 manifest의 이름을 제거하되, `sharedWith`를 **배열**로 바꿔 기본 홈과 owners store(`settings.json.clauderipple-owners.json`)의 `homes` 키에 있는 각 홈의 `generated-agents.json`이 기록한 이름은 제외한다.
+- **status mod·hook 구형 항목.** 기록이 없는 구형 항목은 영구히 보존돼 purge를 막는다. 결정한 방향: 폴더(또는 hook 명령의 스크립트 경로)가 **이 홈 안**에 있고 다른 설치가 claim하지 않았으면 legacy 소유로 인정한다. repo 체크아웃처럼 홈 밖이면 불명으로 두고 보존한다.
+- **실행기(B22) 구형 인수.** 지금은 현재 버전이 렌더링한 스크립트와 정확히 일치할 때만 인수한다. 운영 `~/Applications/ClaudeRipple.app`의 스크립트(번들 id `com.clauderipple.launcher`, node 경로 `~/.clauderipple/runtime/bin/node`)는 런타임 경로가 달라지면 불명이 되고, 그러면 install·uninstall·purge가 막힌다. 결정한 방향: 번들 id가 우리 것이고 스크립트의 `export CLAUDERIPPLE_HOME=`(linux는 Exec env, win32는 `$env:CLAUDERIPPLE_HOME`) 값이 이 홈과 같으면 legacy로 인정한다. 서비스 plist와 같은 수준의 증거다.
+- **잠금 감사.** continuation 기록의 "소유권 기록 파일 잠금 없음"이 어느 파일을 가리키는지는 특정하지 못했다. owners store는 settings 잠금 안에 있고, Desktop meta는 `_meta.json`, Codex는 `config.toml`에 잠금이 있다. 공유 기록을 읽고-고치고-쓰는 곳(direct.json, generated-agents manifest, launcher 등)이 모두 잠금 안에 있는지 감사가 필요하다.
+- 원장(QUALITY_BACKLOG "설치 소유권 커밋 차단 사유")의 나머지는 그대로 미해결이다: Windows 실기 미실행, 장시간 drain 중 정의 교체 재검증.
+
+### 다음 행동
+
+1. 위 결함을 딥시크 워커(`subagent_type: deepseek-v4-1-flash`, model 인자 없음, 첫 두 줄 `[[ripple: deepseek-v4-1-flash]]` / `Model reason: user "지금돌아가는거끝나면 이제부턴 딥시크쓰자."`)에게 맡긴다. 브리핑에는 이 절을 그대로 넣는다. 금지 사항: 실제 launchctl·systemctl·schtasks·키체인·프로세스 신호·운영 CLI 실행 금지, 임시 홈과 주입 executor만 사용. 완료 기준: 위 3건 통과, 구형(0.12.14형 status·plist·meta·Codex 블록·launcher) 업그레이드 회귀 테스트 추가, 타입 검사 통과.
+2. 메인은 삭제·중단 경계의 전체 diff를 다시 검수한다. 이어서 B01~B03·B22~B24를 논리 단위로 나눠 커밋한다. push·설치본 반영은 별도 승인을 받는다.
+3. 이후 순서는 기존과 같다: 웹 발신함 복구·손상 보존 → 시뮬레이터 스크롤·알림 실기 검증.
+
+### 이번 작업 결과 — 2026-10-25 (설치 소유권 트랙)
+
+- 위 **실패 3건은 모두 통과**한다. `applyProxyEnv`는 실제로 쓴 값·이 홈이 기록한 값·다른 설치가 기록한 같은 값만 claim한다. `setStatusMod`/`setAgentTitleHook`은 구조화된 결과(`removed/absent/preserved-other/preserved-unknown/failed`)를 돌려주고, 다른 설치의 정당한 claim 보존은 성공으로 센다. launchctl exit 113은 미등록으로 읽고, doctor/repair는 조회 실패를 `supervisor-state-unknown`으로 보고하며 아무것도 건드리지 않는다.
+- **커밋 차단 결함은 모두 코드로 반영했다.** 0.12.14 status(키 없음 + `home` + 관리자 포트 LISTEN pid 대조)는 `router-state.ts`가, Desktop proxy·CA 3값·생성 워커(sharedWith 배열)·status mod/hook 홈 안 legacy는 `picker.ts`/`integrations.ts`/`settings.ts`가, Codex 구형 블록은 uninstall 시작 시 캡처한 서비스 소유 + ingress 포트로 `codex.ts`가, 실행기 legacy는 기록된 홈으로 `launcher.ts`가 처리한다. 잠금 감사 결과 launcher·agents 폴더·config.json 쓰기를 잠금/원자 쓰기로 보완했다.
+- **추가 처리(G-D):** D01 휴대폰 호스트 서비스는 그 정의가 기록한 홈일 때만 본체 uninstall이 제거한다(`host-service.ts`, 명시 실행 `remote uninstall`은 예외). D02 sudoers 잔존은 안내만 한다(`awake setup --remove`/`sudo rm`). D03 install.sh는 Node 런타임을 staging 후 rename 교체하고 이전 런타임을 보존한다. D04는 picker 설정·Desktop meta·config.json·agents 폴더 쓰기를 원자화/잠금했다. D16은 컨텍스트 상한을 소유 기록으로 회수하고, PATH·원격 SSH 호스트·sudoers는 지우지 않고 남은 항목과 회수 명령을 명시한다.
+- 검증: `npm run typecheck` 통과. 격리 HOME에서 **1951개 중 1939 통과·0 실패·12 건너뜀**(router·cli·remote 전체). 0.12.14형 status·meta·Codex 블록·launcher·호스트 서비스·install.sh 교체에 대한 회귀 테스트를 추가했다. Windows 실기·장시간 drain 중 정의 교체는 여전히 미검증이다.
+
 ## 최신 재개 결과 — 2026-10-25
 
 이 절이 아래의 전환 당시 상태보다 우선한다. 실제 작업 원장은 `docs/QUALITY_BACKLOG.ko.md`다.
