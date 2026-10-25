@@ -10,6 +10,7 @@ import { setPickerEnabled } from "../src/integrations.ts";
 import { certPaths } from "../src/certs.ts";
 import { directOn } from "../src/direct.ts";
 import { applyProxyEnv, settingsEnv } from "../src/settings.ts";
+import { ownersPath } from "../src/owners.ts";
 import { removeClientIntegrations } from "../src/integrations.ts";
 import { plistPath, renderPlist } from "../src/launchd.ts";
 
@@ -19,7 +20,11 @@ function fixture(t: { after(fn: () => void): void }) {
   const home = path.join(root, ".clauderipple");
   const other = path.join(root, "other");
   Object.assign(process.env, { HOME: root, CLAUDE_SETTINGS_PATH: path.join(root, "settings.json"), CLAUDE_APP_SUPPORT: path.join(root, "desktop"), CLAUDERIPPLE_LAUNCH_AGENTS_DIR: path.join(root, "LaunchAgents"), CODEX_HOME: path.join(root, "codex") });
-  t.after(() => { process.env = before; fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in before)) delete process.env[key];
+    Object.assign(process.env, before);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   fs.mkdirSync(home);
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 18791 } }));
   const url = "http://127.0.0.1:18791";
@@ -142,6 +147,32 @@ test("legacy Desktop direct on never reports success with an unproven proxy stil
   assert.equal(result.ok, false);
   assert.equal(currentAppProxy().egressProxyUrl, f.url);
 });
+
+for (const scenario of ["owners-store", "default-home", "damaged-owners-store"] as const) {
+  test(`legacy Desktop cannot be adopted with ambiguous installation history: ${scenario}`, t => {
+    const f = fixture(t);
+    const home = scenario === "default-home" ? f.other : f.home;
+    if (scenario === "default-home") {
+      fs.mkdirSync(home);
+      fs.copyFileSync(path.join(f.home, "config.json"), path.join(home, "config.json"));
+      f.service(home);
+      assert.equal(path.join(os.homedir(), ".clauderipple"), f.home);
+    } else {
+      fs.writeFileSync(ownersPath(process.env.CLAUDE_SETTINGS_PATH!), scenario === "damaged-owners-store" ? "{" : JSON.stringify({ version: 1, homes: { [f.home]: {}, [f.other]: {} } }));
+    }
+    const deps = { ...f.deps, probe: () => ({ version: "0.12.14", home }) };
+    const meta = fs.readFileSync(path.join(configLibraryDir(), "_meta.json"), "utf8");
+    const entry = fs.readFileSync(path.join(configLibraryDir(), "legacy.json"), "utf8");
+    assert.throws(() => migrateLegacyAppProxy(f.url, home, deps), /어느 설치가 설정했는지 확인할 수 없어/);
+    assert.throws(() => applyAppProxy(f.url, home, undefined, deps), /어느 설치가 설정했는지 확인할 수 없어/);
+    assert.equal(fs.readFileSync(path.join(configLibraryDir(), "_meta.json"), "utf8"), meta);
+    assert.equal(fs.readFileSync(path.join(configLibraryDir(), "legacy.json"), "utf8"), entry);
+    const command = pickerOffCommand({ ...f, home, deps });
+    assert.throws(command.run, /어느 설치가 설정했는지 확인할 수 없어/);
+    assert.equal(command.trustRemovals(), 0);
+    assert.deepEqual(command.messages, []);
+  });
+}
 
 for (const scenario of ["foreign-definition", "wrong-listener", "missing-pid", "lookup-failed", "generation-changed"] as const) {
   test(`legacy Desktop migration preserves the entry on ${scenario}`, t => {

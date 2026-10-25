@@ -431,12 +431,12 @@ test("a same-port legacy Desktop proxy is never adopted or deleted without insta
   assert.throws(() => applyAppProxy("http://127.0.0.1:19991", ctx.A), /unknown/);
   const raw = fs.readFileSync(path.join(dir, "_meta.json"), "utf8");
   assert.equal(removeAppProxy("http://127.0.0.1:18791", ctx.B), false);
-  assert.throws(() => applyAppProxy("http://127.0.0.1:18791", ctx.B), /unknown/);
+  assert.throws(() => applyAppProxy("http://127.0.0.1:18791", ctx.B), /unknown|어느 설치가 설정했는지 확인할 수 없어/);
   assert.equal(removeClientIntegrations(ctx.B, () => "absent", { agentDir: ctx.agents, defaultHome: ctx.A, port: 18791 }), false);
   assert.equal(fs.readFileSync(path.join(dir, "_meta.json"), "utf8"), raw);
   assert.equal(fs.existsSync(path.join(dir, "legacy.json")), true);
   // Even the matching installation needs an explicit home record, not merely a matching URL.
-  assert.throws(() => applyAppProxy("http://127.0.0.1:18791", ctx.A), /unknown/);
+  assert.throws(() => applyAppProxy("http://127.0.0.1:18791", ctx.A), /unknown|어느 설치가 설정했는지 확인할 수 없어/);
 });
 
 test("an unmarked Codex block goes on uninstall only with this home's service and ingress", () => {

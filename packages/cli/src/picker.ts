@@ -19,6 +19,8 @@ import { windowsPowerShellEnv } from "./windows-powershell.ts";
 import { homeDir } from "../../router/src/config.ts";
 import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { normalizeHome, sameHome } from "./ownership.ts";
+import { readOwners } from "./owners.ts";
+import { settingsPath } from "./settings.ts";
 import { verifiedDesktopService, type DesktopServiceDeps } from "./desktop-service.ts";
 
 export const CA_NAME = "ClaudeRipple local CA";
@@ -339,7 +341,7 @@ export function appProxyOwner(current: ReturnType<typeof currentAppProxy>, home:
   return "unknown";
 }
 
-/** Migrate a legacy entry only while its service definition and running instance prove this home. */
+/** A legacy entry needs both a verified service and an unambiguous single-installation history. */
 export function migrateLegacyAppProxy(proxyUrl: string, installationHome: string, deps: DesktopServiceDeps = {}): boolean {
   return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => migrateLegacyAppProxyLocked(proxyUrl, installationHome, deps));
 }
@@ -347,6 +349,13 @@ export function migrateLegacyAppProxy(proxyUrl: string, installationHome: string
 function migrateLegacyAppProxyLocked(proxyUrl: string, installationHome: string, deps: DesktopServiceDeps): boolean {
   const cur = currentAppProxy();
   if (!cur.ours || cur.installationHome !== undefined || cur.egressProxyUrl !== proxyUrl) return false;
+  // A live service proves who uses the port now, not who wrote this historical entry. Every
+  // recorded home counts, even when absent from disk; default/configured homes count when present.
+  const owners = readOwners(settingsPath());
+  const homes = [...Object.keys(owners.store.homes), ...[path.join(os.homedir(), ".clauderipple"), homeDir()].filter(home => fs.existsSync(home))];
+  if (owners.error || homes.some(home => !sameHome(home, installationHome))) {
+    throw new Error("구형 Claude Desktop 프록시를 어느 설치가 설정했는지 확인할 수 없어 보존했습니다. 다른 ClaudeRipple 설치와 설치 소유권 기록을 확인한 뒤 프록시 설정을 직접 해제해 주세요.");
+  }
   if (!verifiedDesktopService(installationHome, proxyUrl, deps)) return false;
   const meta = readMeta();
   writeJsonAtomic(path.join(configLibraryDir(), "_meta.json"), { ...meta, clauderipple: { ...meta.clauderipple, installationHome: normalizeHome(installationHome) } });
