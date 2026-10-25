@@ -164,7 +164,7 @@ function figures(frame: Frame, agent: AgentRec): Figure[] {
   if (tokens !== undefined) out.push({ key: 'tokens', label: t(L, 'agents.tokens'), value: compactNumber(tokens) })
   const cache = cachePercent(agent.usage)
   if (cache !== undefined) out.push({ key: 'cache', label: t(L, 'agents.cache'), value: cache + '%' })
-  if (agent.tools) out.push({ key: 'tools', label: t(L, 'agents.toolsLabel'), value: String(agent.tools) })
+  if (agent.tools) out.push({ key: 'tools', label: t(L, 'agents.toolsLabel'), value: compactNumber(agent.tools) })
   return out
 }
 
