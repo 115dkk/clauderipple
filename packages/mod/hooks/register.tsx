@@ -142,6 +142,8 @@ let judgeSequence = 0
 /** Jev's network blips and timeouts in a row. */
 let jevBlips = 0
 let generation = 0
+/** Preserve delivery order when transcript reads overlap; reset guards below reject stale work. */
+let receiveWork: Promise<void> = Promise.resolve()
 let carriedPick = false
 /**
  * An agent's end that came before its spawn was recorded, kept until the record lands. A worker
@@ -1551,9 +1553,13 @@ function agentsActions($: EngineInterface): AgentsActions {
     // surface that cannot scroll leaves it where it is.
     open: async id => {
       try {
-        const viewed = await $.ui.view({ agentId: id })
-        if (!viewed.deny) return
-        await report($, 'agents view', viewed.deny)
+        // The host's native transcript has no receipt rows. Keep captured instructions visible
+        // on the terminal too, rather than handing this conversation to that incomplete view.
+        if (!(await read($, agents)).find(a => a.id === id)?.instructions?.length) {
+          const viewed = await $.ui.view({ agentId: id })
+          if (!viewed.deny) return
+          await report($, 'agents view', viewed.deny)
+        }
       } catch (error) { await report($, 'agents view', error) }
       await update($, agentRunsOpen, () => [])
       await update($, agentOpen, () => id)
@@ -1577,7 +1583,8 @@ async function agentTalk($: EngineInterface, id: string): Promise<AgentTalk> {
     const found = await $.session.messages({ agentId: id })
     if (!Array.isArray(found)) return { deny: found.deny }
     const cwd = await $.session.cwd().catch(() => undefined)
-    return { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }) }
+    const instructions = (await read($, agents)).find(a => a.id === id)?.instructions ?? []
+    return { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }, instructions) }
   } catch (error) { return { deny: reason(error) } }
 }
 /** What an agent is doing, in the words its conversation's tool rows use (tools.ts toolDetail): no leading `cd`, paths short. */
@@ -1716,6 +1723,13 @@ export const register: Register = on => {
       if (['clear', 'resume', 'fork'].includes(e.source)) {
         generation++
         judgeSequence++
+        if (e.source === 'clear') {
+          endedEarly.clear()
+          await update($, agents, () => [])
+          await countAgents($)
+          await update($, agentOpen, () => null)
+          await update($, agentRunsOpen, () => [])
+        }
         await loadSettings($)
         await update($, busy, () => false)
         await update($, appEffort, () => null)
@@ -1754,6 +1768,28 @@ export const register: Register = on => {
       }
     } catch (error) { await report($, 'classic.Stop', error) }
     return next(e)
+  })
+  on('session.receive', { origin: { kind: 'coordinator' } }, async ($, e, next) => {
+    if (!e.agentId) return next(e)
+    const epoch = generation
+    const work = receiveWork.then(async () => {
+      if (epoch !== generation) return
+      const found = await $.session.messages({ agentId: e.agentId })
+      if (!Array.isArray(found)) throw new Error(found.deny)
+      if (epoch !== generation) return
+      // This event precedes queueing, not model consumption. SessionMessage has no stable id;
+      // the visible row count is an approximate receipt position, never a delivery assertion.
+      await update($, agents, list => list.map(a => {
+        if (a.id !== e.agentId || epoch !== generation) return a
+        const previous = a.instructions ?? []
+        return { ...a, instructions: [...previous, { text: e.text, after: found.length, ordinal: (previous.at(-1)?.ordinal ?? 0) + 1 }].slice(-20) }
+      }))
+    })
+    receiveWork = work.then(() => undefined, () => undefined)
+    try { await work }
+    catch (error) { await report($, 'agent instruction', error) }
+    // Even a broken state boundary or diagnostic logger must not block the actual message.
+    finally { return next(e) }
   })
   on('prompt.submit', async ($, e, next) => {
     // A background task's notification says it ended, and how (tasks.ts taskEnds).

@@ -213,7 +213,7 @@ export type SetupActions = {
 /** One entry of an agent's conversation as the pane draws it (agents.tsx `talkOf`). */
 export type AgentEntry =
   /** What it was asked: its first prompt, or a later message sent to it. */
-  | { kind: 'prompt'; text: string }
+  | { kind: 'prompt'; text: string; receipt?: number }
   /** Its own words. */
   | { kind: 'text'; text: string }
   /** A tool it called: the tool, a short line of its input, how it stands, and an edit's lines added and removed. */
