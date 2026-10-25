@@ -323,6 +323,16 @@ export function workingLine(view: SessionView, ui: UI, s?: SessionSummary): stri
   return `<div class="working">${stateRing("running", 16)}<span>${esc(t("running.for", { t: duration(ui.now - since) }))}</span></div>`;
 }
 
+/** The same confirmed task snapshot used by mobile, including completed tasks after the turn. */
+export function plan(s: SessionSummary | undefined, open: boolean): string {
+  const steps = s?.plan ?? [];
+  if (!steps.length) return "";
+  const done = steps.filter(step => step.status === "completed").length;
+  const current = steps.find(step => step.status === "in_progress") ?? steps.find(step => step.status === "pending");
+  const rows = open ? `<div class="tasks-list" role="list" aria-label="${esc(t("plan.title"))}">${steps.map(step => `<div class="task" role="listitem"><span>${esc(t(`plan.${step.status}`))}</span><span style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(step.text)}</span></div>`).join("")}</div>` : "";
+  return `${rows}<button class="tasks-chip" data-act="plan-toggle" aria-expanded="${open}">${esc(t("plan.title"))} ${done}/${steps.length}${current ? ` · ${esc(current.text)}` : ""}${open ? icon.down(14) : icon.chevron(14)}</button>`;
+}
+
 /** The background-task chip; with a task list from the host it opens to show what is running. */
 export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean): string {
   if (!s?.tasks) return "";

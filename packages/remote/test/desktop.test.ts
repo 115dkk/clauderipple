@@ -55,7 +55,7 @@ test("the turn's task list follows update_plan as the app applies it, and the ne
   plan({ advance: true });
   assert.deepEqual(tasks.plan, [], "an advance with no list changes nothing");
   plan({ scope: "first_task", items: [{ content: " Read the code ", status: "in_progress" }, { content: "", status: "pending" }, { content: "Fix it", status: "bogus" }, { content: "Test it", status: "pending" }] });
-  assert.deepEqual(tasks.plan, [{ text: "Read the code", status: "in_progress" }, { text: "Fix it", status: "pending" }, { text: "Test it", status: "pending" }]);
+  assert.deepEqual(tasks.plan, [{ text: " Read the code ", status: "in_progress" }, { text: "Fix it", status: "pending" }, { text: "Test it", status: "pending" }]);
   plan({ advance: true });
   assert.equal(statuses(), "cip");
   plan({ done: [2, 9], start: 3 }, true);
@@ -65,7 +65,7 @@ test("the turn's task list follows update_plan as the app applies it, and the ne
   plan({ advance: "true" });
   assert.equal(statuses(), "ccc");
   plan({ items: Array.from({ length: 15 }, (_, i) => ({ content: `step ${i}`, status: "pending" })), scope: "continuation" });
-  assert.equal(tasks.plan.length, 12);
+  assert.equal(tasks.plan.length, 15);
   tasks.accept(line({ type: "user", timestamp: "2026-10-23T01:00:00.000Z", origin: { kind: "human" }, message: { content: "next" } }));
   assert.deepEqual(tasks.plan, []);
 });

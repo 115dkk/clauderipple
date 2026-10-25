@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { TaskPlan } from "./task-plan.ts";
 import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
@@ -927,11 +928,11 @@ export class Sessions {
     const working = process?.status === "busy" || process?.status === "shell";
     const taskList = working ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
-    const plan = working ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : [];
+    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
     // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
     const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, plan, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { plan, ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -999,12 +1000,42 @@ export class Sessions {
     this.saveListState();
   }
 
+  private taskPlans = new Map<string, { log: EventLog; cursor: number; tracker: TaskPlan }>();
+
+  /** Replay only new durable events; a replaced epoch starts from its own list, not a previous session. */
+  private taskState(id: string): { log: EventLog; cursor: number; tracker: TaskPlan } {
+    let state = this.taskPlans.get(id);
+    if (this.shuttingDown && state) return state;
+    const log = this.log(id);
+    if (!state || state.log !== log) {
+      state = { log, cursor: 0, tracker: new TaskPlan() };
+      this.taskPlans.set(id, state);
+    }
+    const load = (text: import("./protocol.ts").Text): string => {
+      if (typeof text === "string") return text;
+      const value = log.blob(text.blob);
+      if (value === null) throw new Error("Task input blob is missing");
+      return value;
+    };
+    while (state.cursor < log.lastSeq) {
+      const page = log.readAfter(state.cursor);
+      for (const event of page.events) state.tracker.accept(event, load);
+      state.cursor = page.events.at(-1)?.seq ?? log.lastSeq;
+      if (!page.more) break;
+    }
+    return state;
+  }
+
   /** `touch` false: the host noticing a session is no longer live is not the session being used (a restart moved every old one to "now"). */
   private append(id: string, body: EventBody, touch = true): SessionEvent {
+    const beforePlan = this.taskPlans.get(id)?.tracker.version ?? 0;
     const event = this.log(id).append(body);
     const r = this.records.get(id);
+    const taskEvent = body.kind === "assistant" || body.kind === "tool_result" || body.kind === "user";
+    const planChanged = r && !r.desktopBridge && taskEvent && this.taskState(id).tracker.version !== beforePlan;
     if (r && touch) r.updatedAt = this.now();
     this.opts.onEvent(id, event);
+    if (planChanged) this.opts.onSessions();
     return event;
   }
 

@@ -105,6 +105,7 @@ export class App {
   private lastOpenPerm = "";
   private pinned = true;
   private tasksOpen = false;
+  private planOpen = false;
   private workerPath: V.WorkerSheet[] = [];
   private timelineSize: ResizeObserver | null = null;
   private imageUrls = new Map<string, Promise<string>>();
@@ -700,7 +701,7 @@ export class App {
     setHTML(top, V.sessionTop(this.ui, s, view));
     setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
     const perm = s?.readOnly ? "" : V.permCard(view, this.ui);
-    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.tasks(this.ui, s, this.tasksOpen));
+    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.plan(s, this.planOpen) + V.tasks(this.ui, s, this.tasksOpen));
     // Stop only when the host can hear it; offline the button sends (queues) instead.
     const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
     if (s?.readOnly) {
@@ -969,6 +970,7 @@ export class App {
       case "home": this.go({ name: "home" }); break;
       case "open": this.go({ name: "session", id }); break;
       case "toggle-tasks": this.tasksOpen = !this.tasksOpen; this.renderSession(true); break;
+      case "plan-toggle": this.planOpen = !this.planOpen; this.renderSession(true); break;
       case "send": {
         const ta = document.getElementById("input") as HTMLTextAreaElement | null;
         if (!ta) return;

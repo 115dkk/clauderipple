@@ -9,6 +9,8 @@ import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot
 import { fileImages, messageContent, sessionFileTool, type ImageSink } from "./images.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
+import { TaskPlan } from "./task-plan.ts";
+export { nextPlan } from "./task-plan.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
@@ -330,39 +332,6 @@ function withoutEffort(model: string): string {
   return model.replace(/@[^@]*$/, "");
 }
 
-/** The Code tab's own task-list tool; the app shows the list it keeps above the composer. */
-const PLAN_TOOL = "mcp__ccd_turn__update_plan";
-const PLAN_STEPS = 12;
-const PLAN_TEXT = 160;
-
-/** The task list after one accepted update_plan call, as the Claude app applies it (read from its
- * bundle, 2026-10-23): `items` replaces the whole list; otherwise `done` and `start` (1-based) mark
- * steps, and `advance` completes the step in progress and starts the next pending one. */
-export function nextPlan(steps: PlanStep[] | null, input: RecordValue): PlanStep[] | null {
-  if (Array.isArray(input.items)) {
-    const list = input.items.flatMap((value): PlanStep[] => {
-      const item = object(value);
-      const words = str(item?.content).trim().slice(0, PLAN_TEXT);
-      return words ? [{ text: words, status: item?.status === "completed" || item?.status === "in_progress" ? item.status : "pending" }] : [];
-    }).slice(0, PLAN_STEPS);
-    return list.length ? list : steps;
-  }
-  if (!steps) return null;
-  const next = steps.map(step => ({ ...step }));
-  const step = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= next.length ? next[n - 1] : undefined;
-  for (const n of Array.isArray(input.done) ? input.done : []) { const done = step(n); if (done) done.status = "completed"; }
-  const start = step(input.start);
-  if (start) start.status = "in_progress";
-  if (input.advance === true || input.advance === "true") {
-    const at = next.findIndex(s => s.status === "in_progress");
-    const current = next[at];
-    if (current) current.status = "completed";
-    const following = next.find((s, i) => i > at && s.status === "pending") ?? next.find(s => s.status === "pending");
-    if (following) following.status = "in_progress";
-  }
-  return next;
-}
-
 /** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks.
  * Also the main turn's start as the app counts it: the person's last message (origin "human"; compaction
  * summaries and task notifications are not), until the model ends its turn or the person interrupts,
@@ -371,12 +340,10 @@ export class BackgroundTasks {
   private tools = new Map<string, { name: string; background: boolean; label: string }>();
   private active = new Map<string, BackgroundTask>();
   private terminal = new Set<string>();
-  /** update_plan calls waiting for their result: the app refuses a malformed one, which changes nothing. */
-  private planCalls = new Map<string, RecordValue>();
-  private steps: PlanStep[] | null = null;
+  private planState = new TaskPlan();
   get count(): number { return this.active.size; }
   get list(): BackgroundTask[] { return Array.from(this.active.values()); }
-  get plan(): PlanStep[] { return this.steps ?? []; }
+  get plan(): PlanStep[] { return this.planState.list; }
   turnStartedAt: number | null = null;
 
   accept(line: string): void {
@@ -384,7 +351,10 @@ export class BackgroundTasks {
     if (!r || r.isSidechain === true) return;
     const content = object(r.message)?.content;
     const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
-    if (r.type === "user" && object(r.origin)?.kind === "human" && Number.isFinite(at)) { this.turnStartedAt = at; this.steps = null; }
+    if (r.type === "user" && object(r.origin)?.kind === "human") {
+      if (Number.isFinite(at)) this.turnStartedAt = at;
+      this.planState.newTurn();
+    }
     else if (r.type === "user" && typeof content === "string" && /^\[Request interrupted/.test(content)) this.turnStartedAt = null;
     else if (r.type === "assistant" && Array.isArray(content) && !content.some(b => object(b)?.type === "tool_use") &&
       ["end_turn", "stop_sequence"].includes(str(object(r.message)?.stop_reason))) this.turnStartedAt = null;
@@ -405,15 +375,9 @@ export class BackgroundTasks {
         if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: input?.run_in_background === true, label: str(input?.description) || str(input?.command) || name });
         // A task stopped with TaskStop gets no notification at all (seen 2026-10-16: a shell "running" four hours).
         if (name === "TaskStop") this.tools.set(b.id, { name, background: false, label: str(input?.task_id) || str(input?.shell_id) });
-        if (name === PLAN_TOOL && input) this.planCalls.set(b.id, input);
+        if (input) this.planState.call(b.id, name, input);
       }
-      const planCall = r.type === "user" && b?.type === "tool_result" ? str(b.tool_use_id) : "";
-      const plan = this.planCalls.get(planCall);
-      if (plan) {
-        this.planCalls.delete(planCall);
-        if (b?.is_error !== true) this.steps = nextPlan(this.steps, plan);
-        continue;
-      }
+      if (r.type === "user" && b?.type === "tool_result") this.planState.result(str(b.tool_use_id), b.is_error !== true, text(b.content));
       if (r.type !== "user" || b?.type !== "tool_result" || b.is_error === true) continue;
       const tool = this.tools.get(str(b.tool_use_id));
       if (!tool) continue;
@@ -475,7 +439,9 @@ export class DesktopSessions {
       if (live?.bridgeSessionId) {
         const working = live.status === "busy" || live.status === "shell";
         const taskList = working ? this.backgroundTaskList(s.summary.id) : [];
-        s.summary = { ...s.summary, tasks: taskList.length, taskList, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null, plan: working ? this.plan(s.summary.id) : [] };
+        s.summary = { ...s.summary, tasks: taskList.length, taskList, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null, plan: this.plan(s.summary.id) };
+      } else if (this.imported.has(s.summary.id) || this.tasks.has(s.summary.id)) {
+        s.summary = { ...s.summary, plan: this.plan(s.summary.id) };
       }
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
@@ -717,7 +683,14 @@ export class DesktopSessions {
   private scan(id: string): BackgroundTasks | null {
     const source = this.sources.get(id);
     if (!source) return null;
-    const fd = this.open(source.file);
+    let fd: number;
+    try { fd = this.open(source.file); }
+    catch (error) {
+      if (!missing(error)) throw error;
+      this.sources.delete(id);
+      this.tasks.delete(id);
+      return null;
+    }
     try {
       const size = fs.fstatSync(fd).size;
       let cached = this.tasks.get(id);

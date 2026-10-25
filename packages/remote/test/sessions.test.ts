@@ -134,6 +134,30 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
 
+test("SDK task snapshots normalize confirmed tools, survive turn completion and rebuild after restart", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const tool = (call: string, name: string, input: Record<string, unknown>, text: string) => {
+    query.emit({ type: "assistant", message: { id: call, model: "sol", content: [{ type: "tool_use", id: call, name, input }] } });
+    query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: call, content: text }] } });
+  };
+  tool("create", "TaskCreate", { subject: "First\nexact subject" }, "Task #1 created successfully: First");
+  tool("start", "TaskUpdate", { taskId: "1", status: "in_progress" }, "Updated task #1 status");
+  await waitFor(() => f.sessions.summaryOf(id)?.plan?.[0]?.status === "in_progress");
+  tool("done", "TaskUpdate", { taskId: "1", status: "completed" }, "Updated task #1 status");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const expected = [{ id: "1", text: "First\nexact subject", status: "completed" }];
+  assert.deepEqual(f.sessions.summaryOf(id)?.plan, expected);
+  f.sessions.stop(id); await nextTick();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  assert.deepEqual(recovered.summaryOf(id)?.plan, expected);
+});
+
 test("nested SDK workers publish launch, progress and terminal status only in their parent's log", async t => {
   const boundary = controlledQueries();
   const f = fixture(t, {}, { queryFn: boundary.queryFn });
