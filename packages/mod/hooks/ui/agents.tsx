@@ -906,32 +906,26 @@ function runDrawn(el: Els, frame: Frame, calls: readonly ToolCall[], agentLive: 
   const chev = open ? '⌄' : '›'
   // The words take what the chip and the chevron leave, cut by the desktop's own measure.
   const room = frame.columns - 1 - (chip ? Math.ceil(chip.width / CELL_PX) + 1 : 0) - 2
-  // The words and the chevron sit in unkeyed Boxes: a keyed Box is a hover scope of its own, and the
-  // press laid over the row is on `head`, so only `head` sees the pointer anywhere along the line.
+  // The press laid over `head` is the line's only hover: the button's own light behind the whole
+  // line. The words used to light as well, and the two fought under a still pointer — the line
+  // flickered (2026-10-25). The press is drawn wider than the line and clipped to it: sized to the
+  // line by a space count, it fell short of the page's type and left "편집함 파일 …" unpressable.
   return (
     <Box key={'run-' + id} flexDirection="column" rowGap={0.5} minWidth={0}>
       <Box key="head" flexDirection="row" alignItems="center" columnGap={1} minWidth={0}>
         <Box flexShrink={1} minWidth={0} overflow="hidden">
-          <Text {...k.sub} hover={RUN_HOVER} wrap="truncate-end">{clipCh(summary.text, room)}</Text>
+          <Text {...k.sub} wrap="truncate-end">{clipCh(summary.text, room)}</Text>
         </Box>
         {chip && diff ? <Box key="diff" flexShrink={0}>{pic(el, 'diff-' + id, chip.source, t(frame.lang, 'agents.diff', { added: diff.added, removed: diff.removed }), chip.width, DIFF_H)}</Box> : null}
         <Box flexShrink={0}>
-          <Text {...k.mute} hover={RUN_HOVER}>{chev}</Text>
+          <Text {...k.mute}>{chev}</Text>
         </Box>
-        {press(el, 'run-' + id, (frame.columns - 2) * CELL_PX, () => onToggle(id))}
+        {press(el, 'run-' + id, frame.columns * CELL_PX * 1.6, () => onToggle(id))}
       </Box>
       {open ? <Box key="calls" flexDirection="column" minWidth={0}>{shownCalls(calls, open, inFlight).map(call => toolRow(el, frame, call, agentLive, 1, call === inFlight ? since : undefined))}</Box> : null}
     </Box>
   )
 }
-
-/**
- * A run's line under the pointer, as the app lights its own (`text-muted-as-secondary
- * hover:text-primary`, its bundle 2026-10-24): the quiet words take the page's own ink, no light
- * behind them. `inherit` is that ink on either theme; a theme key would follow the terminal's
- * theme, not the app's, and a surface that takes neither leaves the words quiet.
- */
-const RUN_HOVER = { color: 'inherit' }
 
 /** A boxed block on the page: its answer, edged in its result's colour. */
 function block(el: Els, frame: Frame, key: string, label: RenderNode, text: string, edge = 'rgba(128,124,116,0.32)'): RenderNode {
