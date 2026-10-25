@@ -125,7 +125,7 @@ export function specFor(opts: { script: string; claudePath: string | undefined; 
   };
 }
 
-type Run = (cmd: string, args: string[]) => { status: number; out: string };
+export type Run = (cmd: string, args: string[]) => { status: number; out: string };
 const runSync: Run = (cmd, args) => {
   try { return { status: 0, out: execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) }; } catch (e) {
     const err = e as { status?: number; stdout?: string; stderr?: string };
@@ -158,14 +158,22 @@ export function install(spec: PlistSpec, run: Run = runSync, p: Paths = paths())
   return done;
 }
 
-export function uninstall(run: Run = runSync, p: Paths = paths()): string[] {
+export type ServiceRemoval = { state: "removed" | "absent"; lines: string[] } | { state: "lookup-failed" | "stop-failed"; detail: string };
+
+export function uninstall(run: Run = runSync, p: Paths = paths()): ServiceRemoval {
   const done: string[] = [];
-  if (run("/bin/launchctl", ["print", `${domain()}/${LABEL}`]).status === 0) {
+  const missing = (r: { status: number; out: string }) => r.status === 113 || /could not find service|service .*not found/i.test(r.out);
+  const lookup = run("/bin/launchctl", ["print", `${domain()}/${LABEL}`]);
+  if (lookup.status !== 0 && !missing(lookup)) return { state: "lookup-failed", detail: "휴대폰 호스트의 서비스 상태를 확인하지 못해 서비스 정의를 보존했습니다." };
+  if (lookup.status === 0) {
     const r = run("/bin/launchctl", ["bootout", `${domain()}/${LABEL}`]);
-    done.push(r.status === 0 ? `stopped ${LABEL}` : `launchctl bootout said (${r.status}): ${r.out.trim()}`);
+    if (r.status !== 0 && !missing(r)) return { state: "stop-failed", detail: "휴대폰 호스트의 서비스를 해제하지 못해 서비스 정의를 보존했습니다." };
+    done.push(`stopped ${LABEL}`);
   } else done.push(`${LABEL} was not loaded`);
-  if (fs.existsSync(p.plist)) { fs.rmSync(p.plist); done.push(`removed ${p.plist}`); }
-  return done;
+  if (!fs.existsSync(p.plist)) return { state: "absent", lines: done };
+  fs.rmSync(p.plist);
+  done.push(`removed ${p.plist}`);
+  return { state: "removed", lines: done };
 }
 
 /** `launchctl print` is not a stable interface; only the two lines a person needs are read, and the raw state is shown as is. */

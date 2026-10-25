@@ -76,6 +76,20 @@ test("install replaces a loaded agent and bootstraps; uninstall boots out and re
   assert.equal(fs.existsSync(p.plist), false);
 });
 
+test("host uninstall preserves its definition on launchctl lookup or bootout failures", t => {
+  const dir = tmp(t);
+  const p = { home: dir, plist: path.join(dir, "host.plist"), log: path.join(dir, "host.log") };
+  for (const failure of ["print", "bootout"]) {
+    fs.writeFileSync(p.plist, "owned definition");
+    const result = uninstall((_cmd, args) => ({ status: args[0] === failure ? 1 : 0, out: "permission denied" }), p);
+    assert.equal(result.state, failure === "print" ? "lookup-failed" : "stop-failed");
+    assert.equal(fs.readFileSync(p.plist, "utf8"), "owned definition");
+  }
+  const result = uninstall(() => ({ status: 113, out: "" }), p);
+  assert.equal(result.state, "removed");
+  assert.equal(fs.existsSync(p.plist), false);
+});
+
 test("install retries a bootstrap launchd refuses while the old agent is still going away", (t) => {
   const dir = tmp(t);
   const p = { home: dir, plist: path.join(dir, "LaunchAgents", `${LABEL}.plist`), log: path.join(dir, "logs", "host.log") };

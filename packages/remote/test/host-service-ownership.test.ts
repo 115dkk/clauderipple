@@ -8,7 +8,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hostServiceOwnership, uninstallService } from "../src/host-service.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { hostServiceOwnership, servicePaths, uninstallService } from "../src/host-service.ts";
 
 const home = "/tmp/cr-host-install-a";
 const other = "/tmp/cr-host-install-b";
@@ -25,6 +28,18 @@ ${recorded === null ? "" : `    <key>CLAUDERIPPLE_HOME</key><string>${recorded}<
 `;
 const unit = (recorded: string | null): string => `[Unit]\nDescription=Ripple Remote host\n\n[Service]\nExecStart="/n" "/s"\n${recorded === null ? "" : `Environment="CLAUDERIPPLE_HOME=${recorded}"`}\n`;
 const launcher = (recorded: string): string => `﻿# Ripple Remote host\r\n$env:CLAUDERIPPLE_HOME = '${recorded}'\r\n`;
+
+test("macOS host removal propagates lookup and bootout failures without deleting the definition", async t => {
+  const userHome = fs.mkdtempSync(path.join(os.tmpdir(), "cr-host-remove-"));
+  t.after(() => fs.rmSync(userHome, { recursive: true, force: true }));
+  const file = servicePaths("darwin", userHome).definition;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  for (const failure of ["print", "bootout"]) {
+    fs.writeFileSync(file, plist(home));
+    await assert.rejects(uninstallService({ platform: "darwin", installationHome: home, userHome, launchctl: (_cmd, args) => ({ status: args[0] === failure ? 1 : 0, out: "permission denied" }) }), /보존했습니다/);
+    assert.equal(fs.readFileSync(file, "utf8"), plist(home));
+  }
+});
 
 test("the host service records the installation home it was written for", () => {
   for (const [platform, text] of [["darwin", plist(home)], ["linux", unit(home)], ["win32", launcher(home)]] as const) {

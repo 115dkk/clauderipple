@@ -182,6 +182,8 @@ export async function installService(spec: Spec): Promise<string[]> {
 /** What a caller may inject so an uninstall can be tested without launchd, systemd or PowerShell. */
 export type HostServiceDeps = {
   platform?: NodeJS.Platform;
+  userHome?: string;
+  launchctl?: launchd.Run;
   installationHome?: string;
   readDefinition?: () => string | null;
   stop?: () => Promise<void> | void;
@@ -199,7 +201,7 @@ export type HostServiceDeps = {
 export async function uninstallService(deps: HostServiceDeps = {}): Promise<string[]> {
   const platform = deps.platform ?? process.platform;
   const home = deps.installationHome ?? defaultInstallationHome();
-  const p = servicePaths(platform);
+  const p = servicePaths(platform, deps.userHome);
   let text: string | null;
   try {
     text = (deps.readDefinition ?? (() => readDefinition(p.definition)))();
@@ -214,8 +216,9 @@ export async function uninstallService(deps: HostServiceDeps = {}): Promise<stri
   }
   const lines: string[] = [];
   if (!deps.stop && !deps.removeDefinition && platform === "darwin") {
-    lines.push(...launchd.uninstall());
-    return lines;
+    const result = launchd.uninstall(deps.launchctl, launchd.paths(deps.userHome));
+    if ("detail" in result) throw new Error(result.detail);
+    return result.lines;
   }
   if (deps.stop) await deps.stop();
   else if (platform === "win32") {
