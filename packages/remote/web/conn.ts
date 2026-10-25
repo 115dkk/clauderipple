@@ -66,6 +66,12 @@ export class Link {
   private readyTimer: unknown = null;
   private pingN = 0;
   private stopped = false;
+  /**
+   * Bumped whenever the timers are dropped. A callback already queued when its timer was cleared
+   * still runs (setTimeout cannot cancel what already fired), so it checks the epoch first: this is
+   * what keeps a stop, a foreground return or a nudge from reviving an old retry or countdown.
+   */
+  private epoch = 0;
 
   constructor(deps: LinkDeps) { this.deps = deps; }
 
@@ -74,15 +80,13 @@ export class Link {
   stop(): void {
     this.stopped = true;
     this.clearAll();
-    this.sock?.close(1000, "stop");
-    this.sock = null;
+    this.dropSocket(1000, "stop");
   }
 
   /** Network came back, app came to the front, or the user pressed "retry now". */
   nudge(): void {
     if (this.stopped || this.status.state === "denied") return;
     if (this.status.state === "open") { this.ping(); return; }
-    this.clearAll();
     this.connect();
   }
 
@@ -107,18 +111,35 @@ export class Link {
   }
 
   private clearAll(): void {
+    this.epoch++;
     for (const id of [this.retryTimer, this.tickTimer, this.pingTimer, this.readyTimer]) if (id !== null) this.deps.clearTimer(id);
     this.retryTimer = this.tickTimer = this.pingTimer = this.readyTimer = null;
   }
 
+  /** Forget the current socket before closing it, so its late close is not read as a live failure. */
+  private dropSocket(code: number, reason: string): void {
+    const sock = this.sock;
+    if (!sock) return;
+    this.sock = null;
+    try { sock.close(code, reason); } catch { /* already gone */ }
+  }
+
   private connect(): void {
     if (this.stopped) return;
+    // One attempt at a time: a nudge or restart abandons the socket still connecting instead of
+    // leaving it open beside the new one.
+    this.dropSocket(1000, "retry");
+    this.clearAll();
+    const epoch = this.epoch;
     if (!this.deps.isOnline()) {
       this.set({ state: "offline", nextAt: null, downSince: this.status.downSince ?? this.deps.now() });
+      // onStatus is the app's callback: it may have stopped or nudged the link just now.
+      if (this.epoch !== epoch) return;
       this.schedule();
       return;
     }
     this.set({ state: "connecting", nextAt: null });
+    if (this.epoch !== epoch) return;
     let sock: SocketLike;
     try { sock = this.deps.makeSocket(this.deps.url); } catch { this.fail(); return; }
     this.sock = sock;
@@ -132,8 +153,11 @@ export class Link {
     // From creation, not from open: a connect that hangs (a dead address after a network switch)
     // may fire neither open nor close for minutes.
     this.readyTimer = this.deps.setTimer(() => {
+      // Only this socket's own timeout may clear the reference first: a queued old one would forget
+      // the live connect timeout, and stop() could then leave it running.
+      if (this.sock !== sock) return;
       this.readyTimer = null;
-      if (authed || this.sock !== sock) return;
+      if (authed) return;
       this.sock = null;
       try { sock.close(4002, "no ready"); } catch { /* gone */ }
       this.fail();
@@ -164,26 +188,41 @@ export class Link {
   private fail(): void {
     this.sock = null;
     this.clearAll();
+    const epoch = this.epoch;
     if (this.stopped || this.status.state === "denied") return;
     this.set({ attempt: this.status.attempt + 1, downSince: this.status.downSince ?? this.deps.now() });
+    if (this.epoch !== epoch) return;
     this.schedule();
   }
 
   private schedule(): void {
+    const epoch = this.epoch;
     const wait = backoff(this.status.attempt);
     const nextAt = this.deps.now() + wait;
-    if (this.status.state !== "offline") this.set({ state: "waiting", nextAt });
-    this.retryTimer = this.deps.setTimer(() => { this.retryTimer = null; this.connect(); }, wait);
+    if (this.status.state !== "offline") {
+      this.set({ state: "waiting", nextAt });
+      if (this.epoch !== epoch) return;
+    }
+    this.retryTimer = this.deps.setTimer(() => {
+      if (this.epoch !== epoch) return;
+      this.retryTimer = null;
+      this.connect();
+    }, wait);
     const tick = (): void => {
+      if (this.epoch !== epoch) return;
       this.onStatus(this.status);
+      if (this.epoch !== epoch) return;
       this.tickTimer = this.deps.setTimer(tick, 1000);
     };
     this.tickTimer = this.deps.setTimer(tick, 1000);
   }
 
   private armPing(): void {
+    const epoch = this.epoch;
     const loop = (): void => {
+      if (this.epoch !== epoch) return;
       this.ping();
+      if (this.epoch !== epoch) return;
       this.pingTimer = this.deps.setTimer(loop, PING_MS);
     };
     this.pingTimer = this.deps.setTimer(loop, PING_MS);

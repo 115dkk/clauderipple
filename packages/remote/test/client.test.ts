@@ -23,6 +23,9 @@ class Clock {
   private next = 1;
   set = (fn: () => void, ms: number): number => { const id = this.next++; this.timers.push({ at: this.now + ms, fn, id }); return id; };
   clear = (id: unknown): void => { this.timers = this.timers.filter((t) => t.id !== id); };
+  count = (): number => this.timers.length;
+  /** Callbacks already queued when a timer is cleared still run in a browser; hand them out to fire late. */
+  take = (): (() => void)[] => { const fns = this.timers.map((t) => t.fn); this.timers = []; return fns; };
   advance(ms: number): void {
     const end = this.now + ms;
     for (;;) {
@@ -170,6 +173,154 @@ test("offline waits without opening sockets, and nudge reconnects at once when b
   link.nudge();
   assert.equal(sockets.length, 1);
   assert.equal(link.status.state, "connecting");
+});
+
+// 2026-10-25 audit: each retry while offline started another countdown tick without stopping the
+// previous one. 60 s offline left 62 timers, stop() cleared only the newest pair and 61 kept
+// running; a foreground return could then open a socket per stale chain.
+test("an offline wait keeps exactly one retry timer and one countdown tick", () => {
+  const online = { value: false };
+  const { clock, link } = setup(online);
+  link.start();
+  assert.equal(clock.count(), 2, "one retry and one tick");
+  clock.advance(60_000);
+  assert.ok(link.status.attempt === 0, "offline attempts do not escalate");
+  assert.equal(clock.count(), 2, "60 s of retries is still one retry and one tick");
+});
+
+test("stop leaves no timers behind, and a callback already queued cannot revive them", () => {
+  const online = { value: false };
+  const { clock, sockets, link } = setup(online);
+  link.start();
+  clock.advance(10_000);
+  const queued = clock.take();
+  link.stop();
+  assert.equal(clock.count(), 0);
+  for (const fn of queued) fn();
+  assert.equal(clock.count(), 0, "a stale retry or tick callback is ignored");
+  clock.advance(2 * 60_000);
+  assert.equal(clock.count(), 0);
+  assert.equal(sockets.length, 0, "a stopped link opens nothing");
+});
+
+test("a retry queued before the app returns cannot open a second socket", () => {
+  const online = { value: false };
+  const { clock, sockets, link } = setup(online);
+  link.start();
+  clock.advance(1000); // the first offline retry ran; the next one is pending
+  const queued = clock.take();
+  online.value = true;
+  link.foreground();
+  assert.equal(sockets.length, 1, "one reconnect");
+  for (const fn of queued) fn();
+  assert.equal(sockets.length, 1, "the stale retry is not a second attempt");
+  assert.equal(clock.count(), 1, "only the connect timeout remains; no stale tick re-arms");
+});
+
+test("foreground from a long offline wait reconnects once and opens on ready", () => {
+  const online = { value: false };
+  const { clock, sockets, link } = setup(online);
+  link.start();
+  clock.advance(30_000);
+  online.value = true;
+  link.foreground();
+  assert.equal(sockets.length, 1);
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  assert.equal(link.status.state, "open");
+  assert.equal(link.status.attempt, 0);
+  assert.equal(link.status.downSince, null);
+  for (let i = 0; i < 6; i++) { clock.advance(PING_MS); sockets[0]!.recv({ t: "pong", n: i }); }
+  assert.equal(sockets.length, 1, "a healthy minute opens no duplicate socket");
+});
+
+test("a nudge during a connect closes the abandoned socket instead of leaving two open", () => {
+  const { sockets, link } = setup();
+  link.start();
+  assert.equal(sockets.length, 1);
+  link.nudge();
+  assert.equal(sockets.length, 2, "a fresh attempt");
+  assert.equal(sockets[0]!.closed, true, "the first attempt is closed, not orphaned");
+  assert.equal(sockets[1]!.closed, false);
+  sockets[1]!.open();
+  sockets[1]!.recv(ready);
+  assert.equal(link.status.state, "open");
+  assert.equal(link.status.attempt, 0);
+});
+
+test("a late close from an abandoned socket does not disturb the live attempt", () => {
+  const { sockets, link } = setup();
+  link.start();
+  const old = sockets[0]!;
+  link.nudge();
+  sockets[1]!.open();
+  sockets[1]!.recv(ready);
+  old.close();
+  assert.equal(link.status.state, "open");
+  assert.equal(link.status.attempt, 0);
+  assert.equal(sockets.length, 2);
+});
+
+test("a ready timeout already queued cannot forget the live connection's timer", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  const queued = clock.take(); // the first connect's timeout was already due when it was cleared
+  link.nudge();
+  assert.equal(sockets.length, 2);
+  for (const fn of queued) fn();
+  link.stop();
+  assert.equal(clock.count(), 0, "stop still owns the live connect timeout");
+  assert.equal(sockets[1]!.closed, true);
+});
+
+test("a ping that finds the link stale does not re-arm its own chain", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  clock.advance(STALE_MS + PING_MS);
+  assert.equal(sockets[0]!.closed, true);
+  assert.equal(link.status.state, "waiting");
+  assert.equal(clock.count(), 2, "one retry and one tick only");
+  link.stop();
+  assert.equal(clock.count(), 0);
+});
+
+test("a status callback that stops the link cannot leave the countdown re-armed", () => {
+  const online = { value: false };
+  const { clock, link } = setup(online);
+  let calls = 0;
+  link.onStatus = () => { if (++calls === 2) link.stop(); };
+  link.start(); // #1: offline
+  clock.advance(1000); // the first tick calls onStatus #2, which stops the link
+  assert.equal(link.status.state, "offline");
+  assert.equal(clock.count(), 0);
+});
+
+test("a status callback that nudges does not leave a second countdown chain", () => {
+  const online = { value: false };
+  const { clock, link } = setup(online);
+  let calls = 0;
+  link.onStatus = () => { if (++calls === 2) link.nudge(); };
+  link.start();
+  clock.advance(1000);
+  assert.equal(clock.count(), 2, "one retry and one tick after the nudge");
+});
+
+test("a status callback that stops during a connect opens no socket and arms nothing", () => {
+  const { clock, sockets, link } = setup();
+  link.onStatus = () => { if (link.status.state === "connecting") link.stop(); };
+  link.start();
+  assert.equal(sockets.length, 0);
+  assert.equal(clock.count(), 0);
+});
+
+test("a status callback that stops while offline arms no retry", () => {
+  const online = { value: false };
+  const { clock, link } = setup(online);
+  link.onStatus = () => { if (link.status.state === "offline") link.stop(); };
+  link.start();
+  assert.equal(clock.count(), 0);
 });
 
 test("send() refuses while not open, so the outbox keeps the message", () => {
