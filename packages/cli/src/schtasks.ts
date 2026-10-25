@@ -17,12 +17,32 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { homeDir } from "../../router/src/config.ts";
+import { type AgentRemove, type AgentStart, type AgentStop, type Ownership, launcherHome, ownerOf } from "./ownership.ts";
+import { type RouterIdentity, routerIdentity } from "./router-state.ts";
+import { runtime } from "./runtime.ts";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
 export const TASK_NAME = "ClaudeRippleRouter";
 
 export function taskName(): string {
   return process.env.CLAUDERIPPLE_TASK_NAME ?? TASK_NAME;
+}
+
+/**
+ * What a caller may inject: the registered definition, the router pid under that task's launcher,
+ * and one PowerShell invocation. Tests use these so no Task Scheduler, PowerShell or real process
+ * is ever touched; production passes none.
+ */
+export type TaskDeps = {
+  name?: string;
+  definition?: () => unknown;
+  routerPid?: () => number | null;
+  run?: (script: string) => { ok: boolean; out: string };
+};
+
+function invoke(script: string, deps: TaskDeps): { ok: boolean; out: string } {
+  return (deps.run ?? run)(script);
 }
 
 /** Single-quoted PowerShell literal; the only escape inside one is a doubled quote. */
@@ -165,26 +185,74 @@ export function writeLauncher(opts: { program: string; args: string[]; home: str
  * DisallowStartIfOnBatteries/StopIfGoingOnBatteries to false — so reading the switch names gave
  * null, and until #38 no existing task ever matched: every install re-registered.
  */
-export function existingTaskDefinition(name = taskName()): unknown {
-  const existing = run(
+/** A task definition read: truly missing, found, or unreadable. Only the first is "absent". */
+export type TaskDefinitionRead = { state: "absent" | "found" | "error"; definition?: unknown; error?: string };
+
+/**
+ * Reads the registered task without collapsing failures into "no task": an unreadable definition
+ * must make install refuse to replace it, not look like a fresh machine (B01).
+ */
+export function readTaskDefinition(name = taskName(), deps: TaskDeps = {}): TaskDefinitionRead {
+  if (deps.definition) {
+    const definition = deps.definition();
+    return definition === null || definition === undefined ? { state: "absent" } : { state: "found", definition };
+  }
+  const existing = invoke(
     [
-      `$t = Get-ScheduledTask -TaskName ${ps(name)} -ErrorAction SilentlyContinue`,
-      `if ($null -eq $t) { 'null'; exit 0 }`,
+      `$ErrorActionPreference = 'Stop'`,
+      // Enumerate successfully before deciding "absent": a named query with SilentlyContinue also
+      // returns null on access denied, which would let registration overwrite an unreadable task.
+      `$tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq ${ps(name)} })`,
+      `if ($tasks.Count -eq 0) { 'null'; exit 0 }`,
+      `if ($tasks.Count -ne 1) { throw 'ambiguous scheduled task name' }; $t = $tasks[0]`,
       `$a = @($t.Actions); $p = $t.Principal; $tr = @($t.Triggers); $s = $t.Settings`,
       `[pscustomobject]@{ actionCount = $a.Count; execute = $a[0].Execute; arguments = $a[0].Arguments; userId = $p.UserId; runLevel = [int]$p.RunLevel; logonType = [int]$p.LogonType; triggerCount = $tr.Count; triggerType = $tr[0].CimClass.CimClassName; triggerUserId = $tr[0].UserId; restartCount = $s.RestartCount; restartInterval = [string]$s.RestartInterval; executionTimeLimit = [string]$s.ExecutionTimeLimit; multipleInstances = [int]$s.MultipleInstances; allowStartIfOnBatteries = $s.DisallowStartIfOnBatteries -eq $false; dontStopIfGoingOnBatteries = $s.StopIfGoingOnBatteries -eq $false } | ConvertTo-Json -Compress`,
     ].join("; "),
+    deps,
   );
-  if (!existing.ok) return null;
+  if (!existing.ok) return { state: "error", error: existing.out || "Get-ScheduledTask failed" };
+  const text = existing.out.trim();
+  if (text === "null") return { state: "absent" };
   try {
-    return JSON.parse(existing.out);
-  } catch {
-    // A malformed inspection result is not trusted; the caller falls through to registration.
-    return null;
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed === null) return { state: "absent" };
+    return { state: "found", definition: parsed };
+  } catch (error) {
+    // A malformed inspection result is not trusted: an error, never "no task".
+    return { state: "error", error: `unreadable task definition: ${(error as Error).message}` };
   }
 }
 
-export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string>; name?: string }): string {
-  const name = opts.name ?? taskName();
+/** The registered task in the shape taskDefinitionMatches reads, or null when absent/unreadable. */
+export function existingTaskDefinition(name = taskName(), deps: TaskDeps = {}): unknown {
+  const read = readTaskDefinition(name, deps);
+  if (read.state === "error") throw new Error(`scheduled task lookup failed: ${read.error}`);
+  return read.state === "found" ? read.definition : null;
+}
+
+/** Who the task registered under this name belongs to (B01). */
+export function taskOwnership(home: string = homeDir(), deps: TaskDeps = {}): Ownership {
+  const read = readTaskDefinition(deps.name ?? taskName(), deps);
+  if (read.state === "absent") return { state: "absent", home: null };
+  // An unreadable definition says nothing about ownership: never treat it as "no task".
+  if (read.state === "error") return { state: "unknown", home: null };
+  const args = (read.definition as { arguments?: unknown }).arguments;
+  return ownerOf(typeof args === "string" ? launcherHome(args) : null, home);
+}
+
+export function installAgent(opts: { program: string; args?: string[]; home: string; env?: Record<string, string>; name?: string }, deps: TaskDeps = {}): string {
+  const name = opts.name ?? deps.name ?? taskName();
+  // Before the launcher and the registration: a same-named task may belong to another home (B01),
+  // and a definition that cannot be read must not be replaced as if there were none.
+  const read = readTaskDefinition(name, deps);
+  if (read.state === "error") throw new Error(`could not read the scheduled task ${name} (${read.error}); refusing to replace it`);
+  const owner = taskOwnership(opts.home, { ...deps, name, definition: () => read.definition ?? null });
+  if (owner.state === "other") {
+    throw new Error(`the scheduled task ${name} belongs to another ClaudeRipple installation (${owner.home}); remove it with that installation's uninstall, or use its own task name for this one`);
+  }
+  if (owner.state === "unknown") {
+    throw new Error(`the scheduled task ${name} does not record an installation, so it cannot be identified; refusing to replace it`);
+  }
   const launcher = writeLauncher({ ...opts, args: opts.args ?? [] });
   const user = taskUser();
   const powershellArgs = `-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${launcher}"`;
@@ -195,14 +263,14 @@ export function installAgent(opts: { program: string; args?: string[]; home: str
   // for `powershell.exe`, none for `conhost.exe --headless powershell.exe`, and both ran the script).
   const execute = "conhost.exe";
   const actionArgs = `--headless powershell.exe ${powershellArgs}`;
-  const existing = existingTaskDefinition(name);
+  const existing = read.definition ?? null;
   // Updating the generated launcher does not require re-registering an otherwise correct task.
   // Some Windows installations protect an existing per-user task's security descriptor so that
   // even the same unelevated user gets E_ACCESSDENIED from Register-ScheduledTask -Force. Treat the
   // verified existing definition as success; never silently accept a same-named foreign task.
   if (taskDefinitionMatches(existing, { execute, arguments: actionArgs, userId: user })) return launcher;
   const script = renderTaskRegistration(name, user, execute, actionArgs);
-  const r = run(script);
+  const r = invoke(script, deps);
   if (!r.ok) {
     // Retain the pre-headless task only when its entire definition matches.
     if (taskDefinitionMatches(existing, { execute: "powershell.exe", arguments: powershellArgs, userId: user })) return launcher;
@@ -224,14 +292,32 @@ export function renderTaskRegistration(name: string, user: string, execute: stri
   ].join("; ");
 }
 
-export function removeAgent(name = taskName()): boolean {
-  const r = run(`Unregister-ScheduledTask -TaskName ${ps(name)} -Confirm:$false -ErrorAction Stop; 'ok'`);
-  return r.ok;
+export function removeAgent(name = taskName(), opts: { home?: string; deps?: TaskDeps; identity?: (expectedPid: number | null) => RouterIdentity } = {}): AgentRemove {
+  const deps = opts.deps ?? {};
+  const home = opts.home ?? homeDir();
+  const owner = taskOwnership(home, { ...deps, name });
+  if (owner.state === "absent") return "absent";
+  if (owner.state === "other") return "other-installation";
+  if (owner.state === "unknown") return "ownership-unknown";
+  // Unregistering a running task terminates it. A same-named task whose definition points here is
+  // not proof that the running instance is this installation's (the registration can have been
+  // replaced, or an older generation started), so a running task must prove both its installation
+  // id and the pid under its own launcher.
+  if (agentState(name, deps) === "running") {
+    const who = (opts.identity ?? ((expectedPid) => routerIdentity(home, { expectedPid })))(
+      taskRouterPid(name, { home, deps }),
+    );
+    if (who === "other") return "other-installation";
+    if (who !== "ours") return "identity-unknown";
+  }
+  const removed = invoke(`Unregister-ScheduledTask -TaskName ${ps(name)} -Confirm:$false -ErrorAction Stop; 'ok'`, deps);
+  if (!removed.ok) throw new Error(`scheduled task removal failed: ${removed.out}`);
+  return "removed";
 }
 
-export function agentState(name = taskName()): "running" | "loaded" | "not-loaded" {
-  const r = run(`(Get-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop).State`);
-  if (!r.ok) return "not-loaded";
+export function agentState(name = taskName(), deps: TaskDeps = {}): "running" | "loaded" | "not-loaded" {
+  const r = invoke(`(Get-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop).State`, deps);
+  if (!r.ok) throw new Error(`scheduled task state lookup failed: ${r.out}`);
   return /^Running/im.test(r.out) ? "running" : "loaded";
 }
 
@@ -243,15 +329,81 @@ export function agentState(name = taskName()): "running" | "loaded" | "not-loade
  * install `restart` found no router, skipped the shutdown, and `Start-ScheduledTask` was ignored
  * by the task already running: "Restart Router" never restarted anything (found 2026-09-16).
  */
-export function agentPid(): number | null {
-  const r = run(
+/**
+ * The router's pid, for display only. Never used to wait on, stop or signal a process: when two
+ * installations share one runtime their router command lines are identical, so this can name the
+ * other home's process. Stop/restart use this installation's admin port (router-state.ts) instead.
+ */
+export function agentPid(name = taskName(), opts: { home?: string; expectedRouter?: string; deps?: TaskDeps } = {}): number | null {
+  const deps = opts.deps ?? {};
+  // Without our own definition the running router could be any installation's (B01/D6): never
+  // hand its pid to a caller that will wait on it or stop it.
+  if (taskOwnership(opts.home ?? homeDir(), { ...deps, name }).state !== "ours") return null;
+  const r = invoke(
     // Three layouts run the same router: a checkout (packages\router\src\index.ts), an npm
     // install (dist\router\src\index.js) and the packaged app (the .ts under resources). Matching
     // on "router\src\index." covers all three and still cannot match an unrelated process.
-    `(Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='ClaudeRipple.exe'" | Where-Object { $_.CommandLine -like '*router\\src\\index.*' } | Select-Object -First 1).ProcessId`,
+    `$p = Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='ClaudeRipple.exe'" | Where-Object { $_.CommandLine -like '*router\\src\\index.*' } | Select-Object -First 1; if ($null -eq $p) { 'null' } else { [pscustomobject]@{ pid = $p.ProcessId; commandLine = $p.CommandLine } | ConvertTo-Json -Compress }`,
+    deps,
   );
-  const n = Number(r.out.trim());
-  return r.ok && Number.isFinite(n) && n > 0 ? n : null;
+  if (!r.ok) return null;
+  let found: { pid?: unknown; commandLine?: unknown };
+  try {
+    found = JSON.parse(r.out.trim()) as { pid?: unknown; commandLine?: unknown };
+  } catch {
+    return null;
+  }
+  const pid = Number(found.pid);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  // A process running another installation's router script is not this one's to wait on, even
+  // with the task registered here (both can share one task name only through this gate).
+  if (opts.expectedRouter && !String(found.commandLine ?? "").includes(opts.expectedRouter)) return null;
+  return pid;
+}
+
+/**
+ * The router process that belongs to this task's own launcher, for control decisions. Unlike
+ * `agentPid`, this proves the process is under the task registered here: the launcher's command
+ * line names this installation's home, and the router is its child. A direct router of the same
+ * home, or another home's process, cannot satisfy both. Null when anything is unreadable.
+ */
+export function taskRouterPid(name = taskName(), opts: { home?: string; deps?: TaskDeps } = {}): number | null {
+  const deps = opts.deps ?? {};
+  const home = opts.home ?? homeDir();
+  if (taskOwnership(home, { ...deps, name }).state !== "ours") return null;
+  if (deps.routerPid) return deps.routerPid();
+  const launcher = path.join(home, "clauderipple-router.ps1");
+  const listed = invoke(
+    `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*clauderipple-router.ps1*' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`,
+    deps,
+  );
+  if (!listed.ok) return null;
+  let rows: unknown;
+  try {
+    rows = JSON.parse(listed.out.trim());
+  } catch {
+    return null;
+  }
+  const list = Array.isArray(rows) ? rows : rows !== null && typeof rows === "object" ? [rows] : [];
+  const pick = list.find((row) => {
+    const text = (row as { CommandLine?: unknown }).CommandLine;
+    return typeof text === "string" && text.includes(launcher);
+  }) as { ProcessId?: unknown } | undefined;
+  const launcherPid = Number(pick?.ProcessId);
+  if (!Number.isSafeInteger(launcherPid) || launcherPid <= 0) return null;
+  const child = invoke(
+    `$c = Get-CimInstance Win32_Process -Filter "ParentProcessId=${launcherPid}" | Where-Object { $_.CommandLine -like '*router\\src\\index.*' } | Select-Object -First 1; if ($null -eq $c) { 'null' } else { [pscustomobject]@{ pid = $c.ProcessId } | ConvertTo-Json -Compress }`,
+    deps,
+  );
+  if (!child.ok) return null;
+  const text = child.out.trim();
+  if (text === "null") return null;
+  try {
+    const pid = Number((JSON.parse(text) as { pid?: unknown }).pid);
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -265,10 +417,13 @@ export type StartProbe = {
   start(): boolean;
 };
 
-function realStartProbe(name: string): StartProbe {
+function realStartProbe(name: string, home: string, deps: TaskDeps, up?: () => boolean): StartProbe {
   return {
-    up: () => (name === taskName() ? agentPid() !== null : agentState(name) === "running"),
-    start: () => run(`Start-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop; 'ok'`).ok,
+    // The job's process, not an admin-port answer: this decides "already running" before a start,
+    // and an older router of this installation reports no installation id. Shutdown uses the id
+    // (WindowsRouterOps in supervisor.ts); this never does.
+    up: () => (name === taskName() ? (up ?? (() => agentPid(name, { home, expectedRouter: runtime().router, deps }) !== null))() : agentState(name, deps) === "running"),
+    start: () => invoke(`Start-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop; 'ok'`, deps).ok,
   };
 }
 
@@ -291,15 +446,35 @@ function waitUntil(ok: () => boolean, budgetMs: number, pollMs = 500): boolean {
  * router, the task start was accepted, nothing came up, and the update reported success while
  * Claude had no router for 11h47m (#80). So "started" means the router's process exists.
  */
-export function startAgent(name = taskName(), opts: { waitMs?: number; probe?: StartProbe } = {}): "already-running" | "started" | "failed" {
-  const probe = opts.probe ?? realStartProbe(name);
+export function startAgent(name = taskName(), opts: { waitMs?: number; probe?: StartProbe; home?: string; deps?: TaskDeps; up?: () => boolean } = {}): AgentStart {
+  const home = opts.home ?? homeDir();
+  // An injected probe models the supervisor, so it also stands in for what is registered. One
+  // definition read is shared with the answer poll: a start waits, and each poll must not re-read it.
+  let deps = opts.deps ?? {};
+  if (!opts.probe) {
+    const definition = deps.definition ? deps.definition() : existingTaskDefinition(name, deps);
+    deps = { ...deps, definition: () => definition };
+    const owner = taskOwnership(home, { ...deps, name });
+    if (owner.state === "other") return "other-installation";
+    if (owner.state === "unknown") return "ownership-unknown";
+  }
+  const probe = opts.probe ?? realStartProbe(name, home, deps, opts.up);
   if (probe.up()) return "already-running";
   if (!probe.start()) return "failed";
   return waitUntil(probe.up, opts.waitMs ?? 20_000) ? "started" : "failed";
 }
 
-export function stopAgent(name = taskName()): boolean {
+/**
+ * Stop-ScheduledTask for a task whose definition is this installation's. It terminates the running
+ * instance, so it is only called by `stopWindowsRouter`, after that router proved (installation id)
+ * to be ours. Do not call it directly: the definition's home is not proof of the running instance.
+ */
+export function stopAgent(name = taskName(), opts: { home?: string; deps?: TaskDeps } = {}): AgentStop {
+  const deps = opts.deps ?? {};
+  const owner = taskOwnership(opts.home ?? homeDir(), { ...deps, name });
+  if (owner.state === "absent") return "not-loaded";
+  if (owner.state === "other") return "other-installation";
+  if (owner.state === "unknown") return "ownership-unknown";
   // Host callers first request authenticated graceful shutdown and wait for its clean exit.
-  run(`Stop-ScheduledTask -TaskName ${ps(name)} -ErrorAction SilentlyContinue`);
-  return true;
+  return invoke(`Stop-ScheduledTask -TaskName ${ps(name)} -ErrorAction Stop`, deps).ok ? "stopped" : "failed";
 }

@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { renderUnit, unitName, unitPath, installAgent, startAgent, restartAgent, stopAgent, removeAgent, agentState } from "../src/systemd.ts";
+import { renderUnit, unitName, unitPath, unitOwnership, installAgent, startAgent, restartAgent, stopAgent, removeAgent, agentState } from "../src/systemd.ts";
 import { desktopClaudeCodeDirs, latestDesktopClaude } from "../src/claude-auth.ts";
 import { configLibraryDir } from "../src/picker.ts";
 
@@ -94,13 +94,15 @@ test("per-user lifecycle: start is idempotent, restart is one systemctl restart,
     assert.equal(file, unitPath());
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.equal(agentState(), "loaded");
-    assert.equal(startAgent(), "started");
-    assert.equal(startAgent(), "already-running");
-    assert.equal(restartAgent(), "drained");
-    assert.equal(stopAgent(), true);
-    assert.equal(removeAgent(), true);
+    assert.equal(startAgent("/tmp/home"), "started");
+    assert.equal(startAgent("/tmp/home"), "already-running");
+    // A running unit is only stopped when its own id proves it is this installation's.
+    const ours = () => "ours" as const;
+    assert.equal(restartAgent("/tmp/home", {}, undefined, ours), "drained");
+    assert.equal(stopAgent("/tmp/home", {}, undefined, ours), "stopped");
+    assert.equal(removeAgent("/tmp/home", undefined, ours), "removed");
     assert.equal(fs.existsSync(file), false);
-    assert.equal(removeAgent(), false);
+    assert.equal(removeAgent("/tmp/home"), "absent");
     const verbs = calls().map((a) => a.slice(1).join(" "));
     assert.ok(calls().every((a) => a[0] === "--user"), "never the system manager");
     assert.equal(verbs.filter((v) => v === "start clauderipple.service").length, 1);
@@ -114,6 +116,20 @@ test("install refuses to overwrite a unit that is not ClaudeRipple's", { skip: o
     fs.writeFileSync(unitPath(), "[Unit]\nDescription=something else\n");
     assert.throws(() => installAgent({ program: process.execPath, home: "/tmp/home" }), /not ClaudeRipple's/);
     assert.equal(fs.readFileSync(unitPath(), "utf8"), "[Unit]\nDescription=something else\n");
+  }));
+
+test("an unreadable unit is unknown, so install refuses to replace it", { skip: onWindows }, () =>
+  withFakeSystemd(WORKING_SYSTEMCTL, () => {
+    fs.mkdirSync(path.dirname(unitPath()), { recursive: true });
+    fs.writeFileSync(unitPath(), renderUnit({ program: process.execPath, home: "/tmp/other" }), { mode: 0o600 });
+    fs.chmodSync(unitPath(), 0o000);
+    try {
+      assert.deepEqual(unitOwnership("/tmp/home"), { state: "unknown", home: null });
+      assert.throws(() => installAgent({ program: process.execPath, home: "/tmp/home" }, () => ({ ok: true, out: "" })), /could not be read|refusing to replace/);
+    } finally {
+      fs.chmodSync(unitPath(), 0o600);
+      fs.rmSync(unitPath(), { force: true });
+    }
   }));
 
 test("Linux finds the Desktop-cached CLI and the Config Library under XDG_CONFIG_HOME", { skip: notLinux }, () =>
