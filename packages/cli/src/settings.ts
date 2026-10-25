@@ -32,7 +32,11 @@ function readSettings(file: string): Record<string, unknown> {
   if (!fs.existsSync(file)) return {};
   const text = fs.readFileSync(file, "utf8");
   if (text.trim() === "") return {};
-  return JSON.parse(text) as Record<string, unknown>;
+  const parsed: unknown = JSON.parse(text);
+  // A settings.json that is not a JSON object is not ours to repair by overwriting: every caller
+  // would otherwise spread an array or a scalar into a new object and drop what was there.
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${file} is not a JSON object; left untouched`);
+  return parsed as Record<string, unknown>;
 }
 
 function backup(file: string): string | null {

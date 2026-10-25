@@ -176,3 +176,15 @@ test("install's context cap is taken back, a hand-set one stays", () => {
   assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "700000", "the user's own cap is not ours to delete");
   assert.ok(edit.notes.some((note) => /no record/.test(note)), edit.notes.join("\n"));
 });
+
+// G-D04: settings.json is shared with the CLI itself and with every installation. A file that is
+// not a JSON object must stop the edit, not be spread into a new object that loses its contents.
+test("a settings file that is not an object is refused, never rewritten", () => {
+  const file = process.env.CLAUDE_SETTINGS_PATH!;
+  for (const content of ["[]", "null", '"a string"', "42"]) {
+    fs.writeFileSync(file, content);
+    assert.throws(() => applyProxyEnv({ proxyUrl: "http://127.0.0.1:8790", caPath: "/x/ca.pem", force: true }), /not a JSON object/);
+    assert.throws(() => removeProxyEnv({ proxyUrl: "http://127.0.0.1:8790", caPath: "/x/ca.pem" }), /not a JSON object/);
+    assert.equal(fs.readFileSync(file, "utf8"), content);
+  }
+});
