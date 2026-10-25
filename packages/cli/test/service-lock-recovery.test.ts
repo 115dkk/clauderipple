@@ -77,14 +77,28 @@ test("a staging directory from an interrupted acquisition never blocks the next 
   assert.equal(fs.existsSync(staging), true, "another writer's staging directory is not ours to delete");
 });
 
-test("service lock reports a writer that claims the path after recovery as locked", t => {
+test("service lock never replaces a legacy empty lock claimed at the filesystem boundary", t => {
   const { key } = fixture(t);
   const lock = `${key}.operation-lock`;
-  fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, `4242-${"0".repeat(64)}.owner`), "");
-  t.mock.method(fs, "renameSync", () => {
-    throw Object.assign(new Error("ENOTEMPTY: directory not empty"), { code: "ENOTEMPTY" });
+  const mkdir = fs.mkdirSync.bind(fs);
+  const lstat = fs.lstatSync.bind(fs);
+  let legacyClaimed = false;
+  const claim = () => { if (!legacyClaimed) { mkdir(lock); legacyClaimed = true; } };
+  // Old implementation: the legacy writer wins immediately after the absence check.
+  t.mock.method(fs, "lstatSync", (...args: Parameters<typeof fs.lstatSync>) => {
+    try { return lstat(...args); } catch (error) {
+      if (args[0] === lock && (error as NodeJS.ErrnoException).code === "ENOENT") claim();
+      throw error;
+    }
   });
-  assert.throws(() => withServiceLock(key, () => assert.fail("raced lock stolen"), pid => pid === process.pid ? "self" : null), { code: "ELOCKED" });
-  assert.deepEqual(fs.readdirSync(path.dirname(key)), [], "the failed claim cleans up its staging directory");
+  // mkdir implementation: the same writer wins just before the atomic claim.
+  t.mock.method(fs, "mkdirSync", (...args: Parameters<typeof fs.mkdirSync>) => {
+    if (args[0] === lock) claim();
+    return mkdir(...args);
+  });
+  let entered = false;
+  assert.throws(() => withServiceLock(key, () => { entered = true; }, () => "self"), { code: "ELOCKED" });
+  assert.equal(entered, false);
+  assert.equal(legacyClaimed, true);
+  assert.deepEqual(fs.readdirSync(lock), [], "the legacy writer's lock survives unchanged");
 });

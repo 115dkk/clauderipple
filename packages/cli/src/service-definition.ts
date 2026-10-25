@@ -54,26 +54,19 @@ function lockHeld(lock: string): Error {
   return Object.assign(new Error(`서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`), { code: "ELOCKED" });
 }
 
-function pathExists(file: string): boolean {
+/** mkdir is the atomic claim shared with older writers. Never rename over an existing lock. */
+function claimServiceLock(lock: string, lookup: ProcessStartLookup): void {
   try {
-    fs.lstatSync(file);
-    return true;
+    fs.mkdirSync(lock, { mode: 0o700 });
+    return;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
-}
-
-/** Move a prepared lock directory into place. A lock already at the path is reported, never replaced. */
-function claimServiceLock(staging: string, lock: string, lookup: ProcessStartLookup): void {
-  if (pathExists(lock) && !recoverServiceLock(lock, lookup)) throw lockHeld(lock);
+  if (!recoverServiceLock(lock, lookup)) throw lockHeld(lock);
   try {
-    fs.renameSync(staging, lock);
+    fs.mkdirSync(lock, { mode: 0o700 });
   } catch (error) {
-    // A writer that claimed the path after the check above is a live lock, not a filesystem error
-    // the caller has to interpret: report it the same way as any other held lock.
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EEXIST" || code === "ENOTEMPTY" || code === "ENOTDIR" || code === "EPERM") throw lockHeld(lock);
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw lockHeld(lock);
     throw error;
   }
 }
@@ -84,18 +77,11 @@ function acquireServiceLock(key: string, lookup: ProcessStartLookup): () => void
   if (!start) throw new Error("서비스 작업 프로세스의 시작 정보를 확인하지 못했습니다. 다시 시도해 주세요.");
   const ownerName = `${process.pid}-${definitionGeneration(start)}.owner`;
   fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-  // The owner file is written before the directory becomes the lock, and both then appear in one
-  // rename. A process that dies in between leaves only a `.operation-lock.new-*` directory, which no
-  // writer mistakes for a held lock; a lock visible at the real path can no longer be ownerless.
-  const staging = `${lock}.new-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
-  fs.mkdirSync(staging, { mode: 0o700 });
-  try {
-    fs.writeFileSync(path.join(staging, ownerName), "", { flag: "wx", mode: 0o600 });
-    claimServiceLock(staging, lock, lookup);
-  } finally {
-    fs.rmSync(staging, { recursive: true, force: true });
-  }
+  claimServiceLock(lock, lookup);
   const owner = path.join(lock, ownerName);
+  // If initialization fails or the process exits here, preserve the ownerless lock for manual
+  // recovery: neither age nor absence of an owner proves that a legacy writer has finished.
+  fs.writeFileSync(owner, "", { flag: "wx", mode: 0o600 });
   return () => { fs.unlinkSync(owner); fs.rmdirSync(lock); };
 }
 
