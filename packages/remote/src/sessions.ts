@@ -87,7 +87,7 @@ interface Live {
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
   current: { msg: string; text: string; images?: ImagePart[]; files?: SessionFile[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
   /** Task/Agent tool ids → their subagent while it runs */
-  subs: Map<string, { description: string; model: string | null; steps: number }>;
+  subs: Map<string, { description: string; model: string | null; steps: number; parent?: string }>;
   turnStart: number;
   restartAfterTurn: boolean;
   retried: boolean;
@@ -970,6 +970,11 @@ export class Sessions {
   blob(id: string, blob: string): string | null {
     const data = this.log(id).blob(blob);
     if (data !== null) return data;
+    for (const [key, log] of this.logs) {
+      if (!key.startsWith(`${id}/sub-`)) continue;
+      const workerData = log.blob(blob);
+      if (workerData !== null) return workerData;
+    }
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     return this.desktop?.workerBlob(desktopId, blob) ?? this.sendQueue.editingBlob(id, blob);
   }
@@ -2109,12 +2114,12 @@ export class Sessions {
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
           const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }) };
-          if (parent) { this.subLog(r.id, `sub-${parent}`)?.append(body); continue; }
-          this.append(r.id, body);
+          if (parent) this.subLog(r.id, `sub-${parent}`)?.append(body);
+          else this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);
           if (sub) {
+            this.workerEvent(r, live, b.tool_use_id, b.is_error ? "failed" : "done");
             live.subs.delete(b.tool_use_id);
-            this.append(r.id, { kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: sub.description, model: sub.model, status: b.is_error ? "failed" : "done", steps: sub.steps });
           }
         }
         return;
@@ -2243,16 +2248,29 @@ export class Sessions {
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => log.image(data)) }));
     converted.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
+    for (const tool of tools) {
+      if (tool.name !== "Agent" && tool.name !== "Task") continue;
+      const block = message.content?.find(block => block.id === tool.id);
+      live.subs.set(tool.id, { description: tool.summary, model: typeof block?.input?.model === "string" ? block.input.model : null, steps: 0, parent });
+      this.workerEvent(r, live, tool.id, "running");
+    }
     const sub = live.subs.get(parent);
     if (!sub) return;
     sub.steps++;
-    // A named worker is spawned without a `model` argument, so its row had no model until it
-    // finished; its first answer says which model ran it.
     if (message.model && sub.model !== message.model) {
       const first = sub.model === null;
       sub.model = message.model;
-      if (first) this.append(r.id, { kind: "subagent", toolUseId: parent, sub: `sub-${parent}`, description: sub.description, model: sub.model, status: "running", steps: sub.steps });
+      if (first) this.workerEvent(r, live, parent, "running");
     }
+  }
+
+  /** A worker's lifecycle belongs to the conversation that launched it, never the main timeline by default. */
+  private workerEvent(r: SessionRecord, live: Live, toolUseId: string, status: "running" | "done" | "failed"): void {
+    const sub = live.subs.get(toolUseId);
+    if (!sub) return;
+    const body: EventBody = { kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: sub.description, model: sub.model, status, steps: sub.steps };
+    if (sub.parent) this.subLog(r.id, `sub-${sub.parent}`)?.append(body);
+    else this.append(r.id, body);
   }
 
   private flush(id: string, live: Live): void {

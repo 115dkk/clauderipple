@@ -11,11 +11,23 @@ import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
 import { sidebarSections, sidebarState } from "./sidebar.ts";
-import type { TimelineItem, SessionView, ToolView } from "./timeline.ts";
+import type { TimelineItem, SessionView, ToolView, WorkerItem } from "./timeline.ts";
+
+export interface WorkerSheet {
+  kind: "worker";
+  worker: WorkerItem;
+  items: TimelineItem[];
+  loading: boolean;
+  error: string;
+  depth: number;
+  scroll: number;
+  expanded: Map<string, string | null>;
+}
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }
 
 export type Sheet =
+  | WorkerSheet
   | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean }
   | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
   /** Unsent messages kept from earlier connections: what is preserved, what this computer already
@@ -327,6 +339,14 @@ export function sheet(ui: UI): string {
   const s = ui.sheet;
   if (!s) return "";
   const head = (title: string): string => `<div class="grab"></div><div class="sh"><b>${esc(title)}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div>`;
+  if (s.kind === "worker") {
+    const worker = s.worker;
+    const facts = [worker.model, t(`sub.${worker.status}`), t("sub.steps", { n: worker.steps })].filter(Boolean).join(" · ");
+    const back = s.depth > 1 ? `<button class="icon-btn" data-act="worker-back" aria-label="${esc(t("a11y.back"))}">${icon.back(20)}</button>` : "";
+    const body = s.items.map(child => item(child, { ...ui, expanded: s.expanded })).join("");
+    const error = s.error ? `<div class="foot bad" role="alert">${esc(s.error)}</div><button class="btn ghost" data-act="worker-retry">${esc(t("conn.retryNow"))}</button>` : "";
+    return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(worker.description || t("sub.worker"))}"><div class="grab"></div><div class="sh">${back}<b>${esc(worker.description || t("sub.worker"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div><div class="sbody" id="worker-body" data-sub="${esc(worker.sub)}"><div class="foot">${esc(facts)}</div>${error}<div class="tl">${body}</div>${s.loading ? `<div role="status" class="foot">${esc(t("tool.loading"))}</div>` : ""}</div></div>`;
+  }
   if (s.kind === "folder") {
     const f = s.filter.trim().toLowerCase();
     const recent = s.recent.filter((r) => !f || r.name.toLowerCase().includes(f) || r.path.toLowerCase().includes(f)).slice(0, 6);

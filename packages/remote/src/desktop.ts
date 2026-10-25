@@ -16,7 +16,7 @@ const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
-interface Imported { size: number; mtime: number; log: EventLog; dir: string }
+interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
 export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string }
 
 /**
@@ -240,8 +240,9 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       tools.push({ id: b.id, name: b.name,
         summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
         input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, scope, sink) });
-      // Only a top-level worker opens its own log; sidechain records never carry their own subagent event.
-      if (worker && !sidechain && state && resolve) {
+      // A worker transcript is its own conversation: its Agent calls open child logs too.
+      // The top-level pass still skips sidechain records before reaching this point.
+      if (worker && state && resolve) {
         const info = resolve(b.id, input);
         const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, bytes: info.bytes ?? 0, input };
         state.set(b.id, running);
@@ -666,12 +667,16 @@ export class DesktopSessions {
     if (!stat.isFile()) return null;
     const key = `${id}::${sub}`;
     const cached = this.subImports.get(key);
-    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) return cached.log;
+    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs && [...(cached.children ?? [])].every(([toolUseId, child]) => {
+      const info = this.subInfo(id, toolUseId, child.input);
+      return !info.ended && info.model === child.model && info.steps === child.steps && (info.bytes ?? 0) === child.bytes;
+    })) return cached.log;
     if (cached) { this.dispose(cached); this.subImports.delete(key); }
     this.temp ??= fs.mkdtempSync(path.join(os.tmpdir(), "ripple-desktop-"));
     const dir = fs.mkdtempSync(path.join(this.temp, "sub-"));
-    const log = this.importSub(id, file, dir);
-    this.subImports.set(key, { size: stat.size, mtime: stat.mtimeMs, log, dir });
+    const children = new Map<string, SubagentState>();
+    const log = this.importSub(id, file, dir, children);
+    this.subImports.set(key, { size: stat.size, mtime: stat.mtimeMs, log, dir, children });
     return log;
   }
 
@@ -685,17 +690,25 @@ export class DesktopSessions {
     return null;
   }
 
-  private importSub(id: string, file: string, dir: string): EventLog {
+  private importSub(id: string, file: string, dir: string, state: Map<string, SubagentState>): EventLog {
     const source = this.sources.get(id)!;
     const fd = this.openUnder(file);
     let at = source.summary.createdAt;
     const log = EventLog.open({ dir, now: () => at });
+    const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
     try {
       scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true });
+        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve });
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });
+      for (const [toolUseId, running] of state) {
+        const info = resolve(toolUseId, running.input);
+        if (info.ended) {
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+          state.delete(toolUseId);
+        }
+      }
       return log;
     } catch (error) { log.close(); throw error; }
     finally { fs.closeSync(fd); }

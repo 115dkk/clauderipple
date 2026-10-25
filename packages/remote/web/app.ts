@@ -14,7 +14,7 @@ import { pushAvailability } from "./pushstate.ts";
 import { RelaySocket, browserNacl, relayClientUrl } from "./secure.ts";
 import type { RawSocket, RelayPairing } from "./secure.ts";
 import { PING_MS, defaultEffort } from "../src/protocol.ts";
-import { mergeEvents, reduce, timelineItems } from "./timeline.ts";
+import { mergeEvents, reduce, timelineItems, workerFor, workerPrompt, workerConversationItems } from "./timeline.ts";
 import type { TimelineItem, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
 import type { UI } from "./views.ts";
@@ -105,6 +105,7 @@ export class App {
   private lastOpenPerm = "";
   private pinned = true;
   private tasksOpen = false;
+  private workerPath: V.WorkerSheet[] = [];
   private timelineSize: ResizeObserver | null = null;
   private imageUrls = new Map<string, Promise<string>>();
 
@@ -163,7 +164,7 @@ export class App {
     const token = store.get<string | null>("rr.token", null);
     if (!token) { this.screen = { name: "pair" }; this.bind(); this.render(); return; }
     this.screen = this.routeFromHash();
-    window.addEventListener("hashchange", () => { this.screen = this.routeFromHash(); this.ui.sheet = null; this.render(); this.attachCurrent(); });
+    window.addEventListener("hashchange", () => { this.screen = this.routeFromHash(); this.workerPath = []; this.ui.sheet = null; this.render(); this.attachCurrent(); });
     const clientId = store.get<string>("rr.clientId", "") || uid();
     store.set("rr.clientId", clientId);
     // Served by the relay → through the relay, encrypted end to end; served by the host itself → straight to it.
@@ -227,6 +228,7 @@ export class App {
       if (hash) location.hash = hash; else history.pushState(null, "", location.pathname);
     }
     this.screen = screen;
+    this.workerPath = [];
     this.ui.sheet = null;
     this.render();
     this.attachCurrent();
@@ -728,9 +730,35 @@ export class App {
     this.fitInput();
   }
 
-  renderSheet(): void {
+  renderSheet(preservePosition = true): void {
+    const frame = this.ui.sheet?.kind === "worker" ? this.ui.sheet : null;
+    if (frame && preservePosition) this.rememberWorkerPosition();
     const el = $("#sheet");
     setHTML(el, V.sheet(this.ui));
+    const body = document.getElementById("worker-body");
+    if (body && frame) body.scrollTop = frame.scroll;
+  }
+
+  private rememberWorkerPosition(): void {
+    const current = this.workerPath.at(-1);
+    const body = document.getElementById("worker-body");
+    if (current && body?.dataset.sub === current.worker.sub) current.scroll = body.scrollTop;
+  }
+
+  private workerBack(): void {
+    this.rememberWorkerPosition();
+    const closed = this.workerPath.pop();
+    this.ui.sheet = this.workerPath.at(-1) ?? null;
+    // The old DOM still belongs to the child, not to the newly selected parent.
+    setHTML($("#sheet"), "");
+    this.renderSheet(false);
+    this.focusWorkerLink(closed?.worker.sub);
+  }
+
+  private focusWorkerLink(sub?: string): void {
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button[data-act=sub]"));
+    const target = sub ? buttons.find(button => button.dataset.id === sub) : buttons.find(button => button.closest("#sheet"));
+    (target ?? $("#sheet").querySelector<HTMLButtonElement>("button[data-act=worker-back], button[data-act=close-sheet]"))?.focus({ preventScroll: true });
   }
 
   private renderToast(): void {
@@ -815,6 +843,18 @@ export class App {
     });
     root.addEventListener("keydown", (ev) => {
       const el = ev.target as HTMLElement;
+      if (this.ui.sheet?.kind === "worker" && ev.key === "Escape") {
+        ev.preventDefault();
+        if (this.workerPath.length > 1) this.workerBack();
+        else void this.act("close-sheet", el);
+        return;
+      }
+      if (this.ui.sheet?.kind === "worker" && ev.key === "Tab") {
+        const buttons = Array.from($("#sheet").querySelectorAll<HTMLButtonElement>("button:not([disabled])"));
+        const first = buttons[0], last = buttons.at(-1);
+        if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last?.focus(); }
+        else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first?.focus(); }
+      }
       // Enter sends on a hardware keyboard; on a phone the return key makes a new line unless enterkeyhint says send.
       if (el.id === "input" && ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && matchMedia("(pointer: fine)").matches) {
         ev.preventDefault();
@@ -958,17 +998,26 @@ export class App {
         break;
       case "perm-more": this.ui.permOpen.add(id); this.renderSession(true); break;
       case "workers": this.ui.workersOpen = !this.ui.workersOpen; this.renderSession(true); break;
-      case "tool-group":
-        if (this.ui.expanded.has(id)) this.ui.expanded.delete(id);
-        else this.ui.expanded.set(id, null);
+      case "tool-group": {
+        const expanded = this.ui.sheet?.kind === "worker" ? this.ui.sheet.expanded : this.ui.expanded;
+        if (expanded.has(id)) expanded.delete(id);
+        else expanded.set(id, null);
         this.rerenderItems();
         break;
+      }
       case "tool": await this.toggleTool(id); break;
       case "sub": await this.openSub(id); break;
+      case "worker-back": this.workerBack(); break;
+      case "worker-retry": if (this.ui.sheet?.kind === "worker") await this.loadWorker(this.ui.sheet, session); break;
       case "pick-folder": await this.openFolderSheet(); break;
       case "pick-model": this.openModelSheet(null); break;
       case "pick-model-session": if (session && !session.startsWith("local:")) this.openModelSheet(session); break;
-      case "close-sheet": this.ui.sheet = null; this.renderSheet(); break;
+      case "close-sheet": {
+        const sub = this.workerPath[0]?.worker.sub;
+        this.workerPath = []; this.ui.sheet = null; this.renderSheet();
+        if (sub) this.focusWorkerLink(sub);
+        break;
+      }
       case "browse": await this.browse(el.dataset.path ?? ""); break;
       case "choose-folder":
         this.ui.draft.cwd = el.dataset.path ?? null;
@@ -1010,12 +1059,14 @@ export class App {
   }
 
   private async toggleTool(id: string): Promise<void> {
-    if (this.ui.expanded.has(id)) { this.ui.expanded.delete(id); this.rerenderItems(); return; }
-    this.ui.expanded.set(id, null);
+    const frame = this.ui.sheet?.kind === "worker" ? this.ui.sheet : null;
+    const expanded = frame?.expanded ?? this.ui.expanded;
+    if (expanded.has(id)) { expanded.delete(id); this.rerenderItems(); return; }
+    expanded.set(id, null);
     this.rerenderItems();
     if (this.screen.name !== "session") return;
-    const view = this.view(this.screen.id);
-    const tool = view.items.flatMap((i) => (i.type === "assistant" ? i.tools : [])).find((x) => x.id === id);
+    const items = frame?.items ?? timelineItems(this.view(this.screen.id));
+    const tool = items.flatMap(i => i.type === "toolGroup" ? i.rows.flatMap(row => row.type === "tool" ? [row.tool] : row.call ? [row.call] : []) : i.type === "assistant" ? i.tools : []).find(x => x.id === id);
     const session = this.screen.id;
     const values = [tool?.input, tool?.result?.text].filter((v) => v !== undefined);
     if (!values.some(v => typeof v !== "string")) return;
@@ -1032,12 +1083,13 @@ export class App {
         }
         parts.push(text);
       }
-      if (this.ui.expanded.has(id)) this.ui.expanded.set(id, parts.filter(Boolean).join("\n\n────\n\n"));
+      if (expanded.has(id)) expanded.set(id, parts.filter(Boolean).join("\n\n────\n\n"));
     } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
     if (this.isCurrent(session)) this.rerenderItems();
   }
 
   private rerenderItems(): void {
+    if (this.ui.sheet?.kind === "worker") { this.renderSheet(); return; }
     // Expanded state is UI-only; bump versions by re-rendering the list wholesale.
     const tl = document.getElementById("tl");
     if (tl) for (const child of Array.from(tl.children) as HTMLElement[]) child.dataset.ver = "";
@@ -1046,13 +1098,61 @@ export class App {
 
   private async openSub(sub: string): Promise<void> {
     if (this.screen.name !== "session") return;
+    const parent = this.ui.sheet?.kind === "worker" ? this.ui.sheet : null;
+    if (!parent) this.workerPath = [];
+    // Cyclic or repeated links return to their existing frame rather than stacking forever.
+    const existing = this.workerPath.findIndex(frame => frame.worker.sub === sub);
+    this.rememberWorkerPosition();
+    if (existing >= 0) {
+      this.workerPath = this.workerPath.slice(0, existing + 1);
+      this.ui.sheet = this.workerPath.at(-1)!;
+      this.renderSheet();
+      return;
+    }
+    const items = parent?.items ?? timelineItems(this.view(this.screen.id));
+    const frame: V.WorkerSheet = { kind: "worker", worker: workerFor(items, sub, t("sub.worker")), items: [], loading: false, error: "", depth: this.workerPath.length + 1, scroll: 0, expanded: new Map() };
+    this.workerPath.push(frame);
+    this.ui.sheet = frame;
+    const loading = this.loadWorker(frame, this.screen.id);
+    this.focusWorkerLink();
+    await loading;
+    if (this.ui.sheet === frame) this.focusWorkerLink();
+  }
+
+  private async loadWorker(frame: V.WorkerSheet, session: string): Promise<void> {
+    if (frame.loading) return;
+    frame.loading = true; frame.error = "";
+    this.renderSheet();
+    const current = () => this.isCurrent(session) && this.workerPath.includes(frame);
+    const draw = () => { if (current() && this.ui.sheet === frame) { this.renderSheet(); this.hydrateImages($("#sheet"), session); } };
     try {
-      const page = await this.req<SubPage>({ op: "sub", session: this.screen.id, sub });
-      const view = reduce(page.events);
-      const html = timelineItems(view).map((i) => V.item(i, this.ui)).join("");
-      setHTML($("#sheet"), `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog"><div class="grab"></div><div class="sh"><b>${esc(t("sub.worker"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div><div class="sbody"><div class="tl">${html}</div></div></div>`);
-      this.hydrateImages($("#sheet"), this.screen.id);
-    } catch (e) { this.toast(t("error.generic", { text: (e as Error).message })); }
+      let input = frame.worker.call?.input ?? "";
+      if (typeof input !== "string") {
+        let offset = 0, full = "";
+        for (;;) {
+          const chunk = await this.req<BlobChunk>({ op: "blob", session, id: input.blob, offset });
+          if (!current()) return;
+          full += chunk.text;
+          if (chunk.next === null) break;
+          offset = chunk.next;
+        }
+        input = full;
+      }
+      const prompt = workerPrompt(input);
+      let events: SessionEvent[] = [], afterSeq = 0;
+      for (;;) {
+        const page = await this.req<SubPage>({ op: "sub", session, sub: frame.worker.sub, afterSeq });
+        if (!current()) return;
+        events = mergeEvents(events, page.events);
+        frame.items = workerConversationItems(events, prompt);
+        draw();
+        if (!page.more) break;
+        const next = events.at(-1)?.seq ?? 0;
+        if (next <= afterSeq) throw new Error(t("tool.failed"));
+        afterSeq = next;
+      }
+    } catch (error) { if (current()) frame.error = error instanceof Error ? error.message : String(error); }
+    finally { frame.loading = false; draw(); }
   }
 }
 

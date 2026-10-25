@@ -1,6 +1,7 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
 import type { PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
+import { stringField, toolInput } from "../src/tool-details.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
 
@@ -290,6 +291,26 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
     last.ver += "running";
   }
   return result;
+}
+
+export type WorkerItem = Extract<ActivityRow, { type: "subagent" }>;
+
+/** Resolve within the conversation that launched the worker, retaining the full launch input. */
+export function workerFor(items: readonly TimelineItem[], sub: string, label: string): WorkerItem {
+  for (const item of items) {
+    if (item.type === "subagent" && item.sub === sub) return item;
+    if (item.type === "toolGroup") for (const row of item.rows) if (row.type === "subagent" && row.sub === sub) return row;
+  }
+  return { type: "subagent", key: `s${sub}`, ver: "0", toolUseId: sub, sub, description: label, model: null, status: "running", steps: 0 };
+}
+
+/** Labels are not instructions; a later follow-up must not replace the worker's actual launch prompt. */
+export function workerPrompt(input: string): string { return stringField(toolInput(input), "prompt"); }
+export function workerConversationItems(events: readonly SessionEvent[], prompt: string): TimelineItem[] {
+  const items = timelineItems(reduce(events));
+  const first = items.find(item => item.type === "user" || item.type === "assistant" || item.type === "toolGroup");
+  if (first?.type === "user" || !prompt.trim()) return items;
+  return [{ type: "user", key: "worker-prompt", ver: prompt, text: prompt, at: 0 }, ...items];
 }
 
 /** Merge a page into a sorted event list without duplicates (pages may overlap after a reconnect). */
