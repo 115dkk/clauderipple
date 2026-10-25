@@ -5120,6 +5120,10 @@ function renderSummary(summary) {
   $("#logs-summary").replaceChildren(
     summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
     summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
+    // The period's tokens as the request row and the Agents card count them: the whole prompt —
+    // uncached, cache write and cache read — plus the output, in one figure. The prompt's own total
+    // and the output on their own keep their chips beside it.
+    summaryChip(t("logs.th.tokens"), formatNumber(tokensOf(total))),
     // On its own line: with the whole input counted the number runs to eight digits, and the
     // ellipsis on one line cut the cache rate off entirely.
     summaryChip(t("logs.summary.input"), formatNumber(totalInputOf(total)), t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })),

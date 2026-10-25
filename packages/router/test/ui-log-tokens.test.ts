@@ -53,6 +53,21 @@ test("a request whose prompt says nothing has no share to show", () => {
   assert.equal(tokensOf({ input: 0, cached: 0, output: 0 }), 0);
 });
 
+// The summary leads a period with the same figure a request and an agent are counted by, and keeps
+// the prompt's own total and the output on their own beside it.
+test("the summary reads a period's tokens, then its input and output", () => {
+  const app = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+  const start = app.indexOf("function renderSummary(");
+  const end = app.indexOf("function fitSummaryValues(");
+  const body = start > 0 && end > start ? app.slice(start, end) : "";
+  assert.ok(body, "app.js no longer contains renderSummary");
+  const tokens = body.indexOf('summaryChip(t("logs.th.tokens"), formatNumber(tokensOf(total)))');
+  const input = body.indexOf('summaryChip(t("logs.summary.input")');
+  const output = body.indexOf('summaryChip(t("logs.summary.output")');
+  assert.ok(tokens > 0, "the summary no longer shows the period's tokens");
+  assert.ok(input > tokens && output > input, "the summary no longer reads tokens, then input, then output");
+});
+
 // The order is the card's: the tokens, then the cache's share. A column added ahead of another
 // would read the two figures in the other order.
 test("the recent requests table shows the tokens, then the cache", () => {

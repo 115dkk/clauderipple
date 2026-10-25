@@ -557,7 +557,7 @@ label.check input { margin-top: 2px; }
 .logs-header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 4px 8px; }
 .logs-header-row .section-title { display: inline; }
 .logs-header-row .small { margin-left: 8px; }
-.logs-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.logs-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .logs-chip { position: relative; min-width: 0; padding: 14px 16px; }
 .logs-chip + .logs-chip::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 1px; background: var(--separator); }
 .logs-chip .label { display: block; color: var(--label-2); font-size: var(--fs-foot); margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -997,7 +997,6 @@ a.cell { color: inherit; text-decoration: none; }
   .logs-chip:nth-child(n)::before { display: block; }
   .logs-chip:nth-child(odd)::before { display: none; }
   .logs-chip:nth-child(n + 3) { border-top: 1px solid var(--separator); }
-  .logs-chip:nth-child(5) { grid-column: 1 / -1; }
   .chooser-tiles { grid-template-columns: 1fr; }
   .chooser-tiles:not(.single) > .chooser-tile:nth-child(2)::before { display: block; }
 
