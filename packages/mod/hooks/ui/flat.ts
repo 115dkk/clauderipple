@@ -59,7 +59,7 @@ export function flatPictures(appearance: Appearance): Paint {
   const counted = (icon: Icon, count: number, on: boolean): string => {
     const text = count > 9 ? '9+' : String(count)
     const badge = count > 0
-      ? '<circle cx="20" cy="5.5" r="5.5" fill="' + ACCENT + '"/><text x="20" y="8.6" text-anchor="middle" font-size="' + (text.length > 1 ? 7 : 8.5) + '" font-weight="750"' + fillOf('#fff') + '>' + text + '</text>'
+      ? '<circle cx="19.2" cy="4.8" r="4.8" fill="' + ACCENT + '"/><text x="19.2" y="7.6" text-anchor="middle" font-size="' + (text.length > 1 ? 6 : 7.8) + '" font-weight="750"' + fillOf('#fff') + '>' + text + '</text>'
       : ''
     return doc(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge)
   }

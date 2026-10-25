@@ -48,11 +48,6 @@ export function hoverLight(frame: Frame, scope?: string): Record<string, unknown
   return { ...look, hover: { ...look.hover, ...(scope ? { scope } : {}) } }
 }
 
-/** Cells a run of px takes, rounded up. */
-function cellsOf(px: number): number {
-  return Math.ceil(px / CELL_PX)
-}
-
 /** Rows a run of px takes, unrounded (the host takes fractions of a row). */
 export function rowsOf(px: number): number {
   return Math.round((px / ROW_PX) * 1000) / 1000
@@ -207,7 +202,7 @@ export function pill(el: Els, frame: Frame, key: string, label: string, look: Pi
 }
 
 /** Cells the way out takes. */
-export const CLOSE_CELLS = cellsOf(CLOSE_PX + 4)
+export const CLOSE_CELLS = (CLOSE_PX + 4) / CELL_PX
 
 /**
  * The way out: a soft disc with a ×, `label` its name for a reader that cannot see it. The disc is

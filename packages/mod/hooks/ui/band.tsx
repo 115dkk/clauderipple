@@ -770,7 +770,9 @@ type DrawnControl = { key: string; cells: number; node: RenderNode; tip: string 
 function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word): DrawnControl {
   const { Text } = el
   const pad = label ? 0.5 : 0.25
-  const cells = Math.ceil((artPx + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2)
+  // Exact, not rounded up to whole cells: the host takes fractions, and up to 0.7 of a cell after
+  // each icon read as a gap once the app's type made a cell wider (2026-10-25).
+  const cells = (artPx + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2
   return {
     key,
     cells,

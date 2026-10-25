@@ -610,14 +610,19 @@ export function iconArt(icon: Icon, on: boolean, tone: Tone = 'violet'): string 
   return svg(ICON_PX, ICON_PX, glow + '<g fill="none" stroke="' + stroke + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>', '', lit(on))
 }
 
-export const AGENTS_W = 26
+/**
+ * A counted icon's width: the 16 px glyph and its badge's overhang. The disc starts just past the
+ * agents' second head (x 13.5) and above their shoulders: over the glyph's corner it covered that
+ * head, and the 10 px shoulder of 26 px read as a gap after the icon (2026-10-25).
+ */
+export const AGENTS_W = 24
 
 /** A control's icon with a count in a lit disc on its shoulder, one width whatever the count. */
 export function countedArt(icon: Icon, count: number, on: boolean): string {
   const stroke = on ? TONE.violet.hi : SOFT
   const label = count > 9 ? '9+' : String(count)
   const badge = count > 0
-    ? '<circle cx="20" cy="5.5" r="5.5" fill="#22d3ee"/><text x="20" y="8.6" text-anchor="middle" font-size="' + (label.length > 1 ? 7 : 8.5) + '" font-weight="750" fill="#04252e">' + label + '</text>'
+    ? '<circle cx="19.2" cy="4.8" r="4.8" fill="#22d3ee"/><text x="19.2" y="7.6" text-anchor="middle" font-size="' + (label.length > 1 ? 6 : 7.8) + '" font-weight="750" fill="#04252e">' + label + '</text>'
     : ''
   return svg(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + stroke + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge, '', lit(on))
 }
