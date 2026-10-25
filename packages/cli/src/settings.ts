@@ -10,7 +10,7 @@ import path from "node:path";
 import { homeDir } from "../../router/src/config.ts";
 import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { type HomeClaims, type OwnerStore, type SlotClaims, claimedElsewhere, claimsOf, ownersPath, readOwners, setClaims } from "./owners.ts";
-import { insideHome } from "./ownership.ts";
+import { legacyIntegrationPath } from "./ownership.ts";
 
 /** Slots whose env value this call actually wrote or removed. Empty when the file already agreed. */
 export type SlotName = "main" | "smallFast" | "subagent";
@@ -482,10 +482,8 @@ function setAgentTitleHookLocked(enabled: boolean, cmd: { node: string; env?: Re
     return { changed: false, backup: null, notes, wroteSlots: [], outcome: "failed" };
   }
   const command = buildHookCommand(cmd);
-  // An entry is this installation's when it recorded that exact command, or when an older version
-  // left it with no record and the script it runs lives inside this installation's home (a source
-  // checkout is outside, so it stays unknown). An entry another installation records is never ours,
-  // whatever its command (D3, 2026-10-25).
+  // An entry needs this home's exact command record or a known legacy generated script path
+  // without a nested installation. Another installation's claim always preserves the entry.
   const recorded = new Set(record.mine.hooks ?? []);
   const kept: HookEntry[] = [];
   let removed = 0;
@@ -500,7 +498,7 @@ function setAgentTitleHookLocked(enabled: boolean, cmd: { node: string; env?: Re
     const runs = hookCommand(entry);
     const elsewhere = runs !== null && claimedElsewhere(record.store, home, (c) => c.hooks, runs);
     const script = runs === null ? null : hookScriptPath(runs);
-    const legacy = runs !== null && !recorded.has(runs) && !elsewhere && script !== null && insideHome(script, home);
+    const legacy = runs !== null && !recorded.has(runs) && !elsewhere && script !== null && legacyIntegrationPath(script, home, ["lib/node_modules/clauderipple/dist/cli/src/hooks/agent-title.js"]);
     const isOurs = runs !== null && recorded.has(runs) && !elsewhere;
     if (elsewhere) {
       kept.push(entry);
@@ -589,9 +587,9 @@ function pluginDirs(env: Record<string, string>): string[] {
  * place a session the desktop app starts reads plugin folders from (Claude Code docs, plugin
  * authoring reference, CLI 2.1.286). The variable is a path list other plugins may share: only a
  * folder this installation recorded is removed, and another installation's claim keeps it. A
- * folder an older version left with no record is this installation's when it lies inside its home
- * (nothing else writes there) and no other installation claims it; one elsewhere — a source
- * checkout, say — is unknown and preserved. The variable goes only when it is left empty
+ * folder an older version left with no record needs an exact known generated path with no nested
+ * installation and no other installation's claim; arbitrary descendants and source checkouts are
+ * unknown and preserved. The variable goes only when it is left empty
  * (D3, 2026-10-25).
  */
 export function setStatusMod(enabled: boolean, dir: string, opts: { home?: string } = {}): SettingsEdit {
@@ -619,7 +617,7 @@ function setStatusModLocked(enabled: boolean, dir: string, opts: { home?: string
     const elsewhere = claimedElsewhere(record.store, home, (c) => c.mods, entry);
     // A folder with no record is ours only when it is inside this installation's home and is (or
     // was) the status mod; anything else says nothing about who registered it.
-    const legacy = !mine && !elsewhere && insideHome(entry, home) && (!fs.existsSync(entry) || isStatusMod(entry));
+    const legacy = !mine && !elsewhere && legacyIntegrationPath(entry, home, ["mod", "lib/node_modules/clauderipple/dist/mod"]) && (!fs.existsSync(entry) || isStatusMod(entry));
     if (elsewhere) {
       kept.push(entry);
       other++;

@@ -193,6 +193,30 @@ test("a status mod entry with no record is legacy-owned only inside this home", 
   assert.ok(again.notes.some((note) => /did not record/.test(note)), again.notes.join("\n"));
 });
 
+test("nested legacy installation mod and hook survive the parent uninstall", () => {
+  const ctx = scratch();
+  const nested = path.join(ctx.A, "release-check");
+  const mod = pluginDir(path.join(nested, "mod"));
+  fs.writeFileSync(path.join(nested, "config.json"), "{}");
+  const hook = path.join(nested, "lib", "node_modules", "clauderipple", "dist", "cli", "src", "hooks", "agent-title.js");
+  const entry = { _clauderipple: "agent-title", hooks: [{ type: "command", command: `"/node" "${hook}"` }] };
+  fs.writeFileSync(ctx.settings, JSON.stringify({ env: { CLAUDE_CODE_PLUGIN_DIRS: mod }, hooks: { PreToolUse: [entry] } }));
+  const before = fs.readFileSync(ctx.settings, "utf8");
+  assert.equal(setStatusMod(false, mod, { home: ctx.A }).outcome, "preserved-unknown");
+  assert.equal(setAgentTitleHook(false, { node: "/node", script: hook }, { home: ctx.A }).outcome, "preserved-unknown");
+  assert.equal(fs.readFileSync(ctx.settings, "utf8"), before);
+});
+
+test("known legacy mod paths that resolve into another home stay unknown", () => {
+  const ctx = scratch();
+  const nested = path.join(ctx.A, "mod");
+  const mod = pluginDir(nested);
+  fs.writeFileSync(path.join(nested, "config.json"), "{}");
+  fs.writeFileSync(ctx.settings, JSON.stringify({ env: { CLAUDE_CODE_PLUGIN_DIRS: mod } }));
+  assert.equal(setStatusMod(false, mod, { home: ctx.A }).outcome, "preserved-unknown");
+  assert.equal(envOf(ctx.settings).CLAUDE_CODE_PLUGIN_DIRS, mod);
+});
+
 test("an agent-title hook entry this installation did not record is preserved", () => {
   const ctx = scratch();
   fs.writeFileSync(ctx.settings, JSON.stringify({

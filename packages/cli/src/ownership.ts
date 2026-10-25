@@ -40,9 +40,8 @@ export function sameHome(a: string, b: string): boolean {
 }
 
 /**
- * Whether `candidate` is `home` itself or lies under it. Used for a shared entry an older version
- * left with no record: a folder inside this installation's home can only be one that installation
- * created, while one elsewhere (a source checkout, another home) says nothing (D3, 2026-10-25).
+ * Whether `candidate` is `home` itself or lies under it. Containment alone is not ownership:
+ * an installation can contain a nested independent installation.
  */
 export function insideHome(candidate: string, home: string): boolean {
   const windows = home.includes("\\") || /^[A-Za-z]:[\\/]/.test(home);
@@ -56,6 +55,32 @@ export function insideHome(candidate: string, home: string): boolean {
     if (within.startsWith(base + separator)) return true;
   }
   return false;
+}
+
+/**
+ * Legacy client entries need an exact generated path, not arbitrary containment. A nested config
+ * or home marker (including at the candidate itself) disqualifies it. Inspection errors preserve.
+ */
+export function legacyIntegrationPath(candidate: string, home: string, generated: readonly string[]): boolean {
+  if (!generated.some(relative => sameHome(candidate, path.join(home, relative)))) return false;
+  const base = normalizeHome(home);
+  const resolved = normalizeHome(candidate);
+  if (!insideHome(resolved, base) || sameHome(resolved, base)) return false;
+  let cursor = resolved;
+  while (!sameHome(cursor, base)) {
+    for (const marker of ["config.json", "CLAUDERIPPLE_HOME"]) {
+      try {
+        fs.lstatSync(path.join(cursor, marker));
+        return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR") return false;
+      }
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return false;
+    cursor = parent;
+  }
+  return true;
 }
 
 /** The ownership a definition's recorded home implies. `null` means it recorded none. */
