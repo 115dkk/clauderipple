@@ -1,13 +1,18 @@
 // The link to the host. It never gives up: after a drop it waits min(30 s, attempt × 1 s) and
 // tries again, forever, and at once when the phone comes back online or the app comes to the
 // front. A half-open socket (the phone switched networks, the Mac went away without a FIN) is
-// caught by the app-level ping, not by TCP. Only a refused token stops it, because retrying a
-// token the host rejects would just say "connecting" forever — which would be a lie.
+// caught by the app-level ping, not by TCP; coming back to the front probes the open socket first
+// (background age is not proof of death) and only 3 s without a pong drops it. Only a refused token
+// stops it, because retrying a token the host rejects would just say "connecting" forever — which
+// would be a lie.
 import { BACKOFF_CAP_MS, PING_MS, READY_MS, STALE_MS } from "../src/protocol.ts";
 import type { ClientFeature, ClientMsg, HostMsg } from "../src/protocol.ts";
 
 /** A socket that opens but never says `ready` is as good as down (through the relay: the handshake counts too). */
 export { READY_MS };
+
+/** How long an open socket gets to answer the foreground probe before a new attempt starts. */
+export const PROBE_MS = 3_000;
 
 export type LinkState = "connecting" | "open" | "waiting" | "offline" | "denied";
 
@@ -64,6 +69,9 @@ export class Link {
   private tickTimer: unknown = null;
   private pingTimer: unknown = null;
   private readyTimer: unknown = null;
+  private probeTimer: unknown = null;
+  /** The `n` of the probe ping still waiting for its pong, if any. */
+  private probeN: number | null = null;
   private pingN = 0;
   private stopped = false;
   /**
@@ -86,7 +94,7 @@ export class Link {
   /** Network came back, app came to the front, or the user pressed "retry now". */
   nudge(): void {
     if (this.stopped || this.status.state === "denied") return;
-    if (this.status.state === "open") { this.ping(); return; }
+    if (this.status.state === "open") { this.probe(); return; }
     this.connect();
   }
 
@@ -112,8 +120,9 @@ export class Link {
 
   private clearAll(): void {
     this.epoch++;
-    for (const id of [this.retryTimer, this.tickTimer, this.pingTimer, this.readyTimer]) if (id !== null) this.deps.clearTimer(id);
-    this.retryTimer = this.tickTimer = this.pingTimer = this.readyTimer = null;
+    for (const id of [this.retryTimer, this.tickTimer, this.pingTimer, this.readyTimer, this.probeTimer]) if (id !== null) this.deps.clearTimer(id);
+    this.retryTimer = this.tickTimer = this.pingTimer = this.readyTimer = this.probeTimer = null;
+    this.probeN = null;
   }
 
   /** Forget the current socket before closing it, so its late close is not read as a live failure. */
@@ -167,6 +176,12 @@ export class Link {
       this.status.lastRx = this.deps.now();
       let msg: HostMsg;
       try { msg = JSON.parse(String(ev.data)) as HostMsg; } catch { return; }
+      if (msg.t === "pong") {
+        // Only the answer to the probe still pending clears it; an older pong (or a later one after
+        // the probe timed out) changes nothing.
+        if (this.probeN !== null && msg.n === this.probeN) this.clearProbe();
+        return;
+      }
       if (msg.t === "denied") {
         this.clearAll();
         this.sock = null;
@@ -179,20 +194,20 @@ export class Link {
         this.set({ state: "open", attempt: 0, nextAt: null, downSince: null });
         this.onReady();
       }
-      if (msg.t !== "pong") this.onMessage(msg);
+      this.onMessage(msg);
     };
     sock.onclose = () => { if (this.sock === sock) this.fail(); };
     sock.onerror = () => { /* onclose follows */ };
   }
 
-  private fail(): void {
+  private fail(immediate = false): void {
     this.sock = null;
     this.clearAll();
     const epoch = this.epoch;
     if (this.stopped || this.status.state === "denied") return;
     this.set({ attempt: this.status.attempt + 1, downSince: this.status.downSince ?? this.deps.now() });
     if (this.epoch !== epoch) return;
-    this.schedule();
+    if (immediate) this.connect(); else this.schedule();
   }
 
   private schedule(): void {
@@ -228,15 +243,44 @@ export class Link {
     this.pingTimer = this.deps.setTimer(loop, PING_MS);
   }
 
+  /**
+   * The app came back to the front. Ask the open socket to answer now instead of trusting its age:
+   * the time it spent in the background was the phone's, not the computer's silence. One probe at a
+   * time, however often foreground/nudge repeats; a matching pong keeps the socket, and only
+   * PROBE_MS without one drops it and starts a new attempt.
+   */
+  private probe(): void {
+    const sock = this.sock;
+    if (!sock || this.probeTimer !== null) return;
+    const n = ++this.pingN;
+    const epoch = this.epoch;
+    this.probeN = n;
+    this.probeTimer = this.deps.setTimer(() => {
+      if (this.epoch !== epoch || this.probeN !== n) return;
+      this.probeTimer = null;
+      this.probeN = null;
+      if (this.sock !== sock) return;
+      this.sock = null;
+      try { sock.close(4000, "probe timeout"); } catch { /* already gone */ }
+      this.fail(true);
+    }, PROBE_MS);
+    try { sock.send(JSON.stringify({ t: "ping", n } satisfies ClientMsg)); } catch { /* close follows */ }
+  }
+
+  private clearProbe(): void {
+    if (this.probeTimer !== null) this.deps.clearTimer(this.probeTimer);
+    this.probeTimer = null;
+    this.probeN = null;
+  }
+
   private ping(): void {
     const sock = this.sock;
     if (!sock) return;
     const last = this.status.lastRx ?? 0;
     if (this.deps.now() - last > STALE_MS) {
-      // Stale: no frame, not even a pong, for 30 s. Drop it ourselves rather than wait for TCP.
-      this.sock = null;
-      try { sock.close(4000, "stale"); } catch { /* already gone */ }
-      this.fail();
+      // Silence may be the phone's background, not the host's. Probe before dropping: a socket that
+      // is actually alive answers and stays, and the probe's timeout does the dropping.
+      this.probe();
       return;
     }
     try { sock.send(JSON.stringify({ t: "ping", n: ++this.pingN } satisfies ClientMsg)); } catch { /* close follows */ }

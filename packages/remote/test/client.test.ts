@@ -1,7 +1,7 @@
 // The phone's link and timeline, run in Node with a fake socket and a fake clock.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { backoff, Link, READY_MS } from "../web/conn.ts";
+import { backoff, Link, PROBE_MS, READY_MS } from "../web/conn.ts";
 import type { SocketLike } from "../web/conn.ts";
 import { dictionaries } from "../web/i18n.ts";
 import { markdown } from "../web/md.ts";
@@ -33,11 +33,13 @@ class Clock {
       const t = this.timers[0];
       if (!t || t.at > end) break;
       this.timers.shift();
-      this.now = t.at;
+      this.now = Math.max(this.now, t.at); // a timer overdue after freeze() runs late, at "now"
       t.fn();
     }
     this.now = end;
   }
+  /** The app was in the background for `ms`: the time passed but no timer ran. */
+  freeze(ms: number): void { this.now += ms; }
 }
 
 class FakeSocket implements SocketLike {
@@ -105,7 +107,7 @@ test("a dropped link retries forever with capped backoff and recovers", () => {
   assert.equal(readies(), 1);
 });
 
-test("a half-open socket is dropped by the app-level ping after STALE_MS of silence", () => {
+test("a half-open socket is dropped after the stale ping goes unanswered", () => {
   const { clock, sockets, link } = setup();
   link.start();
   sockets[0]!.open();
@@ -115,10 +117,12 @@ test("a half-open socket is dropped by the app-level ping after STALE_MS of sile
   clock.advance(STALE_MS - PING_MS);
   assert.equal(sockets[0]!.closed, false, "not stale at exactly 30 s");
   clock.advance(PING_MS);
+  assert.equal(sockets[0]!.closed, false, "silence is probed before the socket is dropped");
+  assert.equal(link.status.state, "open");
+  clock.advance(PROBE_MS);
   assert.equal(sockets[0]!.closed, true);
-  assert.equal(link.status.state, "waiting");
-  clock.advance(1000);
-  assert.equal(sockets.length, 2);
+  assert.equal(sockets.length, 2, "the unanswered probe starts a new attempt at once");
+  assert.equal(link.status.state, "connecting");
 });
 
 test("a connect that never opens nor closes is abandoned after READY_MS and retried", () => {
@@ -278,10 +282,12 @@ test("a ping that finds the link stale does not re-arm its own chain", () => {
   link.start();
   sockets[0]!.open();
   sockets[0]!.recv(ready);
-  clock.advance(STALE_MS + PING_MS);
+  clock.advance(STALE_MS + PING_MS); // t=40 s: silence is now probed, not dropped at once
+  assert.equal(sockets[0]!.closed, false);
+  clock.advance(PROBE_MS);
   assert.equal(sockets[0]!.closed, true);
-  assert.equal(link.status.state, "waiting");
-  assert.equal(clock.count(), 2, "one retry and one tick only");
+  assert.equal(link.status.state, "connecting");
+  assert.equal(clock.count(), 1, "only the connect timeout; no orphan ping chain");
   link.stop();
   assert.equal(clock.count(), 0);
 });
@@ -321,6 +327,107 @@ test("a status callback that stops while offline arms no retry", () => {
   link.onStatus = () => { if (link.status.state === "offline") link.stop(); };
   link.start();
   assert.equal(clock.count(), 0);
+});
+
+// Coming back to the front used to call ping(), whose 30 s stale rule discarded a socket that was
+// merely old because the app had been in the background. Probe first: one ping, one pong, keep it.
+const pingOf = (sock: FakeSocket): { t: string; n?: number } | undefined =>
+  sock.sent.map((s) => JSON.parse(s) as { t: string; n?: number }).filter((m) => m.t === "ping").at(-1);
+
+test("foreground probes a stale-looking open socket and keeps it when the pong answers", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  clock.freeze(6 * 60_000); // six minutes in the background: the time passed, no timer ran
+  link.foreground();
+  assert.equal(sockets[0]!.closed, false, "an open socket is probed, not discarded for looking stale");
+  assert.equal(link.status.state, "open");
+  const ping = pingOf(sockets[0]!)!;
+  sockets[0]!.recv({ t: "pong", n: ping.n });
+  clock.advance(PROBE_MS);
+  assert.equal(sockets[0]!.closed, false, "the matching pong clears the probe");
+  assert.equal(link.status.state, "open");
+  assert.equal(sockets.length, 1);
+});
+
+test("a probe with no pong starts a new attempt at the 3 s deadline, not after a backoff", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  clock.freeze(60_000);
+  link.foreground();
+  assert.equal(link.status.state, "open");
+  assert.equal(sockets[0]!.closed, false);
+  clock.advance(PROBE_MS - 1);
+  assert.equal(sockets.length, 1, "still probing just before the deadline");
+  clock.advance(1);
+  assert.equal(sockets[0]!.closed, true);
+  assert.equal(sockets.length, 2, "a fresh attempt starts at the deadline");
+  assert.equal(link.status.state, "connecting");
+});
+
+test("a pong for an older ping does not cancel the probe", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  clock.freeze(60_000);
+  link.foreground();
+  const ping = pingOf(sockets[0]!)!;
+  sockets[0]!.recv({ t: "pong", n: (ping.n ?? 0) - 1 });
+  clock.advance(PROBE_MS);
+  assert.equal(sockets[0]!.closed, true, "the probe went unanswered");
+  assert.equal(sockets.length, 2);
+});
+
+test("duplicate foreground and nudge share one probe", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  link.foreground();
+  link.foreground();
+  link.nudge();
+  const pings = sockets[0]!.sent.map((s) => JSON.parse(s) as { t: string }).filter((m) => m.t === "ping");
+  assert.equal(pings.length, 1, "one probe ping, not one per event");
+  sockets[0]!.recv({ t: "pong", n: pingOf(sockets[0]!)!.n });
+  clock.advance(PROBE_MS);
+  assert.equal(sockets.length, 1);
+  assert.equal(link.status.state, "open");
+});
+
+test("a pong from a replaced socket does not affect the live attempt", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  link.foreground();
+  assert.equal(sockets[0]!.closed, false);
+  const n = pingOf(sockets[0]!)!.n;
+  clock.advance(PROBE_MS);
+  assert.equal(sockets.length, 2);
+  assert.equal(link.status.state, "connecting");
+  sockets[0]!.recv({ t: "pong", n });
+  assert.equal(link.status.state, "connecting", "the old socket's answer is ignored");
+  assert.equal(sockets[1]!.closed, false);
+});
+
+test("stop clears the probe timer too", () => {
+  const { clock, sockets, link } = setup();
+  link.start();
+  sockets[0]!.open();
+  sockets[0]!.recv(ready);
+  clock.freeze(60_000);
+  link.foreground();
+  assert.equal(sockets[0]!.closed, false);
+  assert.ok(clock.count() > 0);
+  link.stop();
+  assert.equal(clock.count(), 0);
+  clock.advance(2 * PROBE_MS);
+  assert.equal(clock.count(), 0);
+  assert.equal(sockets.length, 1);
 });
 
 test("send() refuses while not open, so the outbox keeps the message", () => {
