@@ -1553,13 +1553,9 @@ function agentsActions($: EngineInterface): AgentsActions {
     // surface that cannot scroll leaves it where it is.
     open: async id => {
       try {
-        // The host's native transcript has no receipt rows. Keep captured instructions visible
-        // on the terminal too, rather than handing this conversation to that incomplete view.
-        if (!(await read($, agents)).find(a => a.id === id)?.instructions?.length) {
-          const viewed = await $.ui.view({ agentId: id })
-          if (!viewed.deny) return
-          await report($, 'agents view', viewed.deny)
-        }
+        const viewed = await $.ui.view({ agentId: id })
+        if (!viewed.deny) return
+        await report($, 'agents view', viewed.deny)
       } catch (error) { await report($, 'agents view', error) }
       await update($, agentRunsOpen, () => [])
       await update($, agentOpen, () => id)
@@ -1723,13 +1719,6 @@ export const register: Register = on => {
       if (['clear', 'resume', 'fork'].includes(e.source)) {
         generation++
         judgeSequence++
-        if (e.source === 'clear') {
-          endedEarly.clear()
-          await update($, agents, () => [])
-          await countAgents($)
-          await update($, agentOpen, () => null)
-          await update($, agentRunsOpen, () => [])
-        }
         await loadSettings($)
         await update($, busy, () => false)
         await update($, appEffort, () => null)
@@ -1786,10 +1775,10 @@ export const register: Register = on => {
       }))
     })
     receiveWork = work.then(() => undefined, () => undefined)
-    try { await work }
-    catch (error) { await report($, 'agent instruction', error) }
-    // Even a broken state boundary or diagnostic logger must not block the actual message.
-    finally { return next(e) }
+    // The message goes on at once: recording it reads the agent's transcript, and a slow or broken
+    // read must never hold the instruction back from the agent.
+    void work.catch(error => report($, 'agent instruction', error).catch(() => undefined))
+    return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
     // A background task's notification says it ended, and how (tasks.ts taskEnds).

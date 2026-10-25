@@ -53,9 +53,17 @@ function boundaries(on: On) {
     },
   }
 }
+/** The receipt is recorded after the message has gone on; let that recording finish. */
+async function settle(): Promise<void> {
+  // The mod's types carry no timer globals; the test runtime has them.
+  const later = (globalThis as unknown as { setTimeout: (done: () => void, ms: number) => void }).setTimeout
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => later(resolve, 0))
+}
 async function receive($: Engine, text: string, agentId = 'a', kind: 'coordinator' | 'peer' | 'task-notification' = 'coordinator') {
   const origin: SessionReceiveInput['origin'] = kind === 'task-notification' ? { kind } : { kind }
-  return $.session.receive({ text, origin, agentId })
+  const result = await $.session.receive({ text, origin, agentId })
+  await settle()
+  return result
 }
 
 test('coordinator instructions appear between receipt-time rows on desktop and terminal, without truncation', async ($, on) => {
@@ -105,6 +113,7 @@ test('receive passes the unchanged event exactly once even when transcript and d
     const event: SessionReceiveInput = { text: 'Do not lose this', agentId: 'a', origin: { kind: 'coordinator' } }
     expect(await $.session.receive(event)).toEqual({ text: event.text })
     expect(b.passed.at(-1)).toEqual(event)
+    await settle()
   }
   expect(b.passed.length).toBe(2)
   expect(b.logs.length > 0).toBe(true)
@@ -124,28 +133,28 @@ test('a denied receipt state write still queues the original instruction and the
   expect(b.records()[0]?.instructions?.map(i => i.text)).toEqual(['State recovered'])
 })
 
-test('clear rejects an in-flight receipt snapshot without blocking its delivery', async ($, on) => {
+test('a receipt waiting on the transcript neither holds back its delivery nor lands after a clear', async ($, on) => {
   const b = boundaries(on)
   const held = b.hold()
-  const pending = receive($, 'Before clear')
+  // Delivered while the transcript read is still held: the message never waits for the record.
+  expect(await $.session.receive({ text: 'Before clear', origin: { kind: 'coordinator' }, agentId: 'a' })).toEqual({ text: 'Before clear' })
+  expect(b.passed.length).toBe(1)
   await held.started
   await $.classic.SessionStart({ source: 'clear' })
   held.release()
-  expect(await pending).toEqual({ text: 'Before clear' })
-  expect(b.records()).toEqual([])
-  expect(b.passed.length).toBe(1)
+  await settle()
+  expect(b.records().map(a => a.id)).toEqual(['a', 'b'])
+  expect(b.records()[0]?.instructions).toBeUndefined()
 })
 
-test('receipts keep the newest twenty in order and disappear with their agent or clear', async ($, on) => {
+test('receipts keep the newest twenty in order and disappear with their agent', async ($, on) => {
   const b = boundaries(on)
   await Promise.all(Array.from({ length: 23 }, (_, i) => receive($, 'Instruction ' + i)))
+  await settle()
   const instructions = (b.records())?.[0]?.instructions
   expect(instructions?.map(i => i.text)).toEqual(Array.from({ length: 20 }, (_, i) => 'Instruction ' + (i + 3)))
   expect(instructions?.every(i => i.after === 2)).toBe(true)
   b.remove('a')
   await receive($, 'Removed agent must not reappear')
   expect((b.records())?.map(a => a.id)).toEqual(['b'])
-  await receive($, 'Will clear', 'b')
-  await $.classic.SessionStart({ source: 'clear' })
-  expect(b.records()).toEqual([])
 })
