@@ -45,7 +45,7 @@ import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
 import { effortLevels, effortLevelsForModel } from "./admin.ts";
 import { isWebFetchRequest } from "./webfetch.ts";
-import { ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
+import { requestConversationKey, ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
 import type { ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
@@ -891,6 +891,10 @@ export class Proxy {
     if (json) {
       record.source = record.target = typeof model === "string" ? model : "-";
       record.stream = json.stream === true;
+      if (pathname === "/v1/messages") {
+        const conversation = requestConversationKey(json, record.session, typeof agentId === "string" ? agentId : undefined);
+        if (conversation) record.conversation = conversation;
+      }
       if (isAutoModeClassifier(json)) record.purpose = "auto-mode-classifier";
     }
     const search = json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;

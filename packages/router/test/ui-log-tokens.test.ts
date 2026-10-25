@@ -1,7 +1,7 @@
 // The recent requests list reads a request as it did before ba1ba32: the whole prompt in the input
 // cell, with the cache's share on a pill inside it, and the output in a cell of its own. Only the
-// summary gained a tokens chip (060cc48), counted as the Agents card counts an agent (mod stats.ts
-// `agentTokens`): the whole prompt — uncached, cache write and cache read — plus the output. The
+// summary gained a tokens chip (060cc48), now supplied by conversation accounting: the last whole
+// prompt per conversation plus every output, rather than summing every request's prompt. The
 // dashboard's counters are plain functions in a classic script, so the test evaluates them straight
 // from the source text, as the picker test does. What is fixed here: a cache write is not a hit, a
 // fully cached Anthropic turn (`input: 2`) is not a two-token request, and the row is not the
@@ -16,7 +16,6 @@ type Usage = { input: number; cached: number; cacheWrite?: number; output: numbe
 
 type TokenBlock = {
   totalInputOf: (usage: Usage) => number;
-  tokensOf: (usage: Usage) => number;
 };
 
 const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui");
@@ -38,7 +37,7 @@ function loadTokenBlock(): TokenBlock {
   const start = source.indexOf("function totalInputOf");
   const end = source.indexOf("function requestDetail");
   assert.ok(start > 0 && end > start, "app.js no longer contains the token-counting block");
-  return new Function(`${source.slice(start, end)}; return { totalInputOf, tokensOf };`)() as TokenBlock;
+  return new Function(`${source.slice(start, end)}; return { totalInputOf };`)() as TokenBlock;
 }
 
 function loadI18n(): Record<string, Record<string, string>> {
@@ -52,26 +51,33 @@ function loadI18n(): Record<string, Record<string, string>> {
 const LANGUAGES = ["ko", "en", "zh", "ja", "es", "pt"];
 
 test("a prompt is read whole: uncached, cache write and cache read", () => {
-  const { totalInputOf, tokensOf } = loadTokenBlock();
+  const { totalInputOf } = loadTokenBlock();
   assert.equal(totalInputOf({ input: 2, cached: 45_000, cacheWrite: 1_200, output: 900 }), 46_202);
-  assert.equal(tokensOf({ input: 2, cached: 45_000, cacheWrite: 1_200, output: 900 }), 47_102);
 });
 
 test("a record that reports no cache write still counts all it read", () => {
-  const { totalInputOf, tokensOf } = loadTokenBlock();
+  const { totalInputOf } = loadTokenBlock();
   assert.equal(totalInputOf({ input: 100, cached: 900, output: 10 }), 1_000);
-  assert.equal(tokensOf({ input: 100, cached: 900, output: 10 }), 1_010);
 });
 
 // The summary leads a period with the same figure the Agents card counts an agent by, and keeps the
 // prompt's own total and the output on their own beside it.
-test("the summary reads a period's tokens, then its input and output", () => {
+test("the summary displays conversation tokens, not the sum of every prompt, including a provider filter", () => {
   const body = slice("app.js", "function renderSummary(", "function fitSummaryValues(");
-  const tokens = body.indexOf('summaryChip(t("logs.th.tokens"), formatNumber(tokensOf(total)))');
-  const input = body.indexOf('summaryChip(t("logs.summary.input")');
-  const output = body.indexOf('summaryChip(t("logs.summary.output")');
-  assert.ok(tokens > 0, "the summary no longer shows the period's tokens");
-  assert.ok(input > tokens && output > input, "the summary no longer reads tokens, then input, then output");
+  const render = new Function("summary", "requestProvider", "EMPTY_BUCKET", "t", "formatNumber", "summaryChip", "$", "totalInputOf", "formatSeconds", "fitSummaryValues", `${body}; renderSummary(summary);`);
+  const total = { count: 3, ok: 3, failed: 0, input: 2000, cached: 8000, output: 100, conversationTokens: 4100 };
+  const provider = { ...total, conversationTokens: 2100 };
+  for (const filter of ["", "chatgpt"]) {
+    let chips: { label: string; value: unknown }[] = [];
+    render({ total, providers: { chatgpt: provider } }, filter, {}, (key: string) => key,
+      (n: number) => n, (label: string, value: unknown) => ({ label, value }),
+      () => ({ replaceChildren: (...values: typeof chips) => { chips = values; } }),
+      loadTokenBlock().totalInputOf, (n: number) => n, () => {});
+    assert.equal(chips[2]!.label, "logs.th.tokens");
+    assert.equal(chips[2]!.value, filter ? 2100 : 4100);
+    assert.equal(chips[3]!.value, 10000, "the independent input counter must not change");
+    assert.equal(chips[4]!.value, 100);
+  }
 });
 
 // The row went back to its earlier shape: the input and the output are columns of their own, and the

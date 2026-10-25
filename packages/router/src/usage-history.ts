@@ -31,15 +31,75 @@ export type BucketTotals = {
   ms: number;
 };
 
+export type ConversationTokens = {
+  /** Last prompt per conversation + all outputs in this period. */
+  conversationTokens: number;
+  /** Records without a conversation key, counted independently (includes legacy history). */
+  ungroupedRequests: number;
+};
+
+type ConversationTurn = { at: number; prompt: number; output: number };
+// Persist one state per (hour, provider, model, conversation), not one per request. No eviction:
+// dropping old identities would silently overcount later summaries. A query's temporary state is
+// O(distinct conversations in its range); retained history is O(distinct hourly conversation states).
+type ConversationTotals = {
+  turns: Record<string, ConversationTurn>;
+  ungroupedTokens: number;
+  ungroupedRequests: number;
+};
+
 export type UsageSummary = {
-  total: SummaryBucket;
-  providers: Record<string, SummaryBucket>;
+  total: SummaryBucket & ConversationTokens;
+  providers: Record<string, SummaryBucket & ConversationTokens>;
   models: ModelUsageBucket[];
   earliest: string | null;
 };
 
 /** One persisted line: a partial bucket for (hour, provider, model). Lines are additive. */
-type HourBucket = BucketTotals & { h: number; p: string; m: string };
+type HourBucket = BucketTotals & { h: number; p: string; m: string; conversations?: ConversationTotals };
+
+export function emptyConversations(): ConversationTotals {
+  return { turns: Object.create(null) as Record<string, ConversationTurn>, ungroupedTokens: 0, ungroupedRequests: 0 };
+}
+
+export function recordConversations(record: RequestRecord): ConversationTotals {
+  const totals = emptyConversations();
+  if (!record.usage) return totals;
+  const prompt = record.usage.input + record.usage.cached + (record.usage.cacheWrite ?? 0);
+  if (record.conversation && record.kind === "messages" && !record.purpose) {
+    totals.turns[record.conversation] = { at: Date.parse(record.at), prompt, output: record.usage.output };
+  } else {
+    totals.ungroupedTokens = prompt + record.usage.output;
+    totals.ungroupedRequests = 1;
+  }
+  return totals;
+}
+
+export function addConversations(target: ConversationTotals, source: ConversationTotals): void {
+  target.ungroupedTokens += source.ungroupedTokens;
+  target.ungroupedRequests += source.ungroupedRequests;
+  for (const [key, turn] of Object.entries(source.turns)) {
+    const previous = target.turns[key];
+    target.turns[key] = previous
+      ? { ...(turn.at >= previous.at ? turn : previous), output: previous.output + turn.output }
+      : { ...turn };
+  }
+}
+
+export function finishConversations(totals: ConversationTotals): ConversationTokens {
+  let tokens = totals.ungroupedTokens;
+  for (const turn of Object.values(totals.turns)) tokens += turn.prompt + turn.output;
+  return { conversationTokens: tokens, ungroupedRequests: totals.ungroupedRequests };
+}
+
+/** Old hourly records cannot recover conversation identity: expose the independent-request fallback. */
+function conversationsOf(bucket: HourBucket): ConversationTotals {
+  return bucket.conversations ?? {
+    ...emptyConversations(),
+    ungroupedTokens: bucket.input + bucket.cached + bucket.cacheWrite + bucket.output,
+    ungroupedRequests: bucket.count,
+  };
+}
 
 export function emptyTotals(): BucketTotals {
   return { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, ms: 0 };
@@ -104,11 +164,23 @@ export function sortByVolume<T extends SummaryBucket & { provider: string; model
   models.sort((a, b) => volume(b) - volume(a) || b.count - a.count);
 }
 
+function isConversationTotals(value: unknown): value is ConversationTotals {
+  if (!value || typeof value !== "object") return false;
+  const c = value as Partial<ConversationTotals>;
+  if (typeof c.ungroupedTokens !== "number" || !Number.isFinite(c.ungroupedTokens) ||
+      typeof c.ungroupedRequests !== "number" || !Number.isFinite(c.ungroupedRequests) ||
+      !c.turns || typeof c.turns !== "object" || Array.isArray(c.turns)) return false;
+  return Object.entries(c.turns).every(([key, turn]) => /^[a-f0-9]{32}$/.test(key) &&
+    turn && typeof turn === "object" &&
+    [turn.at, turn.prompt, turn.output].every((n) => typeof n === "number" && Number.isFinite(n)));
+}
+
 function isHourBucket(value: unknown): value is HourBucket {
   if (!value || typeof value !== "object") return false;
   const b = value as Partial<HourBucket>;
   return typeof b.h === "number" && Number.isFinite(b.h) && Number.isInteger(b.h) &&
     typeof b.p === "string" && typeof b.m === "string" &&
+    (b.conversations === undefined || isConversationTotals(b.conversations)) &&
     ["count", "ok", "failed", "input", "cached", "cacheWrite", "output", "ms"].every((key) => {
       const n = (b as unknown as Record<string, unknown>)[key];
       return typeof n === "number" && Number.isFinite(n);
@@ -128,6 +200,7 @@ function toLine(bucket: HourBucket): string {
     cacheWrite: bucket.cacheWrite,
     output: bucket.output,
     ms: bucket.ms,
+    conversations: bucket.conversations,
   }) + "\n";
 }
 
@@ -173,7 +246,7 @@ export class UsageHistory {
     const hour = hourOf(record);
     if (hour === null) return;
     this.observe(hour);
-    const bucket: HourBucket = { h: hour, p: record.provider, m: record.target, ...recordTotals(record) };
+    const bucket: HourBucket = { h: hour, p: record.provider, m: record.target, ...recordTotals(record), conversations: recordConversations(record) };
     if (this.openHour !== null && hour < this.openHour) {
       this.append([bucket]);
       this.merge(this.buckets, bucket);
@@ -189,12 +262,19 @@ export class UsageHistory {
   /** Buckets whose hour start lies in [fromMs, toMs), summed across providers and models. */
   summary(fromMs: number, toMs: number): UsageSummary {
     const fromHour = Math.floor(fromMs / HOUR_MS);
+    const conversations = emptyConversations();
+    const providerConversations = new Map<string, ConversationTotals>();
     const total = emptyTotals();
     const providers = new Map<string, BucketTotals>();
     const models = new Map<string, { totals: BucketTotals; provider: string; model: string }>();
     for (const bucket of [...this.buckets.values(), ...this.open.values()]) {
       if (bucket.h < fromHour || bucket.h * HOUR_MS >= toMs) continue;
       addTotals(total, bucket);
+      const accounting = conversationsOf(bucket);
+      addConversations(conversations, accounting);
+      const perProvider = providerConversations.get(bucket.p) ?? emptyConversations();
+      addConversations(perProvider, accounting);
+      providerConversations.set(bucket.p, perProvider);
       const provider = providers.get(bucket.p) ?? providers.set(bucket.p, emptyTotals()).get(bucket.p)!;
       addTotals(provider, bucket);
       const key = modelKey(bucket.p, bucket.m);
@@ -204,8 +284,8 @@ export class UsageHistory {
     const modelList = [...models.values()].map(({ totals, provider, model }) => ({ ...finishTotals(totals), provider, model }));
     sortByVolume(modelList);
     return {
-      total: finishTotals(total),
-      providers: Object.fromEntries([...providers].map(([name, totals]) => [name, finishTotals(totals)])),
+      total: { ...finishTotals(total), ...finishConversations(conversations) },
+      providers: Object.fromEntries([...providers].map(([name, totals]) => [name, { ...finishTotals(totals), ...finishConversations(providerConversations.get(name)!) }])),
       models: modelList,
       earliest: this.earliestHour === null ? null : new Date(this.earliestHour * HOUR_MS).toISOString(),
     };
@@ -218,8 +298,12 @@ export class UsageHistory {
   private merge(target: Map<string, HourBucket>, bucket: HourBucket): void {
     const key = bucketKey(bucket.h, bucket.p, bucket.m);
     const existing = target.get(key);
-    if (existing) addTotals(existing, bucket);
-    else target.set(key, { ...bucket });
+    if (existing) {
+      const conversations = conversationsOf(existing);
+      addConversations(conversations, conversationsOf(bucket));
+      existing.conversations = conversations;
+      addTotals(existing, bucket);
+    } else target.set(key, { ...bucket });
     if (target === this.buckets && (this.highestHour === null || bucket.h > this.highestHour)) this.highestHour = bucket.h;
   }
 
