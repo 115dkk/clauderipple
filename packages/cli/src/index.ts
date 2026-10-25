@@ -90,15 +90,17 @@ function describeOwnership(result: "other-installation" | "ownership-unknown" | 
 
 function pickerOff(): void {
   const home = homeDir();
-  // Under another CLAUDERIPPLE_HOME only this install's entry and CA go (integrations.ts).
-  const removed = removeAppProxy(proxyUrlFor(new ConfigStore(configPath()).get().listen.port), home);
-  console.log(removed ? "✓ Claude Desktop config library entry removed (previous entry restored if there was one)" : "✓ no ClaudeRipple config library entry");
-  try {
-    setPickerEnabled(false);
-    console.log("✓ picker.enabled = false");
-  } catch {
-    /* no config */
+  // Capture legacy ownership before changing the picker or CA, just as uninstall does.
+  const proxyUrl = proxyUrlFor(new ConfigStore(configPath()).get().listen.port);
+  const desktop = currentAppProxy();
+  if (desktop.ours && desktop.installationHome === undefined) {
+    if (!migrateLegacyAppProxy(proxyUrl, home)) throw new Error("Claude Desktop 프록시의 설치 소유권을 확인하지 못해 피커 설정과 CA를 보존했습니다. 이 설치의 서비스를 복구하고 프록시 설정을 확인한 뒤 다시 시도해 주세요.");
   }
+  const removed = removeAppProxy(proxyUrl, home);
+  if (currentAppProxy().ours) throw new Error("Claude Desktop 프록시 제거를 확인하지 못해 피커 설정과 CA를 보존했습니다. 프록시를 설정한 설치와 포트를 확인한 뒤 해당 설치에서 다시 시도해 주세요.");
+  console.log(removed ? "✓ Claude Desktop config library entry removed (previous entry restored if there was one)" : "✓ no ClaudeRipple config library entry");
+  setPickerEnabled(false);
+  console.log("✓ picker.enabled = false");
   if (isWindows) console.log("Removing the CA: Windows will ask you to confirm once more.");
   const store = isWindows ? "your user certificate store" : isLinux ? `your NSS database (${nssDb()})` : "the login keychain";
   const removal = untrustCa(certPaths(home).caPem, { sweep: false, missingCaTrustRemoved: flag("confirm-missing-ca-trust-removed") });

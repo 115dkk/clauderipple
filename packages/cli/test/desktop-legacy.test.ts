@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { applyAppProxy, configLibraryDir, currentAppProxy } from "../src/picker.ts";
+import { stripTypeScriptTypes } from "node:module";
+import vm from "node:vm";
+import { applyAppProxy, configLibraryDir, currentAppProxy, migrateLegacyAppProxy, removeAppProxy } from "../src/picker.ts";
+import { setPickerEnabled } from "../src/integrations.ts";
+import { certPaths } from "../src/certs.ts";
 import { directOn } from "../src/direct.ts";
 import { applyProxyEnv, settingsEnv } from "../src/settings.ts";
 import { removeClientIntegrations } from "../src/integrations.ts";
@@ -29,6 +33,66 @@ function fixture(t: { after(fn: () => void): void }) {
   service();
   const deps = { platform: "darwin" as const, launchctl: (args: string[]) => { assert.equal(args[0], "print"); return { ok: true, out: "state = running\n pid = 4242\n" }; }, probe: () => ({ version: "0.12.14", home }), listenPids: () => [4242] };
   return { home, other, url, deps, service };
+}
+
+// Evaluate only the command body with injected external boundaries. Never import or execute the
+// CLI entry point: its dispatch and native service/keychain dependencies must not run in tests.
+function pickerOffCommand(f: ReturnType<typeof fixture>) {
+  const source = fs.readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("function pickerOff(): void {"), source.indexOf('\nimport { VERSION }'));
+  const messages: string[] = [];
+  let trustRemovals = 0;
+  const run = () => vm.runInNewContext(stripTypeScriptTypes(`${body}\npickerOff();`), {
+    homeDir: () => f.home,
+    configPath: () => path.join(f.home, "config.json"),
+    ConfigStore: class { get() { return { listen: { port: 18791 } }; } },
+    proxyUrlFor: (port: number) => `http://127.0.0.1:${port}`,
+    currentAppProxy, removeAppProxy,
+    migrateLegacyAppProxy: (url: string, home: string) => migrateLegacyAppProxy(url, home, f.deps),
+    setPickerEnabled: (enabled: boolean) => setPickerEnabled(enabled, path.join(f.home, "config.json")),
+    certPaths, flag: () => false, isWindows: false, isLinux: false,
+    untrustCa: () => { trustRemovals++; return "removed"; },
+    console: { log: (message: string) => messages.push(message) },
+  });
+  return { run, messages, trustRemovals: () => trustRemovals };
+}
+
+test("picker off migrates a verified legacy Desktop entry before disabling picker and CA trust", t => {
+  const f = fixture(t);
+  const command = pickerOffCommand(f);
+  command.run();
+  assert.equal(currentAppProxy().egressProxyUrl, null);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, "config.json"), "utf8")).picker.enabled, false);
+  assert.equal(command.trustRemovals(), 1);
+  assert.equal(command.messages.some(message => message.includes("no ClaudeRipple config library entry")), false);
+});
+
+test("picker off preserves picker and CA trust when legacy Desktop ownership cannot be verified", t => {
+  const f = fixture(t);
+  f.service(f.other);
+  const before = fs.readFileSync(path.join(f.home, "config.json"), "utf8");
+  const command = pickerOffCommand(f);
+  assert.throws(command.run, /설치 소유권을 확인하지 못해/);
+  assert.equal(currentAppProxy().egressProxyUrl, f.url);
+  assert.equal(fs.readFileSync(path.join(f.home, "config.json"), "utf8"), before);
+  assert.equal(command.trustRemovals(), 0);
+  assert.deepEqual(command.messages, []);
+});
+
+for (const reason of ["other-installation", "different-port"] as const) {
+  test(`picker off preserves CA trust when proxy removal is refused for ${reason}`, t => {
+    const f = fixture(t);
+    fs.writeFileSync(path.join(configLibraryDir(), "_meta.json"), JSON.stringify({ appliedId: "legacy", clauderipple: { ourId: "legacy", installationHome: reason === "other-installation" ? f.other : f.home } }));
+    if (reason === "different-port") fs.writeFileSync(path.join(configLibraryDir(), "legacy.json"), JSON.stringify({ egressProxyUrl: "http://127.0.0.1:28791" }));
+    const before = currentAppProxy();
+    const config = fs.readFileSync(path.join(f.home, "config.json"), "utf8");
+    const command = pickerOffCommand(f);
+    assert.throws(command.run, /프록시 제거를 확인하지 못해/);
+    assert.deepEqual(currentAppProxy(), before);
+    assert.equal(fs.readFileSync(path.join(f.home, "config.json"), "utf8"), config);
+    assert.equal(command.trustRemovals(), 0);
+    assert.deepEqual(command.messages, []);
+  });
 }
 
 test("legacy Desktop apply migrates only with the current home's definition and verified live PID", t => {
