@@ -106,13 +106,15 @@ function sharedWorkerManifests(home: string, fallback?: string): { files: string
  */
 export function removeClientIntegrations(
   home: string,
-  removeTrust: (caPem: string, opts: { sweep?: boolean }) => CaRemoval | boolean = untrustCa,
+  removeTrust: (caPem: string, opts: { sweep?: boolean; missingCaTrustRemoved?: boolean }) => CaRemoval | boolean = untrustCa,
   opts: {
     modDir?: string;
     agentDir?: string;
     port?: number;
     defaultHome?: string;
     desktopService?: DesktopServiceDeps;
+    /** Explicit user confirmation, never inferred from a missing ca.pem. */
+    missingCaTrustRemoved?: boolean;
     /**
      * This installation's ingress port, passed only when its service definition was this home's
      * when the uninstall started. An unmarked legacy Codex block (an older version recorded no
@@ -206,9 +208,13 @@ export function removeClientIntegrations(
       return removal.result;
     }],
     ["the CA trust", () => {
-      const reported = removeTrust(certPaths(home).caPem, { sweep: false });
+      const reported = removeTrust(certPaths(home).caPem, { sweep: false, ...(opts.missingCaTrustRemoved === true ? { missingCaTrustRemoved: true } : {}) });
       // An injected boolean keeps its old meaning: true = removed, false = not confirmed.
       const result: CaRemoval = typeof reported === "boolean" ? (reported ? "removed" : "failed") : reported;
+      if (result === "missing") {
+        notes.push(`CA 파일이 없어 인증서 저장소의 등록 여부를 확인하지 못했습니다. 원래 인증서를 ${certPaths(home).caPem} 경로에 복원해 주세요. 복원할 수 없다면 인증서 저장소에서 이 설치의 CA를 확인하고 제거한 뒤 \`clauderipple uninstall --purge --confirm-missing-ca-trust-removed\`를 실행해 주세요. 같은 이름의 다른 설치 인증서는 삭제하지 마세요.`);
+        return "preserved-unknown";
+      }
       if (result === "failed") {
         notes.push("CA trust removal was not confirmed; kept installation evidence");
         return "failed";

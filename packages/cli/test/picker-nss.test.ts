@@ -10,10 +10,32 @@ import { createCa } from "../../router/src/x509.ts";
 
 const onWindows = process.platform === "win32";
 
+test("missing CA requires explicit trust removal confirmation, unlike unreadable certificates", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ca-missing-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const missing = path.join(root, "missing.pem");
+  const malformed = path.join(root, "malformed.pem");
+  fs.writeFileSync(malformed, "not a certificate");
+  for (const platform of ["darwin", "win32", "linux"] as const) {
+    const run = () => assert.fail("must not query or delete certificates without identity");
+    assert.equal(untrustCa(missing, { platform, run }), "missing");
+    assert.equal(untrustCa(missing, { platform, run, missingCaTrustRemoved: true }), "absent");
+    assert.equal(untrustCa(root, { platform, run, missingCaTrustRemoved: true }), "failed");
+    assert.equal(untrustCa(malformed, { platform, run, missingCaTrustRemoved: true }), "failed");
+  }
+});
+
+for (const code of ["EACCES", "EIO"]) {
+  test(`CA recovery confirmation never bypasses ${code}`, t => {
+    t.mock.method(fs, "readFileSync", () => { throw Object.assign(new Error(code), { code }); });
+    assert.equal(untrustCa("/isolated/ca.pem", { missingCaTrustRemoved: true, run: () => assert.fail("store must not be touched") }), "failed");
+  });
+}
+
 test("an unreadable CA fingerprint is a failed removal, never confirmed absence", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ca-unreadable-"));
   try {
-    assert.equal(untrustCa(path.join(root, "missing.pem")), "failed");
+    assert.equal(untrustCa(path.join(root, "missing.pem")), "missing");
     assert.equal(untrustCa(root), "failed");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -170,7 +192,7 @@ test("CA removal never turns store query failures into absence", () => {
         throw new Error("permission denied");
       } }), "failed");
       assert.equal(calls.length, 1);
-      assert.equal(untrustCa(path.join(root, "missing.pem"), { platform, run: () => { throw new Error("must not query without a fingerprint"); } }), "failed");
+      assert.equal(untrustCa(path.join(root, "missing.pem"), { platform, run: () => { throw new Error("must not query without a fingerprint"); } }), "missing");
     }
     assert.equal(untrustCa(pem, { platform: "win32", run: () => "0" }), "absent");
     assert.equal(untrustCa(pem, { platform: "linux", run: () => "Certificate Nickname  Trust Attributes\n SSL,S/MIME,JAR/XPI\n" }), "absent");

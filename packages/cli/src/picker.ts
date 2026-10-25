@@ -188,14 +188,14 @@ export function trustCa(caPem: string): void {
  * What a CA removal achieved: `absent` means there was nothing trusted to remove (a purge may
  * proceed), `failed` means the store could not be read or the user declined.
  */
-export type CaRemoval = "removed" | "absent" | "failed";
+export type CaRemoval = "removed" | "absent" | "missing" | "failed";
 
-/** The certificate's SHA-1 as the trust stores key it (no separators), or null when unreadable. */
-function caFingerprint(caPem: string): string | null {
+/** Missing local identity is not evidence that the certificate is absent from the trust store. */
+function caFingerprint(caPem: string): { fingerprint: string } | { error: "missing" | "failed" } {
   try {
-    return new X509Certificate(fs.readFileSync(caPem)).fingerprint.replace(/:/g, "").toUpperCase();
-  } catch {
-    return null;
+    return { fingerprint: new X509Certificate(fs.readFileSync(caPem)).fingerprint.replace(/:/g, "").toUpperCase() };
+  } catch (error) {
+    return { error: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "failed" };
   }
 }
 
@@ -242,11 +242,16 @@ function keychainHasCa(fingerprint: string | null, byName: boolean, run: CaComma
  * A certificate that is not there at all is `absent`, not a failure: an install that already lost
  * its CA must still be able to purge (D3, 2026-10-25).
  */
-export function untrustCa(caPem: string, opts: { sweep?: boolean; platform?: NodeJS.Platform; run?: CaCommand } = {}): CaRemoval {
+export function untrustCa(caPem: string, opts: { sweep?: boolean; platform?: NodeJS.Platform; run?: CaCommand; missingCaTrustRemoved?: boolean } = {}): CaRemoval {
   const platform = opts.platform ?? process.platform;
   const run = opts.run ?? runCaCommand;
-  const fingerprint = caFingerprint(caPem);
-  if (fingerprint === null) return "failed";
+  const identity = caFingerprint(caPem);
+  if ("error" in identity) {
+    // Explicit recovery only: the user has checked the store and removed this installation's CA.
+    // Never bypass permission, I/O or parsing failures, and never sweep by a non-unique name.
+    return identity.error === "missing" && opts.missingCaTrustRemoved === true ? "absent" : identity.error;
+  }
+  const { fingerprint } = identity;
   if (platform === "linux") {
     try {
       const wanted = nssNickname(caPem);

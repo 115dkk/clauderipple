@@ -51,6 +51,16 @@ test("migrated legacy Desktop evidence survives service removal before integrati
   assert.equal(currentAppProxy().egressProxyUrl, null);
 });
 
+test("integration cleanup finishes a missing CA only after explicit manual trust removal confirmation", t => {
+  const f = fixture(t);
+  applyAppProxy(f.url, f.home, undefined, f.deps);
+  assert.equal(removeClientIntegrations(f.home, undefined, { defaultHome: f.home }), false);
+  assert.equal(fs.existsSync(path.join(f.home, "ca.pem")), false);
+  assert.equal(removeClientIntegrations(f.home, undefined, { defaultHome: f.home, missingCaTrustRemoved: true }), true);
+  fs.mkdirSync(path.join(f.home, "ca.pem"));
+  assert.equal(removeClientIntegrations(f.home, undefined, { defaultHome: f.home, missingCaTrustRemoved: true }), false);
+});
+
 test("legacy Desktop direct on switches both clients with independent evidence", t => {
   const f = fixture(t);
   applyProxyEnv({ home: f.home, proxyUrl: f.url, caPath: path.join(f.home, "ca.pem"), force: false });

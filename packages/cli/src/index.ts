@@ -101,9 +101,10 @@ function pickerOff(): void {
   }
   if (isWindows) console.log("Removing the CA: Windows will ask you to confirm once more.");
   const store = isWindows ? "your user certificate store" : isLinux ? `your NSS database (${nssDb()})` : "the login keychain";
-  const removal = untrustCa(certPaths(home).caPem, { sweep: false });
+  const removal = untrustCa(certPaths(home).caPem, { sweep: false, missingCaTrustRemoved: flag("confirm-missing-ca-trust-removed") });
   console.log(
-    removal === "removed" ? `✓ CA removed from ${store}`
+    removal === "missing" ? `CA 파일이 없어 인증서 등록 여부를 확인하지 못했습니다. 원래 인증서를 ${certPaths(home).caPem} 경로에 복원하거나, 인증서 저장소에서 이 설치의 CA를 확인하고 제거한 뒤 \`clauderipple picker off --confirm-missing-ca-trust-removed\`를 실행해 주세요. 같은 이름의 다른 설치 인증서는 삭제하지 마세요.`
+    : removal === "removed" ? `✓ CA removed from ${store}`
     : removal === "absent" ? `✓ CA was not in ${store}`
     : `! CA removal was not confirmed; it may still be trusted. Remove the "${CA_NAME}" certificate from ${store} by hand.`,
   );
@@ -398,6 +399,7 @@ async function uninstall(): Promise<void> {
   }
   const integrationsRemoved = removeClientIntegrations(home, undefined, {
     port: cfg.listen.port,
+    missingCaTrustRemoved: flag("confirm-missing-ca-trust-removed"),
     ...(serviceWasOurs ? { legacyCodexIngressPort: ingressPort(cfg) } : {}),
   });
   if (!integrationsRemoved) process.exitCode = 1;
@@ -684,6 +686,8 @@ function help(): void {
 
   install [--port N] [--force] [--max-context-tokens N]
   uninstall [--purge]
+    --confirm-missing-ca-trust-removed
+                    CA 파일이 없고 인증서 저장소에서 이 설치의 CA를 직접 확인하고 제거한 경우에만 사용합니다.
   status
   doctor [--json]   what is wrong with the router, its background service and Claude's connection settings
   repair [--json]   fix what doctor finds: re-register and start the router, wait for it to answer
