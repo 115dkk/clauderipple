@@ -16,6 +16,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
+import { homeDir } from "../../router/src/config.ts";
+import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
+import { normalizeHome, sameHome } from "./ownership.ts";
 
 export const CA_NAME = "ClaudeRipple local CA";
 
@@ -186,105 +189,206 @@ export function trustCa(caPem: string): void {
 }
 
 /**
+ * What a CA removal achieved: `absent` means there was nothing trusted to remove (a purge may
+ * proceed), `failed` means the store could not be read or the user declined.
+ */
+export type CaRemoval = "removed" | "absent" | "failed";
+
+/** The certificate's SHA-1 as the trust stores key it (no separators), or null when unreadable. */
+function caFingerprint(caPem: string): string | null {
+  try {
+    return new X509Certificate(fs.readFileSync(caPem)).fingerprint.replace(/:/g, "").toUpperCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Whether Windows' CurrentUser Root store holds the certificate; null when that cannot be read. */
+function windowsHasCa(fingerprint: string | null, byName: boolean): boolean | null {
+  const match = byName ? `$_.Subject -eq 'CN=${CA_NAME}'` : fingerprint ? `$_.Thumbprint -eq '${fingerprint}'` : null;
+  if (!match) return false;
+  try {
+    const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { ${match} }).Count`], {
+      env: windowsPowerShellEnv(),
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    }).toString();
+    const count = Number(out.trim());
+    return Number.isSafeInteger(count) ? count > 0 : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the login keychain holds the certificate (trusted or not): true, false, or null when that
+ * cannot be determined. Read-only — `security find-certificate` never prompts for a password.
+ */
+function keychainHasCa(fingerprint: string | null, byName: boolean): boolean | null {
+  const args = byName
+    ? ["find-certificate", "-c", CA_NAME, loginKeychain()]
+    : fingerprint
+      ? ["find-certificate", "-a", "-Z", loginKeychain()]
+      : null;
+  if (!args) return false;
+  try {
+    const out = execFileSync("security", args, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    return byName || out.toUpperCase().includes(`SHA-1 HASH: ${fingerprint}`);
+  } catch (error) {
+    // errSecItemNotFound is the only failure that means "not there"; anything else is unknown.
+    return (error as { status?: number }).status === 44 ? false : null;
+  }
+}
+
+/**
  * `sweep` also removes CAs an earlier install of the same home left behind, found by name. Without
  * it only this `caPem` goes, by fingerprint: a second install (a release check under its own
  * CLAUDERIPPLE_HOME) shares the user's trust store with the real one, whose CA has the same name.
+ * A certificate that is not there at all is `absent`, not a failure: an install that already lost
+ * its CA must still be able to purge (D3, 2026-10-25).
  */
-export function untrustCa(caPem: string, opts: { sweep?: boolean } = {}): boolean {
-  if (isLinux) return nssUntrust(opts.sweep ? undefined : caPem);
-  const trusted = caTrusted(caPem);
-  let fingerprint: string;
-  try {
-    fingerprint = new X509Certificate(fs.readFileSync(caPem)).fingerprint.replace(/:/g, "");
-  } catch {
-    if (!opts.sweep) return false;
-    fingerprint = "";
+export function untrustCa(caPem: string, opts: { sweep?: boolean } = {}): CaRemoval {
+  if (isLinux) {
+    const wanted = caPem ? nssNickname(caPem) : null;
+    const ours = () => nssOurNicknames().filter((name) => wanted === null || name === wanted);
+    const names = ours();
+    if (names.length === 0) return "absent";
+    for (const name of names) {
+      try {
+        certutil(["-D", "-n", name]);
+      } catch {
+        /* verified below */
+      }
+    }
+    return ours().length === 0 ? "removed" : "failed";
   }
+  const fingerprint = caFingerprint(caPem);
+  const sweep = opts.sweep === true;
   if (isWindows) {
-    if (!trusted) return false;
-    const match = opts.sweep ? `$_.Subject -eq 'CN=${CA_NAME}'` : `$_.Thumbprint -eq '${fingerprint}'`;
+    const before = windowsHasCa(fingerprint, sweep);
+    if (before === false) return "absent";
+    if (before === null) return "failed";
+    const match = sweep ? `$_.Subject -eq 'CN=${CA_NAME}'` : `$_.Thumbprint -eq '${fingerprint}'`;
     try {
       powershell(
         `Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { ${match} } | ForEach-Object { Remove-Item -Path $_.PSPath -Force }`,
         { stdio: "inherit", interactive: true },
       );
     } catch {
-      /* the user may have declined the removal dialog */
+      return "failed"; // The user may have declined; removal was not confirmed.
     }
-    return true;
+    return windowsHasCa(fingerprint, sweep) === false ? "removed" : "failed";
   }
-  // macOS: an untrusted copy can still be in the keychain, so the item is deleted either way.
-  if (trusted) {
+  // macOS: an untrusted copy can still be in the keychain, so presence and trust are asked apart.
+  const present = sweep ? keychainHasCa(fingerprint, true) : keychainHasCa(fingerprint, false);
+  if (present === false) return "absent";
+  if (present === null) return "failed";
+  if (caTrusted(caPem)) {
     try {
       execFileSync("security", ["remove-trusted-cert", caPem], { stdio: "inherit" });
     } catch {
-      /* trust settings may already be gone */
+      return "failed";
     }
   }
   try {
-    execFileSync("security", ["delete-certificate", ...(opts.sweep ? ["-c", CA_NAME] : ["-Z", fingerprint]), loginKeychain()], { stdio: "ignore" });
-    return true;
+    execFileSync("security", ["delete-certificate", ...(sweep ? ["-c", CA_NAME] : ["-Z", fingerprint!]), loginKeychain()], { stdio: "ignore" });
+    return "removed";
   } catch {
-    return trusted;
+    // Nothing left to delete means the removal is complete; a leftover is not confirmed.
+    return (sweep ? keychainHasCa(fingerprint, true) : keychainHasCa(fingerprint, false)) === false ? "removed" : "failed";
   }
 }
 
-type Meta = { appliedId?: string; clauderipple?: { ourId?: string; previousAppliedId?: string | null } } & Record<string, unknown>;
+type Meta = { appliedId?: string; clauderipple?: { ourId?: string; previousAppliedId?: string | null; installationHome?: string } } & Record<string, unknown>;
 
 function readMeta(): Meta {
+  let text: string;
   try {
-    return JSON.parse(fs.readFileSync(path.join(configLibraryDir(), "_meta.json"), "utf8")) as Meta;
-  } catch {
-    return {};
+    text = fs.readFileSync(path.join(configLibraryDir(), "_meta.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
+  const parsed: unknown = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Desktop proxy metadata is invalid; left untouched");
+  return parsed as Meta;
 }
 
 const ENTRY_MARK = "clauderipple";
 
-export function currentAppProxy(): { appliedId: string | null; egressProxyUrl: string | null; ours: boolean } {
+export function currentAppProxy(): { appliedId: string | null; egressProxyUrl: string | null; ours: boolean; installationHome?: string | undefined; previousAppliedId?: string | null | undefined } {
   const meta = readMeta();
   const id = typeof meta.appliedId === "string" ? meta.appliedId : null;
   if (!id) return { appliedId: null, egressProxyUrl: null, ours: false };
   try {
     const entry = JSON.parse(fs.readFileSync(path.join(configLibraryDir(), `${id}.json`), "utf8")) as Record<string, unknown>;
-    return { appliedId: id, egressProxyUrl: typeof entry.egressProxyUrl === "string" ? entry.egressProxyUrl : null, ours: meta[ENTRY_MARK]?.ourId === id };
-  } catch {
-    return { appliedId: id, egressProxyUrl: null, ours: false };
+    return { appliedId: id, egressProxyUrl: typeof entry.egressProxyUrl === "string" ? entry.egressProxyUrl : null, ours: meta[ENTRY_MARK]?.ourId === id, installationHome: meta.clauderipple?.installationHome, previousAppliedId: meta.clauderipple?.previousAppliedId };
+  } catch (error) {
+    throw new Error(`Desktop proxy entry ${id} could not be read; left untouched`, { cause: error });
   }
 }
 
+/**
+ * Whose applied Config Library entry this is. An older version recorded no installation home, so
+ * an entry with our marker is that home's only when it points at exactly that home's proxy URL;
+ * anything else is unknown and left alone (D3, 2026-10-25).
+ */
+export function appProxyOwner(current: ReturnType<typeof currentAppProxy>, home: string, proxyUrl?: string): "ours" | "other" | "unknown" {
+  if (!current.ours) return "other";
+  if (current.installationHome !== undefined) return sameHome(current.installationHome, home) ? "ours" : "other";
+  return proxyUrl !== undefined && current.egressProxyUrl === proxyUrl ? "ours" : "unknown";
+}
+
 /** Writes our Config Library entry and applies it. Remembers what was applied before so `off` can restore it. */
-export function applyAppProxy(proxyUrl: string): { id: string; replaced: string | null } {
+export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>): { id: string; replaced: string | null } {
+  return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => applyAppProxyLocked(proxyUrl, installationHome, expected));
+}
+
+function applyAppProxyLocked(proxyUrl: string, installationHome: string, expected?: ReturnType<typeof currentAppProxy>): { id: string; replaced: string | null } {
   const dir = configLibraryDir();
   fs.mkdirSync(dir, { recursive: true });
   const meta = readMeta();
   const cur = currentAppProxy();
+  if (expected && JSON.stringify(cur) !== JSON.stringify(expected)) throw new Error("Desktop proxy changed before restoration; left untouched");
   if (cur.ours && cur.appliedId) {
-    fs.writeFileSync(path.join(dir, `${cur.appliedId}.json`), JSON.stringify({ egressProxyUrl: proxyUrl }, null, 2) + "\n");
+    const owner = appProxyOwner(cur, installationHome, proxyUrl);
+    if (owner === "other") throw new Error("Desktop proxy ownership is unknown or belongs to another installation; left untouched");
+    if (owner === "unknown") throw new Error("Desktop proxy ownership is unknown; left untouched");
+    writeJsonAtomic(path.join(dir, `${cur.appliedId}.json`), { egressProxyUrl: proxyUrl });
+    // Take over an entry an older version applied without recording a home: from here on its
+    // ownership is evidenced like any other (D3).
+    if (cur.installationHome === undefined || !sameHome(cur.installationHome, installationHome)) {
+      const next: Meta = { ...meta, clauderipple: { ...meta.clauderipple, ourId: cur.appliedId, installationHome: normalizeHome(installationHome) } };
+      writeJsonAtomic(path.join(dir, "_meta.json"), next);
+    }
     return { id: cur.appliedId, replaced: null };
   }
   const id = crypto.randomUUID();
   // Only recognized keys in the entry: the app warns about and ignores unknown ones. Ownership lives in _meta.
-  fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify({ egressProxyUrl: proxyUrl }, null, 2) + "\n");
+  writeJsonAtomic(path.join(dir, `${id}.json`), { egressProxyUrl: proxyUrl });
   const previous = typeof meta.appliedId === "string" ? meta.appliedId : null;
-  const next: Meta = { ...meta, appliedId: id, clauderipple: { ourId: id, previousAppliedId: previous } };
-  fs.writeFileSync(path.join(dir, "_meta.json"), JSON.stringify(next, null, 2) + "\n");
+  const next: Meta = { ...meta, appliedId: id, clauderipple: { ourId: id, previousAppliedId: previous, installationHome: normalizeHome(installationHome) } };
+  writeJsonAtomic(path.join(dir, "_meta.json"), next);
   return { id, replaced: previous };
 }
 
 /** With `proxyUrl`, only an entry pointing there goes: another install's entry is not ours to remove. */
-export function removeAppProxy(proxyUrl?: string): boolean {
+export function removeAppProxy(proxyUrl?: string, installationHome = homeDir()): boolean {
+  return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => removeAppProxyLocked(proxyUrl, installationHome));
+}
+
+function removeAppProxyLocked(proxyUrl: string | undefined, installationHome: string): boolean {
   const dir = configLibraryDir();
   const meta = readMeta();
   const cur = currentAppProxy();
-  if (!cur.ours || !cur.appliedId) return false;
+  if (!cur.appliedId || appProxyOwner(cur, installationHome, proxyUrl) !== "ours") return false;
   if (proxyUrl !== undefined && cur.egressProxyUrl !== proxyUrl) return false;
   const previous = meta.clauderipple?.previousAppliedId ?? null;
   const next: Meta = { ...meta };
   delete next.clauderipple;
   if (previous) next.appliedId = previous;
   else delete next.appliedId;
-  fs.writeFileSync(path.join(dir, "_meta.json"), JSON.stringify(next, null, 2) + "\n");
+  writeJsonAtomic(path.join(dir, "_meta.json"), next);
   fs.rmSync(path.join(dir, `${cur.appliedId}.json`), { force: true });
   return true;
 }
