@@ -41,6 +41,7 @@ import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
+import { resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
 import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
@@ -1745,28 +1746,44 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
  * effective catalogue window as bootstrap/picker; an explicit route window still wins. Without a
  * catalogue window, the stored values retain their old precedence. Unknown is absent.
  * `catalogWindows` identifies values the picker window editor must not offer to override.
+ * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
+ * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
  */
-async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number> }> {
+async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> }> {
   const cfg = deps.config();
   const windows: Record<string, number> = {};
   const catalogWindows: Record<string, number> = {};
-  const put = (id: string, fallback?: number): void => {
+  const resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> = {};
+  const put = (id: string, fallback?: number, native = false): void => {
     const base = id.split("@")[0]!;
     const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
     const live = chatgptModelWindow(cfg, id);
+    // Keep the legacy editor maps, but give usage readers a provider-bound resolution. A native
+    // alias's window and the global compaction setting are not the routed model's capacity.
+    const resolved = resolve(id, {}, cfg) ?? (cfg.aliases[base] ? resolve(cfg.aliases[base], {}, cfg) : null);
+    const model = resolved?.model.split("@")[0] ?? base;
+    const provider = resolved ? cfg.providers[resolved.provider] : undefined;
+    const explicit = resolved && !cfg.direct.some(d => base.startsWith(d.prefix)) ? route?.contextWindow : undefined;
+    const own = cfg.cli.extraModels.find(m => m.model.split("@")[0] === model)?.contextWindow
+      ?? provider?.models?.find(m => m.id === model || m.id === model.replace(/-\d{8}$/, ""))?.contextWindow;
+    const known = resolved ? explicit ?? live ?? own : native ? fallback : undefined;
+    if (!resolvedWindows[id]) resolvedWindows[id] = {
+      model, provider: resolved?.provider ?? null,
+      contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null,
+    };
     const value = route?.contextWindow ?? live ?? fallback;
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
     windows[id] = Math.floor(value);
     if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
   };
-  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow);
+  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow, true);
   for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
   for (const provider of Object.values(cfg.providers)) {
     for (const model of ("models" in provider && provider.models) || []) put(model.id, model.contextWindow);
   }
   for (const id of Object.keys(cfg.routes)) put(id);
   for (const id of Object.keys(cfg.aliases)) put(id);
-  return { windows, catalogWindows };
+  return { windows, catalogWindows, resolvedWindows };
 }
 
 function tailLines(file: string, n: number): string {
