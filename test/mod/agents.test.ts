@@ -122,7 +122,14 @@ test('a card is one title line over two body rows at every width, its state on t
     // The model's row is the dot, the name and the effort; the tools sit with the numbers below.
     assert.equal(all.some(n => n.props.key === 'tools'), false)
     const numsRow = all.find(n => n.props.key === 'nums')!
-    assert.deepEqual(numsRow.children.filter((c): c is Tree => typeof c !== 'string').map(c => c.props.key), ['n-tokens', 'n-cache', 'n-tools'])
+    const figureBoxes = numsRow.children.filter((c): c is Tree => typeof c !== 'string' && c.props.position !== 'absolute')
+    assert.deepEqual(figureBoxes.map(c => c.props.key), ['n-tokens', 'n-cache', 'n-tools'])
+    // Every row of a list card opens the conversation, not only the title (the head's press, then
+    // one under the model's row and one under the numbers').
+    for (const key of ['model-row', 'nums']) {
+      const row = all.find(n => n.props.key === key)!
+      assert.ok(row.children.some(c => typeof c !== 'string' && c.props.position === 'absolute'), 'press under ' + key)
+    }
     assert.equal(all.some(n => n.props.key === 'value' && typeof n.props.width === 'number'), false)
     // Neither the effort's bars nor the cache's ring is drawn any more.
     assert.equal(all.some(n => n.type === 'Svg' && ['추론 강도', '캐시'].includes(String(n.props.alt))), false)

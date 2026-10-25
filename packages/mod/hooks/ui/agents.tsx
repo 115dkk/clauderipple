@@ -340,12 +340,15 @@ function timeBox(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNod
  * the agent does now is the conversation's: a line that changed each step made the pane jump. A list
  * tile draws these same rows under its own head.
  */
-function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
+function cardBody(el: Els, frame: Frame, agent: AgentRec, onPress?: () => void): RenderNode[] {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
   const model = modelOf(agent, L)
   const effort = effortOf(agent)
+  // In the list each row carries the head's blank press too, so the whole card opens the
+  // conversation, not only its title (a host Button is one row tall and cannot span the card).
+  const open = (key: string) => onPress ? press(el, key + '-' + agent.id, (frame.columns - 2) * CELL_PX, onPress) : null
   const rows: RenderNode[] = [
     // The row starts where the title does; the model's name takes what the effort leaves and the
     // engine cuts it at the edge, so a name is not shortened while there is room for it.
@@ -355,6 +358,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
         <Text key="model-text" {...k.ink} wrap="truncate-end">{model}</Text>
       </Box>
       {effort ? <Box key="effort" flexShrink={0}><Text {...k.sub}>{effortLabel(effort, L)}</Text></Box> : null}
+      {open('open-model')}
     </Box>,
   ]
   const nums = numberFigures(frame, agent)
@@ -372,6 +376,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
             <Text key="value" {...k.ink}>{f.value}</Text>
           </Box>
         ))}
+        {open('open-nums')}
       </Box>,
     )
   }
@@ -379,6 +384,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
     rows.push(
       <Box key="fallback" minWidth={0}>
         <Text color={k.tone('amber')} wrap="wrap">{fallbackLine(frame, agent)}</Text>
+        {open('open-fallback')}
       </Box>,
     )
   }
@@ -441,7 +447,7 @@ function tile(el: Els, frame: Frame, agent: AgentRec, now: number, onPress: () =
   // The model, numbers and why are the open conversation's card's own rows, under this head.
   return (
     <Box key={'card-' + agent.id} flexDirection="column" width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
-      {[head, ...cardBody(el, frame, agent)]}
+      {[head, ...cardBody(el, frame, agent, onPress)]}
     </Box>
   )
 }
@@ -460,16 +466,6 @@ function taskEndWord(frame: Frame, task: BgTask): string {
   return task.state === 'failed' ? t(frame.lang, 'agents.failed') : task.state === 'stopped' ? t(frame.lang, 'agents.stopped') : ''
 }
 
-/** Cells of a task's time column: the elapsed time's widest, its end word before it. */
-function taskTimeCells(frame: Frame, task: BgTask): number {
-  const word = taskEndWord(frame, task)
-  return Math.ceil(timeCh(frame.lang)) + (word ? Math.ceil(chOf(word)) + 1 : 0)
-}
-
-/**
- * Cells right of a task's time, where an agent's tile has its chevron: the times of both line up.
- */
-const CHEVRON_CELLS = 2
 
 /** What a task runs, when its title is not that already. */
 function taskCommand(task: BgTask): string | undefined {
@@ -506,7 +502,9 @@ function taskTile(el: Els, frame: Frame, task: BgTask, now: number): RenderNode 
         <Box key="title" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
           <Text bold {...k.ink} wrap="truncate-end">{task.title}</Text>
         </Box>
-        <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={taskTimeCells(frame, task) + CHEVRON_CELLS} paddingRight={CHEVRON_CELLS}>
+        {/* At its own width, as an agent card's time is: a column sized in cells, with room kept
+            for a chevron a task does not have, left a wide hole after a cut title (2026-10-25). */}
+        <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0}>
           {end ? <Text key="end" {...(task.state === 'failed' ? { color: k.tone('red') } : k.mute)}>{end}</Text> : null}
           <Text key="elapsed" {...(task.state === 'running' ? k.ink : k.sub)}>{taskRanFor(task, now, L)}</Text>
         </Box>
