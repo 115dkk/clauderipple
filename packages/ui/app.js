@@ -2035,14 +2035,34 @@ function measureSummary(results) {
 }
 
 /**
+ * Whether this provider is Ollama (the local daemon or the cloud endpoint).
+ *
+ * Ollama states a model's thinking levels and context length in its own `/api/show`, beside the
+ * OpenAI-compatible surface, and a probe on that surface reads an unknown `reasoning_effort` as no
+ * effort at all. An empty ladder is therefore what an unread Ollama model looks like, not a
+ * decision (Discord report, 0.12.14).
+ */
+function isOllamaProvider(provider) {
+  if (!provider) return false;
+  if (provider.preset === "ollama") return true;
+  const url = String(provider.url || "");
+  return /^https?:\/\/(?:[^/]*\.)?ollama\.com(?::\d+)?(?:[/?#]|$)/i.test(url)
+    || /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):11434(?:[/?#]|$)/i.test(url);
+}
+
+/**
  * Measure the models of one provider, in the background, and show the config the result settled.
  *
  * Only models missing a wire or a ladder are sent: one the operator set is their decision, and the
  * router will not overwrite it either, so measuring it again would spend requests to change nothing.
+ * Ollama's empty ladder is the exception — see `isOllamaProvider`.
  */
 async function startMeasurement(providerName, provider) {
   if (!provider || (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible")) return;
-  const models = modelsOf(provider).filter((model) => !model.wire || !model.effortLevels).map((model) => model.id);
+  const ollama = isOllamaProvider(provider);
+  const models = modelsOf(provider)
+    .filter((model) => !model.wire || !model.effortLevels || (ollama && Array.isArray(model.effortLevels) && model.effortLevels.length === 0))
+    .map((model) => model.id);
   if (models.length === 0) return;
   let jobId;
   try {

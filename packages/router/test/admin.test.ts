@@ -2711,6 +2711,94 @@ test("measureUnsettledModels: discovers effort for a ladderless provider's unset
   }
 });
 
+// Ollama states a model's thinking levels and context length in its own `/api/show`. Its
+// OpenAI-compatible surface reports ids alone and ignores an unknown `reasoning_effort`, which a
+// probe measured as "no effort" — an empty ladder that then looked settled (Discord, 0.12.14).
+test("an Ollama model's effort and context come from /api/show, and an empty ladder is filled", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "ollama-cloud": {
+        type: "openai-compatible",
+        url: "https://ollama.com/v1",
+        headers: { authorization: "Bearer key" },
+        caps: { reasoning: "none", effortLevels: [] },
+        models: [
+          { id: "gpt-oss:120b", name: "GPT-OSS 120B", effortLevels: [] },
+          { id: "qwen3:235b", name: "Qwen3 235B", effortLevels: ["low"] },
+        ],
+      },
+    },
+  });
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  const measureFetch = async (url: string, init: RequestInit): Promise<Response> => {
+    const body = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    calls.push({ url, body });
+    if (!url.endsWith("/api/show")) return new Response("{}", { status: 200 });
+    return new Response(JSON.stringify(body.model === "gpt-oss:120b"
+      ? { thinking: { values: ["low", "medium", "high"] }, model_info: { "gptoss.context_length": 1048576 } }
+      : { model_info: { "qwen3.context_length": 262144 } }), { status: 200 });
+  };
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "ollama-cloud", models: ["gpt-oss:120b", "qwen3:235b"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    assert.deepEqual(calls.filter((c) => c.url === "https://ollama.com/api/show").map((c) => c.body.model), ["gpt-oss:120b", "qwen3:235b"]);
+    assert.equal(calls.some((c) => "reasoning_effort" in c.body), false, "no ladder probing: the vendor states it");
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["ollama-cloud"]!.models!;
+    assert.deepEqual(models.find((m) => m.id === "gpt-oss:120b")?.effortLevels, ["low", "medium", "high"], "an empty ladder is a blank on Ollama");
+    assert.equal(models.find((m) => m.id === "gpt-oss:120b")?.contextWindow, 1048576);
+    assert.deepEqual(models.find((m) => m.id === "qwen3:235b")?.effortLevels, ["low"], "a ladder someone set stands");
+    assert.equal(models.find((m) => m.id === "qwen3:235b")?.contextWindow, 262144);
+  }, { measureFetch });
+});
+
+test("measureUnsettledModels re-measures Ollama's empty ladders, and leaves an empty one elsewhere", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ollama-"));
+  try {
+    const cfg = makeCfg({
+      providers: {
+        ollama: {
+          type: "openai-compatible",
+          url: "http://127.0.0.1:11434/v1",
+          preset: "ollama",
+          caps: { reasoning: "none", effortLevels: [] },
+          models: [{ id: "llama3.3" }, { id: "qwen3", effortLevels: [] }, { id: "settled", effortLevels: ["low"] }],
+        },
+        // Same empty ladder, but not Ollama: there an empty ladder is a decision and stands.
+        groq: { type: "openai-compatible", url: "http://127.0.0.1:9/v1", wire: "chat", caps: { reasoning: "none", effortLevels: [] }, models: [{ id: "llama-4", effortLevels: [] }, { id: "blank" }] },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const asked: string[] = [];
+    const measureFetch = async (url: string, init: RequestInit): Promise<Response> => {
+      const model = (JSON.parse(String(init.body)) as { model: string }).model;
+      asked.push(model);
+      if (!url.endsWith("/api/show")) return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ thinking: { values: ["low", "high"] }, model_info: { "qwen3.context_length": 131072 } }), { status: 200 });
+    };
+    const deps = { config: () => cfg, configFile, log: new Logger(null, 1_000_000, 1, false), measureFetch } as unknown as AdminDeps;
+    assert.equal(measureUnsettledModels(deps), 2, "the Ollama provider and the ladderless one");
+    let onDisk: Config | undefined;
+    const models = () => onDisk?.providers.ollama?.models ?? [];
+    for (let i = 0; i < 200 && !(models().find((m) => m.id === "llama3.3")?.effortLevels?.length && models().find((m) => m.id === "qwen3")?.contextWindow); i++) {
+      await new Promise((resolveP) => setTimeout(resolveP, 5));
+      onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    }
+    assert.deepEqual(models().find((m) => m.id === "llama3.3")?.effortLevels, ["low", "high"], "an unset ladder is stated now");
+    assert.deepEqual(models().find((m) => m.id === "qwen3")?.effortLevels, ["low", "high"], "the empty ladder is replaced");
+    assert.equal(models().find((m) => m.id === "qwen3")?.contextWindow, 131072);
+    assert.deepEqual(models().find((m) => m.id === "settled")?.effortLevels, ["low"], "a ladder someone set stands");
+    assert.deepEqual(onDisk?.providers.groq?.models?.[0]?.effortLevels, [], "an empty ladder elsewhere is still a decision");
+    assert.ok(!asked.includes("settled"), `a settled model is not measured: ${JSON.stringify(asked)}`);
+    assert.ok(!asked.includes("llama-4"), `a non-Ollama empty ladder is not measured: ${JSON.stringify(asked)}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("POST /api/providers/probe[grok] lists the proxy's models with the headers live traffic sends, and warns", async () => {
   const grokHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-grok-probe-"));
   fs.writeFileSync(path.join(grokHomeDir, "auth.json"), JSON.stringify({ "https://auth.x.ai::u": { key: "grok-session-secret", expires_at: new Date(Date.now() + 5 * 3600_000).toISOString() } }));
