@@ -13,7 +13,7 @@ import * as schtasks from "../src/schtasks.ts";
 import { stopWindowsRouter, restartWindowsRouter, type WindowsRouterOps } from "../src/supervisor.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-"));
-const keys = ["CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
+const keys = ["HOME", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
 const previous = keys.map(key => [key, process.env[key]] as const);
 after(() => {
   for (const [key, value] of previous) {
@@ -30,6 +30,7 @@ function setup() {
     fs.mkdirSync(home, { recursive: true });
     fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 18791 }, cli: { models: { smallFast: "routed-model" } } }));
   }
+  process.env.HOME = dir;
   process.env.CLAUDE_SETTINGS_PATH = path.join(dir, "settings.json");
   process.env.CLAUDE_APP_SUPPORT = path.join(dir, "desktop");
   process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR = path.join(dir, "launch-agents");

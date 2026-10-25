@@ -7,7 +7,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-/** null = definitely absent; undefined = lookup failed. No signals, including signal 0. */
+/** null = definitely absent; undefined = lookup failed. Injectable without querying real processes. */
+export type ProcessStartLookup = (pid: number) => string | null | undefined;
+
+/** No signals, including signal 0. */
 function processStart(pid: number): string | null | undefined {
   if (process.platform === "linux") {
     try {
@@ -19,7 +22,7 @@ function processStart(pid: number): string | null | undefined {
   }
   const windows = process.platform === "win32";
   const result = windows
-    ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().Ticks } else { 'absent' }`], { encoding: "utf8", windowsHide: true })
+    ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($p) { if (!$p.CreationDate) { throw 'process start unavailable' }; $p.CreationDate.ToUniversalTime().Ticks } else { 'absent' }`], { encoding: "utf8", windowsHide: true })
     : spawnSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
   if (!windows && result.status === 1 && !result.stdout?.trim() && !result.stderr?.trim()) return null;
   if (result.status !== 0) return undefined;
@@ -27,7 +30,7 @@ function processStart(pid: number): string | null | undefined {
   return windows && value === "absent" ? null : value || undefined;
 }
 
-function recoverServiceLock(lock: string): boolean {
+function recoverServiceLock(lock: string, lookup: ProcessStartLookup): boolean {
   const files = fs.readdirSync(lock);
   if (files.length !== 1) return false; // Uninitialized, legacy or damaged lock: never guess.
   const file = files[0]!;
@@ -35,7 +38,7 @@ function recoverServiceLock(lock: string): boolean {
   if (!match) return false;
   const pid = Number(match[1]);
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  const start = processStart(pid);
+  const start = lookup(pid);
   if (start === undefined || (start !== null && definitionGeneration(start) === match[2])) return false;
   // Only the reaper that unlinks this exact owner may remove the now-empty directory. A second
   // reaper must not rmdir a fresh lock in the mkdir -> owner-file initialization window.
@@ -47,9 +50,9 @@ function recoverServiceLock(lock: string): boolean {
   return true;
 }
 
-function acquireServiceLock(key: string): () => void {
+function acquireServiceLock(key: string, lookup: ProcessStartLookup): () => void {
   const lock = `${key}.operation-lock`;
-  const start = processStart(process.pid);
+  const start = lookup(process.pid);
   if (!start) throw new Error("서비스 작업 프로세스의 시작 정보를 확인하지 못했습니다. 다시 시도해 주세요.");
   const owner = path.join(lock, `${process.pid}-${definitionGeneration(start)}.owner`);
   fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
@@ -57,7 +60,7 @@ function acquireServiceLock(key: string): () => void {
     fs.mkdirSync(lock, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if (!recoverServiceLock(lock)) throw Object.assign(new Error(`서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`), { code: "ELOCKED" });
+    if (!recoverServiceLock(lock, lookup)) throw Object.assign(new Error(`서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`), { code: "ELOCKED" });
     fs.mkdirSync(lock, { mode: 0o700 });
   }
   try { fs.writeFileSync(owner, "", { flag: "wx", mode: 0o600 }); } catch (error) {
@@ -67,13 +70,13 @@ function acquireServiceLock(key: string): () => void {
   return () => { fs.unlinkSync(owner); fs.rmdirSync(lock); };
 }
 
-export function withServiceLock<T>(key: string, body: () => T): T {
-  const release = acquireServiceLock(key);
+export function withServiceLock<T>(key: string, body: () => T, lookup: ProcessStartLookup = processStart): T {
+  const release = acquireServiceLock(key, lookup);
   try { return body(); } finally { release(); }
 }
 
-export async function withServiceLockAsync<T>(key: string, body: () => Promise<T>): Promise<T> {
-  const release = acquireServiceLock(key);
+export async function withServiceLockAsync<T>(key: string, body: () => Promise<T>, lookup: ProcessStartLookup = processStart): Promise<T> {
+  const release = acquireServiceLock(key, lookup);
   try { return await body(); } finally { release(); }
 }
 

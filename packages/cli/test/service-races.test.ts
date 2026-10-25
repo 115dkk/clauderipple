@@ -9,8 +9,9 @@ import * as schtasks from "../src/schtasks.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-service-race-"));
-  const keys = ["CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME"] as const;
+  const keys = ["HOME", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME"] as const;
   const before = keys.map(key => [key, process.env[key]] as const);
+  process.env.HOME = root;
   process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR = path.join(root, "LaunchAgents");
   process.env.XDG_CONFIG_HOME = path.join(root, "xdg");
   t.after(() => {
