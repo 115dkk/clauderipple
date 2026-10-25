@@ -2,6 +2,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,10 +11,10 @@ import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promi
 import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
-import { FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
+import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { HostServer } from "../src/server.ts";
-import type { ServerOptions } from "../src/server.ts";
+import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
 import { VISIBLE_MS } from "../src/push.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
@@ -204,6 +205,148 @@ test("refresh freezes deferred internal queue drains before they start a new tur
   await f.sessions.pollDesktop();
   assert.equal(f.fake.users.length, 1);
   assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.id, "after-freeze");
+});
+
+class MemoryPeer extends EventEmitter implements ServerPeer {
+  readonly OPEN = 1;
+  readyState = 1;
+  bufferedAmount = 0;
+  readonly frames: HostMsg[] = [];
+  send(text: string): void { this.frames.push(JSON.parse(text) as HostMsg); }
+  close(): void { this.terminate(); }
+  terminate(): void { this.readyState = 3; this.emit("close"); }
+  receive(msg: ClientMsg): void { this.emit("message", JSON.stringify(msg)); }
+  async take<T extends HostMsg["t"]>(kind: T): Promise<Extract<HostMsg, { t: T }>> {
+    await nextTick();
+    const index = this.frames.findIndex(frame => frame.t === kind);
+    assert.notEqual(index, -1, `expected ${kind}, received ${JSON.stringify(this.frames)}`);
+    return this.frames.splice(index, 1)[0] as Extract<HostMsg, { t: T }>;
+  }
+}
+
+/** No listener, real SDK, router, credentials or desktop sessions; only owned temporary storage. */
+async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn) {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-memory-host-"));
+  const sessions = new Sessions({ dir, router, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
+    onEvent: () => {}, onSessions: () => {} });
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
+    hostName: "test", version: "test", recentCli: async () => [] });
+  const peer = new MemoryPeer();
+  t.after(async () => {
+    await server.close();
+    for (const session of sessions.list()) sessions.stop(session.id);
+    await nextTick();
+    sessions.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const id = await sessions.create({ clientMsgId: "empty", cwd: dir, model: "test", effort: null, text: "" });
+  server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "memory-phone" });
+  await peer.take("ready");
+  const upload = async (data: string, uploadId = "attachment", chunkSize = 60_000) => {
+    let response: Extract<HostMsg, { t: "res" }>;
+    let offset = 0;
+    do {
+      const chunk = data.slice(offset, offset + chunkSize);
+      const done = offset + chunk.length === data.length;
+      const reqId = `upload-${uploadId}-${offset}`;
+      peer.receive({ t: "req", reqId, op: { op: "upload", session: id, uploadId, offset, data: chunk, done } });
+      response = await peer.take("res");
+      assert.equal(response.reqId, reqId);
+      if (!response.ok) return response;
+      if (!done) assert.equal(response.data, null);
+      offset += chunk.length;
+    } while (offset < data.length);
+    return response;
+  };
+  return { dir, sessions, peer, id, upload };
+}
+
+for (const size of [4 * 1024 * 1024, ATTACHMENT_CAP - 2, ATTACHMENT_CAP - 1, ATTACHMENT_CAP]) {
+  test(`attachment upload accepts ${size} bytes and preserves the entire blob`, async t => {
+    const f = await memoryHost(t);
+    const bytes = Buffer.alloc(size, 173);
+    const data = bytes.toString("base64");
+    const response = await f.upload(data);
+    assert.ok(response.ok, response.ok ? "" : response.error);
+    const result = response.data as { blob: string };
+    assert.equal(f.sessions.blob(f.id, result.blob), data);
+    assert.deepEqual(Buffer.from(f.sessions.blob(f.id, result.blob)!, "base64"), bytes);
+  });
+}
+
+test("attachment validation rejects malformed characters, lengths and padding without storing a blob", async t => {
+  const f = await memoryHost(t);
+  const malformed = ["", "A", "AA", "AAA", "AAAAA", "=AAA", "A=AA", "AA=A", "A===", "====", "AA==AAAA", "AAA=AAAA",
+    "AA==\n", "AAAA\r\n", "AAAA ", "AA-_", "AAéA", "AA\u0000A", "ＡAAA", "AA===" ];
+  for (const data of malformed) {
+    const response = await f.upload(data, "malformed", 3);
+    assert.equal(response.ok, false, JSON.stringify(data));
+    if (!response.ok) assert.match(response.error, /Invalid attachment (chunk|bytes)\./);
+  }
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions", f.id, "blobs")), false);
+  for (const data of ["AA==", "AAA=", "AAAA", "+/8="]) {
+    const response = await f.upload(data, "retry", 3);
+    assert.ok(response.ok);
+    assert.equal(f.sessions.blob(f.id, (response.data as { blob: string }).blob), data);
+  }
+});
+
+for (const suffix of ["=AAA", "AA=A", "A==="]) test(`attachment upload rejects large malformed padding ${suffix} without overflowing`, async t => {
+  const f = await memoryHost(t);
+  const response = await f.upload("A".repeat(4 * 1024 * 1024) + suffix);
+  assert.equal(response.ok, false);
+  if (!response.ok) assert.equal(response.error, "Invalid attachment bytes.");
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions", f.id, "blobs")), false);
+  assert.equal((await f.upload("AA==")).ok, true, "a rejected final chunk releases its upload id");
+});
+
+for (const excess of [1, 2]) test(`attachment upload rejects ${excess} bytes over the decoded cap`, async t => {
+  const f = await memoryHost(t);
+  const response = await f.upload(Buffer.alloc(ATTACHMENT_CAP + excess).toString("base64"));
+  assert.equal(response.ok, false);
+  if (!response.ok) assert.equal(response.error, excess === 1 ? "Invalid attachment bytes." : "Attachment exceeds 8 MB.");
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions", f.id, "blobs")), false);
+  assert.equal((await f.upload("AAA=")).ok, true);
+});
+
+test("a send racing Stop receives a correlated error, then its retry is acknowledged and delivered once", async t => {
+  const control = Promise.withResolvers<void>();
+  const endTurn = Promise.withResolvers<void>();
+  const users: string[] = [];
+  let interrupts = 0;
+  const f = await memoryHost(t, params => ({
+    async *[Symbol.asyncIterator]() {
+      for await (const user of params.prompt) {
+        users.push(String(user.message.content));
+        if (users.length === 1) await endTurn.promise;
+        yield { type: "result", subtype: "success" };
+      }
+    },
+    interrupt: () => { interrupts++; return control.promise; },
+    setModel: async () => {}, setPermissionMode: async () => {}, close: () => { endTurn.resolve(); },
+  }));
+  await f.sessions.send(f.id, "first", "first");
+  await nextTick();
+  f.peer.receive({ t: "interrupt", session: f.id, reqId: "stop" });
+  const send: ClientMsg = { t: "send", session: f.id, clientMsgId: "racing", text: "keep this" };
+  f.peer.receive(send);
+  const error = await f.peer.take("error");
+  assert.equal(error.code, "send");
+  assert.equal(error.clientMsgId, "racing");
+  assert.equal(error.session, f.id);
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false);
+  assert.equal(interrupts, 1);
+  assert.deepEqual(users, ["first"]);
+  control.resolve();
+  const stopped = await f.peer.take("res");
+  assert.equal(stopped.reqId, "stop");
+  assert.equal(stopped.ok, true);
+  f.peer.receive(send);
+  f.peer.receive(send);
+  for (let i = 0; i < 2; i++) assert.deepEqual(await f.peer.take("ack"), { t: "ack", session: f.id, clientMsgId: "racing" });
+  assert.deepEqual(users, ["first", "keep this"]);
 });
 
 test("attachment upload is chunked, checks offsets, and sends image blocks", async t => {

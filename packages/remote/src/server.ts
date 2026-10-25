@@ -504,7 +504,7 @@ export class HostServer {
     const s = this.opts.sessions;
     switch (op.op) {
       case "upload": {
-        if (!s.has(op.session) || !/^[\w-]{1,100}$/.test(op.uploadId) || typeof op.data !== "string" || op.data.length > BLOB_CHUNK_CHARS || !/^[A-Za-z0-9+/=]*$/.test(op.data)) throw new Error("Invalid attachment chunk.");
+        if (!s.has(op.session) || !/^[\w-]{1,100}$/.test(op.uploadId) || typeof op.data !== "string" || op.data.length > BLOB_CHUNK_CHARS || /[^A-Za-z0-9+/=]/.test(op.data)) throw new Error("Invalid attachment chunk.");
         for (const [key, value] of this.uploads) if (this.now() - value.at > 300_000) this.uploads.delete(key);
         const key = `${c.clientId}/${op.session}/${op.uploadId}`;
         if (!this.uploads.has(key) && this.uploads.size >= 16) throw new Error("Too many unfinished uploads. Try again later.");
@@ -514,7 +514,12 @@ export class HostServer {
         if (data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4) { this.uploads.delete(key); throw new Error("Attachment exceeds 8 MB."); }
         if (!op.done) { this.uploads.set(key, { data, at: this.now() }); return null; }
         this.uploads.delete(key);
-        if (!data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || Buffer.from(data, "base64").length > ATTACHMENT_CAP) throw new Error("Invalid attachment bytes.");
+        // Every chunk already passed the alphabet check. Scan for padding once, without a
+        // repeated regex group (which overflows V8's stack on ordinary multi-MB uploads).
+        const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+        const paddingAt = data.indexOf("=");
+        const bytes = data.length / 4 * 3 - padding;
+        if (!data || data.length % 4 !== 0 || (paddingAt !== -1 && paddingAt !== data.length - padding) || bytes > ATTACHMENT_CAP) throw new Error("Invalid attachment bytes.");
         return { blob: s.log(op.session).image(data) };
       }
       case "models": {

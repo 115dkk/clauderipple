@@ -1265,6 +1265,9 @@ export class Sessions {
   }
 
   private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[]): string | Promise<string> {
+    // Stop closes this query's inbox before awaiting the SDK. Reject before recording the
+    // user/seen id or converting attachments, so a retry can enter the next query exactly once.
+    if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
