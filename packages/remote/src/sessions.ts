@@ -234,6 +234,17 @@ function bridgeRequest(tool: string, input: Record<string, unknown>): { requestK
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One id may only ever name one message. This is the content a receipt remembers, so a reused id
+ * with other words or other files is refused instead of being answered with a success. */
+const SAME_ID_OTHER_CONTENT = "같은 메시지 ID에 다른 내용이 이미 접수되었습니다. 새 메시지로 다시 보내 주세요.";
+const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function sendFingerprint(text: string, attachments: Attachment[]): string {
+  return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
+}
+function createFingerprint(req: { cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): string {
+  return digest({ cwd: req.cwd, model: req.model, effort: req.effort, text: req.text, mode: req.permissionMode ?? "auto", isolation: req.isolation ?? "local", branch: req.baseBranch ?? null });
+}
 /** A stable v4-shaped UUID for a phone message id. */
 function uuidFrom(text: string): string {
   const h = createHash("sha256").update(text).digest("hex");
@@ -1172,20 +1183,22 @@ export class Sessions {
    * A resend that finds a pending receipt left from before a host restart throws
    * OutcomeUnknownError instead of running again: the first attempt may or may not have run. */
   create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
-    for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
     const key = `create:${req.clientMsgId}`;
-    if (this.receipts.status(key) === "completed") {
+    const status = this.receipts.status(key);
+    if (status !== null && this.receipts.conflict(key, createFingerprint(req))) return Promise.reject(new Error(SAME_ID_OTHER_CONTENT));
+    for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
+    if (status === "completed") {
       const session = this.receipts.sessionOf(key);
       if (session && this.records.has(session)) return Promise.resolve(session);
       if (session) return Promise.resolve(session);
     }
-    if (this.receipts.status(key) === "pending") {
+    if (status === "pending") {
       // A resend can arrive while the first create is still checking the folder; both get the one session.
       const riding = this.creating.get(req.clientMsgId);
       if (riding) return riding;
       throw new OutcomeUnknownError();
     }
-    this.receipts.begin(key, "");
+    this.receipts.begin(key, "", createFingerprint(req));
     // A resend can arrive while the first create is still checking the folder; both get the one session.
     let pending = this.creating.get(req.clientMsgId);
     if (!pending) {
@@ -1229,8 +1242,15 @@ export class Sessions {
   send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
     const key = `send:${id}:${clientMsgId}`;
-    if (this.receipts.status(key) === "completed") return id;
+    const fingerprint = sendFingerprint(text, attachments);
+    if (this.receipts.status(key) === "completed") {
+      // The id was accepted with other content: a silent ack would tell the phone work ran that
+      // never did. (Receipts from before fingerprints keep the idempotent answer.)
+      if (this.receipts.conflict(key, fingerprint)) throw new Error(SAME_ID_OTHER_CONTENT);
+      return id;
+    }
     if (this.receipts.status(key) === "pending") {
+      if (this.receipts.conflict(key, fingerprint)) throw new Error(SAME_ID_OTHER_CONTENT);
       const riding = this.sending.get(key) ?? this.bridgeSends.get(`${id}/${clientMsgId}`);
       if (riding) return riding;
       throw new OutcomeUnknownError();
@@ -1247,7 +1267,7 @@ export class Sessions {
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
     if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
-    this.receipts.begin(key, id);
+    this.receipts.begin(key, id, fingerprint);
     try {
       return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
     } catch (error) {

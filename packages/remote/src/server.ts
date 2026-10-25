@@ -12,6 +12,7 @@ import { clientEvent, clientFeatures, settingsResponse } from "./client-compat.t
 import { chunkFrames } from "./chunks.ts";
 import type { Phone } from "./local-control.ts";
 import { browse, macConsent, makeFolder, recentFolders } from "./folders.ts";
+import { listSessionFolder, readSessionFolderFile } from "./session-folder.ts";
 import type { RecentSource } from "./folders.ts";
 import { diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
@@ -156,7 +157,7 @@ export class HostServer {
   constructor(opts: ServerOptions) {
     this.opts = opts;
     const desktopProblem = opts.sessions.desktopProblem?.();
-    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, capabilities: { sessionFiles: true }, ...(desktopProblem ? { desktopProblem } : {}) };
+    this.hostInfo = { name: opts.hostName, version: opts.version, routerOk: true, queue: true, capabilities: { sessionFiles: true, folderFiles: true }, ...(desktopProblem ? { desktopProblem } : {}) };
     this.http = http.createServer((req, res) => this.serve(req, res));
     this.wss = new WebSocketServer({ noServer: true, maxPayload: FRAME_CAP });
     this.http.on("upgrade", (req, socket, head) => {
@@ -548,6 +549,20 @@ export class HostServer {
       case "mkdir": return { path: await makeFolder(op.parent, op.name) };
       case "git": return macConsent(op.path, () => gitInfo(op.path));
       case "commands": return s.commands(op.session);
+      /** Read-only, and only below the folder the session itself works in. The path from the phone
+       * is resolved against that folder and must stay there after symlinks are resolved too. */
+      case "folder_list": {
+        const summary = s.summaryOf(op.session);
+        if (!summary) throw new Error("no such session");
+        if (op.path !== undefined && (typeof op.path !== "string" || op.path.length > 512)) throw new Error("Invalid folder path.");
+        return macConsent(summary.cwd, () => listSessionFolder(summary.cwd, op.path), { wait: 2500 });
+      }
+      case "folder_file": {
+        const summary = s.summaryOf(op.session);
+        if (!summary) throw new Error("no such session");
+        if (typeof op.path !== "string" || !op.path || op.path.length > 512) throw new Error("Invalid folder path.");
+        return macConsent(summary.cwd, () => readSessionFolderFile(summary.cwd, op.path), { wait: 2500 });
+      }
       case "enqueue": s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
       case "queue_remove": return s.removeQueued(op.session, op.id);
       case "queue_send": return { session: await s.sendQueued(op.session, op.id) };

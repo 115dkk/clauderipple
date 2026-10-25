@@ -62,7 +62,20 @@ export function duration(ms: number): string {
 
 export function clock(at: number): string {
   const d = new Date(at);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  // The phone's own 12/24-hour choice and language decide the shape; the fixed form is only a
+  // fallback for a runtime without Intl data.
+  try { return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(d); }
+  catch { return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; }
+}
+
+/** A file size on a phone: whole bytes below a kilobyte, then KB and MB with one decimal only
+ * where the extra digit says something (8.4 MB, but 74 MB). */
+export function fileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  const mb = bytes / (1024 * 1024);
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
 }
 
 export { folderName } from "./sidebar.ts";
