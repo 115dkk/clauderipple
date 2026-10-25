@@ -1,6 +1,6 @@
 // Screens as strings of markup. The app and the screenshot fixtures both call these, so the
 // mockups in docs/media/remote are the shipped UI, not a drawing of it.
-import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
+import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionEvent, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
 import type { LinkStatus } from "./conn.ts";
 import type { OutboxEntry, PreservedItem } from "./outbox.ts";
 import type { PushAvail } from "./pushstate.ts";
@@ -22,6 +22,14 @@ export interface WorkerSheet {
   depth: number;
   scroll: number;
   expanded: Map<string, string | null>;
+  /** Everything this frame has read of the worker's log, so a running worker costs only its new steps. */
+  events?: SessionEvent[];
+  /** The last seq held: the next read asks for what comes after it. */
+  afterSeq?: number;
+  /** The worker's launch instruction, once its blob was read (read once, not on every refresh). */
+  prompt?: string;
+  /** The worker item these items were drawn from, to notice when it has taken another step. */
+  seen?: string;
 }
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }

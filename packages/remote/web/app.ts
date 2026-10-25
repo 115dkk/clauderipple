@@ -308,6 +308,7 @@ export class App {
         c.events = mergeEvents(c.events, m.events);
         for (const e of m.events) if (e.kind === "user") this.dropOutbox(e.clientMsgId);
         if (this.isCurrent(m.session)) this.renderSession();
+        this.followWorker(m.session);
         break;
       }
       case "history": {
@@ -1242,33 +1243,61 @@ export class App {
     const current = () => this.isCurrent(session) && this.workerPath.includes(frame);
     const draw = () => { if (current() && this.ui.sheet === frame) { this.renderSheet(); this.hydrateImages($("#sheet"), session); } };
     try {
-      let input = frame.worker.call?.input ?? "";
-      if (typeof input !== "string") {
-        let offset = 0, full = "";
-        for (;;) {
-          const chunk = await this.req<BlobChunk>({ op: "blob", session, id: input.blob, offset });
-          if (!current()) return;
-          full += chunk.text;
-          if (chunk.next === null) break;
-          offset = chunk.next;
+      let prompt = frame.prompt;
+      if (prompt === undefined) {
+        let input = frame.worker.call?.input ?? "";
+        if (typeof input !== "string") {
+          let offset = 0, full = "";
+          for (;;) {
+            const chunk = await this.req<BlobChunk>({ op: "blob", session, id: input.blob, offset });
+            if (!current()) return;
+            full += chunk.text;
+            if (chunk.next === null) break;
+            offset = chunk.next;
+          }
+          input = full;
         }
-        input = full;
+        prompt = frame.prompt = workerPrompt(input);
       }
-      const prompt = workerPrompt(input);
-      let events: SessionEvent[] = [], afterSeq = 0;
+      // Only what the worker wrote since the last read: a long log is fetched once and then grows by
+      // the steps that are new, and each page is drawn as it lands.
+      let afterSeq = frame.afterSeq ?? 0;
       for (;;) {
         const page = await this.req<SubPage>({ op: "sub", session, sub: frame.worker.sub, afterSeq });
         if (!current()) return;
-        events = mergeEvents(events, page.events);
-        frame.items = workerConversationItems(events, prompt);
-        draw();
-        if (!page.more) break;
-        const next = events.at(-1)?.seq ?? 0;
+        if (page.events.length) {
+          frame.events = mergeEvents(frame.events ?? [], page.events);
+          frame.items = workerConversationItems(frame.events, prompt);
+          frame.afterSeq = frame.events.at(-1)?.seq ?? afterSeq;
+          draw();
+        }
+        if (!page.more || !page.events.length) break;
+        const next = page.events.at(-1)?.seq ?? 0;
         if (next <= afterSeq) throw new Error(t("tool.failed"));
         afterSeq = next;
       }
+      frame.seen = frame.worker.ver;
     } catch (error) { if (current()) frame.error = error instanceof Error ? error.message : String(error); }
     finally { frame.loading = false; draw(); }
+  }
+
+  /**
+   * A worker's conversation follows its steps while it runs: the sheet asks only for what happened
+   * after the last step it holds, so a long log is not read again for every new one.
+   */
+  private followWorker(session: string): void {
+    const frame = this.ui.sheet?.kind === "worker" ? this.ui.sheet : null;
+    if (!frame || !this.isCurrent(session) || frame.loading) return;
+    const items = timelineItems(this.view(session));
+    // Only a worker the session itself launched can be followed; a nested one is drawn from its own
+    // parent's log, which is read again in its own frame.
+    const launched = items.some(item => item.type === "subagent" && item.sub === frame.worker.sub
+      || item.type === "toolGroup" && item.rows.some(row => row.type === "subagent" && row.sub === frame.worker.sub));
+    if (!launched) return;
+    const worker = workerFor(items, frame.worker.sub, t("sub.worker"));
+    if (worker.ver === frame.seen && worker.status === frame.worker.status) return;
+    frame.worker = worker;
+    void this.loadWorker(frame, session);
   }
 }
 
