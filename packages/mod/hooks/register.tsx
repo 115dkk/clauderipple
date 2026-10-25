@@ -2097,9 +2097,11 @@ export const register: Register = on => {
       startTimers($)
       records = await read($, agents)
       frame = await frameOf($, e)
-      // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
-      await read($, agentsTick)
       id = await read($, agentOpen)
+      // The desktop replaces a whole answer, including the hovered native button. Do not
+      // repaint an open conversation every second just to tick its age: that drops the run
+      // line's hover under a still pointer. Steps and tools still refresh its words and age.
+      if (id === null || !isRich(frame)) await read($, agentsTick)
       const open = id === null ? undefined : { id, talk: await agentTalk($, id), runsOpen: await read($, agentRunsOpen) }
       if (open && 'deny' in open.talk) throw new Error(open.talk.deny)
       return renderAgents($.ui.resolve(e), frame, { agents: records, tasks: await read($, bgTasks), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
