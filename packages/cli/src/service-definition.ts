@@ -1,21 +1,70 @@
 // Service definitions are account-wide, not installation-local. Every writer/controller takes
 // this lock; uncooperative/older writers are detected by a generation check around external work.
-// Never steal a stale lock: synchronous supervisor calls can outlast a lease/heartbeat, and a
-// crashed operation must leave an explicit incomplete result rather than admit a second writer.
+// Never expire a live lock: synchronous supervisor calls can outlast a lease/heartbeat. Recovery
+// requires evidence that its exact process (PID + start identity) has ended, not elapsed time.
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+/** null = definitely absent; undefined = lookup failed. No signals, including signal 0. */
+function processStart(pid: number): string | null | undefined {
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
+    }
+  }
+  const windows = process.platform === "win32";
+  const result = windows
+    ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop'; $p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().Ticks } else { 'absent' }`], { encoding: "utf8", windowsHide: true })
+    : spawnSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } });
+  if (!windows && result.status === 1 && !result.stdout?.trim() && !result.stderr?.trim()) return null;
+  if (result.status !== 0) return undefined;
+  const value = result.stdout.trim();
+  return windows && value === "absent" ? null : value || undefined;
+}
+
+function recoverServiceLock(lock: string): boolean {
+  const files = fs.readdirSync(lock);
+  if (files.length !== 1) return false; // Uninitialized, legacy or damaged lock: never guess.
+  const file = files[0]!;
+  const match = /^(\d+)-([a-f0-9]{64})\.owner$/.exec(file);
+  if (!match) return false;
+  const pid = Number(match[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  const start = processStart(pid);
+  if (start === undefined || (start !== null && definitionGeneration(start) === match[2])) return false;
+  // Only the reaper that unlinks this exact owner may remove the now-empty directory. A second
+  // reaper must not rmdir a fresh lock in the mkdir -> owner-file initialization window.
+  try { fs.unlinkSync(path.join(lock, file)); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  fs.rmdirSync(lock);
+  return true;
+}
+
 function acquireServiceLock(key: string): () => void {
   const lock = `${key}.operation-lock`;
+  const start = processStart(process.pid);
+  if (!start) throw new Error("서비스 작업 프로세스의 시작 정보를 확인하지 못했습니다. 다시 시도해 주세요.");
+  const owner = path.join(lock, `${process.pid}-${definitionGeneration(start)}.owner`);
   fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
   try {
     fs.mkdirSync(lock, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    throw Object.assign(new Error(`서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`), { code: "ELOCKED" });
+    if (!recoverServiceLock(lock)) throw Object.assign(new Error(`서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`), { code: "ELOCKED" });
+    fs.mkdirSync(lock, { mode: 0o700 });
   }
-  return () => fs.rmdirSync(lock);
+  try { fs.writeFileSync(owner, "", { flag: "wx", mode: 0o600 }); } catch (error) {
+    fs.rmdirSync(lock);
+    throw error;
+  }
+  return () => { fs.unlinkSync(owner); fs.rmdirSync(lock); };
 }
 
 export function withServiceLock<T>(key: string, body: () => T): T {
