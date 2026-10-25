@@ -95,8 +95,7 @@ function sharedWorkerManifests(home: string, fallback?: string): { files: string
   const homes = new Set<string>([fallback ?? defaultHome(), ...Object.keys(owners.store.homes)]);
   const files = [...homes]
     .filter((other) => other.trim() !== "" && !sameHome(other, home))
-    .map((other) => path.join(other, "generated-agents.json"))
-    .filter((file) => fs.existsSync(file));
+    .map((other) => path.join(other, "generated-agents.json"));
   return { files, error: null };
 }
 

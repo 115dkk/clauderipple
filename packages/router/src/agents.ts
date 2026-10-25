@@ -224,12 +224,14 @@ function fileContent(name: string, modelId: string, title: string, provider: str
 
 type Manifest = { agents: string[] };
 
-function readManifest(file: string): Manifest {
+function readManifest(file: string, strict = false): Manifest {
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { agents?: unknown };
-    if (Array.isArray(parsed.agents)) return { agents: parsed.agents.filter((a): a is string => typeof a === "string") };
-  } catch {
-    /* missing or broken: treat as empty, and it is rewritten below */
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { agents?: unknown } | null;
+    if (Array.isArray(parsed?.agents) && parsed.agents.every((name): name is string => typeof name === "string" && /^[a-z0-9-]+$/.test(name))) return { agents: parsed.agents };
+    throw new Error("생성 워커 목록이 올바르지 않아 워커 파일을 제거하지 않았습니다.");
+  } catch (error) {
+    // A missing manifest is an empty claim; unreadable or invalid claims block every deletion.
+    if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return { agents: [] };
 }
@@ -253,13 +255,10 @@ function agentDirLock(dir: string): string {
 export function removeGeneratedAgentFiles(dir: string, manifestPath: string, sharedWith?: string | string[]): void {
   withFileLock(agentDirLock(dir), () => {
     if (!fs.existsSync(manifestPath)) return;
-    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { agents?: unknown };
-    if (!Array.isArray(parsed.agents) || !parsed.agents.every(name => typeof name === "string" && /^[a-z0-9-]+$/.test(name))) {
-      throw new Error("생성 워커 목록이 올바르지 않아 워커 파일을 제거하지 않았습니다.");
-    }
+    const parsed = readManifest(manifestPath, true);
     if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("워커 폴더가 심볼릭 링크이므로 제거하지 않았습니다.");
     const sharedPaths = (Array.isArray(sharedWith) ? sharedWith : sharedWith ? [sharedWith] : []).filter((file) => path.resolve(file) !== path.resolve(manifestPath));
-    const shared = new Set(sharedPaths.flatMap((file) => readManifest(file).agents));
+    const shared = new Set(sharedPaths.flatMap((file) => readManifest(file, true).agents));
     for (const name of parsed.agents) {
       if (shared.has(name)) continue;
       const file = path.join(dir, `${name}.md`);
