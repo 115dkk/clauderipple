@@ -108,17 +108,29 @@ test('a card is one title line over two body rows at every width, its state on t
     assert.equal(all.filter(n => n.props.key === 'model-row').length, 1)
     assert.equal(all.filter(n => n.props.key === 'nums').length, 1)
     assert.equal(all.filter(n => String(n.props.key).startsWith('nums-')).length, 0)
-    // The title is one clipped line: its one Text ends with the ellipsis, never a second line.
+    // The title is the whole title on one line: the engine cuts it at the edge, since the app's type
+    // is proportional. The body starts where the title does, and no number is given a fixed slot.
     const titleBox = all.find(n => n.props.key === 'title')!
     const titleText = titleBox.children.find((c): c is Tree => typeof c !== 'string')!
-    assert.equal(titleText.children.length, 1)
-    assert.ok(String(titleText.children[0]).endsWith('…'), String(titleText.children[0]))
+    assert.equal(titleText.props.wrap, 'truncate-end')
+    // The display boundary cuts the shown text at its preview length; the card itself pre-cuts nothing.
+    assert.ok(String(titleText.children[0]).startsWith('긴 제목'), String(titleText.children[0]))
+    const modelText = all.find(n => n.props.key === 'model-text')!
+    assert.equal(modelText.props.wrap, 'truncate-end')
+    assert.equal(modelText.children[0], 'gpt-6.1-sol')
+    for (const key of ['model-row', 'nums']) assert.equal(all.find(n => n.props.key === key)!.props.paddingLeft, undefined, key)
+    // The model's row is the dot, the name and the effort; the tools sit with the numbers below.
+    assert.equal(all.some(n => n.props.key === 'tools'), false)
+    const numsRow = all.find(n => n.props.key === 'nums')!
+    assert.deepEqual(numsRow.children.filter((c): c is Tree => typeof c !== 'string').map(c => c.props.key), ['n-tokens', 'n-cache', 'n-tools'])
+    assert.equal(all.some(n => n.props.key === 'value' && typeof n.props.width === 'number'), false)
     // Neither the effort's bars nor the cache's ring is drawn any more.
     assert.equal(all.some(n => n.type === 'Svg' && ['추론 강도', '캐시'].includes(String(n.props.alt))), false)
     // The Claude app's count: the last prompt (1000 + 30000) plus every step's output (5200).
     const text = textOf(tree)
     assert.ok(text.includes('토큰') && text.includes('36k'), text)
-    assert.ok(text.includes('캐시') && text.includes('97%'), text)
+    // Cached share rounded down: 30000 / 31000 is 96.7%, never a whole 100.
+    assert.ok(text.includes('캐시') && text.includes('96%'), text)
     assert.ok(text.includes('도구') && text.includes('23'), text)
   }
 })

@@ -657,7 +657,7 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
     } else expect(why, surface).toBeUndefined()
     // The Claude app's count: the last prompt (1200 + 38000 + 800) plus the reply (5100), the cache's
     // 95% share, and 12 tools.
-    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'tools 12 · tokens 45k · cache 95%' }), surface).toBeDefined()
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'tokens 45k · cache 95% · tools 12' }), surface).toBeDefined()
     else for (const value of ['45k', '95%', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
     // Two agents finished: nothing hides behind "more".
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeUndefined()
@@ -685,12 +685,8 @@ test('the Agents pane draws forty agents at once, and a record missing its title
   for (const { id, columns } of cases) {
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
       const ui = await mount($, 'forty-' + id, surface, columns)
-      // The card is one clipped title line: on the desktop its row is the sure mark that a record
-      // was drawn, on the text surfaces the title itself.
-      const desktop = surface === 'desktop' || surface === 'vscode'
-      for (const i of [0, 30, 31, 39]) {
-        expect(await ui.find(desktop ? { key: 'row-w' + i } : { type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
-      }
+      // The title is the whole title on one line (the engine cuts it at the edge), so every card has it.
+      for (const i of [0, 30, 31, 39]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
       const pictures = await ui.findAll({ type: 'Svg' })
       if (surface === 'terminal' || surface === 'mobile') expect(pictures).toHaveLength(0)
       else {
@@ -703,10 +699,8 @@ test('the Agents pane draws forty agents at once, and a record missing its title
       }
       await ui.unmount()
       const one = await mount($, 'bare-' + id, surface, columns)
-      // One clipped title line: the desktop answers by its row, the text surfaces by the title.
-      const rich = surface === 'desktop' || surface === 'vscode'
-      expect(await one.find(rich ? { key: 'row-a1' } : { type: 'Text', text: 'Port the request log renderer' }), surface + ' ' + id).toBeDefined()
-      expect(await one.find(rich ? { key: 'row-bare' } : { type: 'Text', text: 'bare' }), surface + ' ' + id).toBeDefined()
+      expect(await one.find({ type: 'Text', text: 'Port the request log renderer' }), surface + ' ' + id).toBeDefined()
+      expect(await one.find({ type: 'Text', text: 'bare' }), surface + ' ' + id).toBeDefined()
       await one.unmount()
     }
   }
@@ -752,10 +746,8 @@ test('the Agents pane draws forty mixed real-world records on every surface, ski
     const id = ['mixed', skin, appearance].join('-')
     for (const surface of ['desktop', 'terminal', 'vscode', 'mobile'] as const) {
       const ui = await mount($, id, surface, 40)
-      // The card's title is one clipped line, so the desktop answers by its row and the text
-      // surfaces by the title itself.
-      const desktop = surface === 'desktop' || surface === 'vscode'
-      for (const i of [0, 39]) expect(await ui.find(desktop ? { key: 'row-mixed-' + i } : { type: 'Text', text: '에이전트 표시 오류 수정 ' + i }), id + ' ' + surface + ' ' + i).toBeDefined()
+      // The whole title is in the tree; the engine cuts it only as it draws.
+      for (const i of [0, 39]) expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 ' + i }), id + ' ' + surface + ' ' + i).toBeDefined()
       await ui.unmount()
     }
   }
@@ -1159,13 +1151,13 @@ test('a card says one thing: at most one main action, the others quiet, one way 
   expect(await on_.find({ type: 'Button', key: 'dismiss' })).toBeDefined()
 })
 
-test('no drawing cuts its text: no truncating Text on any surface', async ($, on) => {
+test('no drawing cuts its text, but for the agent card\'s title and model name, which the app\'s proportional type cuts at the edge', async ($, on) => {
   const noop = () => undefined
+  // The engine's own ellipsis, on the two spots whose width the app's type decides: a character
+  // count there measured cells and cut too soon (2026-10-25).
   const settingsActions = QUICK_ACTIONS
   const cases: [string, Draw][] = [
     ['cut-quick', (el, surface) => renderSettings(el, frameOf(surface, 60, 30), { settings: SETTINGS, jev: { source: null, test: { state: 'fail', message: 'key rejected (401) '.repeat(4) } } }, settingsActions)],
-    ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
-    ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
     ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
     ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop })]),
   ]
@@ -1179,6 +1171,23 @@ test('no drawing cuts its text: no truncating Text on any surface', async ($, on
       await ui.unmount()
     }
   }
+})
+
+test('the agent card is the one drawing the engine cuts: its title and its model name alone', async ($, on) => {
+  // The app's type is proportional, so a character count cut too soon; these two take their row's
+  // free width and the engine ellipsis them at the edge (2026-10-25).
+  const agent: AgentRec = { ...AGENTS[0]!, description: 'Mobile / motion — a title long enough to reach the edge of any pane', model: 'gpt-6.1-sol@high' }
+  drawPane(on, 'cut-card', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: [agent], now: NOW, showDone: false }, AGENT_NOOP))
+  const cuts = async (surface: Surface): Promise<string[]> => {
+    const ui = await mount($, 'cut-card', surface, 40)
+    const cut: string[] = []
+    walk(await ui.drawn(), n => { if (n.type === 'Text' && String(n.props?.wrap ?? '').startsWith('truncate')) cut.push(String((n.children ?? []).join(''))) })
+    await ui.unmount()
+    return cut
+  }
+  expect(await cuts('desktop'), 'desktop').toEqual([agent.description, 'gpt-6.1-sol'])
+  // The terminal draws its own rows and wraps; the app's ellipsis is the desktop's.
+  expect(await cuts('terminal'), 'terminal').toEqual([])
 })
 
 // ---- The band holds still (2026-10-10) ----------------------------------------------------------
@@ -1674,9 +1683,12 @@ test('a narrow card keeps its model on one line without the vendor path, and the
     expect(await ui.find({ type: 'Text', text: /표준/ }), side + ' level').toBeUndefined()
     expect(await ui.find({ type: 'Text', text: why }), side + ' why').toBeUndefined()
   }
-  // Narrow: the name is cut to fit beside the effort; the body is the model's row and the numbers'
-  // row at either width (one fixed row each), so the card's height never changes with the pane.
-  expect((await narrow.find({ type: 'Text', text: /^deep/ }))!.text.endsWith('…'), 'cut model').toBe(true)
+  // Neither width pre-cuts the name: the whole string is drawn and the engine ellipsis it at the
+  // edge when its row is short, since the app's type is proportional.
+  for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
+    const model = await ui.find({ type: 'Text', text: 'deepseek-v4.1-flash-1017' })
+    expect(model?.props.wrap, side + ' model cut').toBe('truncate-end')
+  }
   for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
     expect(await ui.find({ key: 'model-row' }), side + ' model row').toBeDefined()
     expect(await ui.find({ key: 'nums' }), side + ' numbers row').toBeDefined()
@@ -1684,9 +1696,8 @@ test('a narrow card keeps its model on one line without the vendor path, and the
     expect(await ui.find({ key: 'open-head-end' }), side + ' time in the head').toBeDefined()
   }
   expect(await narrow.find({ type: 'Text', text: '3분 12초' }), 'time').toBeDefined()
-  // The time never takes a row of its own, and a long title is cut to the head's one line beside it.
+  // The time never takes a row of its own, and the title is the whole string, one line the engine cuts.
   for (const ui of [narrow, wide]) expect(await ui.find({ key: 'time-row' })).toBeUndefined()
-  const title = (await narrow.find({ type: 'Text', text: /^Port the/ }))!.text
-  expect(title.endsWith('…')).toBe(true)
-  expect(chOf(title) <= 33).toBe(true)
+  const title = await narrow.find({ type: 'Text', text: STILL_TITLE })
+  expect(title?.props.wrap, 'title cut').toBe('truncate-end')
 })

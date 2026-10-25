@@ -2047,7 +2047,8 @@ test('known agents show waiting after an eight-second tool and finish with cost'
   await complete($, 'worker-1')
   expect(await ui.find({ type: 'Text', text: 'Rename variable' })).toBeDefined()
   // The Claude app's count: one step's prompt (100 + 40000 cached) plus its output (10), not the weighted cost.
-  expect(await ui.find({ type: 'Text', text: 'tools 1 · tokens 40k · cache 100%' })).toBeDefined()
+  // The cached share is rounded down, so 40000/40100 reads 99%, never a whole 100.
+  expect(await ui.find({ type: 'Text', text: 'tokens 40k · cache 99% · tools 1' })).toBeDefined()
 })
 
 test('an agent keeps the API\'s token counts, its tools and the effort it was sent at; its card opens its conversation and goes back', async ($, on) => {
@@ -2083,7 +2084,7 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   expect(rec?.answeredBy).toBe('deepseek-v4.1-flash@low')
   expect(rec?.provider).toBe('deepseek')
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
-  expect(await ui.find({ type: 'Text', text: /tools 1 · tokens 10k · cache 90%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /tokens 10k · cache 90% · tools 1/ })).toBeDefined()
   expect(reads).toEqual([])
   await ui.press({ key: 'open-worker-1' })
   expect(reads).toContain('worker-1')

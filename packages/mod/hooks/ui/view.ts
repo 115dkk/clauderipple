@@ -305,10 +305,17 @@ export function promptTokens(usage: Usage): number {
   return usage.input + usage.cached + (usage.cacheWrite ?? 0)
 }
 
+/**
+ * The share of a prompt the cache served, in percent.
+ *
+ * Rounded down: a request always carries some uncached input (or a cache write), so a whole 100%
+ * cannot happen, yet rounding turned 99.96% into 100% on the Agents card (2026-10-25). The log
+ * pane and the band's route read the same figure.
+ */
 export function cachePercent(usage: Usage | undefined): number | undefined {
   if (!usage) return undefined
   const prompt = promptTokens(usage)
-  return prompt > 0 ? Math.round((usage.cached / prompt) * 100) : undefined
+  return prompt > 0 ? Math.floor((usage.cached / prompt) * 100) : undefined
 }
 
 // The requested name's `@effort` is the agent file's default, not what was sent; the sent effort is

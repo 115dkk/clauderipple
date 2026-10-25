@@ -4,9 +4,10 @@
 // first, then the finished ones, newest first (the latest few, the rest a press away).
 //
 // A card is a one-line title (with the time and the chevron at its end) over two body rows: the
-// model, effort and tools, then the tokens and the cache. The title gives way with an ellipsis and
-// the model's name with another, so the card is the same height at any width (2026-10-25). No dot
-// marks the state on the title row any more; the time's colour carries it (see `timeInk`).
+// model with the effort it ran at, then the tokens, the cache's share and its tools. The title and
+// the model's name take their row's free width and the engine cuts them at the edge, so the card is
+// the same height at any width (2026-10-25). No dot marks the state on the title row any more; the
+// time's colour carries it (see `timeInk`).
 //
 // The tokens are the Claude app's own count (stats.ts `agentTokens`): the last response's prompt
 // plus every response's output. Summing each step's input said nothing — every step re-sends the
@@ -152,32 +153,32 @@ function doing(agent: AgentRec, now: number, lang: Frame['lang']): string {
 type Figure = { key: string; label: string; value: string }
 
 /**
- * Its numbers in reading order — the tools it called (the model's row), then the tokens it used and
- * the share of its last prompt the cache served (the row under it), as the Claude app's task list
- * has them. A number not reported yet is left out here; the card pads it with a dash.
+ * Its numbers in reading order — the tokens it used, the share of its last prompt the cache served,
+ * then the tools it called, as the card's second row has them. A number not reported yet is left
+ * out here; the card pads it with a dash.
  */
 function figures(frame: Frame, agent: AgentRec): Figure[] {
   const L = frame.lang
   const out: Figure[] = []
-  if (agent.tools) out.push({ key: 'tools', label: t(L, 'agents.toolsLabel'), value: String(agent.tools) })
   const tokens = agentTokens(agent)
   if (tokens !== undefined) out.push({ key: 'tokens', label: t(L, 'agents.tokens'), value: compactNumber(tokens) })
   const cache = cachePercent(agent.usage)
   if (cache !== undefined) out.push({ key: 'cache', label: t(L, 'agents.cache'), value: cache + '%' })
+  if (agent.tools) out.push({ key: 'tools', label: t(L, 'agents.toolsLabel'), value: String(agent.tools) })
   return out
 }
 
 /**
- * The card's second row: the tokens and the cache's share, each in its slot, once there is any (a
- * running agent always, a dash until its first step reports them), so the row neither appears
- * mid-run nor wraps differently as a figure grows.
+ * The card's second row: the tokens, the cache's share and its tools, each in its slot, once there
+ * is any (a running agent always, a dash until its first step reports them), so the row neither
+ * appears mid-run nor moves as a figure grows.
  */
-function tokenFigures(frame: Frame, agent: AgentRec): Figure[] {
+function numberFigures(frame: Frame, agent: AgentRec): Figure[] {
   const got = figures(frame, agent)
   if (!got.length && !live(agent)) return []
   const L = frame.lang
-  const of = (key: string, label: string): Figure => got.find(f => f.key === key) ?? { key, label, value: '–' }
-  return [of('tokens', t(L, 'agents.tokens')), of('cache', t(L, 'agents.cache'))]
+  const of = (key: string, label: string, dash: string): Figure => got.find(f => f.key === key) ?? { key, label, value: dash }
+  return [of('tokens', t(L, 'agents.tokens'), '–'), of('cache', t(L, 'agents.cache'), '–'), of('tools', t(L, 'agents.toolsLabel'), '0')]
 }
 
 /** The numbers as one line of text (the terminal's). */
@@ -293,34 +294,12 @@ export function timeCells(frame: Frame, agent: AgentRec): number {
   return Math.ceil(timeCh(frame.lang)) + failedCells(frame, agent)
 }
 
-/** The widest each number shows, for its slot. */
-const WIDEST: Record<string, readonly string[]> = { tokens: ['9.9k', '999k', '99.9M'], cache: ['100%'], tools: ['999'] }
-
-/** Cells of a number's slot. */
-function slotCells(key: string): number {
-  return Math.ceil(Math.max(...(WIDEST[key] ?? ['999']).map(chOf)))
-}
-
-/** Cells the tools figure takes at the end of the model's row. */
-function toolCells(tools: Figure): number {
-  return Math.ceil(chOf(tools.label)) + 1 + slotCells(tools.key)
-}
-
-/** The tools figure, always at the end of the model's row: none called yet reads as 0. */
-function toolFigure(frame: Frame, agent: AgentRec): Figure {
-  return figures(frame, agent).find(f => f.key === 'tools') ?? { key: 'tools', label: t(frame.lang, 'agents.toolsLabel'), value: String(agent.tools ?? 0) }
-}
-
-/**
- * Cells the model's name has on the card's first row: the row less its air, the provider's dot, the
- * effort's word and the tools. When the row is too narrow the name gives way, cut with an ellipsis;
- * the effort and the numbers are never cut (2026-10-25). Fixed per agent and width, so the row never
- * changes between ticks.
- */
-function modelRoom(frame: Frame, agent: AgentRec, effort: string | undefined, tools: Figure): number {
-  const effortCells = effort ? Math.ceil(chOf(effortLabel(effort, frame.lang))) + 1 : 0
-  return innerCells(frame) - 2 - (agent.provider ? 2 : 0) - effortCells - toolCells(tools) - 1
-}
+// The card's rows are laid out by the app itself, not pre-cut by a character count: the app's type
+// is proportional, so a cut that measured cells left the title in two lines under a wide empty
+// space and the model's name at "Opu…" (2026-10-25). The title and the model's name take what their
+// row leaves and the engine cuts them at the edge with an ellipsis; the effort and the numbers keep
+// their own width and are never cut. The tools sit with the numbers, not the model, so the name has
+// the whole first row (2026-10-25: "도구도 밑에줄로 내릴수있니? 모델명이 보통 길어서").
 
 /**
  * The elapsed time's own colour, which carries the state the title row's dot used to show: running
@@ -335,7 +314,7 @@ function timeInk(agent: AgentRec, k: Look): Look['ink'] {
 
 /** Rows the open conversation's card draws, about, for the capsule's water. */
 export function cardRows(frame: Frame, agent: AgentRec): number {
-  const nums = tokenFigures(frame, agent).length ? 1 : 0
+  const nums = numberFigures(frame, agent).length ? 1 : 0
   const fall = linesOf(fallbackLine(frame, agent), innerCells(frame) - 2)
   return 1.2 + nums + fall + 1.3
 }
@@ -357,7 +336,7 @@ function timeBox(el: Els, frame: Frame, agent: AgentRec, now: number): RenderNod
 
 /**
  * The card's body, two rows under the head that carries the title and the time: the model with the
- * effort it ran at and its tool count, then the tokens it used and the share the cache served. What
+ * effort it ran at, then the tokens it used, the share the cache served and its tool count. What
  * the agent does now is the conversation's: a line that changed each step made the pane jump. A list
  * tile draws these same rows under its own head.
  */
@@ -367,34 +346,27 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
   const L = frame.lang
   const model = modelOf(agent, L)
   const effort = effortOf(agent)
-  const tools = toolFigure(frame, agent)
-  const room = modelRoom(frame, agent, effort, tools)
   const rows: RenderNode[] = [
-    // One line whatever the width: the name gives way before the effort or a number does.
-    <Box key="model-row" flexDirection="row" alignItems="center" columnGap={1} paddingLeft={2} minWidth={0} overflow="hidden">
+    // The row starts where the title does; the model's name takes what the effort leaves and the
+    // engine cuts it at the edge, so a name is not shortened while there is room for it.
+    <Box key="model-row" flexDirection="row" alignItems="center" columnGap={1} minWidth={0} overflow="hidden">
       {agent.provider ? <Box key="dot" flexShrink={0}><Text color={providerColor(agent.provider)}>●</Text></Box> : null}
       <Box key="model" flexShrink={1} minWidth={0} overflow="hidden">
-        <Text {...k.ink}>{clipCh(model, Math.max(4, room))}</Text>
+        <Text key="model-text" {...k.ink} wrap="truncate-end">{model}</Text>
       </Box>
       {effort ? <Box key="effort" flexShrink={0}><Text {...k.sub}>{effortLabel(effort, L)}</Text></Box> : null}
-      <Box key="tools" flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
-        <Text {...k.mute}>{tools.label}</Text>
-        <Box key="value" width={slotCells(tools.key)} flexShrink={0}>
-          <Text {...k.ink}>{tools.value}</Text>
-        </Box>
-      </Box>
     </Box>,
   ]
-  const nums = tokenFigures(frame, agent)
+  const nums = numberFigures(frame, agent)
   if (nums.length) {
     rows.push(
-      <Box key="nums" flexDirection="row" alignItems="center" columnGap={2} paddingLeft={2} minWidth={0}>
+      // Natural spacing: each label sits against its number and the figures a gap apart; a fixed
+      // slot per number left a wide hole between them (2026-10-25).
+      <Box key="nums" flexDirection="row" alignItems="center" columnGap={2} minWidth={0}>
         {nums.map(f => (
           <Box key={'n-' + f.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
             <Text key="label" {...k.mute}>{f.label}</Text>
-            <Box key="value" width={slotCells(f.key)} flexShrink={0}>
-              <Text {...k.ink}>{f.value}</Text>
-            </Box>
+            <Text key="value" {...k.ink}>{f.value}</Text>
           </Box>
         ))}
       </Box>,
@@ -402,7 +374,7 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
   }
   if (agent.pick?.fallbackReason) {
     rows.push(
-      <Box key="fallback" paddingLeft={2} minWidth={0}>
+      <Box key="fallback" minWidth={0}>
         <Text color={k.tone('amber')} wrap="wrap">{fallbackLine(frame, agent)}</Text>
       </Box>,
     )
@@ -425,32 +397,10 @@ function card(el: Els, frame: Frame, agent: AgentRec): RenderNode {
 // The list keeps its capsule of tiles (2026-10-24: the owner asked for background tasks to show
 // beside the agents as the app shows them, not for the tiles to become the app's plain rows).
 
-/**
- * How a list tile lays out, from the pane's width and its language alone, never a value that ticks:
- * the title on one line, and right of it a column as wide as the widest time and the chevron
- * (2026-10-25: the time sits in the head at every width, so a narrow pane never grows a row for it).
- */
-type TileLayout = { width: number; time: number; side: number; title: number }
-function tileLayout(frame: Frame, agent: AgentRec): TileLayout {
-  const width = innerCells(frame)
-  const time = timeCells(frame, agent)
-  const side = time + 2
-  return { width, time, side, title: width - 2 - (side + 1) }
-}
-
-/**
- * The title, always one line: cut with an ellipsis at the cells its row leaves, so a longer title
- * never makes the card taller (a narrow pane folded it to three lines, 2026-10-25).
- */
-function tileTitle(agent: AgentRec, cells: number): string {
-  return clipCh(titleOf(agent), Math.max(10, cells))
-}
-
 /** Rows a list tile draws, about, for the capsule's water: one title line and the card's body. */
 function tileRows(frame: Frame, agent: AgentRec): number {
-  const layout = tileLayout(frame, agent)
-  const nums = tokenFigures(frame, agent).length ? 1 : 0
-  const fall = linesOf(fallbackLine(frame, agent), layout.width - 2)
+  const nums = numberFigures(frame, agent).length ? 1 : 0
+  const fall = linesOf(fallbackLine(frame, agent), innerCells(frame) - 2)
   return 1.2 + 1.2 + nums + fall + 1.3
 }
 
@@ -463,20 +413,22 @@ function tile(el: Els, frame: Frame, agent: AgentRec, now: number, onPress: () =
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
-  const layout = tileLayout(frame, agent)
-  // In a column as wide as its widest value, so the title's row never moves as it ticks.
+  // Right-aligned after the title, at its own width: the app sets the time's type, so a cell count
+  // as its column measured the wrong thing (2026-10-25).
   const time = (
-    <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.time}>
+    <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0}>
       {agent.state === 'failed' ? <Text key="failed" color={k.tone('red')}>{t(L, 'agents.failed')}</Text> : null}
       <Text key="elapsed" {...timeInk(agent, k)}>{ranFor(agent, now, L)}</Text>
     </Box>
   )
   const head = (
     <Box key={'row-' + agent.id} flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0} overflow="hidden">
+      {/* The whole title, one line: the row's free width is the title's, and the engine cuts it
+          at the edge with an ellipsis. A character count left it folded in two under a blank. */}
       <Box key="title" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text bold {...k.ink}>{tileTitle(agent, layout.title)}</Text>
+        <Text key="title-text" bold {...k.ink} wrap="truncate-end">{titleOf(agent)}</Text>
       </Box>
-      <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={layout.side}>
+      <Box key="side" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0}>
         {time}
         <Text key="chev" {...k.mute}>›</Text>
       </Box>
@@ -877,11 +829,11 @@ const BACK_CELLS = 3
 
 /**
  * The page's head, as the Claude app heads an agent's view: a chevron back to the list at the left,
- * then the title on one line, and `end` (the agent's time, `cells` wide) at the right. A drawn chevron
- * under a blank press (the host inks a Button's Text in its own colour, so no Text goes inside one).
+ * then the title on one line, and `end` (the agent's time) at the right. The title takes the row's
+ * free width and the engine cuts it at the edge; the time keeps its own. A drawn chevron under a
+ * blank press (the host inks a Button's Text in its own colour, so no Text goes inside one).
  */
-type HeadEnd = { node: RenderNode; cells: number }
-function pageHead(el: Els, frame: Frame, key: string, pressKey: string, title: string, onBack: () => void, end?: HeadEnd): RenderNode {
+function pageHead(el: Els, frame: Frame, key: string, pressKey: string, title: string, onBack: () => void, end?: RenderNode): RenderNode {
   const { Box, Text } = el
   const k = pageLook(frame)
   return (
@@ -890,11 +842,10 @@ function pageHead(el: Els, frame: Frame, key: string, pressKey: string, title: s
         {pic(el, pressKey + '-chev', chevronArt(frame.appearance), t(frame.lang, 'agents.back'), 16, 16)}
         {press(el, pressKey, BACK_CELLS * CELL_PX, onBack)}
       </Box>
-      <Box key={key + '-title'} flexShrink={1} minWidth={0} overflow="hidden">
-        <Text {...k.ink} wrap="truncate-end">{clipCh(title, frame.columns - BACK_CELLS - 1 - (end ? end.cells + 2 : 0))}</Text>
+      <Box key={key + '-title'} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+        <Text key={key + '-title-text'} {...k.ink} wrap="truncate-end">{title}</Text>
       </Box>
-      {end ? <Box key={key + '-gap'} flexGrow={1} /> : null}
-      {end ? <Box key={key + '-end'} flexShrink={0} paddingRight={0.5}>{end.node}</Box> : null}
+      {end ? <Box key={key + '-end'} flexShrink={0} paddingRight={0.5}>{end}</Box> : null}
     </Box>
   )
 }
@@ -904,7 +855,7 @@ function pageHead(el: Els, frame: Frame, key: string, pressKey: string, title: s
  * offset on each scroll, so a box placed at that row stays put): on the pane's own surface, so the
  * words scrolling under it do not show through. A pill floating over the words hid them (2026-10-24).
  */
-function floatingHead(el: Els, frame: Frame, offset: number, title: string, onBack: () => void, end?: HeadEnd): RenderNode {
+function floatingHead(el: Els, frame: Frame, offset: number, title: string, onBack: () => void, end?: RenderNode): RenderNode {
   const { Box } = el
   const width = Math.max(40, frame.columns) * CELL_PX + 48
   const height = 3 * ROW_PX
@@ -1095,7 +1046,7 @@ function openDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
     paddingY: 0.5,
     children: [card(el, frame, agent)],
   })
-  const end = (): HeadEnd => ({ node: timeBox(el, frame, agent, view.now), cells: timeCells(frame, agent) })
+  const end = (): RenderNode => timeBox(el, frame, agent, view.now)
   const offset = frame.offset ?? 0
   return (
     <Box position="relative" flexDirection="column" rowGap={1} width="100%" minWidth={0}>
