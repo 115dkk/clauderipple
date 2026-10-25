@@ -20,7 +20,10 @@ import * as V from "./views.ts";
 import type { UI } from "./views.ts";
 import { watchFrames } from "./watch.ts";
 
-interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean }
+/** Where the reader is in a conversation: at its newest message, or at the row whose start sits
+ * `inset` pixels below the top edge of the screen (negative when that start is above it). */
+type Position = "bottom" | { key: string; inset: number };
+interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean; /** the page in flight, or the one that failed */ olderReq: string | null; olderFailed: boolean; scroll: Position | null }
 type Screen = { name: "pair" } | { name: "home" } | { name: "session"; id: string };
 
 const store = {
@@ -107,6 +110,8 @@ export class App {
   private tasksOpen = false;
   private workerPath: V.WorkerSheet[] = [];
   private timelineSize: ResizeObserver | null = null;
+  /** The deadline on the page of earlier history this phone asked for. */
+  private olderTimer: ReturnType<typeof setTimeout> | null = null;
   private imageUrls = new Map<string, Promise<string>>();
 
   private clearImages(): void {
@@ -164,7 +169,7 @@ export class App {
     const token = store.get<string | null>("rr.token", null);
     if (!token) { this.screen = { name: "pair" }; this.bind(); this.render(); return; }
     this.screen = this.routeFromHash();
-    window.addEventListener("hashchange", () => { this.screen = this.routeFromHash(); this.workerPath = []; this.ui.sheet = null; this.render(); this.attachCurrent(); });
+    window.addEventListener("hashchange", () => { this.rememberPosition(); this.screen = this.routeFromHash(); this.workerPath = []; this.ui.sheet = null; this.render(); this.attachCurrent(); });
     const clientId = store.get<string>("rr.clientId", "") || uid();
     store.set("rr.clientId", clientId);
     // Served by the relay → through the relay, encrypted end to end; served by the host itself → straight to it.
@@ -198,7 +203,11 @@ export class App {
       isOnline: () => navigator.onLine,
     });
     this.link = link;
-    link.onStatus = (s) => { this.ui.link = s; this.ui.now = Date.now(); this.renderChrome(); };
+    link.onStatus = (s) => {
+      // A page asked for on a socket that just dropped will not arrive: say so instead of spinning.
+      if (s.state !== "open") for (const c of [...this.caches.values()]) if (c.olderReq !== null) this.failOlder(c.olderReq);
+      this.ui.link = s; this.ui.now = Date.now(); this.renderChrome();
+    };
     link.onMessage = (m) => this.onHost(m);
     link.onReady = () => this.onReady();
     window.addEventListener("online", () => link.nudge());
@@ -223,6 +232,8 @@ export class App {
   }
 
   go(screen: Screen): void {
+    // Where the reader is belongs to the conversation being left, not to the one being opened.
+    this.rememberPosition();
     const hash = screen.name === "session" ? `#/s/${encodeURIComponent(screen.id)}` : "";
     if (location.hash !== hash) {
       if (hash) location.hash = hash; else history.pushState(null, "", location.pathname);
@@ -302,11 +313,15 @@ export class App {
       case "history": {
         const c = this.cache(m.session);
         c.loadingOlder = false;
-        c.hasOlder = m.hasOlder;
-        const main = $("main");
-        const before = main ? main.scrollHeight - main.scrollTop : 0;
+        c.olderFailed = false;
+        c.olderReq = null;
+        if (this.olderTimer !== null) { clearTimeout(this.olderTimer); this.olderTimer = null; }
+        // A page that adds nothing ends the asking: the host has nothing older to give.
+        c.hasOlder = m.events.length ? m.hasOlder : false;
+        // The page went in above what the reader is looking at; the row they were on stays put.
+        const anchor = this.isCurrent(m.session) && !this.pinned ? this.topRow() : null;
         c.events = mergeEvents(c.events, m.events);
-        if (this.isCurrent(m.session)) { this.renderSession(); if (main) main.scrollTop = main.scrollHeight - before; }
+        if (this.isCurrent(m.session)) { this.renderSession(); if (anchor) this.place(anchor); }
         break;
       }
       case "ack": {
@@ -326,6 +341,9 @@ export class App {
         break;
       }
       case "res": {
+        // A refused page of earlier history is the reader's to retry; refusals for other requests
+        // are not the timeline's.
+        if (!m.ok) this.failOlder(m.reqId);
         const p = this.pending.get(m.reqId);
         this.pending.delete(m.reqId);
         if (p) { if (m.ok) p.resolve(m.data); else p.reject(new Error(m.error)); }
@@ -360,7 +378,7 @@ export class App {
 
   cache(id: string): Cache {
     let c = this.caches.get(id);
-    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false }; this.caches.set(id, c); }
+    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false, olderReq: null, olderFailed: false, scroll: null }; this.caches.set(id, c); }
     return c;
   }
 
@@ -647,10 +665,13 @@ export class App {
   render(): void {
     const root = $("#app");
     const key = this.screen.name === "session" ? `s:${this.screen.id}` : this.screen.name;
-    if (key !== this.renderedScreen) {
+    const entering = key !== this.renderedScreen;
+    if (entering) {
       this.clearImages();
       this.renderedScreen = key;
-      this.pinned = true;
+      // A conversation opens where the reader left it; one they never opened opens at its newest words.
+      const saved = this.screen.name === "session" ? this.cache(this.screen.id).scroll : null;
+      this.pinned = saved === null || saved === "bottom";
       this.composerMode = "";
       root.dataset.screen = this.screen.name;
       root.innerHTML = this.screen.name === "pair"
@@ -673,6 +694,8 @@ export class App {
       this.renderComposer(t("composer.new"), "send");
     } else {
       this.renderSession();
+      // After the list is drawn: the same rows, minus whatever the reader was reading from.
+      if (entering) this.place(this.cache(this.screen.id).scroll);
     }
     this.renderSheet();
     this.renderToast();
@@ -715,9 +738,93 @@ export class App {
     const stick = this.pinned;
     patchList<TimelineItem>($("#tl"), timelineItems(view), (it) => V.item(it, this.ui));
     this.hydrateImages($("#tl"), id);
-    const c = this.cache(id);
-    $("#older").hidden = !c.loadingOlder;
+    this.renderOlderEdge(this.cache(id));
     if (stick) this.scrollToBottom();
+  }
+
+  /** The edge of the loaded history: the page on its way, or its failure with the reader's own retry. */
+  private renderOlderEdge(c: Cache): void {
+    const el = $("#older");
+    if (!el) return;
+    el.hidden = !c.loadingOlder && !c.olderFailed;
+    el.className = c.olderFailed ? "loading-older failed" : "loading-older";
+    setHTML(el, c.loadingOlder ? esc(t("history.loading"))
+      : c.olderFailed ? `<span role="alert">${esc(t("history.failed"))}</span><button class="btn ghost" data-act="older">${esc(t("conn.retryNow"))}</button>` : "");
+  }
+
+  /** Ask for the conversation's previous page. One at a time; a failed page waits for the person. */
+  loadOlder(retry = false): void {
+    if (this.screen.name !== "session" || this.ui.sheet !== null) return;
+    const c = this.cache(this.screen.id);
+    if (!c.hasOlder || c.loadingOlder || !c.events.length || (c.olderFailed && !retry)) return;
+    if (this.ui.link.state !== "open") return;
+    const reqId = uid();
+    if (!this.link?.send({ t: "history", session: this.screen.id, beforeSeq: c.events[0]!.seq, reqId })) return;
+    c.loadingOlder = true;
+    c.olderFailed = false;
+    c.olderReq = reqId;
+    if (this.olderTimer !== null) clearTimeout(this.olderTimer);
+    // A host that never answers must not leave the edge spinning for the rest of the visit.
+    this.olderTimer = setTimeout(() => this.failOlder(reqId), 12_000);
+    this.renderSession();
+  }
+
+  private failOlder(reqId: string | null): void {
+    if (reqId === null) return;
+    for (const [id, c] of this.caches) {
+      if (c.olderReq !== reqId) continue;
+      c.loadingOlder = false;
+      c.olderFailed = true;
+      c.olderReq = null;
+      if (this.olderTimer !== null) { clearTimeout(this.olderTimer); this.olderTimer = null; }
+      if (this.isCurrent(id)) this.renderSession();
+      return;
+    }
+  }
+
+  /**
+   * The row at the top edge of the screen and how far its start sits below that edge. A row that
+   * starts above the edge (the reader is partway through it) gives a negative inset, so the same
+   * arithmetic puts it back where it was.
+   */
+  private topRow(): { key: string; inset: number } | null {
+    const main = $("main"), tl = $("#tl");
+    if (!main || !tl) return null;
+    const top = main.getBoundingClientRect().top;
+    let above: HTMLElement | null = null, below: HTMLElement | null = null;
+    for (const row of Array.from(tl.children) as HTMLElement[]) {
+      if (!row.dataset.key) continue;
+      const box = row.getBoundingClientRect();
+      if (box.bottom <= top) continue;                                   // entirely above the edge
+      if (box.top <= top) { if (!above || box.top > above.getBoundingClientRect().top) above = row; }
+      else if (!below || box.top < below.getBoundingClientRect().top) below = row;
+    }
+    const row = above ?? below;
+    return row ? { key: row.dataset.key!, inset: row.getBoundingClientRect().top - top } : null;
+  }
+
+  /** Put the named row back at the same distance below the top edge, whatever moved around it. */
+  private place(position: Position | null): void {
+    const main = $("main");
+    if (!main || position === null) return;
+    if (position === "bottom") { this.scrollToBottom(); return; }
+    const row = Array.from($("#tl")?.children ?? []).find(child => (child as HTMLElement).dataset.key === position.key) as HTMLElement | undefined;
+    // The row the reader was on is gone (the conversation was cleared, or the host rebuilt it):
+    // start again from the newest words rather than from the top of whatever is loaded.
+    if (!row) { this.pinned = true; this.scrollToBottom(); return; }
+    // Where the row sits in the content, then where the scroll has to be for its start to return to
+    // the distance the reader left it at. Read off the layout as it is now, not as it was.
+    const at = row.getBoundingClientRect().top - main.getBoundingClientRect().top + main.scrollTop;
+    main.scrollTop = Math.max(0, at - position.inset);
+  }
+
+  /** Where the reader is in the conversation being left, for when they come back to it. */
+  private rememberPosition(): void {
+    if (this.screen.name !== "session") return;
+    const main = $("main");
+    if (!main) return;
+    const atEnd = this.pinned || main.scrollHeight - main.scrollTop - main.clientHeight < 80;
+    this.cache(this.screen.id).scroll = atEnd ? "bottom" : this.topRow();
   }
 
   private renderComposer(placeholder: string, mode: "send" | "stop"): void {
@@ -865,10 +972,8 @@ export class App {
       const main = ev.target as HTMLElement;
       if (main.id !== "main" || this.screen.name !== "session") return;
       this.pinned = main.scrollHeight - main.scrollTop - main.clientHeight < 80;
-      if (main.scrollTop > 240) return;
-      const c = this.cache(this.screen.id);
-      if (!c.hasOlder || c.loadingOlder || !c.events.length) return;
-      if (this.link?.send({ t: "history", session: this.screen.id, beforeSeq: c.events[0]!.seq, reqId: uid() })) { c.loadingOlder = true; $("#older").hidden = false; }
+      // Reading up to the oldest loaded page asks for the one before it.
+      if (main.scrollTop <= 240) this.loadOlder();
     }, true);
   }
 
@@ -891,6 +996,7 @@ export class App {
         break;
       }
       case "retry": this.link?.nudge(); break;
+      case "older": this.loadOlder(true); break;
       case "retry-send": {
         // Through the existing queue path: back to pending, then the same flush a reconnect uses.
         // This is the person's own retry, so it goes out even from a queue the browser is not keeping.

@@ -3,35 +3,10 @@
 // here re-implements the app's decisions, and nothing reaches into its internals.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSend, loadOutbox, outboxKey, tokenFingerprint, writeOutbox } from "../web/outbox.ts";
+import { createSend, outboxKey, tokenFingerprint, writeOutbox } from "../web/outbox.ts";
 import type { OutboxEntry } from "../web/outbox.ts";
-
-const ORIGIN = "https://phone.example";
-const TOKEN = "token-for-the-tests-0123456789";
-
-/** localStorage as a browser gives it, able to refuse writes outright or after a count. */
-class Storage {
-  failWrites = false;
-  failAfter: number | null = null;
-  writes = 0;
-  private map = new Map<string, string>();
-  getItem(key: string): string | null { return this.map.get(key) ?? null; }
-  setItem(key: string, value: string): void {
-    if (this.failWrites || (this.failAfter !== null && this.writes >= this.failAfter)) {
-      const error = new Error("full");
-      error.name = "QuotaExceededError";
-      throw error;
-    }
-    this.writes++;
-    this.map.set(key, value);
-  }
-  keys(): string[] { return [...this.map.keys()]; }
-  /** The stored queue as the app would read it after a reload. */
-  stored(key: string): OutboxEntry[] {
-    const load = loadOutbox(this, key);
-    return load.status === "ok" || load.status === "partial" ? load.entries : [];
-  }
-}
+import { ORIGIN, Storage, TOKEN, install } from "./fake-dom.ts";
+import type { Element } from "./fake-dom.ts";
 
 /** The one socket the app opens; `frames` are the JSON text it actually sent. */
 class Socket {
@@ -63,61 +38,11 @@ class Socket {
   close(): void { this.readyState = 3; this.onclose?.(); }
 }
 
-interface Element {
-  dataset: Record<string, string>;
-  innerHTML: string;
-  value: string;
-  hidden: boolean;
-  scrollTop: number;
-}
-
-/** The slice of the browser the app touches while rendering, plus the elements a test reads back. */
-function install(storage: Storage): { sheet(): Element; body(): Element & { scrollTop: number } } {
-  const elements = new Map<string, Element>();
-  const el = (key: string): Element => {
-    const found = elements.get(key);
-    if (found) return found;
-    const made = {
-      dataset: {}, innerHTML: "", value: "", hidden: false,
-      style: {}, children: [], parentElement: null, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
-      addEventListener: () => undefined, removeEventListener: () => undefined, append: () => undefined,
-      remove: () => undefined, focus: () => undefined, setAttribute: () => undefined, replaceWith: () => undefined,
-      insertBefore: () => undefined, removeChild: () => undefined, disconnect: () => undefined, observe: () => undefined,
-      querySelector: () => null, querySelectorAll: () => [], getElementsByTagName: () => [],
-    };
-    elements.set(key, made);
-    return made;
-  };
-  const define = (name: string, value: unknown): void => { Object.defineProperty(globalThis, name, { value, configurable: true, writable: true }); };
-  define("localStorage", new Proxy(storage, {
-    // Browser storage exposes stored keys as enumerable own properties, not the fixture's fields.
-    ownKeys: () => storage.keys(),
-    getOwnPropertyDescriptor: (_target, key) => typeof key === "string" && storage.getItem(key) !== null
-      ? { configurable: true, enumerable: true, value: storage.getItem(key) } : undefined,
-  }));
-  define("WebSocket", Socket);
-  define("document", {
-    documentElement: { lang: "", dataset: {} as Record<string, string> },
-    visibilityState: "visible",
-    querySelector: (sel: string) => el(sel),
-    querySelectorAll: () => [],
-    getElementById: (id: string) => el(`#${id}`),
-    createElement: (tag: string) => tag === "template" ? { innerHTML: "", content: { firstElementChild: el("template-child") } } : el(`<${tag}>`),
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-  });
-  define("navigator", { languages: ["ko"], language: "ko", onLine: true });
-  define("location", { hash: "", pathname: "/", search: "", origin: ORIGIN, protocol: "https:", host: "phone.example" });
-  define("history", { replaceState: () => undefined, pushState: () => undefined });
-  define("window", { addEventListener: () => undefined, isSecureContext: false, matchMedia: () => ({ matches: false }) });
-  define("matchMedia", () => ({ matches: false }));
-  define("requestAnimationFrame", (fn: () => void) => { fn(); return 0; });
-  define("ResizeObserver", class { observe(): void {} disconnect(): void {} });
-  // The app's own clocks are not under test and would hold the process open; Link's timers are
-  // cleared by link.stop() at the end of each test.
-  define("setInterval", () => 0);
-  define("clearInterval", () => undefined);
-  return { sheet: () => el("#sheet"), body: () => el("#worker-body") };
+/** The socket the app opens, wired into the shared fake browser. */
+function installSocket(storage: Storage): { sheet(): Element; body(): Element } {
+  const browser = install(storage);
+  Object.defineProperty(globalThis, "WebSocket", { value: Socket, configurable: true, writable: true });
+  return browser;
 }
 
 /** The app as its own public surface describes it. The import is untyped on purpose: app.ts is
@@ -150,7 +75,7 @@ interface Running {
 
 /** Start the app the way the browser does: token in storage, home screen, socket open, host ready. */
 async function launch(storage: Storage, entries: OutboxEntry[] = []): Promise<Running> {
-  const elements = install(storage);
+  const elements = installSocket(storage);
   Socket.respond = null;
   const key = outboxKey({ kind: "direct", origin: ORIGIN, fingerprint: await tokenFingerprint(TOKEN) });
   if (entries.length) writeOutbox(storage, key, entries);
