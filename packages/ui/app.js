@@ -5195,6 +5195,22 @@ function renderModelUsage(summary) {
 function totalInputOf(usage) {
   return (usage.input || 0) + (usage.cached || 0) + (usage.cacheWrite || 0);
 }
+/**
+ * The tokens one request spent, as the Agents card counts an agent's (mod stats.ts `agentTokens`):
+ * the whole prompt — uncached, cache write and cache read — plus what the model wrote.
+ */
+function tokensOf(usage) {
+  return totalInputOf(usage) + (usage.output || 0);
+}
+/**
+ * The share of the prompt the cache served, over the whole prompt as the card counts it (mod
+ * view.ts `cachePercent`): a cache write is input the model read fresh, so it counts against the
+ * hit rate.
+ */
+function cacheShareOf(usage) {
+  const prompt = totalInputOf(usage);
+  return prompt > 0 ? Math.round(((usage.cached || 0) / prompt) * 100) : undefined;
+}
 function requestDetail(record) {
   const details = [
     [t("logs.detail.id"), record.id],
@@ -5203,6 +5219,7 @@ function requestDetail(record) {
     [t("logs.detail.uncached"), record.usage ? formatNumber(record.usage.input) : t("logs.none")],
     [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
+    [t("logs.detail.output"), record.usage ? formatNumber(record.usage.output) : t("logs.none")],
   ].map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
   if (record.note) details.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
   return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, details)])]);
@@ -5218,12 +5235,12 @@ function requestRow(record) {
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
     el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: providerLabel(record.provider) }),
   ].filter(Boolean));
-  // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
-  // which read as a two-token request (2026-09-23). The split is in the detail row.
-  const totalInput = record.usage ? totalInputOf(record.usage) : 0;
-  const input = record.usage
-    ? el("span", { class: "token-cell", text: formatNumber(totalInput) }, [el("span", { class: "cache-pill", text: t("logs.cacheHit", { percent: Math.round(record.usage.cached / Math.max(1, totalInput) * 100) }) })])
-    : el("span", { class: "no-usage", text: t("common.notAvailable") });
+  // The tokens and the cache's share, in the Agents card's order and words: the request's whole
+  // prompt — a fully cached Anthropic turn reports `input: 2`, which read as a two-token request
+  // (2026-09-23) — plus its output, then the share the cache served. The prompt's split and the
+  // output on their own stay in the detail row.
+  const tokens = record.usage ? tokensOf(record.usage) : undefined;
+  const cache = record.usage ? cacheShareOf(record.usage) : undefined;
   const status = record.resent
     ? el("span", { class: "status-text resent", text: `${t("logs.status.resent")} ${record.status}`, title: t("logs.status.resentHelp") })
     : el("span", { class: `status-text ${record.ok ? "ok" : "bad"}`, text: `${record.ok ? t("logs.status.ok") : t("logs.status.error")} ${record.status}` });
@@ -5232,8 +5249,8 @@ function requestRow(record) {
     el("td", { class: "c-time", text: timeOf(record.at) }),
     el("td", { class: "c-model" }, [model]),
     el("td", { class: "c-effort", text: record.effort || t("common.notAvailable") }),
-    el("td", { class: "c-in" }, [input]),
-    el("td", { class: record.usage ? "c-out" : "c-out no-usage", text: record.usage ? formatNumber(record.usage.output) : t("common.notAvailable") }),
+    el("td", { class: tokens === undefined ? "c-tok no-usage" : "c-tok", "data-label": t("logs.th.tokens"), text: tokens === undefined ? t("common.notAvailable") : formatNumber(tokens) }),
+    el("td", { class: cache === undefined ? "c-cache no-usage" : "c-cache", "data-label": t("logs.th.cache"), text: cache === undefined ? t("common.notAvailable") : `${cache}%` }),
     el("td", { class: "c-dur", text: formatSeconds(record.ms) }),
     el("td", { class: "c-status" }, [status]),
   );
