@@ -3,38 +3,11 @@
 // here re-implements the app's decisions, and nothing reaches into its internals.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSend, loadOutbox, outboxKey, tokenFingerprint, writeOutbox } from "../web/outbox.ts";
+import { createSend, outboxKey, tokenFingerprint, writeOutbox } from "../web/outbox.ts";
 import type { OutboxEntry } from "../web/outbox.ts";
 import type { QuestionDraft } from "../web/question-answers.ts";
-
-const ORIGIN = "https://phone.example";
-const TOKEN = "token-for-the-tests-0123456789";
-
-/** localStorage as a browser gives it, able to refuse writes outright or after a count. */
-class Storage {
-  failWrites = false;
-  failAfter: number | null = null;
-  writes = 0;
-  private map = new Map<string, string>();
-  getItem(key: string): string | null { return this.map.get(key) ?? null; }
-  setItem(key: string, value: string): void {
-    if (this.failWrites || (this.failAfter !== null && this.writes >= this.failAfter)) {
-      const error = new Error("full");
-      error.name = "QuotaExceededError";
-      throw error;
-    }
-    this.writes++;
-    this.map.set(key, value);
-  }
-  keys(): string[] { return [...this.map.keys()]; }
-  /** Exactly what is stored, without parsing it. */
-  raw(key: string): string | null { return this.map.get(key) ?? null; }
-  /** The stored queue as the app would read it after a reload. */
-  stored(key: string): OutboxEntry[] {
-    const load = loadOutbox(this, key);
-    return load.status === "ok" || load.status === "partial" ? load.entries : [];
-  }
-}
+import { ORIGIN, Storage, TOKEN, install } from "./fake-dom.ts";
+import type { Element } from "./fake-dom.ts";
 
 /** The one socket the app opens; `frames` are the JSON text it actually sent. */
 class Socket {
@@ -67,71 +40,11 @@ class Socket {
   close(): void { this.readyState = 3; this.onclose?.(); }
 }
 
-interface Element {
-  dataset: Record<string, string>;
-  innerHTML: string;
-  value: string;
-  hidden: boolean;
-  scrollTop: number;
-  /** The handlers the app bound to this element, so a test can act like a person. */
-  listeners: Record<string, ((ev: unknown) => void)[]>;
-}
-
-/** The slice of the browser the app touches while rendering, plus the elements a test reads back. */
-function install(storage: Storage): { sheet(): Element; body(): Element & { scrollTop: number }; main(): Element; list(): Element; fire(key: string, type: string, ev: unknown): void } {
-  const elements = new Map<string, Element>();
-  const el = (key: string): Element => {
-    const found = elements.get(key);
-    if (found) return found;
-    const listeners: Record<string, ((ev: unknown) => void)[]> = {};
-    const made = {
-      dataset: {}, innerHTML: "", value: "", hidden: false, listeners,
-      style: {}, children: [], parentElement: null, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
-      addEventListener: (type: string, fn: (ev: unknown) => void) => { (listeners[type] ??= []).push(fn); },
-      removeEventListener: () => undefined, append: () => undefined,
-      remove: () => undefined, focus: () => undefined, setAttribute: () => undefined, replaceWith: () => undefined,
-      insertBefore: () => undefined, removeChild: () => undefined, disconnect: () => undefined, observe: () => undefined,
-      querySelector: () => null, querySelectorAll: () => [], getElementsByTagName: () => [],
-    };
-    elements.set(key, made);
-    return made;
-  };
-  const define = (name: string, value: unknown): void => { Object.defineProperty(globalThis, name, { value, configurable: true, writable: true }); };
-  define("localStorage", new Proxy(storage, {
-    // Browser storage exposes stored keys as enumerable own properties, not the fixture's fields.
-    ownKeys: () => storage.keys(),
-    getOwnPropertyDescriptor: (_target, key) => typeof key === "string" && storage.getItem(key) !== null
-      ? { configurable: true, enumerable: true, value: storage.getItem(key) } : undefined,
-  }));
-  define("WebSocket", Socket);
-  define("document", {
-    documentElement: { lang: "", dataset: {} as Record<string, string> },
-    visibilityState: "visible",
-    querySelector: (sel: string) => el(sel),
-    querySelectorAll: () => [],
-    getElementById: (id: string) => el(`#${id}`),
-    createElement: (tag: string) => tag === "template" ? { innerHTML: "", content: { firstElementChild: el("template-child") } } : el(`<${tag}>`),
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-  });
-  define("navigator", { languages: ["ko"], language: "ko", onLine: true });
-  define("location", { hash: "", pathname: "/", search: "", origin: ORIGIN, protocol: "https:", host: "phone.example" });
-  define("history", { replaceState: () => undefined, pushState: () => undefined });
-  define("window", { addEventListener: () => undefined, isSecureContext: false, matchMedia: () => ({ matches: false }) });
-  define("matchMedia", () => ({ matches: false }));
-  define("requestAnimationFrame", (fn: () => void) => { fn(); return 0; });
-  define("ResizeObserver", class { observe(): void {} disconnect(): void {} });
-  // The app's own clocks are not under test and would hold the process open; Link's timers are
-  // cleared by link.stop() at the end of each test.
-  define("setInterval", () => 0);
-  define("clearInterval", () => undefined);
-  return {
-    sheet: () => el("#sheet"),
-    body: () => el("#worker-body"),
-    main: () => el("#main"),
-    list: () => el("#home-list"),
-    fire: (key: string, type: string, ev: unknown) => { for (const fn of el(key).listeners[type] ?? []) fn(ev); },
-  };
+/** The socket the app opens, wired into the shared fake browser. */
+function installSocket(storage: Storage): ReturnType<typeof install> {
+  const browser = install(storage);
+  Object.defineProperty(globalThis, "WebSocket", { value: Socket, configurable: true, writable: true });
+  return browser;
 }
 
 /** The app as its own public surface describes it. The import is untyped on purpose: app.ts is
@@ -176,7 +89,7 @@ interface Running {
 
 /** Start the app the way the browser does: token in storage, home screen, socket open, host ready. */
 async function launch(storage: Storage, entries: OutboxEntry[] = []): Promise<Running> {
-  const elements = install(storage);
+  const elements = installSocket(storage);
   Socket.respond = null;
   const key = outboxKey({ kind: "direct", origin: ORIGIN, fingerprint: await tokenFingerprint(TOKEN) });
   if (entries.length) writeOutbox(storage, key, entries);
@@ -557,4 +470,45 @@ test("typing in the search narrows the list to its first page, and only the list
     assert.ok(running.list().innerHTML.includes("작업 1"), "the title is in the results");
     assert.ok(!running.list().innerHTML.includes("작업 3"), "sessions outside the project are not");
   } finally { running.app.link?.stop(); }
+});
+
+test("a running worker's open conversation asks only for the steps after the ones it holds", async () => {
+  const running = await launch(new Storage());
+  const event = (seq: number, body: Record<string, unknown>) => ({ seq, at: seq, ...body });
+  const launchCall = event(1, { kind: "assistant", msg: "m", model: "sol", text: "", tools: [{ id: "agent", name: "Agent", summary: "Review", input: { preview: "Review the…", blob: "b1" } }] });
+  const step = (seq: number, text: string) => event(seq, { kind: "assistant", msg: `s${seq}`, model: "sol", text, tools: [] });
+  const worker = (seq: number, steps: number, status: string) => event(seq, { kind: "subagent", toolUseId: "agent", sub: "sub-agent", description: "Review", model: "sol", status, steps });
+  const asked: Record<string, unknown>[] = [];
+  const prompt = JSON.stringify({ prompt: "Review the diff exactly." });
+  Socket.respond = op => {
+    if (op.op === "blob") return { text: prompt, offset: 0, next: null, bytes: prompt.length };
+    if (op.op !== "sub") return null;
+    asked.push(op);
+    const after = Number(op.afterSeq ?? 0);
+    return { events: after === 0 ? [step(1, "Step one")] : after === 1 ? [step(2, "Step two")] : [], more: false };
+  };
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    // The refresh a worker's step starts is not one of the app's promises; let its reads settle.
+    const settle = async (): Promise<void> => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [launchCall, worker(2, 1, "running")] });
+    await running.app.act("sub", { dataset: { id: "sub-agent" } });
+    assert.ok(running.sheet().innerHTML.includes("Step one"), "the first page is drawn as it lands");
+    assert.ok(running.sheet().innerHTML.includes("Review the diff exactly."), "with the worker's real instruction");
+
+    // Another step while the sheet is open: only what is new is read, and nothing already shown is lost.
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [step(3, "Step three"), worker(4, 2, "running")] });
+    await settle();
+    assert.deepEqual(asked.map(op => op.afterSeq), [0, 1], "the refresh asks for the steps since the last one held");
+    assert.ok(running.sheet().innerHTML.includes("Step two"), "the new step joins the log");
+    assert.ok(running.sheet().innerHTML.includes("Step one"), "the steps already read are still there");
+    assert.ok(running.sheet().innerHTML.includes("Review the diff exactly."), "the instruction is not read again");
+
+    // The same worker reported again with nothing new: no further read.
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [worker(4, 2, "running")] });
+    await settle();
+    assert.equal(asked.length, 2, "an unchanged worker costs no request");
+  } finally {
+    running.app.link?.stop();
+  }
 });

@@ -1,6 +1,6 @@
 // Screens as strings of markup. The app and the screenshot fixtures both call these, so the
 // mockups in docs/media/remote are the shipped UI, not a drawing of it.
-import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
+import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionEvent, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
 import type { LinkStatus } from "./conn.ts";
 import type { OutboxEntry, PreservedItem } from "./outbox.ts";
 import type { PushAvail } from "./pushstate.ts";
@@ -24,6 +24,14 @@ export interface WorkerSheet {
   depth: number;
   scroll: number;
   expanded: Map<string, string | null>;
+  /** Everything this frame has read of the worker's log, so a running worker costs only its new steps. */
+  events?: SessionEvent[];
+  /** The last seq held: the next read asks for what comes after it. */
+  afterSeq?: number;
+  /** The worker's launch instruction, once its blob was read (read once, not on every refresh). */
+  prompt?: string;
+  /** The worker item these items were drawn from, to notice when it has taken another step. */
+  seen?: string;
 }
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }
@@ -319,7 +327,7 @@ function toolRow(tool: ToolView, ui: UI): string {
   if (!open) return row;
   const fetched = ui.expanded.get(tool.id);
   const body = fetched ?? [tool.input ? textOf(tool.input) : "", tool.result ? textOf(tool.result.text) : ""].filter(Boolean).join("\n\n────\n\n");
-  return row + (body ? `<details class="tool-details"><summary>${esc(t("perm.showAll"))}</summary><div class="tool-out">${esc(body)}</div></details><div class="tool-preview tool-out">${esc(body.slice(0, 1200).split("\n").slice(0, 12).join("\n"))}${body.length > 1200 || body.split("\n").length > 12 ? "\n…" : ""}</div>` : "") + images(tool.result?.images);
+  return row + (body ? `<details class="tool-details" data-k="d:${esc(tool.id)}"${ui.expanded.has(`d:${tool.id}`) ? " open" : ""}><summary>${esc(t("perm.showAll"))}</summary><div class="tool-out">${esc(body)}</div></details><div class="tool-preview tool-out">${esc(body.slice(0, 1200).split("\n").slice(0, 12).join("\n"))}${body.length > 1200 || body.split("\n").length > 12 ? "\n…" : ""}</div>` : "") + images(tool.result?.images);
 }
 
 export function item(it: TimelineItem, ui: UI): string {
@@ -346,7 +354,9 @@ export function item(it: TimelineItem, ui: UI): string {
       return `<div class="msg-user${it.queued ? " queued" : ""}">${esc(it.text)}${images(it.images)}${q}</div>`;
     }
     case "thinking":
-      return `<details class="tool-details"><summary>${icon.clock(15)} ${lang() === "ko" ? "사고 과정" : "Thinking"}</summary><div class="tool-out">${esc(textOf(it.text))}</div></details>`;
+      // Its own open state lives beside the group's, so a row redrawn while the text streams (or a
+      // conversation opened again) does not fold the person's reading shut.
+      return `<details class="tool-details" data-k="t:${esc(it.key)}"${ui.expanded.has(`t:${it.key}`) ? " open" : ""}><summary>${icon.clock(15)} ${lang() === "ko" ? "사고 과정" : "Thinking"}</summary><div class="tool-out">${esc(textOf(it.text))}</div></details>`;
     case "assistant": {
       const text = textOf(it.text);
       const caret = it.streaming ? `<span class="caret"></span>` : "";
