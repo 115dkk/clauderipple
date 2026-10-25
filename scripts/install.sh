@@ -26,6 +26,13 @@ RUNTIME="$PREFIX/runtime"
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# A half-finished staging directory is never left behind, and never replaces anything (G-D03).
+STAGING=""
+cleanup() {
+  if [ -n "${STAGING:-}" ]; then rm -rf "$STAGING"; fi
+}
+trap cleanup EXIT INT TERM
+
 # --- the Node to install with -------------------------------------------------------------------
 
 node_major() { "$1" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || true; }
@@ -64,9 +71,26 @@ download_node() {
   elif command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "$tmp/node.tar.gz" | cut -d' ' -f1)"
   else die "neither shasum nor sha256sum is available to verify the download"; fi
   [ "$actual" = "$expected" ] || die "the Node download does not match its published checksum"
-  rm -rf "$RUNTIME"
-  mkdir -p "$RUNTIME"
-  tar -xzf "$tmp/node.tar.gz" -C "$RUNTIME" --strip-components 1
+  # Unpack beside the runtime, not into it: an interrupted or failed extraction must leave the
+  # runtime an existing ClaudeRipple already uses untouched. The swap is two renames on one
+  # filesystem, and the previous runtime is kept until the new one is in place (G-D03).
+  STAGING="$RUNTIME.new.$$"
+  rm -rf "$STAGING"
+  mkdir -p "$STAGING"
+  tar -xzf "$tmp/node.tar.gz" -C "$STAGING" --strip-components 1 || { rm -rf "$STAGING"; die "could not unpack Node from $base"; }
+  [ -x "$STAGING/bin/node" ] || { rm -rf "$STAGING"; die "unpacked Node but found no executable at $STAGING/bin/node"; }
+  if [ -e "$RUNTIME" ]; then
+    mv "$RUNTIME" "$RUNTIME.old.$$"
+    if mv "$STAGING" "$RUNTIME"; then
+      rm -rf "$RUNTIME.old.$$"
+    else
+      mv "$RUNTIME.old.$$" "$RUNTIME"
+      die "could not move the new Node into $RUNTIME; the previous one was put back"
+    fi
+  else
+    mv "$STAGING" "$RUNTIME"
+  fi
+  STAGING=""
   rm -rf "$tmp"
 }
 
@@ -120,9 +144,11 @@ case "$NODE" in
   "$RUNTIME"/*)
     ENTRY="$PREFIX/lib/node_modules/clauderipple/bin/clauderipple.js"
     [ -f "$ENTRY" ] || die "the installed package has no entry point at $ENTRY"
-    rm -f "$BIN/clauderipple"
-    printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$NODE" "$ENTRY" > "$BIN/clauderipple"
-    chmod +x "$BIN/clauderipple"
+    # Replaced by rename: an interrupted write leaves the command that was there, not half a file.
+    WRAPPER="$BIN/.clauderipple.new.$$"
+    printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$NODE" "$ENTRY" > "$WRAPPER"
+    chmod +x "$WRAPPER"
+    mv -f "$WRAPPER" "$BIN/clauderipple"
     ;;
 esac
 

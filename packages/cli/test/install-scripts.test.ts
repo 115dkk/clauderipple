@@ -59,3 +59,24 @@ test("install.sh stops on a failed setup with a non-zero code and the next comma
   assert.match(block, /clauderipple install/);
   assert.match(block, /clauderipple repair/);
 });
+
+// G-D03: an interrupted install must not destroy what was already working. install.sh unpacks Node
+// beside the runtime and swaps by rename, keeps the previous runtime until the new one is in place,
+// and replaces the command wrapper by rename too. Checked by inspection, as the bodies are shell.
+test("install.sh stages the runtime swap and replaces the command by rename", () => {
+  const sh = read("install.sh");
+  assert.match(sh, /^cleanup\(\) \{/m);
+  assert.match(sh, /trap cleanup EXIT INT TERM/);
+  const extract = sh.slice(sh.indexOf("download_node()"), sh.indexOf('NODE="$(find_node'));
+  assert.match(extract, /STAGING="\$RUNTIME\.new\.\$\$"/);
+  assert.match(extract, /tar -xzf "\$tmp\/node\.tar\.gz" -C "\$STAGING"/);
+  assert.doesNotMatch(extract, /rm -rf "\$RUNTIME"$/m, "the runtime is not deleted before a new one is unpacked");
+  assert.match(extract, /mv "\$RUNTIME" "\$RUNTIME\.old\.\$\$"/);
+  assert.match(extract, /mv "\$STAGING" "\$RUNTIME"/);
+  assert.match(extract, /mv "\$RUNTIME\.old\.\$\$" "\$RUNTIME"/, "a failed swap puts the previous runtime back");
+  const wrapperAt = sh.indexOf('WRAPPER="$BIN');
+  const wrapper = sh.slice(wrapperAt, sh.indexOf(";;", wrapperAt));
+  assert.match(wrapper, /WRAPPER="\$BIN\/\.clauderipple\.new\.\$\$"/);
+  assert.match(wrapper, /mv -f "\$WRAPPER" "\$BIN\/clauderipple"/);
+  assert.doesNotMatch(wrapper, /rm -f "\$BIN\/clauderipple"/, "the old command is replaced, never removed first");
+});
