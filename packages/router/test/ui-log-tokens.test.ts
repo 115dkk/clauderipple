@@ -1,9 +1,11 @@
-// A request in the log's recent list is read as the Agents card reads an agent (mod stats.ts
-// `agentTokens`, mod view.ts `cachePercent`): its whole prompt — uncached, cache write and cache
-// read — plus its output, then the share the cache served of that prompt. The dashboard's counters
-// are plain functions in a classic script, so the test evaluates them straight from the source
-// text, as the picker test does. What is fixed here: a cache write is not a hit, and a fully cached
-// Anthropic turn (`input: 2`) is not a two-token request.
+// The recent requests list reads a request as it did before ba1ba32: the whole prompt in the input
+// cell, with the cache's share on a pill inside it, and the output in a cell of its own. Only the
+// summary gained a tokens chip (060cc48), counted as the Agents card counts an agent (mod stats.ts
+// `agentTokens`): the whole prompt — uncached, cache write and cache read — plus the output. The
+// dashboard's counters are plain functions in a classic script, so the test evaluates them straight
+// from the source text, as the picker test does. What is fixed here: a cache write is not a hit, a
+// fully cached Anthropic turn (`input: 2`) is not a two-token request, and the row is not the
+// two-column tokens/cache form the revert took out.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -15,18 +17,39 @@ type Usage = { input: number; cached: number; cacheWrite?: number; output: numbe
 type TokenBlock = {
   totalInputOf: (usage: Usage) => number;
   tokensOf: (usage: Usage) => number;
-  cacheShareOf: (usage: Usage) => number | undefined;
 };
 
 const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui");
 
+function sourceOf(file: string): string {
+  return fs.readFileSync(path.join(uiDir, file), "utf8");
+}
+
+function slice(file: string, from: string, to: string): string {
+  const source = sourceOf(file);
+  const start = source.indexOf(from);
+  const end = source.indexOf(to, start + from.length);
+  assert.ok(start > 0 && end > start, `${file} no longer contains ${from} through ${to}`);
+  return source.slice(start, end);
+}
+
 function loadTokenBlock(): TokenBlock {
-  const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+  const source = sourceOf("app.js");
   const start = source.indexOf("function totalInputOf");
   const end = source.indexOf("function requestDetail");
   assert.ok(start > 0 && end > start, "app.js no longer contains the token-counting block");
-  return new Function(`${source.slice(start, end)}; return { totalInputOf, tokensOf, cacheShareOf };`)() as TokenBlock;
+  return new Function(`${source.slice(start, end)}; return { totalInputOf, tokensOf };`)() as TokenBlock;
 }
+
+function loadI18n(): Record<string, Record<string, string>> {
+  const source = sourceOf("i18n.js");
+  const start = source.indexOf("const I18N = {");
+  const end = source.indexOf("\n};", start);
+  assert.ok(start > 0 && end > start, "i18n.js no longer contains the dictionary");
+  return new Function(`${source.slice(start, end + 3)}; return I18N;`)() as Record<string, Record<string, string>>;
+}
+
+const LANGUAGES = ["ko", "en", "zh", "ja", "es", "pt"];
 
 test("a prompt is read whole: uncached, cache write and cache read", () => {
   const { totalInputOf, tokensOf } = loadTokenBlock();
@@ -40,27 +63,10 @@ test("a record that reports no cache write still counts all it read", () => {
   assert.equal(tokensOf({ input: 100, cached: 900, output: 10 }), 1_010);
 });
 
-test("the cache's share is of the whole prompt, so a cache write is not a hit", () => {
-  const { cacheShareOf } = loadTokenBlock();
-  assert.equal(cacheShareOf({ input: 2, cached: 45_000, cacheWrite: 1_200, output: 900 }), 97);
-  assert.equal(cacheShareOf({ input: 2, cached: 0, cacheWrite: 2_218, output: 400 }), 0);
-  assert.equal(cacheShareOf({ input: 100, cached: 100, output: 10 }), 50);
-});
-
-test("a request whose prompt says nothing has no share to show", () => {
-  const { cacheShareOf, tokensOf } = loadTokenBlock();
-  assert.equal(cacheShareOf({ input: 0, cached: 0, output: 0 }), undefined);
-  assert.equal(tokensOf({ input: 0, cached: 0, output: 0 }), 0);
-});
-
-// The summary leads a period with the same figure a request and an agent are counted by, and keeps
-// the prompt's own total and the output on their own beside it.
+// The summary leads a period with the same figure the Agents card counts an agent by, and keeps the
+// prompt's own total and the output on their own beside it.
 test("the summary reads a period's tokens, then its input and output", () => {
-  const app = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
-  const start = app.indexOf("function renderSummary(");
-  const end = app.indexOf("function fitSummaryValues(");
-  const body = start > 0 && end > start ? app.slice(start, end) : "";
-  assert.ok(body, "app.js no longer contains renderSummary");
+  const body = slice("app.js", "function renderSummary(", "function fitSummaryValues(");
   const tokens = body.indexOf('summaryChip(t("logs.th.tokens"), formatNumber(tokensOf(total)))');
   const input = body.indexOf('summaryChip(t("logs.summary.input")');
   const output = body.indexOf('summaryChip(t("logs.summary.output")');
@@ -68,15 +74,37 @@ test("the summary reads a period's tokens, then its input and output", () => {
   assert.ok(input > tokens && output > input, "the summary no longer reads tokens, then input, then output");
 });
 
-// The order is the card's: the tokens, then the cache's share. A column added ahead of another
-// would read the two figures in the other order.
-test("the recent requests table shows the tokens, then the cache", () => {
-  const html = fs.readFileSync(path.join(uiDir, "index.html"), "utf8");
+// The row went back to its earlier shape: the input and the output are columns of their own, and the
+// tokens/cache pair ba1ba32 put in their place is gone.
+test("the recent requests table has the input and output columns", () => {
+  const html = sourceOf("index.html");
   const row = /<table id="requests-table"><thead><tr>([\s\S]*?)<\/tr>/.exec(html)?.[1];
   assert.ok(row, "index.html no longer has the requests table's head");
-  const tokens = row.indexOf('data-i18n="logs.th.tokens"');
-  const cache = row.indexOf('data-i18n="logs.th.cache"');
-  assert.ok(tokens > 0 && cache > tokens, "the requests table no longer reads tokens then cache");
-  assert.equal(row.includes('data-i18n="logs.th.input"'), false, "the requests table shows the input on its own again");
-  assert.equal(row.includes('data-i18n="logs.th.output"'), false, "the requests table shows the output on its own again");
+  const input = row.indexOf('data-i18n="logs.th.input"');
+  const output = row.indexOf('data-i18n="logs.th.output"');
+  assert.ok(input > 0 && output > input, "the requests table no longer reads input then output");
+  assert.equal(row.includes('data-i18n="logs.th.tokens"'), false, "the requests table shows the tokens again");
+  assert.equal(row.includes('data-i18n="logs.th.cache"'), false, "the requests table shows the cache again");
+});
+
+test("a request row keeps the cache's share on the input cell and the output on its own", () => {
+  const row = slice("app.js", "function requestRow(", "function renderRequests(");
+  assert.ok(row.includes('class: "c-in"'), "the row's input cell is gone");
+  assert.ok(row.includes("cache-pill"), "the cache's share no longer rides in the input cell");
+  assert.ok(row.includes("c-out"), "the row's output cell is gone");
+  assert.equal(row.includes("logs.th.tokens"), false, "the row takes the tokens column again");
+  assert.equal(row.includes("logs.th.cache"), false, "the row takes the cache column again");
+  const detail = slice("app.js", "function requestDetail(", "function requestRow(");
+  assert.equal(detail.includes("logs.detail.output"), false, "the detail row repeats the output");
+});
+
+// The summary chip's word stays in every language; the two words the row no longer uses are gone
+// with it (ui-i18n-parity holds every language to the same keys).
+test("the summary's tokens label is in every language and the row's labels are gone", () => {
+  const i18n = loadI18n();
+  for (const lang of LANGUAGES) {
+    assert.ok(i18n[lang]?.["logs.th.tokens"], `${lang} lost the summary's tokens label`);
+    assert.equal("logs.th.cache" in i18n[lang]!, false, `${lang} still carries the row's cache label`);
+    assert.equal("logs.detail.output" in i18n[lang]!, false, `${lang} still carries the detail's output label`);
+  }
 });
