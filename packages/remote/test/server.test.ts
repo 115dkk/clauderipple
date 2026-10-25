@@ -934,12 +934,12 @@ test("static serves HTML, strips app TypeScript, exposes only the shared protoco
   assert.match(index.type, /^text\/html/);
   assert.match(index.body, /<!doctype html>/i);
   const source = fs.readFileSync(path.join(webDir, "app.ts"), "utf8");
-  assert.ok(source.includes("submit(text: string): void"), "Known TypeScript signature must exist in the source");
+  assert.ok(source.includes("submit(text: string): boolean"), "Known TypeScript signature must exist in the source");
   const app = await get(f.port, "/app.ts");
   assert.equal(app.status, 200);
   assert.match(app.type, /^text\/javascript/);
   assert.match(app.body, /submit\(text\s*\)\s*\{/);
-  assert.ok(!app.body.includes("submit(text: string): void"));
+  assert.ok(!app.body.includes("submit(text: string): boolean"));
   assert.ok(!app.body.includes(": string"));
   const protocol = await get(f.port, "/src/protocol.ts");
   assert.equal(protocol.status, 200);
@@ -1245,6 +1245,18 @@ test("a send orphaned by a host restart answers outcome_unknown over the socket 
   peer.send({ t: "send", session: id, clientMsgId: "fresh-1", text: "new turn" });
   await peer.take("ack", m => m.clientMsgId === "fresh-1");
   await waitFor(() => fake.users.length === 2);
+});
+
+// B16: a message the host will not take must name itself, or the phone cannot keep it for a retry.
+// `no_session` itself is only ever answered to `attach` (no message involved); a send to a session
+// that is gone comes back as `send`, which carries the clientMsgId.
+test("a send to a session that no longer exists names the message so the phone can keep it", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const peer = await f.auth();
+  peer.send({ t: "send", session: "gone-session", clientMsgId: "keep-me", text: "이 지시는 사라지면 안 됩니다" });
+  const error = await peer.take("error", m => m.clientMsgId === "keep-me");
+  assert.deepEqual(error.msg, { t: "error", code: "send", message: "no such session", clientMsgId: "keep-me", session: "gone-session" });
+  assert.equal(f.fake.users.length, 0, "nothing ran, so only the person's retry (same id) should send it");
 });
 
 test("answering the same approval twice resolves once; the second answer gets 이미 처리됨", { timeout: 4500 }, async t => {

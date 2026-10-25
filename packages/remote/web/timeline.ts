@@ -5,7 +5,7 @@ import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
 
 export type Item =
-  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending" }
+  | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
   | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
@@ -27,7 +27,9 @@ export interface SessionView {
   lastSeq: number;
 }
 
-export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending" }
+/** A message this phone is holding for the host. `error` is the host's reason for refusing it: the
+ * words stay, and it is not sent again on its own until the person retries or takes them back. */
+export interface Outgoing { clientMsgId: string; text: string; at: number; state: "pending" | "sending"; error?: string }
 
 /**
  * Reduce a session's loaded events (ascending seq; gaps allowed, duplicates ignored) and the
@@ -158,7 +160,7 @@ export function reduce(events: readonly SessionEvent[], outbox: readonly Outgoin
   }
   for (const o of outbox) {
     if (seenUser.has(o.clientMsgId)) continue;
-    put({ type: "user", key: `u${o.clientMsgId}`, ver: o.state, text: o.text, at: o.at, queued: o.state });
+    put({ type: "user", key: `u${o.clientMsgId}`, ver: `${o.state}${o.error ? `:${o.error}` : ""}`, text: o.text, at: o.at, queued: o.state, ...(o.error ? { error: o.error } : {}) });
   }
   if (state !== "running" && state !== "starting") finishStream();
   const open = items.filter((i): i is Extract<Item, { type: "permission" }> => i.type === "permission" && i.decision === null);

@@ -4,30 +4,62 @@
 import type { BlobChunk, BrowseResult, ClientMsg, Effort, FolderEntry, HostMsg, ProviderGroup, ReqOp, SessionEvent, SessionSummary, SubPage } from "../src/protocol.ts";
 import { Link } from "./conn.ts";
 import type { LinkStatus } from "./conn.ts";
-import { esc, icon, patchList, setHTML } from "./dom.ts";
+import { esc, icon } from "./dom.ts";
+import { patchList, setHTML } from "./html.ts";
 import { lang, pickLang, setLang, t } from "./i18n.ts";
 import { browserPushEnv, currentSubscription, enablePush, sameKey } from "./notify.ts";
+import { adopt, autoSendable, createSend, hostIdentity, loadOutbox, named, outboxStart, preserved, refuse, requeue, writeOutbox } from "./outbox.ts";
+import type { OutboxEntry, OutboxStart, PreservedItem } from "./outbox.ts";
 import { pushAvailability } from "./pushstate.ts";
 import { RelaySocket, browserNacl, relayClientUrl } from "./secure.ts";
 import type { RawSocket, RelayPairing } from "./secure.ts";
 import { PING_MS, defaultEffort } from "../src/protocol.ts";
 import { mergeEvents, reduce, timelineItems } from "./timeline.ts";
-import type { TimelineItem, Outgoing, SessionView } from "./timeline.ts";
+import type { TimelineItem, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
 import type { UI } from "./views.ts";
+import { watchFrames } from "./watch.ts";
 
-interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean; attached: boolean }
-interface OutboxEntry extends Outgoing { session: string | null; create?: { cwd: string; model: string; effort: Effort | null } }
+interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean }
 type Screen = { name: "pair" } | { name: "home" } | { name: "session"; id: string };
 
 const store = {
+  getItem(key: string): string | null {
+    try { return localStorage.getItem(key); } catch { return null; }
+  },
+  setItem(key: string, value: string): void {
+    try { localStorage.setItem(key, value); } catch { /* private mode: state lives for this visit only */ }
+  },
   get<T>(key: string, fallback: T): T {
-    try { const raw = localStorage.getItem(key); return raw === null ? fallback : (JSON.parse(raw) as T); } catch { return fallback; }
+    const raw = store.getItem(key);
+    if (raw === null) return fallback;
+    try { return JSON.parse(raw) as T; } catch { return fallback; }
   },
   set(key: string, value: unknown): void {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode: state lives for this visit only */ }
+    try { store.setItem(key, JSON.stringify(value)); } catch { /* not serializable: nothing to keep */ }
   },
 };
+
+/**
+ * localStorage as it is, for the outbox. Unlike `store` above it does not turn a refused read into
+ * "nothing stored": the outbox has to tell an empty queue from a value it could not read, or it
+ * would write over the person's words (B05/B16). Throw here; the outbox module reports it.
+ */
+const rawStorage = {
+  getItem: (key: string): string | null => localStorage.getItem(key),
+  setItem: (key: string, value: string): void => { localStorage.setItem(key, value); },
+  keys: (): string[] => Object.keys(localStorage),
+};
+
+/** What the phone says when the queue could not be read, cannot be stored, or cannot tell its computer. */
+function noticeText(notice: NonNullable<OutboxStart["notice"]>): string {
+  switch (notice) {
+    case "no-identity": return t("outbox.identityUnknown");
+    case "unavailable": return t("outbox.storageUnavailable");
+    case "partial":
+    case "unreadable": return t("outbox.unreadable");
+  }
+}
 
 /** Keep the pairing a link's fragment carries ("#pair=…"); false when it carries none. */
 function savePairing(fragment: string): boolean {
@@ -49,12 +81,25 @@ export class App {
   ui: UI;
   screen: Screen = { name: "home" };
   caches = new Map<string, Cache>();
-  outbox: OutboxEntry[] = store.get<OutboxEntry[]>("rr.outbox", []);
+  /** Unsent messages of the computer this phone is paired with: see outbox.ts (B05). Loaded by start(). */
+  outbox: OutboxEntry[] = [];
   recentModels: string[] = store.get<string[]>("rr.recentModels", []);
   link: Link | null = null;
   pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   /** create's clientMsgId → session id, once the host acknowledged it */
   created = new Map<string, string>();
+  /** Where this computer's unsent messages live; null before start() knows the pairing (or cannot tell). */
+  private outboxKey: string | null = null;
+  /** False while a stored queue that was not read back whole (or could not be written) must not be overwritten. */
+  private outboxWritable = false;
+  /** Whether this browser is keeping the queue: false after a refused write, so nothing is sent on its own. */
+  private outboxDurable = false;
+  /** What start() had to say about the stored queue, kept so a send can be refused the same way. */
+  private outboxNotice: OutboxStart["notice"] = null;
+  /** Said once per failure streak; cleared by a write that succeeds again. */
+  private outboxWarned = false;
+  /** The session the host was last told this phone is looking at: see watch.ts (B17). */
+  private watching: string | null = null;
   private renderedScreen = "";
   private composerMode = "";
   private lastOpenPerm = "";
@@ -112,7 +157,8 @@ export class App {
 
   // ---- boot --------------------------------------------------------------------------------
 
-  start(): void {
+  /** Resolves once the pairing is known and the first screen is up; awaiting only the token fingerprint. */
+  async start(): Promise<void> {
     if (savePairing(location.hash)) history.replaceState(null, "", location.pathname);
     const token = store.get<string | null>("rr.token", null);
     if (!token) { this.screen = { name: "pair" }; this.bind(); this.render(); return; }
@@ -121,15 +167,29 @@ export class App {
     const clientId = store.get<string>("rr.clientId", "") || uid();
     store.set("rr.clientId", clientId);
     // Served by the relay → through the relay, encrypted end to end; served by the host itself → straight to it.
+    // The same pairing names the computer whose unsent messages this phone keeps: switching computers
+    // keeps each one's queue, and two computers never share one (B05).
     const relay = store.get<RelayPairing | null>("rr.relay", null);
-    const viaRelay = relay !== null && relay.url === location.origin;
+    const identity = await hostIdentity({ relay, origin: location.origin, token });
+    const viaRelay = identity?.kind === "relay" ? relay : null;
+    const outcome = outboxStart(identity, rawStorage);
+    this.outboxKey = outcome.key;
+    this.outbox = outcome.entries;
+    this.outboxWritable = outcome.writable;
+    this.outboxDurable = outcome.writable;
+    this.outboxNotice = outcome.notice;
+    // A queue that was not read back whole is never written over, and a direct pairing this browser
+    // cannot fingerprint stores nothing and sends nothing: say which one happened instead of
+    // behaving as if the queue were simply empty.
+    if (outcome.notice !== null) this.toast(noticeText(outcome.notice));
+    this.refreshRecovery();
     const link = new Link({
-      url: viaRelay ? relayClientUrl(relay) : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
+      url: viaRelay ? relayClientUrl(viaRelay) : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
       token, clientId,
       // Only the transport chunks are asked for; the rest of this client's answers stay as they are.
       features: ["chunkedFrames"],
       makeSocket: viaRelay
-        ? (url) => new RelaySocket(new WebSocket(url) as unknown as RawSocket, relay, browserNacl())
+        ? (url) => new RelaySocket(new WebSocket(url) as unknown as RawSocket, viaRelay, browserNacl())
         : (url) => new WebSocket(url) as unknown as import("./conn.ts").SocketLike,
       now: () => Date.now(),
       setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -175,10 +235,11 @@ export class App {
   // ---- host messages -----------------------------------------------------------------------
 
   private onReady(): void {
-    for (const c of this.caches.values()) c.attached = false;
+    // The host drops every attachment with the socket it was made on, so this one knows nothing yet.
+    this.watching = null;
     this.sendPresence();
     this.attachCurrent();
-    this.flushOutbox();
+    this.flushOutbox(null);
     if (!this.ui.models.length) void this.loadModels();
     void this.resyncPush();
   }
@@ -257,7 +318,6 @@ export class App {
             this.renderedScreen = "";
           }
         }
-        this.cache(m.session).attached = false;
         this.dropOutbox(m.clientMsgId);
         this.attachCurrent();
         this.render();
@@ -269,12 +329,24 @@ export class App {
         if (p) { if (m.ok) p.resolve(m.data); else p.reject(new Error(m.error)); }
         break;
       }
-      case "error":
-        // outcome_unknown: the host restarted mid-send and cannot say whether the first attempt
-        // ran. Keep the typed text in the outbox (it flushes again on reconnect) and say so.
-        if (m.clientMsgId && m.code !== "outcome_unknown") this.dropOutbox(m.clientMsgId);
+      case "error": {
+        // Nothing the person wrote is thrown away here (B16). `outcome_unknown` may have run, so the
+        // entry stays as it is and the next connect asks again under the same id; `host_updating` is
+        // transient and goes back to pending for that reconnect; any other refusal is the host saying
+        // no to this message, kept with the host's own reason until the person retries it or takes
+        // the words back.
+        const before = this.outbox;
+        if (m.clientMsgId) {
+          this.outbox = refuse(this.outbox, m.clientMsgId, m.code, m.message);
+          if (this.outbox !== before) {
+            if (!this.saveOutbox()) this.warnNotSaved(false);
+            this.refreshRecovery();
+            if (this.screen.name === "session") this.renderSession();
+          }
+        }
         this.toast(t("error.generic", { text: m.message }));
         break;
+      }
       default:
         break;
     }
@@ -286,17 +358,28 @@ export class App {
 
   cache(id: string): Cache {
     let c = this.caches.get(id);
-    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false, attached: false }; this.caches.set(id, c); }
+    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false }; this.caches.set(id, c); }
     return c;
   }
 
+  /**
+   * Keep the host's idea of what this phone is looking at equal to the screen. An attached session
+   * is one the host streams to and counts as being read, so a phone that only ever attaches goes on
+   * silencing every session it walked through (B17): leaving one has to be said.
+   */
   private attachCurrent(): void {
-    if (this.screen.name !== "session" || this.screen.id.startsWith("local:") || this.ui.link.state !== "open") return;
-    const c = this.cache(this.screen.id);
-    if (c.attached) return;
+    const next = this.screen.name === "session" && !this.screen.id.startsWith("local:") ? this.screen.id : null;
+    const { detach, attach } = watchFrames(this.watching, next);
+    if (detach !== null) {
+      // A closed socket means the host already forgot it, so a refused send changes nothing here.
+      this.link?.send({ t: "detach", session: detach });
+      this.watching = null;
+    }
+    if (attach === null || this.ui.link.state !== "open") return;
+    const c = this.cache(attach);
     const last = c.events.length ? c.events[c.events.length - 1]!.seq : 0;
-    const msg: ClientMsg = c.epoch && last ? { t: "attach", session: this.screen.id, epoch: c.epoch, afterSeq: last } : { t: "attach", session: this.screen.id };
-    if (this.link?.send(msg)) c.attached = true;
+    const msg: ClientMsg = c.epoch && last ? { t: "attach", session: attach, epoch: c.epoch, afterSeq: last } : { t: "attach", session: attach };
+    if (this.link?.send(msg)) this.watching = attach;
   }
 
   req<T>(op: ReqOp): Promise<T> {
@@ -323,51 +406,221 @@ export class App {
 
   // ---- outbox: nothing a person typed is dropped; nothing shows as sent before the host says so ----
 
-  private saveOutbox(): void { store.set("rr.outbox", this.outbox); }
+  /**
+   * Write the queue. True means the browser is keeping it. A stored value that was not read back
+   * whole is never written over: it may hold words this app could not parse (B05/B16).
+   */
+  private saveOutbox(): boolean {
+    if (this.outboxKey === null || !this.outboxWritable) { this.outboxDurable = false; return false; }
+    const saved = writeOutbox(rawStorage, this.outboxKey, this.outbox);
+    this.outboxDurable = saved.ok;
+    if (saved.ok) this.outboxWarned = false;
+    return saved.ok;
+  }
+
+  /**
+   * Say that the queue is not being kept. Once per failure streak for background writes; always for
+   * something the person just did, or the tap would look like it did nothing.
+   */
+  private warnNotSaved(always: boolean): void {
+    if (!always && this.outboxWarned) return;
+    this.outboxWarned = true;
+    this.toast(t("outbox.saveFailed"));
+  }
 
   private dropOutbox(id: string): void {
     const before = this.outbox.length;
     this.outbox = this.outbox.filter((o) => o.clientMsgId !== id);
-    if (this.outbox.length !== before) this.saveOutbox();
+    if (this.outbox.length !== before) { if (!this.saveOutbox()) this.warnNotSaved(false); this.refreshRecovery(); }
   }
 
-  private flushOutbox(): void {
-    for (const o of this.outbox) {
+  /**
+   * Send queued messages. `null` is a pass nobody asked for (a reconnect): only the messages this
+   * browser is keeping, and only while it is keeping them. An array is a person's own action and
+   * sends exactly those ids — never whatever else happens to be waiting beside them.
+   *
+   * The intent reaches the disk before the frame reaches the socket. After that point a reload must
+   * read the message as "may have run" (`sending`), never as never-sent: an edited retry of a
+   * message that actually went out would otherwise start the same session twice. A message this
+   * phone could not keep is not sent at all, and its words stay where the person can still copy them.
+   */
+  private flushOutbox(ids: readonly string[] | null): void {
+    // A refused write is not a permanent queue lock: on reconnect first try to make the current
+    // queue durable again. Nothing is selected for automatic sending until that write succeeds.
+    if (ids === null && !this.outboxDurable && this.outboxWritable && this.outbox.length > 0) {
+      if (!this.saveOutbox()) this.warnNotSaved(false);
+    }
+    const sendable = ids === null ? autoSendable(this.outbox, this.outboxDurable) : named(this.outbox, ids);
+    if (sendable.length === 0) { this.render(); return; }
+    const was = sendable.map((entry) => entry.state);
+    for (const entry of sendable) entry.state = "sending";
+    if (!this.saveOutbox()) {
+      // Nothing left the phone; the words are still exactly as the person left them.
+      sendable.forEach((entry, i) => { entry.state = was[i] ?? "pending"; });
+      this.warnNotSaved(ids !== null);
+      this.render();
+      return;
+    }
+    let changed = false;
+    for (const o of sendable) {
       const session = o.session ?? null;
       const sent = o.create && !session
         ? this.link?.send({ t: "create", clientMsgId: o.clientMsgId, cwd: o.create.cwd, model: o.create.model, effort: o.create.effort, text: o.text })
         : session ? this.link?.send({ t: "send", session, clientMsgId: o.clientMsgId, text: o.text }) : false;
-      o.state = sent ? "sending" : "pending";
+      // Never left the phone: say so, and try to keep saying so. If even this write fails, the stored
+      // "sending" is the conservative side — the person retries under the same id, which is idempotent.
+      if (!sent) { o.state = "pending"; changed = true; }
     }
-    this.saveOutbox();
+    if (changed) this.saveOutbox();
     this.render();
   }
 
-  submit(text: string): void {
+  /**
+   * Queue what the composer holds. False means nothing was queued and the words must stay in the
+   * field. A message that was already sent, or whose outcome is unknown, is never replaced here:
+   * that is the person's decision, made on the message itself, not a side effect of pressing send.
+   */
+  submit(text: string): boolean {
+    const screen = this.screen;
     const body = text.trim();
-    if (!body || (this.screen.name === "session" && this.summary(this.screen.id)?.readOnly)) return;
-    const clientMsgId = uid();
-    if (this.screen.name === "home" || (this.screen.name === "session" && this.screen.id.startsWith("local:"))) {
+    if (!body || (screen.name === "session" && this.summary(screen.id)?.readOnly)) return false;
+    // A message that cannot be tied to one computer, or kept anywhere, is not sent at all: the words
+    // stay in the field, which is the one place they are certain to survive (B05/B16).
+    if (this.outboxKey === null) { this.toast(t("outbox.identityUnknown")); return false; }
+    if (this.outboxNotice === "unavailable") { this.toast(t("outbox.storageUnavailable")); return false; }
+    if (screen.name === "home" || (screen.name === "session" && screen.id.startsWith("local:"))) {
       const d = this.ui.draft;
-      if (!d.cwd) { this.openFolderSheet(); return; }
-      if (!d.model) { this.openModelSheet(null); return; }
-      const entry: OutboxEntry = { clientMsgId, text: body, at: Date.now(), state: "pending", session: null, create: { cwd: d.cwd, model: d.model, effort: d.effort } };
-      this.outbox.push(entry);
-      this.rememberModel(d.model);
-      this.flushOutbox();
-      this.go({ name: "session", id: `local:${clientMsgId}` });
-      return;
+      // A local screen names the create this phone is still waiting on. Its id is only reused for
+      // the same words: a retry keeps the id (the host would otherwise start a second session),
+      // while edited words are a new message — the entry they replace was refused or never sent, so
+      // retiring it here loses nothing (outbox.ts createSend).
+      const local = screen.name === "session" ? screen.id.slice(6) : null;
+      const held = local === null ? undefined : this.outbox.find((o) => o.clientMsgId === local);
+      const plan = createSend(held, body, uid);
+      // A create already on its way, or one whose outcome the host could not confirm, is not
+      // replaced from here: that is the person's decision, made on the message itself.
+      if (plan.kind === "held") { this.toast(t("outbox.waiting")); return false; }
+      let create = held?.create ?? null;
+      if (!create) {
+        if (!d.cwd) { this.openFolderSheet(); return false; }
+        if (!d.model) { this.openModelSheet(null); return false; }
+        create = { cwd: d.cwd, model: d.model, effort: d.effort };
+      }
+      const before = this.outbox;
+      const rest = before.filter((o) => o.clientMsgId !== held?.clientMsgId && o.clientMsgId !== plan.clientMsgId);
+      this.outbox = [...rest, { clientMsgId: plan.clientMsgId, text: body, at: Date.now(), state: "pending", session: null, create }];
+      // A message the browser will not keep is not sent and not left as a phantom in the queue: the
+      // words stay in the field, which is the copy that survives (B16).
+      if (!this.saveOutbox()) { this.outbox = before; this.warnNotSaved(true); return false; }
+      this.rememberModel(create.model);
+      this.flushOutbox([plan.clientMsgId]);
+      this.go({ name: "session", id: `local:${plan.clientMsgId}` });
+      return true;
     }
-    if (this.screen.name !== "session") return;
-    const session = this.screen.id;
-    this.outbox.push({ clientMsgId, text: body, at: Date.now(), state: "pending", session });
-    this.flushOutbox();
+    if (screen.name !== "session") return false;
+    const before = this.outbox;
+    const queued: OutboxEntry = { clientMsgId: uid(), text: body, at: Date.now(), state: "pending", session: screen.id };
+    this.outbox = [...before, queued];
+    if (!this.saveOutbox()) { this.outbox = before; this.warnNotSaved(true); return false; }
+    this.flushOutbox([queued.clientMsgId]);
     this.scrollToBottom();
+    return true;
   }
 
   private rememberModel(id: string): void {
     this.recentModels = [id, ...this.recentModels.filter((m) => m !== id)].slice(0, 5);
     store.set("rr.recentModels", this.recentModels);
+  }
+
+  // ---- messages kept from an earlier connection ------------------------------------------------
+  // Read-only unless the person chooses otherwise: nothing here is sent by the app, and a copy only
+  // joins this computer's queue after the confirmation (outbox.ts preserved/adopt).
+
+  /** What the sheet shows: other computers' buckets, this computer's held and recovered messages, raw text. */
+  private recoveryData(): { candidates: PreservedItem[]; recovered: OutboxEntry[]; held: OutboxEntry[]; raw: string[]; unavailable: boolean } {
+    const kept = preserved(rawStorage, this.outboxKey, this.outbox);
+    const own = this.outboxKey === null ? null : loadOutbox(rawStorage, this.outboxKey);
+    const ownRaw = own !== null && (own.status === "unreadable" || own.status === "partial") ? [own.raw] : [];
+    const unavailable = kept.status === "unavailable" || this.outboxNotice === "unavailable" || own?.status === "unavailable";
+    return {
+      candidates: kept.items,
+      recovered: this.outbox.filter((o) => o.delivery === "recovered"),
+      held: this.outbox.filter((o) => o.delivery === "held"),
+      raw: [...kept.raw, ...ownRaw],
+      unavailable,
+    };
+  }
+
+  /** Keep the home card and an open sheet in step with what is stored. */
+  private refreshRecovery(): void {
+    const data = this.recoveryData();
+    const messages = data.candidates.length + data.recovered.length + data.held.length;
+    this.ui.recovery = messages === 0 && data.raw.length === 0 && !data.unavailable ? null : { messages, raw: data.raw.length, unavailable: data.unavailable };
+    const sheet = this.ui.sheet;
+    if (sheet?.kind !== "recovery") return;
+    const present = new Set(data.candidates.map((item) => item.key));
+    this.ui.sheet = {
+      ...sheet, ...data,
+      picked: new Set([...sheet.picked].filter((id) => present.has(id))),
+      shown: sheet.shown !== null && sheet.shown < data.raw.length ? sheet.shown : null,
+    };
+    // The sheet is on screen with these messages: draw it again, or a retry it just handled would
+    // keep showing the row the person already acted on.
+    this.renderSheet();
+  }
+
+  private openRecovery(): void {
+    const data = this.recoveryData();
+    this.ui.sheet = { kind: "recovery", step: "list", picked: new Set(), shown: null, ...data };
+    this.renderSheet();
+  }
+
+  private async copyRecovered(id: string): Promise<void> {
+    const sheet = this.ui.sheet;
+    if (sheet?.kind !== "recovery") return;
+    const index = /^raw:(\d+)$/.exec(id);
+    // A preserved item is addressed by its opaque handle (two buckets can hold the same id with
+    // different words); messages already in this computer's queue are addressed by their id.
+    const text = index
+      ? sheet.raw[Number(index[1])]
+      : [...sheet.held, ...sheet.recovered].find((entry) => entry.clientMsgId === id)?.text
+        ?? sheet.candidates.find((item) => item.key === id)?.entry.text;
+    if (text === undefined) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      // Nothing to promise here: say the browser's own name for the refusal rather than a silent tap.
+      this.toast(t("error.generic", { text: e instanceof Error && e.name ? e.name : "clipboard" }));
+    }
+  }
+
+  /** Copy the chosen preserved messages into this computer's queue, once the person confirms. */
+  private importRecovered(): void {
+    const sheet = this.ui.sheet;
+    if (sheet?.kind !== "recovery") return;
+    if (sheet.step === "list") {
+      if (!sheet.picked.size) return;
+      this.ui.sheet = { ...sheet, step: "confirm" };
+      this.renderSheet();
+      return;
+    }
+    if (this.outboxKey === null) { this.toast(t("outbox.identityUnknown")); return; }
+    const before = this.outbox;
+    const picked = sheet.candidates.filter((item) => sheet.picked.has(item.key)).map((item) => item.entry);
+    const result = adopt(before, picked);
+    if (result.conflicts.length > 0) {
+      // The same id is already waiting here with other words: nothing is imported over it, so both
+      // texts stay where they are. (A dedicated "conflict" sentence would say more; see the report.)
+      this.outbox = before;
+      this.toast(t("recovery.importFailed"));
+    } else {
+      this.outbox = result.entries;
+      // The copy is only worth making if this browser keeps it; the originals are untouched either way.
+      if (!this.saveOutbox()) { this.outbox = before; this.warnNotSaved(true); }
+    }
+    this.ui.sheet = { ...sheet, step: "list", picked: new Set() };
+    this.refreshRecovery();
+    this.renderSheet();
   }
 
   // ---- rendering -----------------------------------------------------------------------------
@@ -582,7 +835,7 @@ export class App {
   async act(act: string, el: HTMLElement): Promise<void> {
     const id = el.dataset.id ?? "";
     const session = this.screen.name === "session" ? this.screen.id : "";
-    if (session && this.summary(session)?.readOnly && ["send", "stop", "allow", "deny", "always", "pick-model-session"].includes(act)) return;
+    if (session && this.summary(session)?.readOnly && ["send", "retry-send", "stop", "allow", "deny", "always", "pick-model-session"].includes(act)) return;
     switch (act) {
       case "image": {
         const image = el.querySelector('img');
@@ -598,6 +851,73 @@ export class App {
         break;
       }
       case "retry": this.link?.nudge(); break;
+      case "retry-send": {
+        // Through the existing queue path: back to pending, then the same flush a reconnect uses.
+        // This is the person's own retry, so it goes out even from a queue the browser is not keeping.
+        const before = this.outbox;
+        this.outbox = requeue(this.outbox, id);
+        if (this.outbox === before) break;
+        // An explicit retry sends that one message; if the queue cannot be kept, it is not sent at all.
+        if (!this.saveOutbox()) { this.outbox = before; this.warnNotSaved(true); break; }
+        this.flushOutbox([id]);
+        this.refreshRecovery();
+        break;
+      }
+      case "edit-send": {
+        // The words go back into the composer — the one place a message is changed — so there is a
+        // single copy of them. A held message is not changed here: its outcome (or an already-made
+        // session) is unknown, and the person is told why instead of being silently ignored.
+        const entry = this.outbox.find((o) => o.clientMsgId === id);
+        if (!entry || entry.error === undefined) break;
+        if (entry.state === "sending" || (entry.delivery ?? "queued") !== "queued") { this.toast(t("outbox.waiting")); break; }
+        const ta = document.getElementById("input") as HTMLTextAreaElement | null;
+        if (!ta || ta.value.trim()) break;   // a draft already being written is never replaced
+        // The message moves into the composer only once its words are safely in the stored draft: a
+        // draft write that fails leaves the message exactly where it is, still on disk and on screen.
+        try {
+          rawStorage.setItem(`rr.typed.${this.renderedScreen}`, JSON.stringify(entry.text));
+        } catch {
+          this.warnNotSaved(true);
+          break;
+        }
+        ta.value = entry.text;
+        this.fitInput();
+        // A refused send is handed back whole: its words now live in the composer. A create keeps its
+        // entry, because that entry is what names this screen; sending from here reuses its id.
+        if (entry.session !== null) this.dropOutbox(entry.clientMsgId);
+        ta.focus();
+        break;
+      }
+      case "recovery-open": this.openRecovery(); break;
+      case "recovery-pick": {
+        const sheet = this.ui.sheet;
+        if (sheet?.kind !== "recovery") break;
+        if (sheet.picked.has(id)) sheet.picked.delete(id); else sheet.picked.add(id);
+        this.renderSheet();
+        break;
+      }
+      case "recovery-raw": {
+        const sheet = this.ui.sheet;
+        if (sheet?.kind !== "recovery") break;
+        const index = Number(id);
+        this.ui.sheet = { ...sheet, shown: sheet.shown === index ? null : Number.isFinite(index) ? index : null };
+        this.renderSheet();
+        break;
+      }
+      case "recovery-copy": await this.copyRecovered(id); break;
+      case "recovery-import": this.importRecovered(); break;
+      case "recovery-send": {
+        // The person sends a message they imported: same id, so the host cannot run it twice. Only a
+        // create can be sent from here — a plain message belonged to another computer's session, and
+        // has no session on this one to go to.
+        if (!this.outbox.some((o) => o.clientMsgId === id && o.delivery === "recovered" && o.create)) break;
+        const before = this.outbox;
+        this.outbox = requeue(this.outbox, id);
+        if (!this.saveOutbox()) { this.outbox = before; this.warnNotSaved(true); break; }
+        this.flushOutbox([id]);
+        this.refreshRecovery();
+        break;
+      }
       case "pair-link": {
         // A Home Screen app keeps its own storage, apart from Safari's: the pairing a scanned QR
         // left in Safari never reaches it, so the link is pasted here instead.
@@ -612,11 +932,12 @@ export class App {
       case "send": {
         const ta = document.getElementById("input") as HTMLTextAreaElement | null;
         if (!ta) return;
-        const text = ta.value;
+        // The field is cleared only once the message is actually queued: a send that is refused a
+        // started session, or one that waits for the person, leaves their words where they are.
+        if (!this.submit(ta.value)) return;
         ta.value = "";
         store.set(`rr.typed.${this.renderedScreen}`, "");
         this.fitInput();
-        this.submit(text);
         break;
       }
       case "stop": if (session && !session.startsWith("local:")) this.link?.send({ t: "interrupt", session }); break;
@@ -742,7 +1063,8 @@ export function boot(): void {
   const params = new URLSearchParams(location.search);
   const demo = params.get("demo");
   if (demo) { void import("./demo.ts").then((d) => d.runDemo(demo, params)); return; }
-  new App({ state: "connecting", attempt: 0, nextAt: null, lastRx: null, downSince: null }).start();
+  // start() is async only for the pairing fingerprint; a failure there is left to the console, not swallowed.
+  void new App({ state: "connecting", attempt: 0, nextAt: null, lastRx: null, downSince: null }).start();
 }
 
 boot();
