@@ -90,6 +90,8 @@ const stats = atom({ plugin: 'ripple', key: 'stats' } as const, emptyStats())
 const settingsDraft = atom({ plugin: 'ripple', key: 'settingsDraft' } as const, null)
 const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
+/** The compact card's tidy-up switch: on unless the person turned it off, and their last choice is kept. */
+const compactTidy = atom({ plugin: 'ripple', key: 'compactTidy' } as const, true)
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 /** Compactions of the main conversation that finished, for the Compact icon's count; /clear zeroes it. */
@@ -1078,9 +1080,10 @@ async function driveHandoff($: EngineInterface): Promise<void> {
     await report($, 'handoff', error)
   }
 }
-async function runCompact($: EngineInterface, note = ''): Promise<void> {
+/** The tidy prompt the last Compact press sent and the main-loop turn it became; null once it settles. */
+let tidy: { text: string; note: string; turnId: string | null } | null = null
+async function compactNow($: EngineInterface, note: string): Promise<void> {
   const language = await read($, lang)
-  await update($, panel, () => null)
   await update($, resultCard, () => ({ stage: 'compacting' }))
   try {
     await $.command.run({ command: 'compact', args: note })
@@ -1089,6 +1092,38 @@ async function runCompact($: EngineInterface, note = ''): Promise<void> {
     await update($, resultCard, () => ({ stage: 'failed' as const, detail: t(language, 'alerts.compactFailed') }))
     await $.ui.toast(t(language, 'toasts.compactFailed'))
     await report($, 'compact command', error)
+  }
+}
+/** The tidy-up did not finish: nothing is compacted, and the card says the chat was left as it was. */
+async function tidyStopped($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  await update($, resultCard, () => ({ stage: 'failed' as const, detail: t(language, 'alerts.tidyFailed') }))
+  await $.ui.toast(t(language, 'toasts.tidyStopped'))
+}
+/**
+ * A Compact press, and the tidy-up it asks for first (2026-10-25): a prompt of this plugin's own, a
+ * user turn of its own, so the chat says what it has done, what is left and what it decided, and
+ * updates its handoff or memory files while those are still in the transcript. The prompt and the
+ * answer stay in the transcript, and the summary is built from them. The turn it becomes is bound at
+ * `turn.start` and settled at `turn.complete`: only its own end compacts, and one that is stopped
+ * compacts nothing. With the switch off, the compaction goes at once.
+ */
+async function runCompact($: EngineInterface, note = ''): Promise<void> {
+  await update($, panel, () => null)
+  // A press while the tidy-up or the compaction runs sends nothing a second time; the card it shows says so.
+  if (tidy) return
+  const language = await read($, lang)
+  if (!await read($, compactTidy)) { await compactNow($, note); return }
+  await update($, resultCard, () => ({ stage: 'tidying' }))
+  const text = t(language, 'alerts.tidyPrompt')
+  tidy = { text, note, turnId: null }
+  try {
+    const sent = await $.prompt.submit({ text })
+    if ('drop' in sent) throw new Error(sent.drop)
+  } catch (error) {
+    tidy = null
+    await tidyStopped($)
+    await report($, 'compact tidy', error)
   }
 }
 async function openCompact($: EngineInterface, surface: Frame['surface']): Promise<void> {
@@ -1415,7 +1450,7 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c), await read($, swampHidden))) })
-  if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
+  if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote), tidy: await read($, compactTidy) }
   if (which === 'clear') return { kind: 'clear' }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
@@ -1477,7 +1512,7 @@ function setupActions($: EngineInterface): SetupActions {
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
   return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
-    noteInput: text => update($, compactNote, () => text), copy: () => copyHandoff($) }
+    noteInput: text => update($, compactNote, () => text), toggleTidy: () => update($, compactTidy, value => !value), copy: () => copyHandoff($) }
 }
 function agentsActions($: EngineInterface): AgentsActions {
   return {
@@ -1775,8 +1810,21 @@ export const register: Register = on => {
     } catch (error) { await report($, 'turn.step record', error) }
     return answer
   })
+  on('turn.start', ($, e, next) => {
+    // The Compact press's tidy prompt becomes a turn of its own; its id is how its end is told from
+    // every other turn's (a prompt queued before it, or one the person types next).
+    if (tidy && tidy.turnId === null && !e.agentId && e.text.includes(tidy.text)) tidy.turnId = e.turnId
+    return next(e)
+  })
   on('turn.complete', async ($, e, next) => {
     try {
+      if (!e.agentId && tidy?.turnId === e.turnId) {
+        const note = tidy.note
+        tidy = null
+        // The compaction runs from a tick of its own, not inside this turn's hooks.
+        if (e.reason === 'answer') void $.clock.after(1, async () => { await compactNow($, note) })
+        else await tidyStopped($)
+      }
       if (e.agentId) {
         const now = await $.clock.now()
         const before = (await read($, agents)).find(a => a.id === e.agentId)

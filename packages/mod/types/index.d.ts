@@ -394,7 +394,7 @@ export type Stats = {
 /** `writing`: the fork is (or will be) writing the note; `opened`: a new session was opened with it; `copied`: no session could be opened, so it was copied. */
 export type HandoffStage = 'writing' | 'opened' | 'copied' | 'failed'
 export type SetupStep = 1 | 2 | 3 | 4
-export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'tidying' | 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 export type JevState = {
   source: 'env' | 'file' | 'pasted' | 'zen' | null
   test: { state: 'idle' | 'testing' | 'ok' | 'fail'; message?: string }
@@ -460,6 +460,8 @@ declare module 'claude-code' {
       settingsDraft: Settings | null
       setupStep: SetupStep
       compactNote: string
+      /** The compact card's "tidy up first" switch, on unless the person turned it off (register.tsx). */
+      compactTidy: boolean
       effortMenuOpen: boolean
       agentsOpen: boolean
       /** Finished compactions of the main conversation (the Compact icon's count). */

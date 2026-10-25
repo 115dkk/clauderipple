@@ -124,7 +124,7 @@ export type BandActions = {
 
 // ---- Alerts and cards ------------------------------------------------------------------------
 
-export type ResultStage = 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
+export type ResultStage = 'tidying' | 'handingOff' | 'handoffDone' | 'compacting' | 'compacted' | 'failed'
 
 export type AlertView =
   /** The cache expired on a big chat: the next prompt re-reads it all. */
@@ -138,8 +138,8 @@ export type AlertView =
   /** The judge failed and Auto fell back. */
   | { kind: 'judgeDown'; judge: JudgeKind; reason: string; network?: boolean }
   | { kind: 'result'; stage: ResultStage; detail?: string }
-  /** Compact with an optional note of what to keep. */
-  | { kind: 'compactNote'; draft: string }
+  /** Compact with an optional note of what to keep, and whether the chat tidies up first. */
+  | { kind: 'compactNote'; draft: string; tidy: boolean }
   /** The band's Clear asks before the conversation is started over. */
   | { kind: 'clear' }
 
@@ -152,6 +152,8 @@ export type AlertActions = {
   openSettings: () => void
   /** Each change of the compact note's field. */
   noteInput: (text: string) => void
+  /** The compact card's "tidy up first" switch; the last choice is kept. */
+  toggleTidy: () => void
   /** Copies a written handoff again (its done card). */
   copy: () => void
 }

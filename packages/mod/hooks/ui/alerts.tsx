@@ -102,15 +102,19 @@ export function cardOf(frame: Frame, alert: AlertView, a: AlertActions): Card {
       }
     case 'result':
       return resultCard(frame, alert, a)
-    case 'compactNote':
+    case 'compactNote': {
+      // The tidy-up is on unless the person turned it off; its switch sits quiet beside Compact.
+      const tidy: Choice = { key: 'tidy', label: t(L, 'alerts.tidyFirst', { state: t(L, alert.tidy ? 'band.on' : 'band.off') }), hotkey: 't', onPress: a.toggleTidy }
       return {
         key: 'note',
         face: 'asking',
         title: t(L, 'alerts.compactTitle'),
         body: t(L, 'alerts.compactBody'),
+        quiet: [tidy],
         main: { ...compact, onPress: () => a.compact(alert.draft) },
         close: cancel,
       }
+    }
     case 'clear':
       return {
         key: 'clear',
@@ -131,6 +135,9 @@ function resultCard(frame: Frame, alert: Extract<AlertView, { kind: 'result' }>,
       return { key: 'result', face: 'going', title: t(L, 'alerts.handingOff'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.quickProgress') }
     case 'handoffDone':
       return { key: 'result', face: 'pleased', title: t(L, 'alerts.handoffDone'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.summaryReady'), quiet: [{ key: 'copy', label: t(L, 'alerts.copyAgain'), hotkey: 'y', onPress: a.copy }], close }
+    case 'tidying':
+      // Put away while it runs: the turn is in the chat, and the compaction follows it either way.
+      return { key: 'result', face: 'working', title: t(L, 'alerts.tidying'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.tidyingBody'), close }
     case 'compacting':
       return { key: 'result', face: 'squeezing', title: t(L, 'alerts.compacting'), body: (alert.detail === undefined ? undefined : displayText(alert.detail)) ?? t(L, 'alerts.compactingBody') }
     case 'compacted':
@@ -186,7 +193,7 @@ function seaOf(card: Card, alert: AlertView): Omit<Sea, 'at'> {
       return { tone: 'violet', weather: 'sparkles', ripples: 'calm' }
     default: {
       const stage = alert.kind === 'result' ? alert.stage : 'failed'
-      if (stage === 'handingOff' || stage === 'compacting') return { tone: 'violet', ripples: 'busy', current: true }
+      if (stage === 'handingOff' || stage === 'compacting' || stage === 'tidying') return { tone: 'violet', ripples: 'busy', current: true }
       if (stage === 'failed') return { tone: 'red', weather: 'static' }
       return { tone: 'green', tick: true, weather: 'sparkles' }
     }
@@ -300,7 +307,7 @@ export function renderAlert(el: Els, frame: Frame, alert: AlertView, a: AlertAct
   const buttons = [card.main ? press(card.main, true) : '', ...(card.quiet ?? []).map(c => press(c)), rich ? '' : close]
   // The terminal has no face: a text mark says it instead (work going on, done, failed or broken,
   // a warning, a question).
-  const mark = card.face === 'squeezing' || card.face === 'going' ? '…' : tone === 'ok' ? '✓' : tone === 'bad' ? '✕' : tone === 'warn' ? '▲' : '◉'
+  const mark = card.face === 'squeezing' || card.face === 'going' || card.face === 'working' ? '…' : tone === 'ok' ? '✓' : tone === 'bad' ? '✕' : tone === 'warn' ? '▲' : '◉'
   return speak(el, frame, {
     key: 'alert-' + card.key,
     face: card.face,
