@@ -22,7 +22,7 @@ import { installTrayAgent, removeTrayAgent, trayLoginItemDecision, trayPlistPath
 import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
-import { applyAppProxy, caTrusted, CA_NAME, currentAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { applyAppProxy, caTrusted, CA_NAME, currentAppProxy, migrateLegacyAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
 import { removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
 import { withCommandHelp } from "./help-gate.ts";
 import { runtime } from "./runtime.ts";
@@ -323,6 +323,12 @@ async function uninstall(): Promise<void> {
   // this installation's to remove only when this home's own definition was the one registered
   // when the uninstall started (B03).
   const serviceWasOurs = serviceOwnership(home).state === "ours";
+  const desktop = currentAppProxy();
+  // Capture ownership while the service and its verified process still exist. The durable home
+  // marker remains usable by removeClientIntegrations after the service has been unregistered.
+  if (desktop.ours && desktop.installationHome === undefined && desktop.egressProxyUrl === proxyUrlFor(cfg.listen.port)) {
+    if (!migrateLegacyAppProxy(proxyUrlFor(cfg.listen.port), home)) throw new Error("Claude Desktop 프록시의 설치 소유권을 확인하지 못해 제거를 중단했습니다. 서비스를 복구한 뒤 다시 시도해 주세요.");
+  }
   // The phone host is its own account-wide service and is not inside the router's definition: stop
   // and remove it first, so nothing keeps running against files this uninstall removes. Its own
   // definition decides ownership, so another installation's host is reported, not touched (D1).

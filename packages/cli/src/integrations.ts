@@ -27,7 +27,8 @@ import { codexRemove } from "./codex.ts";
 import { proxyUrlFor } from "./doctor.ts";
 import { readOwners } from "./owners.ts";
 import { sameHome } from "./ownership.ts";
-import { type CaRemoval, currentAppProxy, removeAppProxy, untrustCa } from "./picker.ts";
+import type { DesktopServiceDeps } from "./desktop-service.ts";
+import { type CaRemoval, currentAppProxy, migrateLegacyAppProxy, removeAppProxy, untrustCa } from "./picker.ts";
 import { setAgentTitleHook, setStatusMod, settingsPath } from "./settings.ts";
 import { runtime } from "./runtime.ts";
 
@@ -111,6 +112,7 @@ export function removeClientIntegrations(
     agentDir?: string;
     port?: number;
     defaultHome?: string;
+    desktopService?: DesktopServiceDeps;
     /**
      * This installation's ingress port, passed only when its service definition was this home's
      * when the uninstall started. An unmarked legacy Codex block (an older version recorded no
@@ -165,8 +167,8 @@ export function removeClientIntegrations(
           notes.push("left the Claude Desktop proxy: another installation owns it");
           return "preserved-other";
         }
-      } else {
-        // A shared port is not evidence of which installation wrote an unmarked entry.
+      } else if (ourProxy === undefined || !migrateLegacyAppProxy(ourProxy, home, opts.desktopService)) {
+        // A shared port alone is not evidence; migration also verifies the service and live PID.
         notes.push("left the Claude Desktop proxy: installation ownership is unknown");
         return "preserved-unknown";
       }

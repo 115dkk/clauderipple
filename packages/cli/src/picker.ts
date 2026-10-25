@@ -19,6 +19,7 @@ import { windowsPowerShellEnv } from "./windows-powershell.ts";
 import { homeDir } from "../../router/src/config.ts";
 import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { normalizeHome, sameHome } from "./ownership.ts";
+import { verifiedDesktopService, type DesktopServiceDeps } from "./desktop-service.ts";
 
 export const CA_NAME = "ClaudeRipple local CA";
 
@@ -333,19 +334,34 @@ export function appProxyOwner(current: ReturnType<typeof currentAppProxy>, home:
   return "unknown";
 }
 
-/** Writes our Config Library entry and applies it. Remembers what was applied before so `off` can restore it. */
-export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>): { id: string; replaced: string | null } {
-  return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => applyAppProxyLocked(proxyUrl, installationHome, expected));
+/** Migrate a legacy entry only while its service definition and running instance prove this home. */
+export function migrateLegacyAppProxy(proxyUrl: string, installationHome: string, deps: DesktopServiceDeps = {}): boolean {
+  return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => migrateLegacyAppProxyLocked(proxyUrl, installationHome, deps));
 }
 
-function applyAppProxyLocked(proxyUrl: string, installationHome: string, expected?: ReturnType<typeof currentAppProxy>): { id: string; replaced: string | null } {
+function migrateLegacyAppProxyLocked(proxyUrl: string, installationHome: string, deps: DesktopServiceDeps): boolean {
+  const cur = currentAppProxy();
+  if (!cur.ours || cur.installationHome !== undefined || cur.egressProxyUrl !== proxyUrl) return false;
+  if (!verifiedDesktopService(installationHome, proxyUrl, deps)) return false;
+  const meta = readMeta();
+  writeJsonAtomic(path.join(configLibraryDir(), "_meta.json"), { ...meta, clauderipple: { ...meta.clauderipple, installationHome: normalizeHome(installationHome) } });
+  return true;
+}
+
+/** Writes our Config Library entry and applies it. Remembers what was applied before so `off` can restore it. */
+export function applyAppProxy(proxyUrl: string, installationHome = homeDir(), expected?: ReturnType<typeof currentAppProxy>, deps: DesktopServiceDeps = {}): { id: string; replaced: string | null } {
+  return withFileLock(path.join(configLibraryDir(), "_meta.json"), () => applyAppProxyLocked(proxyUrl, installationHome, expected, deps));
+}
+
+function applyAppProxyLocked(proxyUrl: string, installationHome: string, expected: ReturnType<typeof currentAppProxy> | undefined, deps: DesktopServiceDeps): { id: string; replaced: string | null } {
   const dir = configLibraryDir();
   fs.mkdirSync(dir, { recursive: true });
   const meta = readMeta();
   const cur = currentAppProxy();
   if (expected && JSON.stringify(cur) !== JSON.stringify(expected)) throw new Error("Desktop proxy changed before restoration; left untouched");
   if (cur.ours && cur.appliedId) {
-    const owner = appProxyOwner(cur, installationHome, proxyUrl);
+    let owner = appProxyOwner(cur, installationHome, proxyUrl);
+    if (owner === "unknown" && migrateLegacyAppProxyLocked(proxyUrl, installationHome, deps)) owner = "ours";
     if (owner === "other") throw new Error("Desktop proxy ownership is unknown or belongs to another installation; left untouched");
     if (owner === "unknown") throw new Error("Desktop proxy ownership is unknown; left untouched");
     writeJsonAtomic(path.join(dir, `${cur.appliedId}.json`), { egressProxyUrl: proxyUrl });

@@ -16,7 +16,8 @@ import { certPaths } from "./certs.ts";
 import { classifyMode, cliProxyState, desktopProxyState, fetchRouterStatus, proxyUrlFor, repair, type Mode, type RecoveryDeps } from "./doctor.ts";
 import { writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { claimedElsewhere, claimsOf, readOwners } from "./owners.ts";
-import { applyAppProxy, appProxyOwner, currentAppProxy, removeAppProxy } from "./picker.ts";
+import type { DesktopServiceDeps } from "./desktop-service.ts";
+import { applyAppProxy, appProxyOwner, currentAppProxy, migrateLegacyAppProxy, removeAppProxy } from "./picker.ts";
 import { MODEL_SLOT_ENV, editSettingsEnv, isNativeClaudeModel, settingsEnv, settingsPath } from "./settings.ts";
 
 export type DirectResult = { ok: boolean; mode: Mode; restartClaude: true; detail: string };
@@ -62,9 +63,11 @@ function currentMode(home: string): Mode {
   return classifyMode(cli.proxy, desktop.proxy, cfg.picker?.enabled === true);
 }
 
-export function directOn(home: string): DirectResult {
+export function directOn(home: string, desktopService: DesktopServiceDeps = {}): DirectResult {
   const cfg = config(home);
   const proxyUrl = proxyUrlFor(cfg.listen.port);
+  const legacy = currentAppProxy();
+  if (legacy.ours && legacy.installationHome === undefined && legacy.egressProxyUrl === proxyUrl) migrateLegacyAppProxy(proxyUrl, home, desktopService);
   const caPath = certPaths(home).caPem;
   const removedCli: Record<string, string> = {};
   const notes: string[] = [];
@@ -78,6 +81,15 @@ export function directOn(home: string): DirectResult {
     const mine = claimsOf(record.store, home);
     const proxy = cliProxyState(env, proxyUrl, caPath);
     // Validate the whole transition before changing either client or the restoration snapshot.
+    const app = currentAppProxy();
+    if (app.egressProxyUrl && (appProxyOwner(app, home, proxyUrl) !== "ours" || app.egressProxyUrl !== proxyUrl)) {
+      notes.push("Claude Desktop 프록시의 설치 소유권을 확인하지 못해 직접 연결로 전환하지 않았습니다. 기존 프록시 설정을 확인해 주세요.");
+      blocked = true;
+    }
+    if (env.HTTPS_PROXY && !((proxy.proxy === "ripple" || proxy.stale) && env.NODE_EXTRA_CA_CERTS === caPath)) {
+      notes.push("Claude Code 프록시의 설치 소유권을 확인하지 못해 직접 연결로 전환하지 않았습니다. 기존 프록시 설정을 확인해 주세요.");
+      blocked = true;
+    }
     for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
       const value = env[name];
       if (value === undefined || isNativeClaudeModel(value)) continue;
@@ -137,7 +149,9 @@ export function directOn(home: string): DirectResult {
   const detail = changed
     ? `Claude now connects directly. Removed: ${removed.join(", ")}. Saved in ${directStatePath(home)}.${edit.backup ? ` settings.json backup: ${edit.backup}.` : ""}`
     : "Claude was already on its default connection; nothing of ClaudeRipple's was in its settings.";
-  return { ok: true, mode: currentMode(home), restartClaude: true, detail: [detail, ...notes].join(" ") };
+  const mode = currentMode(home);
+  const complete = mode === "direct" && !settingsEnv().HTTPS_PROXY && !currentAppProxy().egressProxyUrl;
+  return { ok: complete, mode, restartClaude: true, detail: complete ? [detail, ...notes].join(" ") : "일부 프록시 설정이 남아 직접 연결로 전환하지 못했습니다. 저장된 복구 정보와 클라이언트 설정을 확인해 주세요." };
 }
 
 export async function directOff(deps: RecoveryDeps, opts: { force?: boolean } = {}): Promise<DirectResult> {
