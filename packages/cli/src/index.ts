@@ -473,8 +473,9 @@ async function update(): Promise<void> {
   console.log(`Updating ClaudeRipple ${VERSION} → ${latest ?? spec} (${kind.kind === "script" ? "install script" : "npm"}, ${kind.prefix})…`);
   const result = runUpdate(kind, installedRuntime, spec);
   if (result.ok && hadTray) {
-    // The new files decide where Electron lives; ask them, not this process's copy.
-    execFileSync(installedRuntime.node, [installedRuntime.cli, "tray", "--install"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
+    // The new files decide where Electron lives; ask them, not this process's copy. --refresh also
+    // replaces a runtime the previous version fetched, which an install alone would keep (B15).
+    execFileSync(installedRuntime.node, [installedRuntime.cli, "tray", "--install", "--refresh"], { env: { ...process.env, ...installedRuntime.env }, stdio: "inherit" });
   }
   console.log(result.message);
   if (!result.ok) process.exitCode = 1;
@@ -866,8 +867,9 @@ async function dispatchCommand(): Promise<void> {
         break;
       }
       // --ensure is what the app launcher runs: fetch Electron once if it is missing, then start.
+      // --refresh (after an update) also replaces a runtime an older version fetched.
       const ensured = args.includes("--ensure") && !installedRuntime.packaged ? installTrayRuntime() : null;
-      const result = args.includes("--install") ? installTrayRuntime() : ensured && !ensured.ok ? ensured : await startTray({ atLogin: flag("at-login") });
+      const result = args.includes("--install") ? installTrayRuntime({ refresh: flag("refresh") }) : ensured && !ensured.ok ? ensured : await startTray({ atLogin: flag("at-login") });
       console.log(result.message);
       if (!result.ok) process.exit(1);
       break;

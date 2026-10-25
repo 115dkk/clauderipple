@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { earlyExit, npmEnv, trayEnv } from "../src/tray.ts";
+import { earlyExit, npmEnv, swapTrayRuntime, trayEnv, trayRuntimeMatches, trayRuntimeRange } from "../src/tray.ts";
 
 // Issue #50: a tray that died at launch still reported "✓ tray started".
 test("a tray process that exits at once is reported with its output; one that stays up is started", async () => {
@@ -58,4 +58,53 @@ test("npm for the tray finds the running Node first, whatever the variable is ca
   const names = Object.keys(both).filter((name) => name.toUpperCase() === "PATH");
   assert.equal(names.length, 1);
   assert.equal(both[names[0]!]?.split(path.delimiter)[0], nodeDir);
+});
+
+// B15: the fetched Electron lives in the home folder, so installing a newer ClaudeRipple left the
+// old runtime in place and the tray kept running it. A refresh compares the recorded range and
+// swaps in a fully installed copy, keeping the working one when the move cannot be made.
+test("a fetched runtime is refreshed only when it is not the one this version asks for", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-tray-runtime-"));
+  try {
+    assert.equal(trayRuntimeRange(dir), null);
+    assert.equal(trayRuntimeMatches("^38.1.0", dir), false);
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ dependencies: { electron: "^38.1.0" } }));
+    assert.equal(trayRuntimeRange(dir), "^38.1.0");
+    assert.equal(trayRuntimeMatches("^38.1.0", dir), true);
+    assert.equal(trayRuntimeMatches("^39.0.0", dir), false, "a newer version's range refreshes the old copy");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a staged runtime replaces the working one, and a locked one is left whole", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-tray-swap-"));
+  try {
+    const target = path.join(root, "tray-runtime");
+    // No working copy yet: the staged one simply moves in.
+    let staging = path.join(root, "tray-runtime.new-1");
+    fs.mkdirSync(staging);
+    fs.writeFileSync(path.join(staging, "package.json"), "{}");
+    assert.deepEqual(swapTrayRuntime(target, staging), { ok: true });
+    assert.equal(fs.existsSync(path.join(target, "package.json")), true);
+    assert.equal(fs.existsSync(staging), false);
+
+    // A working copy is replaced, and the backup goes once the move worked.
+    staging = path.join(root, "tray-runtime.new-2");
+    fs.mkdirSync(staging);
+    fs.writeFileSync(path.join(staging, "package.json"), JSON.stringify({ dependencies: { electron: "^39.0.0" } }));
+    assert.deepEqual(swapTrayRuntime(target, staging), { ok: true });
+    assert.equal(fs.readFileSync(path.join(target, "package.json"), "utf8"), JSON.stringify({ dependencies: { electron: "^39.0.0" } }));
+    assert.deepEqual(fs.readdirSync(root).sort(), ["tray-runtime"]);
+
+    // A backup path that cannot be used (a running tray's files held open) leaves both copies as
+    // they were, and says so rather than reporting a half-done replacement.
+    const blocked = path.join(root, "tray-runtime.new-3");
+    fs.mkdirSync(blocked);
+    fs.writeFileSync(path.join(blocked, "package.json"), "{}");
+    fs.writeFileSync(path.join(root, "taken"), "x");
+    const failed = swapTrayRuntime(target, blocked, path.join(root, "taken"));
+    assert.equal(failed.ok, false);
+    assert.match(failed.ok ? "" : failed.message, /still holds/);
+    assert.equal(fs.readFileSync(path.join(target, "package.json"), "utf8"), JSON.stringify({ dependencies: { electron: "^39.0.0" } }));
+    assert.equal(fs.existsSync(blocked), true, "the staged copy is the caller's to clean up");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

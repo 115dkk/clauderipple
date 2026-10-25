@@ -933,11 +933,11 @@ function runCli(args: string[]): Promise<string> {
  * one object must not be mixed with warnings on stderr. With `timeoutMs` a CLI that hangs (a
  * supervisor that never answers) is ended rather than left holding a button down.
  */
-function runCliResult(args: string[], timeoutMs = 0): Promise<{ ok: boolean; output: string; stdout: string; timedOut: boolean }> {
+function runCliResult(args: string[], timeoutMs = 0, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ ok: boolean; output: string; stdout: string; timedOut: boolean }> {
   const { node, env, cli } = cliPaths();
   return new Promise((resolve) => {
     // An update prints npm's and the installer's own lines; the default 1MB buffer is not for that.
-    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home }, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home, ...extraEnv }, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       const timedOut = !!err && timeoutMs > 0 && (err as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
       resolve({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim(), stdout: String(stdout), timedOut });
     });
@@ -1167,9 +1167,12 @@ function loadUpdateSeen(): UpdateSeen {
 }
 
 async function relaunchTray(): Promise<void> {
+  // The replacement starts as this one did: the CLI's own `tray` opens the window, which brought a
+  // hidden dashboard to the front after every automatic update (B14). A window that was up stays up.
+  const visible = windowVisible();
   app.releaseSingleInstanceLock();
   try {
-    const result = await runCliResult(["tray"], 30_000);
+    const result = await runCliResult(["tray", "--at-login"], 30_000, visible ? { CLAUDERIPPLE_APP_SHOW: "1" } : {});
     if (!result.ok) throw new Error(result.output || "could not relaunch tray");
   } catch (error) {
     // Keep a functioning tray if its replacement could not start, including spawn/timeout failures.
