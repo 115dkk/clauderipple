@@ -455,6 +455,7 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
     const pickerModeOn = () => true, probeProvider = (name, draft) => { h.probes.push(clone(draft)); return h.probe; }, api = () => h.probe;
     const setTimeout = () => 0, startChatgptLogin = () => {}, closeModal = () => {};
     const showModal = form => { h.root = form; }, toast = (message, error) => { if (error) h.errors.push(message); };
+    ${dashboardBlock('function configSaved(', '// A save sends')}
     const document = { createTextNode: text => el('text', {text}) };
     const latestConfig = async () => clone(h.latest), configRequest = async next => { h.writes.push(clone(next)); };
     const loadProviders = async () => {}, offerPickerOn = async () => {}, startMeasurement = () => {};
@@ -605,9 +606,12 @@ function slotsSaveHarness(config: SavedConfig, rows: SlotItem[], put = async (_n
     const $all = () => h.rows.map(item => ({_get: () => clone(item)}));
     const $ = () => ({classList:{toggle(){}},textContent:''}), t = key => key, updateSlotSummary = () => {};
     const clearTimeout = () => {}, setTimeout = () => 1, effortLevelsFor = () => ['low','high'];
-    const latestConfig = async () => h.config;
+    const api = async () => clone(h.config), toast = () => {};
     const configRequest = async next => { h.writes.push(clone(next)); await h.put(next); h.config = clone(next); };
+    ${dashboardBlock('function configSaved(', '// A save sends')}
+    ${mergeBlock}
     ${dashboardBlock('let slotsSaveTimer =', '// ---- Providers')}
+    slotsBaseline = Object.fromEntries(Object.entries(h.config.routes).map(([id, route]) => [id, {provider:route.provider,model:route.model,...(route.effort ? {effort:route.effort} : {})}]));
     return {saveSlots, scheduleSlotsSave};
   `)(h) as { saveSlots(): Promise<void>; scheduleSlotsSave(): void };
   return { h, ...ui };

@@ -70,7 +70,8 @@ async function api(path, opts) {
 // The router writes `cli.models` to settings.json on this save (they only take effect there). If
 // that write could not happen it says so here — a slot that silently does nothing is the bug this
 // call used to be, so a failure must reach the screen rather than the router log.
-async function configRequest(next) {
+/** @param {Object} next @param {(fresh: Object) => Object} [rebase] Reapply an editor's atomic changes on a conflict. */
+async function configRequest(next, rebase) {
   // Older routers return a raw config without a revision: keep their existing PUT contract.
   const base = configSnapshots.get(next.configRevision);
   const arrayKeys = { models: "id", extraModels: "model", direct: "prefix", credentials: "id" };
@@ -79,17 +80,27 @@ async function configRequest(next) {
     try {
       const out = await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
       if (out && out.configRevision !== undefined) next.configRevision = out.configRevision;
-      if (out && out.warning) toast(out.warning, true);
       return out;
     } catch (error) {
-      if (error.status !== 409 || !changes || attempt >= 3) throw error;
+      if (error.status !== 409 || (!changes && !rebase) || attempt >= 3) throw error;
       const fresh = await api("/api/config");
-      const rebased = modApply(fresh, changes, arrayKeys);
+      const rebased = rebase ? rebase(fresh) : modApply(fresh, changes, arrayKeys);
       // Callers retain `next` as their saved copy, including everything the retry preserved.
       for (const key of Object.keys(next)) delete next[key];
       Object.assign(next, rebased);
     }
   }
+}
+
+/** Report one save outcome, never a success toast over a partial-success warning.
+ * @param {{warning?: string} | undefined} out
+ * @param {string} [message] Success text; omitted by editors with an inline saved status.
+ * @param {string} [warning] An additional caller warning, shown alongside the server's warning.
+ */
+function configSaved(out, message, warning) {
+  const warnings = [out && out.warning, warning].filter(Boolean);
+  if (warnings.length) toast(warnings.join("\n"), true);
+  else if (message) toast(message);
 }
 
 // A save sends the whole config, so it starts from what the router holds now rather than the copy
@@ -354,10 +365,10 @@ async function toggleAutoUpdate(enabled) {
     // Do not use latestConfig's stale fallback for an automatic-install preference.
     const next = await api("/api/config");
     next.autoUpdate = enabled;
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     if (status.autoUpdate) status.autoUpdate.enabled = enabled;
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
   } catch (error) {
     toast(t("common.saveFailed"), true, error.message);
   } finally {
@@ -1024,10 +1035,10 @@ async function saveWebSearch(value) {
   if (picked) next.webSearch = { provider: picked.provider, model: picked.model, ...(maxResults !== undefined ? { maxResults } : {}) };
   else delete next.webSearch;
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     renderModelSlots();
-    toast(t("slots.webSearchSaved"));
+    configSaved(out, t("slots.webSearchSaved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 
@@ -1042,15 +1053,16 @@ async function saveModelSlots() {
   for (const select of $all("#client-model-slots select[data-slot]")) models[select.dataset.slot] = select.value;
   next.cli = { ...(next.cli || {}), models };
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     // Saying "saved" over a choice that will make every search fail is the same silent no-op this
     // screen was already guilty of once. The label on the option warns before the fact; this catches
     // a session that already had it selected. With a web search backend set the search never
     // reaches `smallFast`, so there is nothing to warn about.
-    const owners = models.smallFast && !next.webSearch ? providersOffering(next, models.smallFast) : [];
-    if (owners.length && providerCannotSearch(owners[0], models.smallFast)) toast(t("slots.noWebSearchWarn"), true);
-    else toast(t("slots.slotSaved"));
+    const savedModels = next.cli.models;
+    const owners = savedModels.smallFast && !next.webSearch ? providersOffering(next, savedModels.smallFast) : [];
+    const warning = owners.length && providerCannotSearch(owners[0], savedModels.smallFast) ? t("slots.noWebSearchWarn") : undefined;
+    configSaved(out, t("slots.slotSaved"), warning);
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 
@@ -1067,7 +1079,7 @@ function clientPickerSelections() {
 async function saveClientPickerModels() {
   if (!currentConfig) return;
   const next = applyPickerSelections(clone(await latestConfig()), clientPickerSelections());
-  try { await configRequest(next); currentConfig = next; toast(t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+  try { const out = await configRequest(next); currentConfig = next; configSaved(out, t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 function pickerModeOn() {
   return Boolean(status && status.picker && status.picker.enabled);
@@ -1115,9 +1127,9 @@ async function toggleWorkerTools(enabled) {
   const next = clone(await latestConfig());
   next.cli = { ...(next.cli || {}), limitWorkerTools: enabled };
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
   renderClients();
 }
@@ -1677,6 +1689,8 @@ setInterval(() => { if (!macBusy && !macSetup.running) void refreshMac(); }, 500
 function claudeSelect(selected) {
   const select = el("select", {});
   for (const model of claudeModels) select.appendChild(selectOption(model.id, labelOf(model)));
+  // A retired source still identifies a saved route, including when its row is removed.
+  if (selected && !claudeModels.some((model) => model.id === selected)) select.appendChild(selectOption(selected, selected));
   select.value = selected || claudeModels[0].id;
   return select;
 }
@@ -1688,7 +1702,10 @@ function targetSelect(route) {
     for (const model of group.models) optgroup.appendChild(selectOption(JSON.stringify([group.name, model.id]), labelOf(model)));
     select.appendChild(optgroup);
   }
-  select.value = route ? JSON.stringify([route.provider, route.model]) : "";
+  const value = route ? JSON.stringify([route.provider, route.model]) : "";
+  // Do not make an unavailable saved target look like passthrough; it must remain removable.
+  if (route && !$all("option", select).some((option) => option.value === value)) select.appendChild(selectOption(value, `${route.provider} / ${route.model} (?)`));
+  select.value = value;
   return select;
 }
 function effortSelect(value, levels) {
@@ -1745,7 +1762,7 @@ function slotRow(id, route) {
     effortCell,
     el("div", { class: "map-remove" }, [remove]),
   );
-  row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.value });
+  row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.disabled ? undefined : effort.value });
   sync();
   return row;
 }
@@ -1759,6 +1776,8 @@ async function loadSlots() {
     const routes = currentConfig.routes || {};
     const ids = [...claudeModels.map((model) => model.id), ...Object.keys(routes).filter((id) => !claudeModels.some((model) => model.id === id))];
     for (const id of ids) rows.appendChild(slotRow(id, routes[id]));
+    // Compare against what the controls actually displayed, not implicit/defaulted config fields.
+    slotsBaseline = readSlotRoutes();
     updateSlotSummary();
   } catch (error) {
     toast(t("common.loadFailed"), true, error.message);
@@ -1849,6 +1868,38 @@ function updateSlotSummary() {
 let slotsSaveTimer = null;
 let slotsSaving = false;
 let slotsSaveAgain = false;
+/** Last acknowledged controls, independent of currentConfig (other screens refresh that).
+ * @type {Record<string, {provider: string, model: string, effort?: string} | null> | null}
+ */
+let slotsBaseline = null;
+/** Snapshot the controls before any await; a change during GET/PUT belongs to the next save. */
+function readSlotRoutes() {
+  const entries = $all("#slots-list .map-row").map((row) => {
+    const { id, route, effort } = row._get();
+    return [id, route ? { ...route, ...(effort !== undefined ? { effort } : {}) } : null];
+  });
+  if (new Set(entries.map(([id]) => id)).size !== entries.length) throw new Error(t("slots.duplicate"));
+  return Object.fromEntries(entries);
+}
+/** A changed row owns its provider/model/effort together; untouched rows and latest metadata survive.
+ * Explicit removal wins over a remote edit. An edited row deleted remotely is recreated in full,
+ * without resurrecting old metadata. Apply the same rule before PUT and after every 409.
+ * @param {Object} fresh
+ * @param {Record<string, Object | null>} before
+ * @param {Record<string, Object | null>} after
+ */
+function mergeSlotRoutes(fresh, before, after) {
+  const next = clone(fresh);
+  next.routes = { ...(next.routes || {}) };
+  const changed = new Set(modChanges(before, after).map((change) => change.path[0]));
+  for (const id of changed) {
+    const route = after[id];
+    if (!route) { delete next.routes[id]; continue; }
+    next.routes[id] = { ...next.routes[id], ...route };
+    if (route.effort === undefined) delete next.routes[id].effort;
+  }
+  return next;
+}
 function slotsStatus(text, isError) {
   const box = $("#slots-status");
   box.textContent = text;
@@ -1862,27 +1913,22 @@ function scheduleSlotsSave() {
   slotsSaveTimer = setTimeout(() => void saveSlots(), 500);
 }
 async function saveSlots() {
-  if (!currentConfig) return;
+  if (!currentConfig || !slotsBaseline) return;
   if (slotsSaving) { slotsSaveAgain = true; return; }
+  clearTimeout(slotsSaveTimer);
+  slotsSaveTimer = null;
   slotsSaving = true;
   try {
-    const next = clone(await latestConfig());
-    const routes = {};
-    const seen = new Set();
-    for (const row of $all("#slots-list .map-row")) {
-      const item = row._get();
-      if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); return; }
-      seen.add(item.id);
-      if (!item.route) continue;
-      const route = { ...((next.routes || {})[item.id] || {}), ...item.route };
-      if (effortLevelsFor(item.route.provider, item.route.model).length) route.effort = item.effort;
-      else delete route.effort;
-      routes[item.id] = route;
-    }
-    next.routes = routes;
-    await configRequest(next);
+    const sent = readSlotRoutes();
+    const before = slotsBaseline;
+    const rebase = (fresh) => mergeSlotRoutes(fresh, before, sent);
+    // A failed read must not fall back to stale settings, including on legacy routers.
+    const next = rebase(await api("/api/config"));
+    const out = await configRequest(next, rebase);
     currentConfig = next;
-    slotsStatus(t("slots.saved"));
+    slotsBaseline = sent;
+    slotsStatus(out && out.warning ? out.warning : t("slots.saved"), Boolean(out && out.warning));
+    configSaved(out);
     updateSlotSummary();
   } catch (error) {
     slotsStatus(`${t("common.saveFailed")} ${error.message}`, true);
@@ -2082,7 +2128,7 @@ async function removeProvider(name, provider) {
   next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
   next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     selectedProviderName = Object.keys(next.providers)[0] || null;
     providerDetailTab = "overview";
@@ -2090,7 +2136,7 @@ async function removeProvider(name, provider) {
     clientsLoaded = false;
     closeProviderDetail();
     renderProviderWorkspace();
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 
@@ -2148,12 +2194,12 @@ async function saveAnthropicRotation(name, provider, enabled, control, message) 
   if (enabled) next.providers[name].accountPool = true;
   else delete next.providers[name].accountPool;
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     slotsLoaded = false;
     clientsLoaded = false;
     renderProviderWorkspace();
-    toast(t("providers.rotationSaved"));
+    configSaved(out, t("providers.rotationSaved"));
   } catch (error) {
     control.checked = !enabled;
     message.textContent = "";
@@ -2693,11 +2739,11 @@ function keyUsageText(name, index) {
 
 async function saveKeyPool(next) {
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     keyForm = null;
     renderProviderWorkspace();
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
     void refreshHealth();
     return true;
   } catch (error) {
@@ -2966,11 +3012,17 @@ function closeModal() {
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-backdrop").addEventListener("click", (event) => { if (event.target === $("#modal-backdrop")) closeModal(); });
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("#modal-backdrop").hidden) { closeModal(); return; }
-  if (event.key === "Enter" && !$("#modal-backdrop").hidden && event.target.tagName !== "TEXTAREA") {
-    const action = $("#modal-content [data-default-action]");
-    if (action && !action.disabled) { event.preventDefault(); action.click(); }
-  }
+  // keyCode 229 also covers the IME commit key on browsers that already cleared isComposing.
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || $("#modal-backdrop").hidden) return;
+  if (event.key === "Escape") { closeModal(); return; }
+  if (event.key !== "Enter" || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+  // Only single-line text entry gets the shortcut. Buttons (including Cancel), selects, links,
+  // checkboxes, textareas and editable regions keep their own native keyboard behaviour.
+  const target = event.target;
+  if (!$("#modal-content").contains(target) || target.tagName !== "INPUT" || target.isContentEditable) return;
+  if (!["text", "search", "email", "url", "tel", "password", "number"].includes(target.type)) return;
+  const action = $("#modal-content [data-default-action]");
+  if (action && !action.disabled) { event.preventDefault(); action.click(); }
 });
 
 function openClaudeAccountConsent(providerName) {
@@ -3250,7 +3302,7 @@ function openAnthropicProviderForm(options) {
     // accountPool makes these models native Claude routing targets. Without it this remains the
     // historical OpenAI ingress provider, and routing deliberately ignores it.
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "claude-code" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "claude-code" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -3351,7 +3403,7 @@ function openGrokProviderForm(options) {
     const existingSelections = pickerSelectionsExcept(next, providerName);
     applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
+    try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -3463,7 +3515,7 @@ function openGoogleProviderForm(options) {
     const existingSelections = pickerSelectionsExcept(next, providerName);
     applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
+    try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -3773,7 +3825,7 @@ function openProviderForm(options) {
     }
     saveButton.disabled = true;
     try {
-      await configRequest(next);
+      const out = await configRequest(next);
       currentConfig = next;
       selectedProviderName = providerName;
       providerDetailTab = "overview";
@@ -3781,7 +3833,7 @@ function openProviderForm(options) {
       providersLoaded = false;
       closeModal();
       await loadProviders();
-      toast(t("common.saved"));
+      configSaved(out, t("common.saved"));
       await offerPickerOn(pickerInput.checked && checkedModels.length > 0);
       // Detached on purpose. Measuring asks every ticked model several questions, which is far
       // longer than a save should take, and a model whose wire is still unknown works exactly as it
