@@ -22,9 +22,14 @@ test("macOS and Windows trust checks reject an old CA with the same subject", ()
       let trusted = old;
       let verified = false;
       let verificationAllowed = true;
+      let held = fingerprint;
       const run = (_command: string, args: string[]): string => {
         if (platform === "win32") return args.join(" ").includes(`Thumbprint -eq '${trusted}'`) ? "1" : "0";
         if (args[0] === "trust-settings-export") return `<plist><dict><key>trustList</key><dict><key>${trusted}</key><dict/></dict></dict></plist>`;
+        if (args[0] === "find-certificate") {
+          assert.deepEqual(args.slice(0, 5), ["find-certificate", "-a", "-Z", "-c", "ClaudeRipple local CA"]);
+          return held ? `SHA-256 hash: 00\nSHA-1 hash: ${held}\nkeychain: "login.keychain-db"\n` : "";
+        }
         assert.deepEqual(args.slice(0, 3), ["verify-cert", "-c", file]);
         verified = true;
         if (!verificationAllowed) throw new Error("not trusted");
@@ -37,6 +42,13 @@ test("macOS and Windows trust checks reject an old CA with the same subject", ()
         assert.equal(verified, true, "trust, not mere presence, is verified");
         verificationAllowed = false;
         assert.equal(caTrusted(file, { platform, run }), false, "a matching but untrusted certificate is refused");
+        // 2026-10-25: the certificate was gone from the keychain, its trust settings and the file
+        // still verified, and `picker on` skipped adding it.
+        verificationAllowed = true;
+        held = "";
+        assert.equal(caTrusted(file, { platform, run }), false, "trust settings without the certificate in the keychain are not trust");
+        held = old;
+        assert.equal(caTrusted(file, { platform, run }), false, "another certificate of the same name is not this one");
       }
     }
   } finally {

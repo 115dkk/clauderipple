@@ -166,6 +166,13 @@ export function caTrusted(caPem: string, opts: { platform?: NodeJS.Platform; run
     // Presence alone is not trust: verify the current certificate against that keychain too.
     const settings = run("security", ["trust-settings-export", "/dev/stdout"]);
     if (!settings.toUpperCase().includes(`<KEY>${fingerprint}</KEY>`)) return false;
+    // Trust settings outlive their certificate, and verify-cert passes on the file and them alone:
+    // on 2026-10-25 a CA removed from the keychain still read as trusted, `picker on` skipped adding
+    // it, and the app refused every claude.ai page (ERR_CERT_AUTHORITY_INVALID). The app needs the
+    // certificate itself in the keychain.
+    const cn = /(?:^|\n)CN=([^\n]+)/.exec(new X509Certificate(fs.readFileSync(caPem)).subject)?.[1] ?? "";
+    const held = run("security", ["find-certificate", "-a", "-Z", "-c", cn, loginKeychain()]);
+    if (!held.toUpperCase().replace(/\s+/g, " ").includes(`SHA-1 HASH: ${fingerprint}`)) return false;
     run("security", ["verify-cert", "-c", caPem, "-p", "basic", "-k", loginKeychain()]);
     return true;
   } catch {
