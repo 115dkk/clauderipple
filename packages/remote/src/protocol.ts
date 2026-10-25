@@ -129,7 +129,7 @@ export type EventBody = MessageImages & (
   | { kind: "figures"; figures: Figures }
   | { kind: "notice"; code: NoticeCode; text?: string });
 
-export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked";
+export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed";
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 
@@ -252,7 +252,7 @@ export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: st
 export interface PlanStep { text: string; status: "pending" | "in_progress" | "completed" }
 
 /** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
-export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** why sending it failed; the queue is held */ error?: string }
+export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** Why it failed or is waiting; only queueHeld requires explicit resume. */ error?: string }
 
 export interface ModelOption { model: string; name: string; provider: string; efforts: Effort[]; usable: boolean }
 export interface ProviderGroup { provider: string; label: string; usable: boolean; models: ModelOption[] }

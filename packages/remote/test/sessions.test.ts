@@ -825,6 +825,7 @@ test("desktop handoff failures persist and retry only at a later idle, at most t
   assert.equal(saved().desktopHandoffAttempts, 3);
   assert.match(logs[0]!, /failed: timeout/);
   assert.match(logs[2]!, /attempt 3\/3/);
+  assert.ok(recovered.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_failed"));
 });
 
 test("handoff closes an idle SDK writer and waits for real process exit before invoking the runner", async t => {
@@ -904,6 +905,58 @@ test("a successful later handoff clears the durable failure and is not attempted
   await f.sessions.send(id, "after-success", "again");
   await waitFor(() => f.fake.users.length === 3 && f.sessions.summaryOf(id)?.state === "idle");
   assert.equal(calls, 2);
+});
+
+test("handoff does not reopen a conversation already owned by Desktop with RC off", async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-existing-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const registry = new Map<string, DesktopProcess>();
+  let calls = 0;
+  const f = fixture(t, { permission: true }, { desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "",
+    handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  registry.set("sdk-1", { sessionId: "sdk-1", pid: 42, status: "idle" });
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await f.sessions.pollDesktop();
+  assert.equal(calls, 0);
+  assert.equal(f.fake.spies.close, 1, "the idle SDK stops rather than remaining a second writer");
+  assert.throws(() => f.sessions.send(id, "blocked-after-adoption", "do not start another writer"), /Remote Control/);
+});
+
+for (const status of ["pending", "opening"]) test(`a ${status} Desktop handoff recovers and retries without a new phone turn`, async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  f.sessions.shutdown();
+  const file = path.join(f.dir, "sessions.json");
+  const records: { desktopHandoff: string; desktopHandoffAttempts: number }[] = JSON.parse(fs.readFileSync(file, "utf8"));
+  records[0]!.desktopHandoff = status;
+  records[0]!.desktopHandoffAttempts = status === "opening" ? 1 : 0;
+  fs.writeFileSync(file, JSON.stringify(records));
+  let now = Date.now(), calls = 0;
+  const requests: string[] = [];
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: () => { throw new Error("must not spawn another SDK writer"); }, now: () => now,
+    handoff: async request => { requests.push(request.sessionId); if (++calls === 1) throw new Error("temporary launcher failure"); return "opened"; }, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  recovered.recover();
+  await recovered.pollDesktop();
+  await nextTick(); await nextTick();
+  assert.equal(calls, 1);
+  assert.ok(recovered.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_retry"));
+  await recovered.pollDesktop();
+  assert.equal(calls, 1, "retry has a delay, not a tight poll loop");
+  now += 30_000;
+  await recovered.pollDesktop();
+  await nextTick(); await nextTick();
+  assert.equal(calls, 2);
+  assert.deepEqual(requests, ["sdk-1", "sdk-1"], "the same transcript is handed over, never a fork");
+  assert.ok(recovered.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_requested"));
+  assert.equal(recovered.log(id).tail().events.filter(e => e.kind === "user").length, 1);
+  now += 60_000;
+  await recovered.pollDesktop();
+  assert.equal(calls, 2, "a confirmed launcher request is not repeated");
 });
 
 test("attention: a permission request is set, survives `seen`, and clears when the approval is answered", async t => {

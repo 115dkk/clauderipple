@@ -69,7 +69,8 @@ interface SessionRecord {
   createdBy: string;
   contextWindow: number | null;
   /** Missing on older host records; desktop continuations are explicitly excluded. */
-  desktopHandoff?: "pending" | "attempted" | "failed" | "excluded";
+  desktopHandoff?: "pending" | "opening" | "attempted" | "failed" | "excluded";
+  desktopHandoffRetryAt?: number;
   desktopHandoffAttempts?: number;
   desktopHandoffError?: string;
   desktopBridge?: boolean;
@@ -469,6 +470,12 @@ export class Sessions {
       if (this.records.has(p.session)) this.append(p.session, { kind: "permission_decided", id: p.id, decision: "expired", reason: "host_restarted" });
     }
     for (const r of this.records.values()) {
+      // A host exit during the launcher call did not confirm delivery to Desktop.
+      if (r.desktopHandoff === "opening") {
+        r.desktopHandoff = (r.desktopHandoffAttempts ?? 0) < 3 ? "pending" : "failed";
+        this.save();
+        if (r.desktopHandoff === "failed") this.append(r.id, { kind: "notice", code: "desktop_handoff_failed" }, false);
+      }
       if (r.state === "running" || r.state === "starting" || r.state === "waiting") {
         this.append(r.id, { kind: "notice", code: "host_restarted", text: "호스트가 다시 시작되어 이 턴이 중단되었습니다" }, false);
         this.setState(r, "stopped", undefined, false);
@@ -508,6 +515,7 @@ export class Sessions {
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
+      if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed" && this.now() >= (r.desktopHandoffRetryAt ?? 0)) this.handoff(r);
       if (!this.desktop) continue;
       const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
       // The Claude app worker has Remote Control on for a conversation the host is still driving
@@ -1228,6 +1236,7 @@ export class Sessions {
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
+    if (this.opts.handoff) this.append(r.id, { kind: "notice", code: "desktop_handoff" });
     if (req.text.trim()) await this.send(r.id, req.clientMsgId, req.text);
     else this.setState(r, "idle");
     this.opts.onSessions();
@@ -2185,12 +2194,21 @@ export class Sessions {
     return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
   }
 
-  private handoff(r: SessionRecord, live: Live): void {
+  private handoff(r: SessionRecord, live = this.live.get(r.id)): void {
     const runner = this.opts.handoff;
-    if (!runner || !r.sdkSessionId || r.desktopBridge || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
+    if (!runner || !r.sdkSessionId || r.desktopBridge || this.archived.has(r.id) || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
     if (r.desktopHandoff !== "pending" && r.desktopHandoff !== "failed") return;
+    // An app worker already owns it, even when RC is off: do not open another writer.
+    if (this.desktop?.isOpen(r.sdkSessionId)) {
+      if (live) this.stop(r.id, live);
+      r.desktopHandoff = "attempted";
+      delete r.desktopHandoffRetryAt;
+      delete r.desktopHandoffError;
+      this.save();
+      return;
+    }
     if ((r.desktopHandoffAttempts ?? 0) >= 3) return;
-    r.desktopHandoff = "attempted";
+    r.desktopHandoff = "opening";
     r.desktopHandoffAttempts = (r.desktopHandoffAttempts ?? 0) + 1;
     this.save();
     const transfer = { messages: [] as SdkUserMessage[] };
@@ -2202,16 +2220,23 @@ export class Sessions {
         this.stop(r.id, live);
         // close() and iterator completion alone do not prove the writer has stopped.
         // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.
-        await live.query.processExited;
+        await live?.query.processExited;
         if (this.shuttingDown || r.desktopBridge) return;
         const result = await runner({ sessionId: r.sdkSessionId!, title: r.title, cwd: r.cwd });
+        if (this.shuttingDown) return;
+        r.desktopHandoff = "attempted";
         delete r.desktopHandoffError;
+        delete r.desktopHandoffRetryAt;
         this.save();
+        this.append(r.id, { kind: "notice", code: "desktop_handoff_requested" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] ${result}`);
       } catch (error) {
+        if (this.shuttingDown) return;
         r.desktopHandoff = "failed";
         r.desktopHandoffError = error instanceof Error ? error.message : String(error);
+        r.desktopHandoffRetryAt = this.now() + 30_000;
         this.save();
+        this.append(r.id, { kind: "notice", code: r.desktopHandoffAttempts! < 3 ? "desktop_handoff_retry" : "desktop_handoff_failed" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] failed: ${r.desktopHandoffError} (attempt ${r.desktopHandoffAttempts}/3)`);
       } finally {
         this.handingOff.delete(r.id);
