@@ -3221,7 +3221,8 @@ function showModal(content, cleanup) {
   if (modalCleanup) modalCleanup();
   modalCleanup = cleanup || null;
   // Where the keyboard was before the dialog opened: closing puts it back there instead of on <body> (G-D10).
-  modalOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const active = document.activeElement;
+  modalOpener = active && typeof active.focus === "function" ? active : null;
   $("#modal-content").replaceChildren(content);
   $("#modal-backdrop").hidden = false;
   const first = $("#modal-content input, #modal-content button, #modal-content select");
