@@ -438,7 +438,8 @@ declare module 'claude-code' {
       coldHidden: boolean
       kept: { pings: number; tokens: number } | null
       judgeDown: string | null
-      handoff: { stage: HandoffStage; text?: string } | null
+      /** `run` names the press whose fork is writing, so a result cannot land on a later chat (register.tsx driveHandoff). */
+      handoff: { stage: HandoffStage; text?: string; run?: number } | null
       /** The band's Handoff was pressed and its fork has not started: the tick starts it when the session is idle. */
       handoffQueued: boolean
       panel: 'settings' | 'setup' | 'compact' | 'clear' | null

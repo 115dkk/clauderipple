@@ -138,6 +138,14 @@ let judgeSequence = 0
 /** Jev's network blips and timeouts in a row. */
 let jevBlips = 0
 let generation = 0
+/** The press whose handoff fork is running: a result carries it so a /clear cannot be handed another chat's note. */
+let handoffRun = 0
+/**
+ * A finished agent's conversation, read once. The Agents pane is redrawn every second while any
+ * agent or task runs, and re-reading a conversation that cannot grow was a full transcript read
+ * per tick per open pane (B19). A resumed agent runs again first, which changes the key.
+ */
+let agentTalkCache: { id: string; key: string; talk: AgentTalk } | null = null
 let carriedPick = false
 /**
  * An agent's end that came before its spawn was recorded, kept until the record lands. A worker
@@ -1055,7 +1063,7 @@ async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult
  */
 async function queueHandoff($: EngineInterface): Promise<void> {
   if ((await read($, handoff))?.stage === 'writing') return
-  await update($, handoff, () => ({ stage: 'writing' as const }))
+  await update($, handoff, () => ({ stage: 'writing' as const, run: ++handoffRun }))
   await update($, panel, () => null)
   await update($, handoffQueued, () => true)
   // A tick now rather than at the next 15 s one: the card already says the note is being written.
@@ -1114,13 +1122,26 @@ async function driveHandoff($: EngineInterface): Promise<void> {
   const value = await read($, handoff)
   if (value?.stage !== 'writing' || value.text || !await read($, handoffQueued) || await read($, busy)) return
   await update($, handoffQueued, () => false)
+  // The chat this press belongs to. A /clear while the fork runs starts another one, and its note
+  // must not open a session over it (B11). `run` names the press, because a second press after the
+  // clear has a fork of its own and this one's answer is not it.
+  const chat = generation
+  const run = value.run
+  const stale = async (): Promise<boolean> => generation !== chat || (await read($, handoff))?.run !== run
+  /** Drop this press's card, unless a later press has already taken the state over. */
+  const drop = async (): Promise<void> => {
+    if ((await read($, handoff))?.run === run) await update($, handoff, () => null)
+  }
   try {
     const answer = await fork($, QUICK_PROMPT)
+    if (await stale()) { await drop(); return }
     if (!answer?.isAnswered || !answer.text.trim()) throw new Error(answer && !answer.isAnswered ? answer.reason : 'empty handoff')
-    await update($, handoff, () => ({ stage: 'writing' as const, text: answer.text }))
+    await update($, handoff, () => ({ stage: 'writing' as const, text: answer.text, run }))
     await moveToNewSession($)
   } catch (error) {
-    await update($, handoff, () => ({ stage: 'failed' as const }))
+    // A failure after the chat changed says nothing about this chat: no toast, no failed card.
+    if (await stale()) { await drop(); return }
+    await update($, handoff, () => ({ stage: 'failed' as const, run }))
     await $.ui.toast(t(language, 'toasts.handoffFailed'))
     await report($, 'handoff', error)
   }
@@ -1574,6 +1595,9 @@ function agentsActions($: EngineInterface): AgentsActions {
         await report($, 'agents view', viewed.deny)
       } catch (error) { await report($, 'agents view', error) }
       await update($, agentRunsOpen, () => [])
+      // An explicit open reads the conversation now, even if it was read before: the host may have
+      // kept what it says more up to date than this pane's last draw.
+      agentTalkCache = null
       await update($, agentOpen, () => id)
       try {
         const moved = await $.ui.scroll({ in: AGENTS_PANE, to: 'end' })
@@ -1589,13 +1613,21 @@ function agentsActions($: EngineInterface): AgentsActions {
  * An agent's conversation for the Agents pane, read again at each draw: its steps and tool calls
  * redraw the pane while it runs, so what it says shows as it says it. Paths in its tool calls read
  * relative to the session's folder, or under `~`.
+ *
+ * A finished agent's conversation cannot change, so it is read once: the pane's clock ticks for
+ * whichever agent is still running, and the open one being finished changed nothing it shows (B19).
  */
-async function agentTalk($: EngineInterface, id: string): Promise<AgentTalk> {
+async function agentTalk($: EngineInterface, id: string, record?: AgentRec): Promise<AgentTalk> {
+  const key = record ? `${record.state}:${record.endedAt ?? 0}:${record.tools}` : 'unknown'
+  if (record && record.state !== 'running' && agentTalkCache?.id === id && agentTalkCache.key === key) return agentTalkCache.talk
   try {
     const found = await $.session.messages({ agentId: id })
     if (!Array.isArray(found)) return { deny: found.deny }
     const cwd = await $.session.cwd().catch(() => undefined)
-    return { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }) }
+    const talk: AgentTalk = { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }) }
+    if (record && record.state !== 'running') agentTalkCache = { id, key, talk }
+    else if (agentTalkCache?.id === id) agentTalkCache = null
+    return talk
   } catch (error) { return { deny: reason(error) } }
 }
 /** What an agent is doing, in the words its conversation's tool rows use (tools.ts toolDetail): no leading `cd`, paths short. */
@@ -2187,7 +2219,7 @@ export const register: Register = on => {
       // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
       await read($, agentsTick)
       id = await read($, agentOpen)
-      const open = id === null ? undefined : { id, talk: await agentTalk($, id), runsOpen: await read($, agentRunsOpen) }
+      const open = id === null ? undefined : { id, talk: await agentTalk($, id, records.find(record => record.id === id)), runsOpen: await read($, agentRunsOpen) }
       if (open && 'deny' in open.talk) throw new Error(open.talk.deny)
       return renderAgents($.ui.resolve(e), frame, { agents: records, tasks: await read($, bgTasks), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { return agentsRenderFailure($, e, error, { ...(frame ? { frame } : {}), records, wasOpen: id !== null }) }
