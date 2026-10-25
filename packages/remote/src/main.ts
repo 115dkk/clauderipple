@@ -146,6 +146,9 @@ async function runHost(): Promise<void> {
   const expoNotifier = new ExpoNotifier({ dir, send: expoSender(), log,
     seenRecently: (id) => server?.sessionSeenRecently(id) ?? false,
     context: (id, event) => sessions?.pushContext(id, event) ?? {},
+    // The identity the phone paired with: a tap from a previous computer must not open a session
+    // id on this one.
+    host: toB64u(loadHostKey(dir, nacl).publicKey),
   });
   // Mac sessions the host is not tailing push only while the Mac is away (screen locked or idle).
   const away = new MacAway({ log });
