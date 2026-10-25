@@ -291,6 +291,11 @@ export function item(it: TimelineItem, ui: UI): string {
       if (it.decision === null) return `<div class="perm-done open">${icon.shield(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(t("state.waiting"))}</span></div>`;
       const label = it.decision === "allow" ? t("perm.allowed") : it.decision === "allow_always" ? t("perm.allowedAlways") : it.decision === "deny" ? t("perm.denied") : t("perm.expired");
       const cls = it.decision === "allow_always" ? "allow" : it.decision;
+      if (it.requestKind === "plan") {
+        const open = ui.expanded.has(it.id);
+        const body = ui.expanded.get(it.id) ?? textOf(it.input);
+        return `<div><div class="perm-done ${cls}"><button class="tool" data-act="tool" data-id="${esc(it.id)}" aria-expanded="${open}"><span class="nm">${esc(it.title || it.tool)}</span><span>${esc(label)}</span>${icon.chevron(16)}</button></div>${open ? `<div class="msg-asst">${markdown(body)}${it.decision === "expired" && it.reason ? `<div class="foot">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</div>` : ""}</div>` : ""}</div>`;
+      }
       const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</span>` : "";
       return `<div class="perm-done ${cls}">${it.decision === "allow" || it.decision === "allow_always" ? icon.check(16) : icon.x(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(label)}</span></div>${why ? `<div class="foot">${why}</div>` : ""}`;
     }

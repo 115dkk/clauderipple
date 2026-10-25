@@ -1076,7 +1076,8 @@ export class App {
     this.rerenderItems();
     if (this.screen.name !== "session") return;
     const items = frame?.items ?? timelineItems(this.view(this.screen.id));
-    const tool = items.flatMap(i => i.type === "toolGroup" ? i.rows.flatMap(row => row.type === "tool" ? [row.tool] : row.call ? [row.call] : []) : i.type === "assistant" ? i.tools : []).find(x => x.id === id);
+    const permission = items.find((item): item is Extract<TimelineItem, { type: "permission" }> => item.type === "permission" && item.id === id && item.requestKind === "plan" && item.decision !== null);
+    const tool: import("./timeline.ts").ToolView | undefined = items.flatMap(i => i.type === "toolGroup" ? i.rows.flatMap(row => row.type === "tool" ? [row.tool] : row.call ? [row.call] : []) : i.type === "assistant" ? i.tools : []).find(x => x.id === id) ?? (permission ? { id, name: permission.tool, summary: permission.summary, input: permission.input } : undefined);
     const session = this.screen.id;
     const values = [tool?.input, tool?.result?.text].filter((v) => v !== undefined);
     if (!values.some(v => typeof v !== "string")) return;

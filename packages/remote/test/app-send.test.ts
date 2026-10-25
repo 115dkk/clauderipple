@@ -132,6 +132,7 @@ interface AppBoundary {
     draft: { cwd: string | null; model: string | null; effort: "high" | null };
     /** filled so the app does not ask the host for its model list (which leaves a request timer) */
     models: unknown[];
+    expanded: Map<string, string | null>;
     sheet: { kind: string; worker?: { sub: string; status: string }; expanded?: Map<string, string | null>; scroll?: number } | null;
   };
   link: { stop(): void } | null;
@@ -183,6 +184,21 @@ const entry = (over: Partial<OutboxEntry> = {}): OutboxEntry => ({
   clientMsgId: "a", text: "A 지시", at: 1_700_000_000_000, state: "pending", session: "s1", ...over,
 });
 const twoWaiting = (): OutboxEntry[] => [entry({ clientMsgId: "a" }), entry({ clientMsgId: "b", text: "B 지시", error: "no such session" })];
+
+test("a decided plan loads every blob chunk through the read-only detail path", async () => {
+  const running = await launch(new Storage());
+  const ops: Record<string, unknown>[] = [];
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [{ seq: 1, at: 1, kind: "permission", id: "plan", tool: "ExitPlanMode", title: "Plan", summary: "", input: { blob: "plan-blob", bytes: 10, preview: "preview" }, canAlways: false, requestKind: "plan" }, { seq: 2, at: 2, kind: "permission_decided", id: "plan", decision: "allow" }] });
+    Socket.respond = op => { ops.push(op); return op.offset === 0 ? { text: "First\n", next: 6 } : { text: "Last", next: null }; };
+    const before = running.socket.frames.length;
+    await running.app.act("tool", { dataset: { id: "plan" } });
+    assert.equal(running.app.ui.expanded.get("plan"), "First\nLast");
+    assert.deepEqual(ops.map(op => [op.op, op.offset]), [["blob", 0], ["blob", 6]]);
+    assert.ok(parsed(running.socket.frames.slice(before)).every(frame => frame.t === "req"), "reviewing never sends another decision");
+  } finally { running.app.link?.stop(); }
+});
 
 test("worker navigation loads every page and returns through parent frames with instructions, status and position intact", async () => {
   const running = await launch(new Storage());
