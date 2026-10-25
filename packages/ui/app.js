@@ -5133,13 +5133,16 @@ for (const selector of ["#logs-from", "#logs-to"]) {
 renderPeriodControl();
 fillCustomDates();
 
-const EMPTY_BUCKET = { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, avgMs: 0, cacheHitPercent: 0 };
+const EMPTY_BUCKET = { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, avgMs: 0, cacheHitPercent: 0, conversationTokens: 0 };
 function renderSummary(summary) {
   const providers = (summary && summary.providers) || {};
   const total = (requestProvider ? providers[requestProvider] : summary && summary.total) || EMPTY_BUCKET;
   $("#logs-summary").replaceChildren(
     summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
     summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
+    // The router groups conversations: last whole prompt + every output, as on the Agents card.
+    // Input/output and the model table keep their independent request-volume accounting.
+    summaryChip(t("logs.th.tokens"), formatNumber(total.conversationTokens)),
     // On its own line: with the whole input counted the number runs to eight digits, and the
     // ellipsis on one line cut the cache rate off entirely.
     summaryChip(t("logs.summary.input"), formatNumber(totalInputOf(total)), t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })),

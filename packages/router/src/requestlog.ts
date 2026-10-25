@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
-import { UsageHistory, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
+import { UsageHistory, addConversations, emptyConversations, finishConversations, recordConversations, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_CARRY = 64 * 1024;
@@ -42,6 +42,8 @@ export type RequestRecord = {
    * session ask what happened to its own requests.
    */
   session?: string;
+  /** Privacy-preserving identity of one conversation, independent of provider/model. */
+  conversation?: string;
   /**
    * The request was made inside a subagent: Claude Code names the agent in the
    * `x-claude-code-agent-id` header, and only a subagent's request carries it (CLI 2.1.304).
@@ -60,7 +62,7 @@ export type RequestRecord = {
 /** A kind or a set of kinds; a record matches any of them. */
 type RequestFilter = { provider?: string; kind?: RequestRecord["kind"] | RequestRecord["kind"][]; session?: string };
 
-export type RequestSummary = { total: SummaryBucket; providers: Record<string, SummaryBucket>; models: (SummaryBucket & { provider: string; model: string })[] };
+export type RequestSummary = Omit<UsageSummary, "earliest">;
 export type { SummaryBucket };
 
 function isRecord(value: unknown): value is RequestRecord {
@@ -137,11 +139,18 @@ export class RequestLog {
   /** Summarise records at or after an epoch timestamp in milliseconds. */
   summary(sinceMs: number): RequestSummary {
     const total = emptyTotals();
+    const conversations = emptyConversations();
+    const providerConversations = new Map<string, ReturnType<typeof emptyConversations>>();
     const providers = new Map<string, BucketTotals>();
     const models = new Map<string, { totals: BucketTotals; provider: string; model: string }>();
     for (const record of this.records) {
       const at = Date.parse(record.at);
       if (!Number.isFinite(at) || at < sinceMs) continue;
+      const accounting = recordConversations(record);
+      addConversations(conversations, accounting);
+      const perProvider = providerConversations.get(record.provider) ?? emptyConversations();
+      addConversations(perProvider, accounting);
+      providerConversations.set(record.provider, perProvider);
       const provider = providers.get(record.provider) ?? providers.set(record.provider, emptyTotals()).get(record.provider)!;
       const key = `${record.provider}\u0000${record.target}`;
       const model = models.get(key) ?? models.set(key, { totals: emptyTotals(), provider: record.provider, model: record.target }).get(key)!;
@@ -150,8 +159,8 @@ export class RequestLog {
     const modelsList = [...models.values()].map(({ totals, provider, model }) => ({ ...finishTotals(totals), provider, model }));
     sortByVolume(modelsList);
     return {
-      total: finishTotals(total),
-      providers: Object.fromEntries([...providers].map(([name, totals]) => [name, finishTotals(totals)])),
+      total: { ...finishTotals(total), ...finishConversations(conversations) },
+      providers: Object.fromEntries([...providers].map(([name, totals]) => [name, { ...finishTotals(totals), ...finishConversations(providerConversations.get(name)!) }])),
       models: modelsList,
     };
   }
@@ -425,6 +434,29 @@ export class ResponseUsageTap {
     const output = "output_tokens" in usage ? number("output_tokens") : current.output;
     this.usage = { input, cached, ...(cacheWrite !== undefined ? { cacheWrite } : {}), output };
   }
+}
+
+/** Not the provider cache key: that groups side requests and truncates prompts intentionally.
+ * Accounting must distinguish complete first messages, and prefer the engine's agent identity.
+ * Hash before storing; neither the prompt nor the raw agent header enters the request log.
+ */
+export function requestConversationKey(body: Record<string, unknown>, session?: string, agentId?: string): string | undefined {
+  const hash = (seed: unknown): string => crypto.createHash("sha256").update(JSON.stringify(seed)).digest("hex").slice(0, 32);
+  if (agentId) return hash(["agent", session ?? "", agentId]);
+  const metadata = body.metadata;
+  const userId = metadata && typeof metadata === "object" && "user_id" in metadata ? metadata.user_id : undefined;
+  const identity = session ?? (typeof userId === "string" ? userId : undefined);
+  if (!identity || !Array.isArray(body.messages)) return undefined;
+  const first: unknown = body.messages.find((message: unknown) =>
+    message !== null && typeof message === "object" && "role" in message && message.role === "user");
+  if (!first || typeof first !== "object" || !("content" in first)) return undefined;
+  // Cache breakpoints move between turns; they are not part of the message's identity.
+  const content: unknown = Array.isArray(first.content) ? first.content.map((block: unknown) => {
+    if (!block || typeof block !== "object") return block;
+    const { cache_control, ...rest } = block as Record<string, unknown>;
+    return rest;
+  }) : first.content;
+  return hash(["prompt", identity, content]);
 }
 
 export function requestId(): string {

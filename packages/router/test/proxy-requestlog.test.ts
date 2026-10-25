@@ -268,6 +268,25 @@ test("the agent header marks a subagent's turn, and the provider's Fast switch a
   } finally { await r.stop(); }
 });
 
+test("conversation identity separates agents in one session and survives model/prompt changes with an agent header", async () => {
+  const r = await rig();
+  try {
+    const headers = { "x-claude-code-session-id": "shared-session" };
+    const main = (await r.send("gpt-test", {}, "/v1/messages", undefined, headers)).record;
+    const worker = (await r.send("gpt-test", {}, "/v1/messages", undefined, { ...headers, "x-claude-code-agent-id": "private-agent-one" })).record;
+    const next = (await r.send("chat-test", { messages: [{ role: "user", content: "changed after compaction" }] }, "/v1/messages", undefined, { ...headers, "x-claude-code-agent-id": "private-agent-one" })).record;
+    const other = (await r.send("gpt-test", {}, "/v1/messages", undefined, { ...headers, "x-claude-code-agent-id": "private-agent-two" })).record;
+    assert.match(main.conversation!, /^[a-f0-9]{32}$/);
+    assert.notEqual(main.conversation, worker.conversation);
+    assert.equal(worker.conversation, next.conversation);
+    assert.notEqual(other.conversation, worker.conversation);
+    const summary = r.requests.usage(0, Date.now() + 1);
+    assert.equal(summary.total.conversationTokens, 3 * 10 + 4 * 2);
+    assert.equal(summary.total.ungroupedRequests, 0);
+    assert.doesNotMatch(fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8"), /private-prompt|private-agent|changed after compaction/);
+  } finally { await r.stop(); }
+});
+
 test("proxy generateImage records the image traffic, with usage on success and a failure record", async () => {
   const r = await rig();
   try {
