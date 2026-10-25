@@ -4,11 +4,21 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { caTrusted, nssNickname, nssTrust, nssTrusted, nssUntrust } from "../src/picker.ts";
+import { caTrusted, nssNickname, nssTrust, nssTrusted, nssUntrust, untrustCa } from "../src/picker.ts";
 import { X509Certificate } from "node:crypto";
 import { createCa } from "../../router/src/x509.ts";
 
 const onWindows = process.platform === "win32";
+
+test("an unreadable CA fingerprint is a failed removal, never confirmed absence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ca-unreadable-"));
+  try {
+    assert.equal(untrustCa(path.join(root, "missing.pem")), "failed");
+    assert.equal(untrustCa(root), "failed");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("macOS and Windows trust checks reject an old CA with the same subject", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ca-identity-"));
@@ -145,10 +155,38 @@ test("without certutil, trust fails with the package to install and nothing coun
     const pem = ca("current");
     assert.equal(nssTrusted(pem), false);
     assert.throws(() => nssTrust(pem), /sudo apt install libnss3-tools/);
-    assert.equal(nssUntrust(), false);
+    assert.throws(() => nssUntrust(), /ENOENT/);
   }));
 
-test("the real certutil accepts the same calls", { skip: onWindows || !realCertutil() }, () =>
+test("CA removal never turns store query failures into absence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ca-removal-"));
+  const pem = path.join(root, "ca.pem");
+  fs.writeFileSync(pem, createCa({ cn: "ClaudeRipple local CA" }).certPem);
+  try {
+    for (const platform of ["darwin", "win32", "linux"] as const) {
+      const calls: string[][] = [];
+      assert.equal(untrustCa(pem, { platform, run: (command, args) => {
+        calls.push([command, ...args]);
+        throw new Error("permission denied");
+      } }), "failed");
+      assert.equal(calls.length, 1);
+      assert.equal(untrustCa(path.join(root, "missing.pem"), { platform, run: () => { throw new Error("must not query without a fingerprint"); } }), "failed");
+    }
+    assert.equal(untrustCa(pem, { platform: "win32", run: () => "0" }), "absent");
+    assert.equal(untrustCa(pem, { platform: "linux", run: () => "Certificate Nickname  Trust Attributes\n SSL,S/MIME,JAR/XPI\n" }), "absent");
+    assert.equal(untrustCa(pem, { platform: "darwin", run: () => { throw Object.assign(new Error("not found"), { status: 44 }); } }), "absent");
+    let queries = 0;
+    assert.equal(untrustCa(pem, { platform: "linux", run: (_command, args) => {
+      if (args.includes("-D")) return "";
+      if (++queries > 1) throw new Error("query failed after deletion");
+      return `${nssNickname(pem)} C,,\n`;
+    } }), "failed");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the real certutil accepts the same calls", { skip: process.env.CLAUDERIPPLE_TEST_REAL_NSS !== "1" || onWindows || !realCertutil() }, () =>
   withNss("", ({ ca }) => {
     // An empty script is not written, so the system certutil is the one on PATH.
     const pem = ca("current");

@@ -71,13 +71,8 @@ function certutil(args: string[]): string {
 }
 
 /** Every ClaudeRipple CA in the database, including ones left by an earlier install. */
-function nssOurNicknames(): string[] {
-  let out: string;
-  try {
-    out = certutil(["-L"]);
-  } catch {
-    return [];
-  }
+function nssOurNicknames(run: (args: string[]) => string = certutil): string[] {
+  const out = run(["-L"]);
   // One line per certificate: the nickname, then its trust flags ("C,,") as the last column.
   return out
     .split("\n")
@@ -204,15 +199,14 @@ function caFingerprint(caPem: string): string | null {
 }
 
 /** Whether Windows' CurrentUser Root store holds the certificate; null when that cannot be read. */
-function windowsHasCa(fingerprint: string | null, byName: boolean): boolean | null {
+type CaCommand = (command: string, args: string[]) => string;
+const runCaCommand: CaCommand = (command, args) => execFileSync(command, args, { env: windowsPowerShellEnv(), stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).toString();
+
+function windowsHasCa(fingerprint: string | null, byName: boolean, run: CaCommand = runCaCommand): boolean | null {
   const match = byName ? `$_.Subject -eq 'CN=${CA_NAME}'` : fingerprint ? `$_.Thumbprint -eq '${fingerprint}'` : null;
   if (!match) return false;
   try {
-    const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { ${match} }).Count`], {
-      env: windowsPowerShellEnv(),
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-    }).toString();
+    const out = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `@(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { ${match} }).Count`]);
     const count = Number(out.trim());
     return Number.isSafeInteger(count) ? count > 0 : null;
   } catch {
@@ -224,7 +218,7 @@ function windowsHasCa(fingerprint: string | null, byName: boolean): boolean | nu
  * Whether the login keychain holds the certificate (trusted or not): true, false, or null when that
  * cannot be determined. Read-only — `security find-certificate` never prompts for a password.
  */
-function keychainHasCa(fingerprint: string | null, byName: boolean): boolean | null {
+function keychainHasCa(fingerprint: string | null, byName: boolean, run: CaCommand = runCaCommand): boolean | null {
   const args = byName
     ? ["find-certificate", "-c", CA_NAME, loginKeychain()]
     : fingerprint
@@ -232,7 +226,7 @@ function keychainHasCa(fingerprint: string | null, byName: boolean): boolean | n
       : null;
   if (!args) return false;
   try {
-    const out = execFileSync("security", args, { stdio: ["ignore", "pipe", "ignore"] }).toString();
+    const out = run("security", args);
     return byName || out.toUpperCase().includes(`SHA-1 HASH: ${fingerprint}`);
   } catch (error) {
     // errSecItemNotFound is the only failure that means "not there"; anything else is unknown.
@@ -247,55 +241,55 @@ function keychainHasCa(fingerprint: string | null, byName: boolean): boolean | n
  * A certificate that is not there at all is `absent`, not a failure: an install that already lost
  * its CA must still be able to purge (D3, 2026-10-25).
  */
-export function untrustCa(caPem: string, opts: { sweep?: boolean } = {}): CaRemoval {
-  if (isLinux) {
-    const wanted = caPem ? nssNickname(caPem) : null;
-    const ours = () => nssOurNicknames().filter((name) => wanted === null || name === wanted);
-    const names = ours();
-    if (names.length === 0) return "absent";
-    for (const name of names) {
-      try {
-        certutil(["-D", "-n", name]);
-      } catch {
-        /* verified below */
-      }
-    }
-    return ours().length === 0 ? "removed" : "failed";
-  }
+export function untrustCa(caPem: string, opts: { sweep?: boolean; platform?: NodeJS.Platform; run?: CaCommand } = {}): CaRemoval {
+  const platform = opts.platform ?? process.platform;
+  const run = opts.run ?? runCaCommand;
   const fingerprint = caFingerprint(caPem);
-  const sweep = opts.sweep === true;
-  if (isWindows) {
-    const before = windowsHasCa(fingerprint, sweep);
-    if (before === false) return "absent";
-    if (before === null) return "failed";
-    const match = sweep ? `$_.Subject -eq 'CN=${CA_NAME}'` : `$_.Thumbprint -eq '${fingerprint}'`;
+  if (fingerprint === null) return "failed";
+  if (platform === "linux") {
     try {
-      powershell(
-        `Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { ${match} } | ForEach-Object { Remove-Item -Path $_.PSPath -Force }`,
-        { stdio: "inherit", interactive: true },
-      );
-    } catch {
-      return "failed"; // The user may have declined; removal was not confirmed.
-    }
-    return windowsHasCa(fingerprint, sweep) === false ? "removed" : "failed";
-  }
-  // macOS: an untrusted copy can still be in the keychain, so presence and trust are asked apart.
-  const present = sweep ? keychainHasCa(fingerprint, true) : keychainHasCa(fingerprint, false);
-  if (present === false) return "absent";
-  if (present === null) return "failed";
-  if (caTrusted(caPem)) {
-    try {
-      execFileSync("security", ["remove-trusted-cert", caPem], { stdio: "inherit" });
+      const wanted = nssNickname(caPem);
+      const nssRun = (args: string[]) => run("certutil", ["-d", `sql:${nssDb()}`, ...args]);
+      const ours = () => nssOurNicknames(nssRun).filter(name => name === wanted);
+      const names = ours();
+      if (names.length === 0) return "absent";
+      for (const name of names) nssRun(["-D", "-n", name]);
+      return ours().length === 0 ? "removed" : "failed";
     } catch {
       return "failed";
     }
   }
+  const sweep = opts.sweep === true;
+  if (platform === "win32") {
+    const before = windowsHasCa(fingerprint, sweep, run);
+    if (before === false) return "absent";
+    if (before === null) return "failed";
+    const match = sweep ? `$_.Subject -eq 'CN=${CA_NAME}'` : `$_.Thumbprint -eq '${fingerprint}'`;
+    try {
+      const script = `Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { ${match} } | ForEach-Object { Remove-Item -Path $_.PSPath -Force }`;
+      if (opts.run) run("powershell.exe", ["-NoProfile", "-Command", script]);
+      else powershell(script, { stdio: "inherit", interactive: true });
+    } catch {
+      return "failed"; // The user may have declined; removal was not confirmed.
+    }
+    return windowsHasCa(fingerprint, sweep, run) === false ? "removed" : "failed";
+  }
+  // macOS: an untrusted copy can still be in the keychain, so presence and trust are asked apart.
+  const present = sweep ? keychainHasCa(fingerprint, true, run) : keychainHasCa(fingerprint, false, run);
+  if (present === false) return "absent";
+  if (present === null) return "failed";
   try {
-    execFileSync("security", ["delete-certificate", ...(sweep ? ["-c", CA_NAME] : ["-Z", fingerprint!]), loginKeychain()], { stdio: "ignore" });
+    const trust = run("security", ["trust-settings-export", "/dev/stdout"]);
+    if (trust.toUpperCase().includes(`<KEY>${fingerprint}</KEY>`)) run("security", ["remove-trusted-cert", caPem]);
+  } catch {
+    return "failed";
+  }
+  try {
+    run("security", ["delete-certificate", ...(sweep ? ["-c", CA_NAME] : ["-Z", fingerprint]), loginKeychain()]);
     return "removed";
   } catch {
     // Nothing left to delete means the removal is complete; a leftover is not confirmed.
-    return (sweep ? keychainHasCa(fingerprint, true) : keychainHasCa(fingerprint, false)) === false ? "removed" : "failed";
+    return (sweep ? keychainHasCa(fingerprint, true, run) : keychainHasCa(fingerprint, false, run)) === false ? "removed" : "failed";
   }
 }
 
