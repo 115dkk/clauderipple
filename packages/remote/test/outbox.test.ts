@@ -6,7 +6,7 @@ import { autoSend, createSend, hostIdentity, loadOutbox, outboxKey, outboxStart,
 import type { OutboxEntry, OutboxStore } from "../web/outbox.ts";
 import { setLang } from "../web/i18n.ts";
 import { reduce, timelineItems } from "../web/timeline.ts";
-import { item as drawItem } from "../web/views.ts";
+import { item as drawItem, ARCHIVE_KEY, HOME_PAGE } from "../web/views.ts";
 import type { UI } from "../web/views.ts";
 
 /** localStorage's two calls over a Map, standing in for one browser profile. */
@@ -326,6 +326,7 @@ function ui(): UI {
     now: 0, link: { state: "open", attempt: 0, nextAt: null, lastRx: 0, downSince: null }, host: null, home: undefined,
     sessions: [], models: [], sheet: null, draft: { cwd: null, model: null, effort: null },
     expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null,
+    pins: [], folded: [ARCHIVE_KEY], query: "", homeLimit: HOME_PAGE,
   };
 }
 

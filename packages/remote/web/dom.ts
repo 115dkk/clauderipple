@@ -27,6 +27,8 @@ export const icon = {
   home: (s?: number) => svg(`<path d="M4 11l8-6.5 8 6.5"/><path d="M6 9.5V19h12V9.5"/>`, s),
   bell: (s?: number) => svg(`<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>`, s),
   up: (s?: number) => svg(`<path d="M12 19V7M7 11l5-5 5 5"/><path d="M5 4.5h14"/>`, s),
+  /** A row's own actions: three dots, so the row is not one button with a second button inside it. */
+  more: (s?: number) => `<svg class="ic" width="${s ?? 20}" height="${s ?? 20}" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor"/></svg>`,
 };
 
 export function toolIcon(name: string): string {

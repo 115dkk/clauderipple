@@ -10,7 +10,7 @@ import { activitySummary } from "../src/tool-details.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
-import { sidebarSections, sidebarState } from "./sidebar.ts";
+import { sidebarSections, sidebarState, sessionTitle, isPinned, searchSessions, PINNED_GROUP } from "./sidebar.ts";
 import type { TimelineItem, SessionView, ToolView, WorkerItem } from "./timeline.ts";
 
 export interface WorkerSheet {
@@ -29,6 +29,8 @@ export interface Draft { cwd: string | null; model: string | null; effort: Effor
 export type Sheet =
   | WorkerSheet
   | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean }
+  /** One session's own actions, opened from its row's menu: pin, archive, put the unread mark back. */
+  | { kind: "session"; id: string }
   | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
   /** Unsent messages kept from earlier connections: what is preserved, what this computer already
    * holds after an import, and any stored text that could not be read (never parsed, never sent). */
@@ -66,6 +68,14 @@ export interface UI {
   workersOpen: boolean;
   permOpen: Set<string>;
   toast: string | null;
+  /** Session ids pinned on this device, as listed in its storage. */
+  pins: string[];
+  /** Section keys folded on this device; the archive starts folded. */
+  folded: string[];
+  /** The home search field's text. */
+  query: string;
+  /** How many session rows the home list draws before offering more. */
+  homeLimit: number;
   /** whether notifications can work here, and are on; null until known */
   push?: PushAvail | null;
   /** the person said "later" to the notification card */
@@ -73,6 +83,11 @@ export interface UI {
   /** messages kept from earlier connections (a pairing change, or a replaced host key) */
   recovery?: RecoverySummary | null;
 }
+
+/** The archive's folding key; a stored key list uses it like any section name. */
+export const ARCHIVE_KEY = "archive";
+/** Session rows drawn at once on the home list: a thousand sessions cost what forty do. */
+export const HOME_PAGE = 40;
 
 // ---- small helpers -----------------------------------------------------------------------------
 
@@ -141,23 +156,74 @@ export function banner(ui: UI): string {
 
 // ---- home --------------------------------------------------------------------------------------
 
+/**
+ * One session row. It is a wrapper because a row has two actions that must not be nested buttons:
+ * opening the session (the whole row) and its own menu (the small button at the end).
+ */
 function sessionRow(s: SessionSummary, ui: UI): string {
   const tag = s.pending > 0
     ? `<span class="tag">${esc(t("state.waiting"))}${s.pending > 1 ? ` ${s.pending}` : ""}</span>`
     : s.state === "running" || s.state === "starting" ? `<span class="tag run">${esc(t("state.running"))}</span>` : "";
-  return `<button class="row" data-act="open" data-id="${esc(s.id)}">${s.state === "error" && !s.pending ? ripple("sorry", 24) : stateRing(sidebarState(s), 24)}<div class="body"><div class="t1">${esc(s.title)}</div><div class="t2"><span>${esc(folderName(s.cwd, ui.home))}</span><span class="sep">·</span><span class="m">${esc(modelName(ui.models, s.model))}</span><span class="sep">·</span><span>${esc(relTime(s.updatedAt, ui.now))}</span></div></div>${tag}</button>`;
+  return `<div class="rowwrap"><button class="row" data-act="open" data-id="${esc(s.id)}">${s.state === "error" && !s.pending ? ripple("sorry", 24) : stateRing(sidebarState(s), 24)}<div class="body"><div class="t1">${esc(s.title)}</div><div class="t2"><span>${esc(folderName(s.cwd, ui.home))}</span><span class="sep">·</span><span class="m">${esc(modelName(ui.models, s.model))}</span><span class="sep">·</span><span>${esc(relTime(s.updatedAt, ui.now))}</span></div></div>${tag}</button><button class="row-more" data-act="row-menu" data-id="${esc(s.id)}" aria-label="${esc(t("a11y.sessionMenu"))}" aria-haspopup="dialog">${icon.more(18)}</button></div>`;
+}
+
+/** A section's name. Pressing it folds the rows away and leaves the count, like the archive's row. */
+function sectionHeader(key: string, name: string, count: number, folded: boolean, alwaysCount = false, foldable = true): string {
+  const inner = `${esc(name)}${folded || alwaysCount ? `<span class="count">${count}</span>` : ""}`;
+  return foldable
+    ? `<button class="sec" data-act="fold" data-key="${esc(key)}" aria-expanded="${!folded}" aria-label="${esc(`${name}, ${count}`)}">${inner}${icon.chevron(14)}</button>`
+    : `<div class="sec" role="heading" aria-level="2">${inner}</div>`;
+}
+
+/** The home's own list: results while searching, otherwise the pinned, recent and grouped sessions. */
+export function homeList(ui: UI): string {
+  const open = ui.link.state === "open";
+  // While the link is down the states below are the last ones seen, and look it.
+  const stale = open ? "" : " stale";
+  const search = searchSessions(ui.sessions, ui.query, { listKnown: open || ui.sessions.length > 0 });
+  if (search.kind === "unavailable") return `<div class="homenote">${esc(t("home.searchUnavailable"))}</div>`;
+  if (search.kind === "none") return `<div class="homenote">${esc(t("home.searchNone"))}</div>`;
+  if (search.kind === "results") {
+    const shown = search.sessions.slice(0, ui.homeLimit);
+    const more = search.sessions.length - shown.length;
+    return `${sectionHeader("results", t("home.results"), search.sessions.length, false, true, false)}<div class="list${stale}">${shown.map(s => sessionRow(s, ui)).join("")}</div>${more > 0 ? pager(more) : ""}${open ? "" : `<div class="homenote">${esc(t("home.searchStale"))}</div>`}`;
+  }
+  const archived = ui.sessions.filter(s => s.archived).sort((a, b) => b.updatedAt - a.updatedAt);
+  const live = sidebarSections(ui.sessions, ui.groups, ui.now, { pins: ui.pins, folded: ui.folded });
+  const out: string[] = [];
+  let budget = ui.homeLimit, hidden = 0;
+  const draw = (key: string, name: string, list: SessionSummary[], folded: boolean, alwaysCount = false): void => {
+    if (folded) { if (budget > 0) out.push(sectionHeader(key, name, list.length, true, alwaysCount)); return; }
+    if (budget <= 0) { hidden += list.length; return; }
+    const shown = list.slice(0, budget);
+    budget -= shown.length;
+    hidden += list.length - shown.length;
+    out.push(sectionHeader(key, name, list.length, false, alwaysCount));
+    out.push(`<div class="list${stale}">${shown.map(s => sessionRow(s, ui)).join("")}</div>`);
+  };
+  for (const section of live) draw(section.key, section.name, section.sessions, section.folded);
+  if (!live.length && archived.length) out.push(`<div class="homenote">${esc(t("home.allArchived"))}</div>`);
+  if (archived.length) draw(ARCHIVE_KEY, t("home.showArchived"), archived, ui.folded.includes(ARCHIVE_KEY), true);
+  if (!ui.sessions.length) out.push(`<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body", { host: hostName(ui) }))}</p><div class="hint">${icon.down(22)}</div></div>`);
+  if (hidden > 0) out.push(pager(hidden));
+  return out.join("");
+}
+
+/** "Show more", saying how many rows are still waiting; the list draws HOME_PAGE more each time. */
+function pager(more: number): string {
+  return `<div class="pager"><button class="btn" data-act="home-more">${esc(t("home.moreCount", { n: more }))}</button></div>`;
 }
 
 export function homeMain(ui: UI): string {
-  const sections = sidebarSections(ui.sessions, ui.groups);
-  // While the link is down the states below are the last ones seen, and look it.
-  const stale = ui.link.state === "open" ? "" : " stale";
-  const sec = (title: string, list: SessionSummary[]): string =>
-    list.length ? `<div class="sec">${esc(title)}</div><div class="list${stale}">${list.map((s) => sessionRow(s, ui)).join("")}</div>` : "";
-  const empty = ui.sessions.length === 0
-    ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body", { host: hostName(ui) }))}</p><div class="hint">${icon.down(22)}</div></div>`
-    : "";
-  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sections.map(g => sec(g.name, g.sessions)).join("")}${empty}${recoveryCard(ui)}${pushCard(ui)}<div style="height:12px"></div>`;
+  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${homeSearch(ui)}<div id="home-list">${homeList(ui)}</div>${recoveryCard(ui)}${pushCard(ui)}<div style="height:12px"></div>`;
+}
+
+/** The search field, only once there is a list to search. It is outside the list so typing keeps the caret. */
+function homeSearch(ui: UI): string {
+  // A query someone already typed stays visible even if the list empties under it (a re-pair), so
+  // the sentence about the missing list has the field it belongs to.
+  if (!ui.sessions.length && !ui.query) return "";
+  return `<div class="filter">${icon.search(18)}<input id="home-search" placeholder="${esc(t("home.search"))}" aria-label="${esc(t("home.search"))}" value="${esc(ui.query)}" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"></div>`;
 }
 
 /** Below the list, near the thumb: turn notifications on, or what it takes on this phone. Gone once on or dismissed. */
@@ -368,6 +434,21 @@ export function sheet(ui: UI): string {
     const target = s.browse?.path ?? ui.draft.cwd;
     const foot = target ? `<div class="sfoot"><div class="path">${esc(shortPath(target, ui.home))}</div><button class="btn primary" data-act="choose-folder" data-path="${esc(target)}">${esc(t("folder.here"))}</button></div>` : "";
     return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("folder.title"))}<div class="filter">${icon.search(18)}<input id="folder-filter" placeholder="${esc(t("folder.filter"))}" value="${esc(s.filter)}" autocomplete="off"></div><div class="sbody">${recentHtml}${browse}</div>${foot}</div>`;
+  }
+  if (s.kind === "session") {
+    // One session's own actions, in the order people reach for them: keep it out of the list, pin
+    // it where it can be found, put the unread mark back. The row's ⋯ opens this, so every action
+    // here also has a menu beside it rather than a gesture only.
+    const session = ui.sessions.find(x => x.id === s.id);
+    if (!session) return "";
+    const live = ui.link.state === "open";
+    const pinned = isPinned(session, ui.pins);
+    // A Desktop star is the Desktop app's to remove; this phone cannot take it back, so it is not offered.
+    const canPin = pinned || session.group !== PINNED_GROUP;
+    const flagged = sidebarState(session) === "unread";
+    const opt = (act: string, label: string): string => `<button class="opt" data-act="${act}" data-id="${esc(session.id)}" ${live ? "" : "disabled"}><div class="body"><div class="t1">${esc(label)}</div></div></button>`;
+    const note = live ? folderName(session.cwd, ui.home) : t("home.needsHost");
+    return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(t("a11y.sessionMenu"))}">${head(sessionTitle(session))}<div class="sbody"><div class="list">${opt("archive-toggle", session.archived ? t("home.unarchive") : t("home.archive"))}${canPin ? opt("pin-toggle", pinned ? t("home.unpin") : t("home.pin")) : ""}${flagged ? "" : opt("unread", t("home.markUnread"))}</div><div class="note">${esc(note)}</div></div><div class="sfoot"><button class="btn primary" data-act="close-sheet">${esc(t("a11y.close"))}</button></div></div>`;
   }
   if (s.kind === "recovery") {
     // Everything the person can read or copy of what was saved for another connection (or an

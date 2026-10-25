@@ -180,6 +180,7 @@ function ui(sheet: Sheet | null): UI {
     host: { name: "<img src=x onerror=alert(1)>", version: "t", routerOk: true }, home: undefined,
     sessions: [], models: [], sheet, draft: { cwd: null, model: null, effort: null },
     expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null,
+    pins: [], folded: ["archive"], query: "", homeLimit: 40,
   };
 }
 

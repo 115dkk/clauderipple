@@ -26,6 +26,8 @@ class Storage {
     this.map.set(key, value);
   }
   keys(): string[] { return [...this.map.keys()]; }
+  /** Exactly what is stored, without parsing it. */
+  raw(key: string): string | null { return this.map.get(key) ?? null; }
   /** The stored queue as the app would read it after a reload. */
   stored(key: string): OutboxEntry[] {
     const load = loadOutbox(this, key);
@@ -69,18 +71,22 @@ interface Element {
   value: string;
   hidden: boolean;
   scrollTop: number;
+  /** The handlers the app bound to this element, so a test can act like a person. */
+  listeners: Record<string, ((ev: unknown) => void)[]>;
 }
 
 /** The slice of the browser the app touches while rendering, plus the elements a test reads back. */
-function install(storage: Storage): { sheet(): Element; body(): Element & { scrollTop: number } } {
+function install(storage: Storage): { sheet(): Element; body(): Element & { scrollTop: number }; main(): Element; list(): Element; fire(key: string, type: string, ev: unknown): void } {
   const elements = new Map<string, Element>();
   const el = (key: string): Element => {
     const found = elements.get(key);
     if (found) return found;
+    const listeners: Record<string, ((ev: unknown) => void)[]> = {};
     const made = {
-      dataset: {}, innerHTML: "", value: "", hidden: false,
+      dataset: {}, innerHTML: "", value: "", hidden: false, listeners,
       style: {}, children: [], parentElement: null, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
-      addEventListener: () => undefined, removeEventListener: () => undefined, append: () => undefined,
+      addEventListener: (type: string, fn: (ev: unknown) => void) => { (listeners[type] ??= []).push(fn); },
+      removeEventListener: () => undefined, append: () => undefined,
       remove: () => undefined, focus: () => undefined, setAttribute: () => undefined, replaceWith: () => undefined,
       insertBefore: () => undefined, removeChild: () => undefined, disconnect: () => undefined, observe: () => undefined,
       querySelector: () => null, querySelectorAll: () => [], getElementsByTagName: () => [],
@@ -117,7 +123,13 @@ function install(storage: Storage): { sheet(): Element; body(): Element & { scro
   // cleared by link.stop() at the end of each test.
   define("setInterval", () => 0);
   define("clearInterval", () => undefined);
-  return { sheet: () => el("#sheet"), body: () => el("#worker-body") };
+  return {
+    sheet: () => el("#sheet"),
+    body: () => el("#worker-body"),
+    main: () => el("#main"),
+    list: () => el("#home-list"),
+    fire: (key: string, type: string, ev: unknown) => { for (const fn of el(key).listeners[type] ?? []) fn(ev); },
+  };
 }
 
 /** The app as its own public surface describes it. The import is untyped on purpose: app.ts is
@@ -133,6 +145,12 @@ interface AppBoundary {
     /** filled so the app does not ask the host for its model list (which leaves a request timer) */
     models: unknown[];
     sheet: { kind: string; worker?: { sub: string; status: string }; expanded?: Map<string, string | null>; scroll?: number } | null;
+    /** the home list's own state: its search, its pins and folds, and how many rows it draws */
+    query: string;
+    pins: string[];
+    folded: string[];
+    homeLimit: number;
+    toast: string | null;
   };
   link: { stop(): void } | null;
 }
@@ -145,6 +163,9 @@ interface Running {
   storage: Storage;
   sheet: () => Element;
   body: () => Element;
+  main: () => Element;
+  list: () => Element;
+  fire: (key: string, type: string, ev: unknown) => void;
   key: string;
 }
 
@@ -171,7 +192,7 @@ async function launch(storage: Storage, entries: OutboxEntry[] = []): Promise<Ru
   assert.ok(socket, "the app opened its socket");
   socket.open();
   socket.deliver({ t: "ready", host: { name: "Mac", version: "t", routerOk: true }, sessions: [] });
-  return { app, socket, storage, sheet: elements.sheet, body: elements.body, key };
+  return { app, socket, storage, sheet: elements.sheet, body: elements.body, main: elements.main, list: elements.list, fire: elements.fire, key };
 }
 
 const parsed = (frames: readonly string[]): { t?: string; clientMsgId?: string }[] =>
@@ -391,4 +412,83 @@ test("the open recovery sheet is redrawn when a retry takes its message", async 
   } finally {
     running.app.link?.stop();
   }
+});
+
+// ---- the home list: folds, pins, pages and the row's own menu ----------------------------------
+
+/** A session as the host sends one. */
+function summary(over: Partial<import("../src/protocol.ts").SessionSummary> & { id: string }): import("../src/protocol.ts").SessionSummary {
+  return {
+    title: `세션 ${over.id}`, cwd: "/Users/pbj/Documents/ClaudeRipple", model: "m", effort: null, state: "idle",
+    pending: 0, createdAt: 1, updatedAt: 2, lastSeq: 0, epoch: "e", ...over,
+  };
+}
+const framesOf = (running: Running, type: string): Record<string, unknown>[] =>
+  running.socket.frames.map(frame => JSON.parse(frame) as Record<string, unknown>).filter(m => m.t === type);
+
+test("a folded group is remembered on this device and its rows come back when it is opened", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.socket.deliver({ t: "sessions", sessions: [summary({ id: "a", title: "첫 세션", updatedAt: 3 }), summary({ id: "b", title: "둘째 세션", updatedAt: 2 })], groups: [] });
+    assert.ok(running.main().innerHTML.includes("첫 세션"), "both sessions are drawn");
+    // These sessions are older than the hour, so they sit in their own group rather than 최근.
+    await running.app.act("fold", { dataset: { key: "sidebar:phone" } });
+    assert.ok(!running.list().innerHTML.includes("첫 세션"), "a folded group draws no rows");
+    assert.match(running.list().innerHTML, /data-key="sidebar:phone" aria-expanded="false"/);
+    assert.deepEqual(JSON.parse(running.storage.raw("rr.folded") ?? "[]"), ["archive", "sidebar:phone"], "the fold survives a relaunch");
+    await running.app.act("fold", { dataset: { key: "sidebar:phone" } });
+    assert.ok(running.list().innerHTML.includes("첫 세션"), "unfolding brings them back");
+  } finally { running.app.link?.stop(); }
+});
+
+test("the row's menu archives, marks unread and pins: the first two reach the computer, the pin stays here", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.socket.deliver({ t: "sessions", sessions: [summary({ id: "a", title: "첫 세션" }), summary({ id: "b", title: "둘째 세션" })], groups: [] });
+    await running.app.act("row-menu", { dataset: { id: "a" } });
+    assert.match(running.sheet().innerHTML, />보관</);
+    await running.app.act("archive-toggle", { dataset: { id: "a" } });
+    await running.app.act("row-menu", { dataset: { id: "b" } });
+    await running.app.act("unread", { dataset: { id: "b" } });
+    await running.app.act("row-menu", { dataset: { id: "a" } });
+    await running.app.act("pin-toggle", { dataset: { id: "a" } });
+    assert.deepEqual(framesOf(running, "archive"), [{ t: "archive", session: "a", archived: true }]);
+    assert.equal(framesOf(running, "unread").length, 1);
+    assert.equal(framesOf(running, "pin").length, 0, "a pin is this device's own note");
+    assert.deepEqual(JSON.parse(running.storage.raw("rr.pins") ?? "[]"), ["a"]);
+    assert.ok(running.main().innerHTML.includes("고정됨"), "the pinned session gets its own section");
+    // A session that leaves the list takes its open menu with it instead of reopening it later.
+    await running.app.act("row-menu", { dataset: { id: "b" } });
+    running.socket.deliver({ t: "sessions", sessions: [summary({ id: "a", title: "첫 세션" })], groups: [] });
+    assert.equal(running.sheet().innerHTML, "", "the menu went with the session that left");
+  } finally { running.app.link?.stop(); }
+});
+
+test("without the computer the sheet says so instead of failing silently", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.socket.deliver({ t: "sessions", sessions: [summary({ id: "a", title: "첫 세션" })], groups: [] });
+    running.socket.close();
+    await running.app.act("row-menu", { dataset: { id: "a" } });
+    assert.match(running.sheet().innerHTML, /컴퓨터에 연결된 뒤에 바꿀 수 있습니다\./);
+    assert.match(running.sheet().innerHTML, /data-act="archive-toggle"[^>]*disabled/);
+    await running.app.act("archive-toggle", { dataset: { id: "a" } });
+    assert.match(running.app.ui.toast ?? "", /컴퓨터에 연결된 뒤에 바꿀 수 있습니다\./);
+  } finally { running.app.link?.stop(); }
+});
+
+test("typing in the search narrows the list to its first page, and only the list is redrawn", async () => {
+  const running = await launch(new Storage());
+  try {
+    const sessions = Array.from({ length: 60 }, (_, i) => summary({ id: `s${i}`, title: `작업 ${i}`, cwd: `/Users/pbj/Documents/${i % 2 ? "ClaudeRipple" : "기타"}/p${i}`, updatedAt: i + 1 }));
+    running.socket.deliver({ t: "sessions", sessions, groups: [] });
+    assert.match(running.main().innerHTML, /id="home-search"/);
+    await running.app.act("home-more", { dataset: {} });
+    assert.equal(running.app.ui.homeLimit, 80);
+    running.fire("#app", "input", { target: { id: "home-search", value: "claUdeRipple P1" } });
+    assert.equal(running.app.ui.query, "claUdeRipple P1");
+    assert.equal(running.app.ui.homeLimit, 40, "a new search starts at its first page");
+    assert.ok(running.list().innerHTML.includes("작업 1"), "the title is in the results");
+    assert.ok(!running.list().innerHTML.includes("작업 3"), "sessions outside the project are not");
+  } finally { running.app.link?.stop(); }
 });
