@@ -44,4 +44,9 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      # The mod's TSX needs Claude's engine types and its tests need a local Claude installation,
+      # neither of which belongs in CI for a fork's code (G-D12). This parses the mod, resolves
+      # its relative imports and checks the manifests; `claude plugin test packages/mod` stays a
+      # maintainer step on a machine that has the engine.
+      - run: npm run check:mod
       - run: npm test

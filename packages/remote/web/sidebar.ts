@@ -1,6 +1,11 @@
 import type { SessionSummary } from "../src/protocol.ts";
 import { lang, t } from "./i18n.ts";
 
+/** Use the same folder fallback as the conversation header, also for blank metadata. */
+export function sessionTitle(s: Pick<SessionSummary, "title" | "cwd">): string {
+  return s.title.trim() || folderName(s.cwd);
+}
+
 export function sidebarLabel(name: string): string {
   if (name === "sidebar:ungrouped") return lang() === "ko" ? "그룹 없음" : "No group";
   if (name === "sidebar:phone") return lang() === "ko" ? "휴대폰에서 시작" : "Started on phone";
@@ -29,18 +34,15 @@ export function sidebarSections(sessions: SessionSummary[], groups?: string[], n
   return [{ name: sidebarLabel("sidebar:recent"), sessions: recent }, ...names.map(name => ({ name: sidebarLabel(name), sessions: rest.filter(s => groupOf(s) === name)
     .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER) || b.updatedAt - a.updatedAt) }))].filter(g => g.sessions.length > 0);
 }
-/**
- * The app sidebar's rule (checked against live sessions 2026-10-12): unread outranks working,
- * and working is one state whether the main turn or only subagents run. Opening the phone never
- * changes Claude's read state. The transcript task count is not used here: tasks whose end was
- * never recorded linger in it, which made long-idle sessions blink.
- */
+/** One glyph rule for the home list, conversation switcher and web sidebar. */
 export function sidebarState(s: SessionSummary): string {
-  if (s.pending > 0 || s.state === "waiting") return "waiting";
-  if (s.state === "error") return "error";
-  if (s.unread) return "unread";
-  if (s.state === "running" || s.state === "starting" || s.background) return "running";
-  return "read";
+  switch (sessionGroup(s)) {
+    case "input": return "waiting";
+    case "failed": return "error";
+    case "review": return "unread";
+    case "working": return s.state === "running" || s.state === "starting" ? "running" : "background";
+    case "done": return "read";
+  }
 }
 
 // ---- the phone's session list: grouped by status (or folder), newest change first --------------
@@ -50,16 +52,20 @@ export type SessionGroup = "input" | "failed" | "review" | "working" | "done";
 export const GROUP_ORDER: readonly SessionGroup[] = ["input", "failed", "review", "working", "done"];
 
 /**
- * The bucket a session belongs to. A permission request (open or waiting) or a Claude app turn that
- * stopped on a question outranks everything — both need the person's input; the last turn's error
- * outranks a lingering finished flag; a turn that finished and nobody has looked at yet (its
- * `attention`) is 검토 대기; running/starting/background is 작업 중; the rest is 완료.
+ * Classify only signals the host actually supplies. Desktop's local sidebar gives live approval
+ * and active work precedence over unread completion (ion-dist shared-11 xC → shared-26 Kj,
+ * checked 2026-10-25). An old wrap_up cannot block a new main turn. Background work alone does
+ * not answer a blocked question. `review` here means unread output, NOT Desktop's PR-ready
+ * bucket: PR/merge and completed-ack metadata are not part of this protocol.
+ * A transcript task count is not liveness evidence; only `background` is.
  */
 export function sessionGroup(s: SessionSummary): SessionGroup {
-  if (s.pending > 0 || s.state === "waiting" || s.attention?.reason === "question") return "input";
+  if (s.pending > 0 || s.state === "waiting") return "input";
   if (s.state === "error") return "failed";
-  if (s.attention?.reason === "finished") return "review";
-  if (s.state === "running" || s.state === "starting" || s.background) return "working";
+  if (s.state === "running" || s.state === "starting") return "working";
+  if (s.attention?.reason === "question") return "input";
+  if (s.background) return "working";
+  if (s.attention?.reason === "finished" || s.unread) return "review";
   return "done";
 }
 
@@ -75,7 +81,7 @@ function byRecency(a: SessionSummary, b: SessionSummary): number {
 }
 
 /** The last path segment, the way a folder is named in speech. `~` for the home folder. */
-function folderLabel(p: string, home?: string): string {
+export function folderName(p: string, home?: string): string {
   if (home && p === home) return "~";
   const parts = p.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? "/";
@@ -99,7 +105,7 @@ export function groupSessions(sessions: SessionSummary[], mode: GroupMode = "sta
     for (const s of list) { const bucket = byFolder.get(s.cwd); if (bucket) bucket.push(s); else byFolder.set(s.cwd, [s]); }
     return [...byFolder.entries()]
       .sort((a, b) => folderRecency(b[1]) - folderRecency(a[1]) || a[0].localeCompare(b[0]))
-      .map(([cwd, group]) => ({ key: `folder:${cwd}`, name: folderLabel(cwd, opts.home), sessions: group.sort(byRecency) }));
+      .map(([cwd, group]) => ({ key: `folder:${cwd}`, name: folderName(cwd, opts.home), sessions: group.sort(byRecency) }));
   }
   return GROUP_ORDER
     .map(group => ({ key: `group:${group}`, name: groupLabel(group), sessions: list.filter(s => sessionGroup(s) === group).sort(byRecency) }))

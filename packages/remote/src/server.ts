@@ -5,15 +5,17 @@ import fs from "node:fs";
 import http from "node:http";
 import module from "node:module";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { tokenMatches } from "./config.ts";
 import { clientEvent, clientFeatures, settingsResponse } from "./client-compat.ts";
+import { chunkFrames } from "./chunks.ts";
 import type { Phone } from "./local-control.ts";
 import { browse, macConsent, makeFolder, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
 import { diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
-import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
+import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
 import { SEEN_MS, VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
@@ -40,6 +42,7 @@ const require = module.createRequire(import.meta.url);
 /** Published path → file, for what the PWA loads from outside web/. The relay's build serves the same paths. */
 export const SHARED: Record<string, (pkgDir: string) => string> = {
   "src/protocol.ts": (pkg) => path.join(pkg, "src", "protocol.ts"),
+  "src/chunks.ts": (pkg) => path.join(pkg, "src", "chunks.ts"),
   "src/tool-details.ts": (pkg) => path.join(pkg, "src", "tool-details.ts"),
   "src/wrap-up.ts": (pkg) => path.join(pkg, "src", "wrap-up.ts"),
   "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
@@ -182,7 +185,7 @@ export class HostServer {
   }
 
   private markSeen(c: Client, session: string): void {
-    if (!c.authed) return;
+    if (!c.authed || c.visibleAt <= 0 || this.now() - c.visibleAt >= VISIBLE_MS) return;
     this.seenAt.set(session, this.now());
     if (this.seenAt.size > 500) {
       const cutoff = this.now() - SEEN_MS;
@@ -369,9 +372,20 @@ export class HostServer {
     if (c.ws.readyState !== c.ws.OPEN) return;
     if (msg.t === "events" || msg.t === "history") msg = { ...msg, events: msg.events.map(event => clientEvent(event, c.features)) };
     const text = JSON.stringify(msg);
-    if (Buffer.byteLength(text) > FRAME_CAP) {
+    const bytes = Buffer.byteLength(text);
+    if (bytes > FRAME_CAP) {
+      // A client that asked for chunkedFrames gets the same frame in slices of its exact bytes, so
+      // a big queue, edit answer or session list arrives whole; everyone else keeps the old wire.
+      // Past CHUNK_MESSAGE_MAX the message is not chunked at all: the phone's memory stays bounded.
+      if (c.features.has("chunkedFrames") && bytes <= CHUNK_MESSAGE_MAX) {
+        for (const chunk of chunkFrames(text, randomUUID())) {
+          if (c.ws.readyState !== c.ws.OPEN) return;
+          c.ws.send(JSON.stringify(chunk));
+        }
+        return;
+      }
       // The log caps events and pages, so this means a bug; say so rather than kill the socket (Paseo #2610).
-      this.opts.log?.(`frame over cap dropped: ${msg.t} ${Buffer.byteLength(text)} bytes`);
+      this.opts.log?.(`frame over cap dropped: ${msg.t} ${bytes} bytes`);
       if (msg.t !== "error") this.send(c, { t: "error", code: "too_large", message: `${msg.t} frame over ${FRAME_CAP} bytes` });
       return;
     }
@@ -408,7 +422,9 @@ export class HostServer {
       case "hello": return;
       case "attach": this.attach(c, msg.session, msg.epoch, msg.afterSeq); return;
       case "detach": c.attached.delete(msg.session); this.syncWatches(); return;
-      case "seen": if (s.has(msg.session)) s.markSeen(msg.session); return;
+      case "seen":
+        if (c.attached.has(msg.session) && c.visibleAt > 0 && this.now() - c.visibleAt < VISIBLE_MS && s.has(msg.session)) s.markSeen(msg.session);
+        return;
       case "archive":
         try { s.setArchived(msg.session, msg.archived === true); }
         catch (e) { this.send(c, { t: "error", code: "archive", message: (e as Error).message, session: msg.session }); }
@@ -502,7 +518,7 @@ export class HostServer {
     const s = this.opts.sessions;
     switch (op.op) {
       case "upload": {
-        if (!s.has(op.session) || !/^[\w-]{1,100}$/.test(op.uploadId) || typeof op.data !== "string" || op.data.length > BLOB_CHUNK_CHARS || !/^[A-Za-z0-9+/=]*$/.test(op.data)) throw new Error("Invalid attachment chunk.");
+        if (!s.has(op.session) || !/^[\w-]{1,100}$/.test(op.uploadId) || typeof op.data !== "string" || op.data.length > BLOB_CHUNK_CHARS || /[^A-Za-z0-9+/=]/.test(op.data)) throw new Error("Invalid attachment chunk.");
         for (const [key, value] of this.uploads) if (this.now() - value.at > 300_000) this.uploads.delete(key);
         const key = `${c.clientId}/${op.session}/${op.uploadId}`;
         if (!this.uploads.has(key) && this.uploads.size >= 16) throw new Error("Too many unfinished uploads. Try again later.");
@@ -512,7 +528,12 @@ export class HostServer {
         if (data.length > Math.ceil(ATTACHMENT_CAP / 3) * 4) { this.uploads.delete(key); throw new Error("Attachment exceeds 8 MB."); }
         if (!op.done) { this.uploads.set(key, { data, at: this.now() }); return null; }
         this.uploads.delete(key);
-        if (!data || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data) || Buffer.from(data, "base64").length > ATTACHMENT_CAP) throw new Error("Invalid attachment bytes.");
+        // Every chunk already passed the alphabet check. Scan for padding once, without a
+        // repeated regex group (which overflows V8's stack on ordinary multi-MB uploads).
+        const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+        const paddingAt = data.indexOf("=");
+        const bytes = data.length / 4 * 3 - padding;
+        if (!data || data.length % 4 !== 0 || (paddingAt !== -1 && paddingAt !== data.length - padding) || bytes > ATTACHMENT_CAP) throw new Error("Invalid attachment bytes.");
         return { blob: s.log(op.session).image(data) };
       }
       case "models": {

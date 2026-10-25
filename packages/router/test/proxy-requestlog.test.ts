@@ -18,7 +18,7 @@ import { createCa, createLeaf } from "../src/x509.ts";
 
 const noClaudeCodeCredentialReaders = { keychain: () => null, credentialsFile: () => null };
 
-async function rig() {
+async function rig(options: { respond?: (res: http.ServerResponse) => void; healthLimit?: number } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-log-metadata-"));
   const ca = createCa({ cn: "request log test" });
   const leaf = createLeaf({ host: "localhost", caCertPem: ca.certPem, caKeyPem: ca.keyPem });
@@ -36,6 +36,7 @@ async function rig() {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
       seen.push(body);
       seenAuth.push(req.headers.authorization);
+      if (options.respond) { options.respond(res); return; }
       if ((body.tools as { type?: string }[] | undefined)?.some((tool) => tool.type === "image_generation")) {
         if (imageStatus !== 200) {
           res.writeHead(imageStatus, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "image backend failed" } }));
@@ -90,9 +91,11 @@ async function rig() {
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const agent = new https.Agent({ ca: ca.certPem, lookup: (_host, _options, callback) => callback(null, [{ address: "127.0.0.1", family: 4 }]) });
   const observed = new ObservedClaudeCodeAuth();
-  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health: new UpstreamHealth(() => 100, () => {}), upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
+  const trips: number[] = [];
+  const health = new UpstreamHealth(() => options.healthLimit ?? 100, (n) => trips.push(n));
+  const proxy = new Proxy({ config: () => cfg, home, requests, claudeCodeCredentialReaders: noClaudeCodeCredentialReaders, observedClaudeCodeAuth: observed, agentDir: path.join(home, "agents"), certs: new CertStore(home), log: new Logger(path.join(home, "router.log"), 1e6, 1, false), health, upstreamPort: (native.address() as net.AddressInfo).port, upstreamAgent: agent });
   await proxy.listen();
-  const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: () => void, headers: Record<string, string> = {}) => {
+  const send = async (model: string, extra: Record<string, unknown> = {}, pathname = "/v1/messages", beforeSend?: (socket: tls.TLSSocket) => void, headers: Record<string, string> = {}) => {
     const socket = net.connect(port, "127.0.0.1");
     await new Promise<void>((resolve) => socket.once("connect", resolve));
     socket.write("CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n");
@@ -110,21 +113,106 @@ async function rig() {
         if (text.endsWith("\r\n0\r\n\r\n") || (length && Buffer.byteLength(text.slice(split + 4)) >= Number(length[1]))) resolve(text);
       });
       secure.once("end", () => resolve(text));
+      secure.once("close", () => resolve(text));
       secure.once("error", reject);
     });
-    beforeSend?.();
+    beforeSend?.(secure);
     const headerLines = Object.entries(headers).map(([name, value]) => `${name}: ${value}`).join("\r\n");
     secure.write(`POST ${pathname} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}${headerLines ? `\r\n${headerLines}` : ""}\r\n\r\n${body}`);
     const text = await result;
     secure.destroy();
     return { text, record: requests.list(1)[0]! };
   };
-  return { cfg, seen, seenAuth, home, requests, proxy, observed, send, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
+  return { cfg, seen, seenAuth, home, requests, proxy, observed, send, health, trips, failBackend: () => { responseStatus = 400; }, failImage: () => { imageStatus = 500; }, stop: async () => {
     proxy.close(); agent.destroy();
     await Promise.all([backend, native].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     fs.rmSync(home, { recursive: true, force: true });
   } };
 }
+
+test("repeated client cancellations before native headers never trip upstream health", { timeout: 5000 }, async () => {
+  let received = Promise.withResolvers<http.ServerResponse>();
+  const r = await rig({ respond: (res) => received.resolve(res), healthLimit: 2 });
+  try {
+    for (let i = 0; i < 3; i++) {
+      let client: tls.TLSSocket | undefined;
+      const sent = r.send("claude-native", {}, "/v1/messages", (socket) => { client = socket; });
+      const upstream = await received.promise;
+      const closed = new Promise<void>((resolve) => upstream.once("close", resolve));
+      client!.destroy();
+      await sent;
+      await closed;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(r.health.consecutiveFailures, 0);
+      assert.deepEqual(r.trips, []);
+      assert.equal(r.requests.list(10).length, i + 1);
+      assert.equal(r.requests.list(1)[0]!.status, "aborted");
+      assert.equal(r.requests.list(1)[0]!.ok, false);
+      received = Promise.withResolvers<http.ServerResponse>();
+    }
+    assert.equal(r.proxy.stats.inFlight, 0);
+    assert.equal(r.proxy.stats.completed, 0);
+    assert.equal(r.proxy.stats.failed, 3);
+  } finally { await r.stop(); }
+});
+
+for (const [model, provider] of [["claude-native", "anthropic"], ["chat-test", "chat"], ["responses-test", "responses"], ["gpt-test", "gpt"], ["gemini-test", "google"]] as const) {
+  test(`cancelling ${model} after stream start is recorded once as aborted, not successful`, { timeout: 5000 }, async () => {
+    const received = Promise.withResolvers<http.ServerResponse>();
+    const r = await rig({ respond: (res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(model === "chat-test"
+        ? 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+        : model === "responses-test" || model === "gpt-test"
+          ? 'data: {"type":"response.created","response":{}}\n\ndata: {"type":"response.output_item.added","item":{"id":"msg_partial","type":"message"}}\n\ndata: {"type":"response.output_text.delta","item_id":"msg_partial","delta":"partial"}\n\n'
+          : model === "gemini-test"
+            ? 'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'
+            : 'data: {"type":"message_start","message":{"id":"msg_partial"}}\n\n');
+      received.resolve(res);
+    } });
+    try {
+      const exhaustion = { reason: "quota_exhausted" as const, at: Date.now(), until: Date.now() + 60_000 };
+      r.proxy.providerHealth.observe(provider, 429, exhaustion);
+      const started = Promise.withResolvers<void>();
+      let client: tls.TLSSocket | undefined;
+      const sent = r.send(model, {}, "/v1/messages", (socket) => {
+        client = socket;
+        socket.once("data", () => started.resolve());
+      });
+      const upstream = await received.promise;
+      const closed = new Promise<void>((resolve) => upstream.once("close", resolve));
+      await started.promise;
+      client!.destroy();
+      await sent;
+      await closed;
+      while (r.proxy.stats.inFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      assert.equal(r.requests.list(10).length, 1);
+      const record = r.requests.list(1)[0]!;
+      assert.equal(record.ok, false);
+      assert.equal(record.status, "aborted");
+      assert.equal(record.stopReason, undefined);
+      assert.equal(r.proxy.stats.completed, 0);
+      assert.equal(r.proxy.stats.failed, 1);
+      assert.equal(r.health.consecutiveFailures, 0);
+      if (provider === "chat" || provider === "responses") {
+        assert.deepEqual(r.proxy.providerHealth.snapshot()[provider], exhaustion, "a cancelled OpenAI turn must not clear an earlier provider exhaustion as a success");
+      }
+    } finally { await r.stop(); }
+  });
+}
+
+test("real native connection resets still count toward upstream health", { timeout: 5000 }, async () => {
+  const r = await rig({ respond: (res) => res.destroy(), healthLimit: 2 });
+  try {
+    for (let i = 0; i < 2; i++) {
+      const { text, record } = await r.send("claude-native");
+      assert.match(text, /^HTTP\/1\.1 502/);
+      assert.equal(record.ok, false);
+    }
+    assert.equal(r.health.consecutiveFailures, 2);
+    assert.deepEqual(r.trips, [2]);
+  } finally { await r.stop(); }
+});
 
 test("proxy finish correlates every translated message and records actual service tiers", async () => {
   const r = await rig();

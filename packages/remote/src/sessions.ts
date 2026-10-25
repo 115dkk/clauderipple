@@ -277,7 +277,7 @@ export class Sessions {
   /** Slash commands per session (its init event), and the latest seen anywhere for sessions with none yet. */
   private commandLists = new Map<string, { at: number; list: string[] }>();
   private lastCommands: string[] = [];
-  private figuresAt = new Map<string, number>();
+  private figuresAt = new Map<string, { at: number; model: string; epoch: string; cliId: string }>();
   private lastFigures = new Map<string, string>();
   /** model → the context window the SDK reported for it (`modelUsage`), learned from host sessions and
    * reused for Mac sessions on the same model, which never report one. Kept in `context-windows.json`. */
@@ -651,8 +651,12 @@ export class Sessions {
       if (wasRunning === undefined && firstSights >= FIRST_SIGHTS_PER_POLL) continue;
       this.macTurns.set(s.id, running);
       if (wasRunning === undefined) firstSights++;
-      if (wasRunning === undefined || wasRunning || running) {
-        const forced = wasRunning === undefined || (wasRunning && !running);
+      const previous = this.figuresAt.get(s.id);
+      // First materialization is not a replacement: no older snapshot existed to invalidate.
+      if (previous && !previous.epoch) previous.epoch = s.epoch;
+      const changed = previous && (previous.model !== s.model || s.epoch && previous.epoch !== s.epoch);
+      if (wasRunning === undefined || wasRunning || running || changed) {
+        const forced = wasRunning === undefined || (wasRunning && !running) || !!changed;
         void this.readFigures(s.id, record?.sdkSessionId ?? s.id, s.model, record?.contextWindow ?? null, forced, true);
       }
     }
@@ -752,9 +756,14 @@ export class Sessions {
     for (const s of sessions) {
       if (s.origin !== "desktop" || this.records.has(s.id) || this.archived.has(s.id)) continue;
       seen.add(s.id);
-      const permission = s.state === "waiting" || s.attention?.reason === "permission";
+      const permission = s.state === "waiting" || s.pending > 0;
       const previous = this.macStates.get(s.id);
       this.macStates.set(s.id, { state: s.state, permission });
+      const current = this.attention.get(s.id) ?? null;
+      // List-only desktop sessions have no record whose setState would retire the previous
+      // turn's attention. Use the same transition contract without generating startup alerts.
+      const next = nextAttention(current, previous?.state ?? "stopped", s.state, this.now());
+      if (next !== current) { this.setAttention(s.id, next); this.opts.onSessions(); }
       if (!previous) continue;
       if (permission && !previous.permission) this.alert(s.id, { kind: "permission" });
       else if (previous.state === "running" && s.state === "idle") {
@@ -1162,7 +1171,7 @@ export class Sessions {
   /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session.
    * A resend that finds a pending receipt left from before a host restart throws
    * OutcomeUnknownError instead of running again: the first attempt may or may not have run. */
-  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
+  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
     const key = `create:${req.clientMsgId}`;
     if (this.receipts.status(key) === "completed") {
@@ -1180,7 +1189,7 @@ export class Sessions {
     // A resend can arrive while the first create is still checking the folder; both get the one session.
     let pending = this.creating.get(req.clientMsgId);
     if (!pending) {
-      pending = this.createNew(req).then(
+      pending = this.createNew(req, title).then(
         id => { this.receipts.complete(key, id); return id; },
         (error: unknown) => { this.receipts.abandon(key); throw error; },
       ).finally(() => this.creating.delete(req.clientMsgId));
@@ -1189,7 +1198,7 @@ export class Sessions {
     return pending;
   }
 
-  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
+  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     const mode = req.permissionMode ?? "auto";
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const isolation = req.isolation ?? "local";
@@ -1203,7 +1212,7 @@ export class Sessions {
       : path.resolve(req.cwd);
     if (!(await isDirectory(cwd))) throw new Error(`not a folder: ${cwd}`);
     const now = this.now();
-    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
+    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: title?.trim() || oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
@@ -1231,7 +1240,9 @@ export class Sessions {
     if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
       const s = this.list().find(s => s.id === id);
       if (!s) throw new Error("no such session");
-      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" });
+      // This is a fresh conversation, not an SDK /clear: carry its label separately from the
+      // empty prompt so persistence, the first SDK launch and the desktop handoff all retain it.
+      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" }, s.title);
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
@@ -1258,6 +1269,9 @@ export class Sessions {
   }
 
   private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[]): string | Promise<string> {
+    // Stop closes this query's inbox before awaiting the SDK. Reject before recording the
+    // user/seen id or converting attachments, so a retry can enter the next query exactly once.
+    if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
@@ -1368,6 +1382,7 @@ export class Sessions {
     this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
     for (const outcome of this.settings.replay(r.id)) this.append(r.id, { kind: "settings", ...outcome });
     r.desktopBridge = true;
+    r.contextWindow = null;
     r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
     this.save();
     this.opts.onSessions();
@@ -1391,7 +1406,10 @@ export class Sessions {
       const meta = this.desktop.metadataOf(transcript);
       if (meta && (meta.title !== r.title || meta.model && meta.model !== r.model)) {
         r.title = meta.title;
-        if (meta.model && !r.confirmedSettings?.model) r.model = meta.model;
+        if (meta.model && !r.confirmedSettings?.model) {
+          if (r.model !== meta.model) r.contextWindow = null;
+          r.model = meta.model;
+        }
         this.save();
         this.opts.onSessions();
       }
@@ -1854,6 +1872,7 @@ export class Sessions {
       const r = this.records.get(id)!;
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_model", model: m.model });
       if (this.shuttingDown) throw new OutcomeUnknownError();
+      if (r.model !== model) r.contextWindow = null;
       r.model = model;
       r.confirmedSettings = { ...r.confirmedSettings, model };
       this.save();
@@ -1890,6 +1909,7 @@ export class Sessions {
       if (this.live.get(id) !== live) throw new Error("The session stopped before its model changed. Try again.");
       await live.query.setModel(m.model);
     }
+    if (changedModel) r.contextWindow = null;
     r.model = model;
     r.effort = effort;
     this.save();
@@ -2112,8 +2132,8 @@ export class Sessions {
         }
         const ok = msg.subtype === "success" && msg.is_error !== true;
         const usage = msg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
-        const win = usage ? Object.values(usage).map((u) => u.contextWindow ?? 0).find((w) => w > 0) : undefined;
-        if (win) r.contextWindow = win;
+        const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(r.model))?.[1].contextWindow;
+        r.contextWindow = typeof win === "number" && Number.isFinite(win) && win > 0 ? win : null;
         for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
         const error = ok ? undefined : this.failureText(r.id, String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"))).slice(0, 500);
         this.append(r.id, { kind: "result", ok, ...(error ? { error } : {}), ms: typeof msg.duration_ms === "number" ? msg.duration_ms : this.now() - live.turnStart, turns: typeof msg.num_turns === "number" ? msg.num_turns : 0 });
@@ -2289,16 +2309,26 @@ export class Sessions {
   /**
    * One read of the router's records for a session, appended when it changed. `id` is the host's id
    * for it, `cliId` the id Claude Code sends the router (`X-Claude-Code-Session-Id`). A Mac session
-   * has no window of its own, so the one learned for its model stands; none known stays null.
+   * has no window of its own. The learned SDK value is only a legacy native fallback: RouterClient
+   * prefers provider-bound router metadata, and never uses that cache for an unknown routed model.
    * `mac`: a session the router has no record of yet (an old one, from before it started) says nothing.
    */
   private async readFigures(id: string, cliId: string, model: string, contextWindow: number | null, force: boolean, mac: boolean): Promise<void> {
-    const last = this.figuresAt.get(id) ?? 0;
-    if (!force && this.now() - last < 15_000) return;
-    this.figuresAt.set(id, this.now());
+    const epoch = () => this.records.has(id) ? this.log(id).epoch : this.desktop?.snapshot(id)?.epoch ?? "";
+    const scope = { at: this.now(), model, epoch: epoch(), cliId };
+    const last = this.figuresAt.get(id);
+    const changed = last && (last.model !== model || last.epoch !== scope.epoch || last.cliId !== cliId);
+    if (!force && !changed && scope.at - (last?.at ?? 0) < 15_000) return;
+    const hadFigures = this.lastFigures.has(id);
+    if (changed) { this.lastFigures.delete(id); this.desktopFigures.delete(id); }
+    this.figuresAt.set(id, scope);
     let figures: Figures;
     try { figures = await this.opts.router.figures(cliId, model, contextWindow ?? this.windows.get(windowKey(model)) ?? null); } catch { return; }
-    if (mac && !figures.route && !figures.effort && !figures.workers.length) return;
+    // A replaced log/model or a newer read owns the next event, not this late reply.
+    if (this.shuttingDown || this.figuresAt.get(id) !== scope || epoch() !== scope.epoch) return;
+    const current = this.records.get(id);
+    if (current && (current.model !== model || (current.sdkSessionId ?? id) !== cliId)) return;
+    if (mac && !hadFigures && !figures.route && !figures.effort && !figures.workers.length) return;
     const { at: _at, ...rest } = figures;
     const key = JSON.stringify(rest);
     if (this.lastFigures.get(id) === key) return;

@@ -2,6 +2,7 @@
 // mockups in docs/media/remote are the shipped UI, not a drawing of it.
 import type { BrowseResult, Effort, FolderEntry, HostInfo, ProviderGroup, SessionSummary, Text, ImagePart } from "../src/protocol.ts";
 import type { LinkStatus } from "./conn.ts";
+import type { OutboxEntry, PreservedItem } from "./outbox.ts";
 import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
 import { t, lang } from "./i18n.ts";
@@ -16,7 +17,27 @@ export interface Draft { cwd: string | null; model: string | null; effort: Effor
 
 export type Sheet =
   | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean }
-  | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null };
+  | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
+  /** Unsent messages kept from earlier connections: what is preserved, what this computer already
+   * holds after an import, and any stored text that could not be read (never parsed, never sent). */
+  | {
+      kind: "recovery";
+      step: "list" | "confirm";
+      /** readable messages kept for other connections, not yet copied here; `key` is the opaque handle */
+      candidates: PreservedItem[];
+      /** messages already copied into this computer's queue; they wait to be sent by hand */
+      recovered: OutboxEntry[];
+      /** messages this computer holds because their outcome (or creation) is unconfirmed */
+      held: OutboxEntry[];
+      raw: string[];
+      picked: Set<string>;
+      /** index of the raw value shown in full, if any */
+      shown: number | null;
+      unavailable: boolean;
+    };
+
+/** What the home screen says about kept messages before the sheet is opened. */
+export interface RecoverySummary { messages: number; raw: number; unavailable: boolean };
 
 export interface UI {
   now: number;
@@ -37,6 +58,8 @@ export interface UI {
   push?: PushAvail | null;
   /** the person said "later" to the notification card */
   pushLater?: boolean;
+  /** messages kept from earlier connections (a pairing change, or a replaced host key) */
+  recovery?: RecoverySummary | null;
 }
 
 // ---- small helpers -----------------------------------------------------------------------------
@@ -122,7 +145,7 @@ export function homeMain(ui: UI): string {
   const empty = ui.sessions.length === 0
     ? `<div class="empty">${ripple("calm", 84)}<b>${esc(t("home.empty.title"))}</b><p>${esc(t("home.empty.body", { host: hostName(ui) }))}</p><div class="hint">${icon.down(22)}</div></div>`
     : "";
-  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sections.map(g => sec(g.name, g.sessions)).join("")}${empty}${pushCard(ui)}<div style="height:12px"></div>`;
+  return `<div class="lt">${esc(t("home.title"))}</div>${banner(ui)}${sections.map(g => sec(g.name, g.sessions)).join("")}${empty}${recoveryCard(ui)}${pushCard(ui)}<div style="height:12px"></div>`;
 }
 
 /** Below the list, near the thumb: turn notifications on, or what it takes on this phone. Gone once on or dismissed. */
@@ -137,6 +160,16 @@ export function pushCard(ui: UI): string {
 
 export function homeTop(ui: UI): string {
   return `${linkPill(ui)}<span class="spacer"></span><button class="icon-btn" data-act="settings" aria-label="${esc(t("a11y.settings"))}">${icon.gear(21)}</button>`;
+}
+
+/** Kept messages from an earlier connection: where their words can be read and copied, never sent by themselves. */
+export function recoveryCard(ui: UI): string {
+  const r = ui.recovery;
+  if (!r) return "";
+  const line = r.unavailable
+    ? t("outbox.storageUnavailable")
+    : t("home.pending", { n: r.messages + r.raw });
+  return `<button class="banner recovery" data-act="recovery-open">${icon.file(22)}<div class="txt"><b>${esc(t("recovery.title"))}</b>${esc(line)}</div>${icon.chevron(18)}</button>`;
 }
 
 export function chips(ui: UI): string {
@@ -215,6 +248,15 @@ export function item(it: TimelineItem, ui: UI): string {
     case "start":
       return `<div class="start">${esc(t("history.start"))}</div>`;
     case "user": {
+      if (it.error !== undefined) {
+        // The host refused it: the person's words and the host's own reason stay on screen, and the
+        // controls act on the outbox entry the item is keyed by (`u<clientMsgId>`). Retry sends the
+        // same id again, which the host acknowledges instead of running twice; the pencil takes the
+        // words back into the composer, where a message is changed. A message the app is holding
+        // refuses the pencil with its own explanation instead (outbox.waiting).
+        const id = it.key.slice(1);
+        return `<div class="msg-user failed">${esc(it.text)}${images(it.images)}<div class="q bad">${icon.x(13)}<span>${esc(it.error)}</span></div><div class="q act"><button class="btn ghost" data-act="retry-send" data-id="${esc(id)}">${esc(t("conn.retryNow"))}</button><button class="icon-btn" data-act="edit-send" data-id="${esc(id)}" aria-label="${esc(t("a11y.editMessage"))}">${icon.pencil(16)}</button></div></div>`;
+      }
       const q = it.queued ? `<div class="q">${icon.clock(13)}${esc(it.queued === "pending" ? t("queue.pending") : t("queue.sending"))}</div>` : "";
       return `<div class="msg-user${it.queued ? " queued" : ""}">${esc(it.text)}${images(it.images)}${q}</div>`;
     }
@@ -306,6 +348,32 @@ export function sheet(ui: UI): string {
     const target = s.browse?.path ?? ui.draft.cwd;
     const foot = target ? `<div class="sfoot"><div class="path">${esc(shortPath(target, ui.home))}</div><button class="btn primary" data-act="choose-folder" data-path="${esc(target)}">${esc(t("folder.here"))}</button></div>` : "";
     return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("folder.title"))}<div class="filter">${icon.search(18)}<input id="folder-filter" placeholder="${esc(t("folder.filter"))}" value="${esc(s.filter)}" autocomplete="off"></div><div class="sbody">${recentHtml}${browse}</div>${foot}</div>`;
+  }
+  if (s.kind === "recovery") {
+    // Everything the person can read or copy of what was saved for another connection (or an
+    // earlier pairing of this one), plus what this computer is already holding after an import.
+    // Nothing here goes out on its own: checkboxes choose copies, and the copies wait.
+    if (s.unavailable) {
+      return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("recovery.title"))}<div class="sbody"><div class="note">${esc(t("outbox.storageUnavailable"))}</div></div><div class="sfoot"><button class="btn primary" data-act="close-sheet">${esc(t("a11y.close"))}</button></div></div>`;
+    }
+    const row = (entry: OutboxEntry, why: string, acts: string): string =>
+      `<div class="opt kept full"><div class="body"><div class="t1">${esc(entry.text)}</div><div class="t2">${esc(why)}</div></div><div class="acts">${acts}</div></div>`;
+    const copyButton = (id: string): string => `<button class="btn ghost" data-act="recovery-copy" data-id="${esc(id)}">${esc(t("recovery.copy"))}</button>`;
+    const held = s.held.map((entry) => row(entry,
+      entry.hold === "unknown_outcome" ? t("outbox.unknown") : t("outbox.waiting"),
+      `<button class="btn ghost" data-act="retry-send" data-id="${esc(entry.clientMsgId)}">${esc(t("conn.retryNow"))}</button>${copyButton(entry.clientMsgId)}`)).join("");
+    const recovered = s.recovered.map((entry) => row(entry, t("recovery.noAutomaticSend"),
+      (entry.create ? `<button class="btn ghost" data-act="recovery-send" data-id="${esc(entry.clientMsgId)}">${esc(t("composer.send"))}</button>` : "") + copyButton(entry.clientMsgId))).join("");
+    const pick = (item: PreservedItem): string => {
+      const on = s.picked.has(item.key);
+      return `<div class="kept full"><button class="opt full${on ? " on" : ""}" data-act="recovery-pick" data-id="${esc(item.key)}" aria-pressed="${on}"><div class="body"><div class="t1">${esc(item.entry.text)}</div><div class="t2">${esc(relTime(item.entry.at, ui.now))}</div></div>${on ? `<span class="tick">${icon.check(20)}</span>` : ""}</button><div class="acts">${copyButton(item.key)}</div></div>`;
+    };
+    const unreadable = s.raw.map((raw, index) => `<div class="opt kept full"><div class="body"><div class="t1">${esc(t("outbox.unreadable"))}</div>${s.shown === index ? `<pre class="raw">${esc(raw)}</pre>` : ""}</div><div class="acts"><button class="btn ghost" data-act="recovery-raw" data-id="${index}">${esc(t("recovery.raw"))}</button>${copyButton(`raw:${index}`)}</div></div>`).join("");
+    // The host name in the confirmation is the one the phone knows; esc() keeps it text, never markup.
+    const foot = s.step === "confirm"
+      ? `<div class="note">${esc(t("recovery.confirm", { host: hostName(ui) }))}</div><div class="note">${esc(t("recovery.noAutomaticSend"))}</div><button class="btn primary" data-act="recovery-import">${esc(t("recovery.import"))}</button>`
+      : `<button class="btn primary" data-act="recovery-import" ${s.picked.size ? "" : "disabled"}>${esc(t("recovery.import"))}</button>`;
+    return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog">${head(t("recovery.title"))}<div class="sbody"><div class="note">${esc(t("recovery.body"))}</div>${held}${recovered}${s.candidates.map(pick).join("")}${unreadable}</div><div class="sfoot">${foot}</div></div>`;
   }
   const chosen = s.groups.flatMap((g) => g.models).find((m) => m.model === s.model);
   const recentIds = s.recent.filter((id) => s.groups.some((g) => g.models.some((m) => m.model === id && m.usable))).slice(0, 3);

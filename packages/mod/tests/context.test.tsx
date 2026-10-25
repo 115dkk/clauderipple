@@ -235,6 +235,8 @@ test('register.tsx draws the pane from the session\'s summary breakdown and coun
     const breakdown = e.breakdown === 'full' ? { ...BREAKDOWN, totalTokens: 81_300 } : BREAKDOWN
     return { value: { startedAt: NOW, context: { window: 200_000, ...(e.breakdown ? { breakdown } : {}) }, rateLimits: [] } }
   })
+  // The precise count's key names the model it counted (register.tsx countContext).
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.close', () => ({ value: undefined }))

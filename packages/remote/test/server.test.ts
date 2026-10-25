@@ -2,6 +2,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -10,10 +11,11 @@ import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promi
 import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
-import { FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
+import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
+import { FrameAssembler } from "../src/chunks.ts";
 import { HostServer } from "../src/server.ts";
-import type { ServerOptions } from "../src/server.ts";
+import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
 import { VISIBLE_MS } from "../src/push.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
@@ -204,6 +206,184 @@ test("refresh freezes deferred internal queue drains before they start a new tur
   await f.sessions.pollDesktop();
   assert.equal(f.fake.users.length, 1);
   assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.id, "after-freeze");
+});
+
+class MemoryPeer extends EventEmitter implements ServerPeer {
+  readonly OPEN = 1;
+  readyState = 1;
+  bufferedAmount = 0;
+  readonly frames: HostMsg[] = [];
+  send(text: string): void { this.frames.push(JSON.parse(text) as HostMsg); }
+  close(): void { this.terminate(); }
+  terminate(): void { this.readyState = 3; this.emit("close"); }
+  receive(msg: ClientMsg): void { this.emit("message", JSON.stringify(msg)); }
+  async take<T extends HostMsg["t"]>(kind: T): Promise<Extract<HostMsg, { t: T }>> {
+    await nextTick();
+    const index = this.frames.findIndex(frame => frame.t === kind);
+    assert.notEqual(index, -1, `expected ${kind}, received ${JSON.stringify(this.frames)}`);
+    return this.frames.splice(index, 1)[0] as Extract<HostMsg, { t: T }>;
+  }
+}
+
+/**
+ * Drains a peer's chunk frames through the shared decoder until `want` matches. `sizes` collects
+ * each chunk's actual wire size, so a test can prove every slice fits FRAME_CAP.
+ */
+async function chunkedFrame(peer: MemoryPeer, want: (msg: HostMsg) => boolean, sizes: number[] = []): Promise<HostMsg> {
+  const assembler = new FrameAssembler(Date.now);
+  for (let attempt = 0; attempt < 500; attempt++) {
+    await nextTick();
+    for (const frame of peer.frames.splice(0)) {
+      if (frame.t !== "chunk") { if (want(frame)) return frame; continue; }
+      sizes.push(Buffer.byteLength(JSON.stringify(frame)));
+      const result = assembler.push(frame);
+      assert.notEqual(result.kind, "error", result.kind === "error" ? result.reason : "");
+      if (result.kind !== "assembled") continue;
+      const msg = JSON.parse(result.text) as HostMsg;
+      if (want(msg)) return msg;
+    }
+  }
+  throw new Error("no matching frame arrived");
+}
+
+/** A query that starts a turn and never ends it, so queued messages stay queued. */
+function holdingQuery(users: string[]) {
+  const hold = Promise.withResolvers<void>();
+  const queryFn: QueryFn = params => ({
+    async *[Symbol.asyncIterator]() {
+      for await (const user of params.prompt) {
+        users.push(String(user.message.content));
+        await hold.promise;
+      }
+    },
+    interrupt: async () => {}, setModel: async () => {}, setPermissionMode: async () => {}, close: () => { hold.resolve(); },
+  });
+  return { queryFn, hold };
+}
+
+/** No listener, real SDK, router, credentials or desktop sessions; only owned temporary storage. */
+async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn) {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-memory-host-"));
+  const sessions = new Sessions({ dir, router, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
+    onEvent: () => {}, onSessions: () => {} });
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
+    hostName: "test", version: "test", recentCli: async () => [] });
+  const peer = new MemoryPeer();
+  t.after(async () => {
+    await server.close();
+    for (const session of sessions.list()) sessions.stop(session.id);
+    await nextTick();
+    sessions.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const id = await sessions.create({ clientMsgId: "empty", cwd: dir, model: "test", effort: null, text: "" });
+  server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "memory-phone" });
+  await peer.take("ready");
+  const upload = async (data: string, uploadId = "attachment", chunkSize = 60_000) => {
+    let response: Extract<HostMsg, { t: "res" }>;
+    let offset = 0;
+    do {
+      const chunk = data.slice(offset, offset + chunkSize);
+      const done = offset + chunk.length === data.length;
+      const reqId = `upload-${uploadId}-${offset}`;
+      peer.receive({ t: "req", reqId, op: { op: "upload", session: id, uploadId, offset, data: chunk, done } });
+      response = await peer.take("res");
+      assert.equal(response.reqId, reqId);
+      if (!response.ok) return response;
+      if (!done) assert.equal(response.data, null);
+      offset += chunk.length;
+    } while (offset < data.length);
+    return response;
+  };
+  return { dir, sessions, peer, id, upload, server };
+}
+
+for (const size of [4 * 1024 * 1024, ATTACHMENT_CAP - 2, ATTACHMENT_CAP - 1, ATTACHMENT_CAP]) {
+  test(`attachment upload accepts ${size} bytes and preserves the entire blob`, async t => {
+    const f = await memoryHost(t);
+    const bytes = Buffer.alloc(size, 173);
+    const data = bytes.toString("base64");
+    const response = await f.upload(data);
+    assert.ok(response.ok, response.ok ? "" : response.error);
+    const result = response.data as { blob: string };
+    assert.equal(f.sessions.blob(f.id, result.blob), data);
+    assert.deepEqual(Buffer.from(f.sessions.blob(f.id, result.blob)!, "base64"), bytes);
+  });
+}
+
+test("attachment validation rejects malformed characters, lengths and padding without storing a blob", async t => {
+  const f = await memoryHost(t);
+  const malformed = ["", "A", "AA", "AAA", "AAAAA", "=AAA", "A=AA", "AA=A", "A===", "====", "AA==AAAA", "AAA=AAAA",
+    "AA==\n", "AAAA\r\n", "AAAA ", "AA-_", "AAéA", "AA\u0000A", "ＡAAA", "AA===" ];
+  for (const data of malformed) {
+    const response = await f.upload(data, "malformed", 3);
+    assert.equal(response.ok, false, JSON.stringify(data));
+    if (!response.ok) assert.match(response.error, /Invalid attachment (chunk|bytes)\./);
+  }
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions", f.id, "blobs")), false);
+  for (const data of ["AA==", "AAA=", "AAAA", "+/8="]) {
+    const response = await f.upload(data, "retry", 3);
+    assert.ok(response.ok);
+    assert.equal(f.sessions.blob(f.id, (response.data as { blob: string }).blob), data);
+  }
+});
+
+for (const suffix of ["=AAA", "AA=A", "A==="]) test(`attachment upload rejects large malformed padding ${suffix} without overflowing`, async t => {
+  const f = await memoryHost(t);
+  const response = await f.upload("A".repeat(4 * 1024 * 1024) + suffix);
+  assert.equal(response.ok, false);
+  if (!response.ok) assert.equal(response.error, "Invalid attachment bytes.");
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions", f.id, "blobs")), false);
+  assert.equal((await f.upload("AA==")).ok, true, "a rejected final chunk releases its upload id");
+});
+
+for (const excess of [1, 2]) test(`attachment upload rejects ${excess} bytes over the decoded cap`, async t => {
+  const f = await memoryHost(t);
+  const response = await f.upload(Buffer.alloc(ATTACHMENT_CAP + excess).toString("base64"));
+  assert.equal(response.ok, false);
+  if (!response.ok) assert.equal(response.error, excess === 1 ? "Invalid attachment bytes." : "Attachment exceeds 8 MB.");
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions", f.id, "blobs")), false);
+  assert.equal((await f.upload("AAA=")).ok, true);
+});
+
+test("a send racing Stop receives a correlated error, then its retry is acknowledged and delivered once", async t => {
+  const control = Promise.withResolvers<void>();
+  const endTurn = Promise.withResolvers<void>();
+  const users: string[] = [];
+  let interrupts = 0;
+  const f = await memoryHost(t, params => ({
+    async *[Symbol.asyncIterator]() {
+      for await (const user of params.prompt) {
+        users.push(String(user.message.content));
+        if (users.length === 1) await endTurn.promise;
+        yield { type: "result", subtype: "success" };
+      }
+    },
+    interrupt: () => { interrupts++; return control.promise; },
+    setModel: async () => {}, setPermissionMode: async () => {}, close: () => { endTurn.resolve(); },
+  }));
+  await f.sessions.send(f.id, "first", "first");
+  await nextTick();
+  f.peer.receive({ t: "interrupt", session: f.id, reqId: "stop" });
+  const send: ClientMsg = { t: "send", session: f.id, clientMsgId: "racing", text: "keep this" };
+  f.peer.receive(send);
+  const error = await f.peer.take("error");
+  assert.equal(error.code, "send");
+  assert.equal(error.clientMsgId, "racing");
+  assert.equal(error.session, f.id);
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false);
+  assert.equal(interrupts, 1);
+  assert.deepEqual(users, ["first"]);
+  control.resolve();
+  const stopped = await f.peer.take("res");
+  assert.equal(stopped.reqId, "stop");
+  assert.equal(stopped.ok, true);
+  f.peer.receive(send);
+  f.peer.receive(send);
+  for (let i = 0; i < 2; i++) assert.deepEqual(await f.peer.take("ack"), { t: "ack", session: f.id, clientMsgId: "racing" });
+  assert.deepEqual(users, ["first", "keep this"]);
 });
 
 test("attachment upload is chunked, checks offsets, and sends image blocks", async t => {
@@ -468,6 +648,120 @@ test("set_mode returns correlated success/error and broadcasts the mode event", 
   assert.equal((await peer.take('res', m => m.reqId === 'mode-error')).msg.ok, false);
 });
 
+test("a legal queue over one frame arrives chunked, exact, and edit and send read the original", async t => {
+  const users: string[] = [];
+  const { queryFn, hold } = holdingQuery(users);
+  const f = await memoryHost(t, queryFn);
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "busy", text: "hold the turn" });
+  await f.peer.take("ack");
+  const korean = "가".repeat(70_000); // 210,000 UTF-8 bytes
+  const ascii = "a".repeat(140_000);
+  f.sessions.enqueue(f.id, "queued-0", korean);
+  f.sessions.enqueue(f.id, "queued-1", ascii);
+  f.sessions.holdQueue(f.id);
+  const chunked = new MemoryPeer();
+  f.server.connected(chunked);
+  chunked.receive({ t: "hello", token, clientId: "chunked", features: ["chunkedFrames"] });
+  const sizes: number[] = [];
+  const ready = await chunkedFrame(chunked, msg => msg.t === "ready", sizes) as Extract<HostMsg, { t: "ready" }>;
+  assert.ok(sizes.length > 1, "the list did not fit one frame");
+  assert.ok(sizes.every(size => size <= FRAME_CAP), `${Math.max(...sizes)} bytes`);
+  const listed = ready.sessions.find(session => session.id === f.id)!;
+  assert.deepEqual(listed.queue?.map(row => row.id), ["queued-0", "queued-1"]);
+  assert.equal(listed.queue?.[0]?.text, korean, "the whole text, not a preview");
+  assert.equal(listed.queue?.[1]?.text, ascii);
+  assert.equal(listed.queueHeld, true);
+  // The sessions broadcast takes the same path.
+  f.server.onSessions();
+  t.mock.timers.tick(150);
+  const broadcast = await chunkedFrame(chunked, msg => msg.t === "sessions") as Extract<HostMsg, { t: "sessions" }>;
+  assert.equal(broadcast.sessions.find(session => session.id === f.id)?.queue?.[1]?.text, ascii);
+  // A single row whose JSON escaping outgrows a frame is chunked too and comes back whole.
+  const escapes = "\u0000".repeat(44_000);
+  f.sessions.enqueue(f.id, "escaped", escapes);
+  chunked.receive({ t: "req", reqId: "edit", op: { op: "queue_remove", session: f.id, id: "escaped" } });
+  const edit = await chunkedFrame(chunked, msg => msg.t === "res" && msg.reqId === "edit") as Extract<HostMsg, { t: "res" }>;
+  assert.ok(edit.ok);
+  if (edit.ok) assert.equal((edit.data as { text: string }).text, escapes);
+  // Sending hands the stored text to the model unchanged.
+  chunked.receive({ t: "req", reqId: "send-now", op: { op: "queue_send", session: f.id, id: "queued-1" } });
+  const sent = await chunkedFrame(chunked, msg => msg.t === "res" && msg.reqId === "send-now") as Extract<HostMsg, { t: "res" }>;
+  assert.ok(sent.ok, sent.ok ? "" : sent.error);
+  hold.resolve();
+  for (let i = 0; i < 50 && !users.includes(ascii); i++) await nextTick();
+  assert.ok(users.includes(ascii), "the queued message reached the SDK whole");
+});
+
+test("an old client keeps the old wire while a requesting one gets the same list chunked", async t => {
+  const { queryFn } = holdingQuery([]);
+  const f = await memoryHost(t, queryFn);
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "busy", text: "hold" });
+  await f.peer.take("ack");
+  f.sessions.enqueue(f.id, "q0", "a".repeat(140_000));
+  f.sessions.enqueue(f.id, "q1", "b".repeat(140_000));
+  const old = new MemoryPeer();
+  f.server.connected(old);
+  old.receive({ t: "hello", token, clientId: "old" });
+  assert.equal((await old.take("error")).code, "too_large");
+  assert.equal(old.frames.some(frame => frame.t === "ready" || frame.t === "chunk"), false, "no chunk is sent unasked");
+  const fresh = new MemoryPeer();
+  f.server.connected(fresh);
+  fresh.receive({ t: "hello", token, clientId: "new", features: ["chunkedFrames"] });
+  const ready = await chunkedFrame(fresh, msg => msg.t === "ready") as Extract<HostMsg, { t: "ready" }>;
+  assert.equal(ready.sessions.find(session => session.id === f.id)?.queue?.length, 2);
+});
+
+test("small answers stay one frame for a client that asked for chunks", async t => {
+  const f = await memoryHost(t);
+  const peer = new MemoryPeer();
+  f.server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "small", features: ["chunkedFrames"] });
+  const ready = await peer.take("ready");
+  assert.ok(Buffer.byteLength(JSON.stringify(ready)) <= FRAME_CAP);
+  assert.equal(peer.frames.some(frame => frame.t === "chunk"), false);
+});
+
+test("many sessions with full queues still arrive chunked, in order and exact", async t => {
+  const { queryFn } = holdingQuery([]);
+  const f = await memoryHost(t, queryFn);
+  const whole = ["가".repeat(70_000), "b".repeat(140_000)];
+  const ids: string[] = [];
+  for (let n = 0; n < 4; n++) {
+    const id = await f.sessions.create({ clientMsgId: `many-${n}`, cwd: f.dir, model: "test", effort: null, text: "" });
+    f.sessions.send(id, `hold-${n}`, "hold");
+    f.sessions.enqueue(id, `m${n}-0`, whole[0]!);
+    f.sessions.enqueue(id, `m${n}-1`, whole[1]!);
+    ids.push(id);
+  }
+  const peer = new MemoryPeer();
+  f.server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "many", features: ["chunkedFrames"] });
+  const sizes: number[] = [];
+  const ready = await chunkedFrame(peer, msg => msg.t === "ready", sizes) as Extract<HostMsg, { t: "ready" }>;
+  assert.ok(sizes.length > 1);
+  assert.ok(sizes.every(size => size <= FRAME_CAP));
+  assert.equal(ready.sessions.length, ids.length + 1, "the fixture's own session plus four");
+  for (const [n, id] of ids.entries()) {
+    const session = ready.sessions.find(candidate => candidate.id === id);
+    assert.deepEqual(session?.queue?.map(row => row.id), [`m${n}-0`, `m${n}-1`]);
+    assert.equal(session?.queue?.[0]?.text, whole[0]);
+    assert.equal(session?.queue?.[1]?.text, whole[1]);
+  }
+});
+
+test("a message past the chunk bound is not split; the existing too_large answer stands", async t => {
+  const sessions = { list: () => [], groups: () => undefined, watchAttached: () => {}, pollDesktop: async () => {}, pollQueued: () => {}, prepareRefresh: () => true } as never;
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
+    hostName: "x".repeat(CHUNK_MESSAGE_MAX + 1), version: "0", recentCli: async () => [] });
+  await server.listen();
+  t.after(() => server.close());
+  const peer = new MemoryPeer();
+  server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "oversized", features: ["chunkedFrames"] });
+  assert.equal((await peer.take("error")).code, "too_large");
+  assert.equal(peer.frames.some(frame => frame.t === "chunk"), false);
+});
+
 test("queued desktop sends catch a one-second idle gap with no phone and no full or network poll", async t => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const f = bridgeFixture(t);
@@ -640,20 +934,26 @@ test("static serves HTML, strips app TypeScript, exposes only the shared protoco
   assert.match(index.type, /^text\/html/);
   assert.match(index.body, /<!doctype html>/i);
   const source = fs.readFileSync(path.join(webDir, "app.ts"), "utf8");
-  assert.ok(source.includes("submit(text: string): void"), "Known TypeScript signature must exist in the source");
+  assert.ok(source.includes("submit(text: string): boolean"), "Known TypeScript signature must exist in the source");
   const app = await get(f.port, "/app.ts");
   assert.equal(app.status, 200);
   assert.match(app.type, /^text\/javascript/);
   assert.match(app.body, /submit\(text\s*\)\s*\{/);
-  assert.ok(!app.body.includes("submit(text: string): void"));
+  assert.ok(!app.body.includes("submit(text: string): boolean"));
   assert.ok(!app.body.includes(": string"));
   const protocol = await get(f.port, "/src/protocol.ts");
   assert.equal(protocol.status, 200);
   assert.match(protocol.type, /^text\/javascript/);
   assert.match(protocol.body, /export const FRAME_CAP/);
   assert.ok(!protocol.body.includes("export interface"));
-  // The relay's encryption and tweetnacl are the other shared files; the service worker is an app file.
+  // The relay's encryption, the chunk codec and tweetnacl are the other shared files; the service
+  // worker is an app file.
   assert.match((await get(f.port, "/src/e2ee.ts")).body, /export function phoneHello/);
+  const chunks = await get(f.port, "/src/chunks.ts");
+  assert.equal(chunks.status, 200);
+  assert.match(chunks.type, /^text\/javascript/);
+  assert.match(chunks.body, /export class FrameAssembler/, "the browser link loads the same decoder");
+  assert.ok(!chunks.body.includes("export interface"));
   const naclJs = await get(f.port, "/vendor/nacl-fast.min.js");
   assert.equal(naclJs.status, 200);
   assert.match(naclJs.type, /^text\/javascript/);
@@ -712,6 +1012,49 @@ test("presence: a phone that reported visible within 30 s counts as looking; hid
   assert.deepEqual(nativeRemoved, ["test-client"]);
   peer.ws.close();
   await waitFor(() => !looking());
+});
+
+test("seen requires fresh visible presence and an attached session, including reconnects", async t => {
+  let now = 1_000_000;
+  const f = await fixture(t, { now: () => now });
+  const id = await f.create();
+  const peer = await f.auth();
+  const reason = () => f.sessions.summaryOf(id)?.attention?.reason;
+  peer.send({ t: "attach", session: id });
+  await peer.take("events");
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(reason(), "finished");
+  assert.equal(f.server.sessionSeenRecently(id), false, "a background attach is not a look");
+  peer.send({ t: "presence", visible: true });
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(reason(), undefined);
+  f.sessions.markUnread(id);
+  peer.send({ t: "presence", visible: false });
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(reason(), "finished", "an older phone's background seen is ignored");
+  const reconnected = await f.auth();
+  reconnected.send({ t: "attach", session: id });
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), "finished");
+  reconnected.send({ t: "presence", visible: true });
+  await reconnected.barrier();
+  now += VISIBLE_MS;
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), "finished", "a stale presence cannot clear attention");
+  reconnected.send({ t: "presence", visible: true });
+  reconnected.send({ t: "detach", session: id });
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), "finished", "a different focused screen cannot acknowledge this session");
+  reconnected.send({ t: "attach", session: id });
+  reconnected.send({ t: "seen", session: id });
+  await reconnected.barrier();
+  assert.equal(reason(), undefined);
 });
 
 test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {
@@ -904,6 +1247,18 @@ test("a send orphaned by a host restart answers outcome_unknown over the socket 
   await waitFor(() => fake.users.length === 2);
 });
 
+// B16: a message the host will not take must name itself, or the phone cannot keep it for a retry.
+// `no_session` itself is only ever answered to `attach` (no message involved); a send to a session
+// that is gone comes back as `send`, which carries the clientMsgId.
+test("a send to a session that no longer exists names the message so the phone can keep it", { timeout: 4500 }, async t => {
+  const f = await fixture(t);
+  const peer = await f.auth();
+  peer.send({ t: "send", session: "gone-session", clientMsgId: "keep-me", text: "이 지시는 사라지면 안 됩니다" });
+  const error = await peer.take("error", m => m.clientMsgId === "keep-me");
+  assert.deepEqual(error.msg, { t: "error", code: "send", message: "no such session", clientMsgId: "keep-me", session: "gone-session" });
+  assert.equal(f.fake.users.length, 0, "nothing ran, so only the person's retry (same id) should send it");
+});
+
 test("answering the same approval twice resolves once; the second answer gets 이미 처리됨", { timeout: 4500 }, async t => {
   const f = await fixture(t);
   await f.create();
@@ -922,6 +1277,7 @@ test("a looked-at session suppresses push for 180 s; other sessions are unaffect
   const id = await f.create();
   const peer = await f.auth();
   assert.equal(f.server.sessionSeenRecently(id), false);
+  peer.send({ t: "presence", visible: true });
   peer.send({ t: "attach", session: id });
   await peer.take("events");
   await peer.barrier();

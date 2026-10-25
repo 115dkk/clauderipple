@@ -10,12 +10,13 @@ import { readUpdateSeen, rememberUpdate, updateNotice, TrayReplacement } from ".
 const main = fs.readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const source = main.slice(main.indexOf("let updateSeen:"), main.indexOf("async function checkForUpdate"));
 export function updateHarness(sourceText: string, home: string) {
-  const boundary = { calls: 0, notifications: 0, quits: 0, locks: 0, fail: true };
+  const boundary = { calls: 0, notifications: 0, quits: 0, locks: 0, fail: true, visible: false, args: [] as string[], env: {} as Record<string, string | undefined> };
   const create = new Function("deps", `
     const { fs, path, home, readUpdateSeen, rememberUpdate, updateNotice, TrayReplacement, boundary } = deps;
     let updating = false, routerUpdateUntil = 0, updateNotification = null, availableUpdate = null;
     const app = { getVersion: () => '1.0.0', releaseSingleInstanceLock() {}, requestSingleInstanceLock() { boundary.locks++; return true; }, quit() { boundary.quits++; } };
-    const runCliResult = async () => { boundary.calls++; return { ok: !boundary.fail, output: 'launch refused' }; };
+    const runCliResult = async (args, timeout, env) => { boundary.calls++; boundary.args = args; boundary.env = env || {}; return { ok: !boundary.fail, output: 'launch refused' }; };
+    const windowVisible = () => boundary.visible === true;
     const Notification = class { static isSupported() { return true; } on() {} show() { boundary.notifications++; } };
     const L = { autoUpdated: v => v, autoAvailable: v => v }, notifyIcon = () => undefined;
     ${stripTypeScriptTypes(sourceText)}
@@ -25,6 +26,18 @@ export function updateHarness(sourceText: string, home: string) {
   return { handle, boundary };
 }
 
+test("a replacement tray shows the dashboard only when it was already open", async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "tray-visible-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const { handle, boundary } = updateHarness(source, home);
+  boundary.fail = false;
+  boundary.visible = true;
+  await handle({ version: "1.1.0", autoUpdate: { kind: "script", lastUpdatedFrom: "1.0.0", lastUpdatedTo: "1.1.0", lastUpdatedAt: 1000 } });
+  assert.deepEqual(boundary.args, ["tray", "--at-login"]);
+  assert.equal(boundary.env.CLAUDERIPPLE_APP_SHOW, "1");
+  assert.equal(boundary.quits, 1);
+});
+
 test("real tray polling retries failed replacement without duplicating notification or completing before launch", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "tray-retry-"));
@@ -33,6 +46,9 @@ test("real tray polling retries failed replacement without duplicating notificat
   const status = { version: "1.1.0", autoUpdate: { kind: "script", lastUpdatedFrom: "1.0.0", lastUpdatedTo: "1.1.0", lastUpdatedAt: 1000 } };
   await assert.rejects(handle(status), /launch refused/);
   assert.equal(boundary.calls, 1);
+  // B14: the replacement stays in the tray; only a dashboard that was up is shown again.
+  assert.deepEqual(boundary.args, ["tray", "--at-login"]);
+  assert.equal(Object.hasOwn(boundary.env, "CLAUDERIPPLE_APP_SHOW"), false);
   assert.equal(boundary.quits, 0);
   assert.equal(boundary.locks, 1);
   assert.equal(boundary.notifications, 1);

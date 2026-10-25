@@ -45,7 +45,10 @@ const logFile = process.env.CLAUDERIPPLE_NO_LOGFILE ? null : path.join(home, "lo
 let log: Logger | null = null;
 // Created after listen(); the config callback below runs before that and finds it null.
 let tunnels: RemoteTunnels | null = null;
+/** The last config read's validation errors: the status and readiness report them (G-D14). */
+let configErrors: string[] = [];
 const store = new ConfigStore(undefined, (c, errors) => {
+  configErrors = [...errors];
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
   log?.info(`config loaded: ${Object.keys(c.routes).length} routes, ${Object.keys(c.providers).length} providers, direct=${c.direct.map((d) => d.prefix).join(",") || "-"}`);
   // Keep the Codex app's model list in step with the models we serve (only while `codex on` is in effect).
@@ -248,6 +251,7 @@ proxy
     const adminDeps: AdminDeps = {
       autoUpdater,
       config: () => store.get(),
+      configErrors: () => configErrors,
       configFile: configPath(),
       log: log!,
       stats: () => proxy.stats,

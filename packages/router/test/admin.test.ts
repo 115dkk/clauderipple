@@ -45,6 +45,7 @@ async function withAdmin(
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     modelCatalog?: () => Promise<unknown>;
     modelScoresFetch?: typeof fetch;
+    configErrors?: NonNullable<AdminDeps["configErrors"]>;
     chatgpt?: NonNullable<AdminDeps["chatgpt"]>;
     google?: NonNullable<AdminDeps["google"]>;
     opencodeUsage?: NonNullable<AdminDeps["opencodeUsage"]>;
@@ -796,6 +797,22 @@ test("/readyz separates readiness from liveness and names each problem", async (
     const status = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { readiness: { ready: boolean; problems: string[] } };
     assert.deepEqual(status.readiness, body);
   });
+});
+
+// G-D14: the first read adopts an invalid config so the router can serve the fix, but that is not
+// a healthy router: readiness said "ready" over a config whose routes could not exist.
+test("a config that failed validation is reported as a problem, with its errors", async () => {
+  const errors = ["route x: fallback 0 names unknown provider \"q\""];
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const status = (await (await fetch(`${base()}:${port}/api/status`)).json()) as {
+      readiness: { ready: boolean; problems: string[] }; config: { errors: string[] };
+    };
+    assert.equal(status.readiness.ready, false);
+    assert.ok(status.readiness.problems.includes("config"), status.readiness.problems.join(","));
+    assert.deepEqual(status.config.errors, errors);
+    const ready = await fetch(`${base()}:${port}/readyz`);
+    assert.equal(ready.status, 503);
+  }, { configErrors: () => errors });
 });
 
 test("GET /api/status returns a snapshot", async () => {

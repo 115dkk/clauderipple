@@ -59,6 +59,22 @@ export function modelReason(prompt: string): ModelReason | null {
   const quote = pair?.slice(1).find(Boolean)?.trim()
   return { source: line[1]!.toLowerCase() as ModelReason['source'], text, ...(quote ? { quote } : {}) }
 }
+/**
+ * A rule reason's minimal form: a concrete file identifier first and a non-empty rule after it
+ * ("memory/translation.md — draft translations run on Opus"). It reads the line's shape only —
+ * never whether the file exists or what it says. An empty "Model reason: rule" used to pass and
+ * named a model with no source at all (2026-10-25).
+ */
+export function ruleReason(text: string): boolean {
+  const trimmed = text.trim()
+  const at = trimmed.search(/\s/)
+  if (at <= 0) return false
+  const file = trimmed.slice(0, at).replace(/[,;]+$/, '')
+  // A path segment or an extension: "memory/x.md", "docs/specs/a.md", "C:\rules\x.md".
+  if (!/[/\\]|\.[A-Za-z0-9]{1,8}$/.test(file)) return false
+  // " — ", " - ", ": " or a plain space; the rule itself must hold something.
+  return trimmed.slice(at).replace(/^\s*[—–:,-]\s*/, '').trim().length > 0
+}
 /** A prompt without its model-reason line, which is for the mod only. */
 export function withoutReason(prompt: string): string {
   return prompt.replace(new RegExp(REASON.source + '\\n?', 'gim'), '').replace(/^\s*\n/, '')

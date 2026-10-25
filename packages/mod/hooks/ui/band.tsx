@@ -253,15 +253,15 @@ export function limitFact(frame: Frame, view: DashboardView): Fact | null {
   return { key: 'limit', width, value, tail, card: [t(frame.lang, 'band.limitAlt', { window: limitName(limit.kind, frame.lang), value: Math.round(limit.percent) + '%', reset: resets ? ', ' + resets : '' })] }
 }
 
-/** The last route in `room` cells, or the router's notice; null when there is neither or no room. */
+/** The router's notice when it has one, else the last route, in `room` cells; null when there is neither or no room. */
 export function routeFact(frame: Frame, view: DashboardView, room: number, onPress: () => void): Fact | null {
   const rich = isRich(frame)
   if (view.hide.includes('route') || room < (rich ? RICH_ROUTE_MIN : ROUTE_MIN)) return null
+  // The notice is the router's state now; a route is a record of an earlier request, and it must
+  // not stand for a router that has stopped answering (2026-10-25).
+  if (view.notice) return { key: 'route', width: room, ...(rich ? { grow: true as const } : {}), value: { text: clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), room), dim: true } }
   const r = view.route
-  if (!r) {
-    if (!view.notice) return null
-    return { key: 'route', width: room, ...(rich ? { grow: true as const } : {}), value: { text: clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), room), dim: true } }
-  }
+  if (!r) return null
   const glyph: Run = r.resent ? { text: '↻', dim: true } : r.ok ? { text: rich ? '→' : '↳', dim: true } : { text: '✕', color: BAD }
   // The desktop says what the figure is ("hit 100%"); a bare percentage beside a model name read as anything.
   const hit = r.cachePct !== undefined ? (rich ? t(frame.lang, 'band.hit', { percent: r.cachePct }) : r.cachePct + '%') : ''
@@ -701,19 +701,20 @@ export function routeName(model: string): string {
   return modelName(model.replace(/\s*\(.*\)$/, ''))
 }
 
-/** The last route: where it went (the provider's dot), the model, its cache hit; the way into the log. */
+/** The router's notice when it has one, else the last route: where it went, its model and cache hit; the way into the log. */
 function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions, room: number): RenderNode {
   const { Box, Text } = el
   if (view.hide.includes('route')) return ''
-  const r = view.route
-  if (!r) {
-    if (!view.notice) return ''
+  // The router's state now outranks a record of an earlier request (2026-10-25).
+  if (view.notice) {
     return (
       <Box key="fact-route" position="relative" flexShrink={1} minWidth={0} overflow="hidden">
         <Text {...lookOf(frame).mute} wrap="truncate">{view.notice.replace(/^ClaudeRipple:\s*/, '')}</Text>
       </Box>
     )
   }
+  const r = view.route
+  if (!r) return ''
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   const k = lookOf(frame)
   const name = routeName(r.model)

@@ -20,7 +20,7 @@ import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tai
 import { mainWindow, openWindow, sendToWindow, windowVisible, type Bounds } from "./window";
 
 type QuotaWindow = { used_percent?: number; window_minutes?: number };
-type Quota = { rate_limits?: { primary?: QuotaWindow | null; secondary?: QuotaWindow | null } };
+type Quota = { plan_type?: string; rate_limits?: { primary?: QuotaWindow | null; secondary?: QuotaWindow | null } };
 
 type Status = {
   version: string;
@@ -28,7 +28,7 @@ type Status = {
   /** Reported from 0.1.2 on; an older router leaves it out. */
   runtime?: { node: string; router: string | null; startedAt: string };
   /** Reported from 0.1.2 on: whether requests can actually go through, and what is in the way. */
-  readiness?: { ready: boolean; problems: ("settings" | "upstream" | "picker-ca" | "picker-proxy" | `provider:${string}`)[] };
+  readiness?: { ready: boolean; problems: ("settings" | "upstream" | "picker-ca" | "picker-proxy" | "config" | `provider:${string}`)[] };
   listen: { host: string; port: number };
   adminPort: number;
   stats: { started: number; completed: number; failed: number; inFlight: number };
@@ -37,7 +37,7 @@ type Status = {
   providers: Record<string, { url?: string; reachable: boolean; type?: string }>;
   settings: { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string };
   cliVersion: string;
-  chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; signedIn?: Record<string, boolean> };
+  chatgpt?: { quota: Record<string, Quota | null>; auth: Record<string, string>; signedIn?: Record<string, boolean> };
   /** Reported from 0.6.0 on, where a Claude subscription provider is configured. */
   claude?: { accounts: { id: string; label: string; quota: Quota }[] };
   picker?: { enabled: boolean; hosts: string[]; last: unknown };
@@ -58,7 +58,6 @@ const STRINGS = {
     inFlight: "in flight",
     connected: "Claude Desktop connected",
     notConnected: "Claude Desktop not connected",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% this week`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Restart Router",
     startRouter: "Start Router",
@@ -91,6 +90,7 @@ const STRINGS = {
       : code === "upstream" ? "Anthropic is unreachable"
       : code === "picker-ca" ? "picker mode: certificate not trusted"
       : code === "picker-proxy" ? "picker mode: Claude Desktop proxy not set"
+      : code === "config" ? "the config file has errors"
       : code.startsWith("provider:") ? `provider ${code.slice(9)} unreachable`
       : code,
     about: "About ClaudeRipple",
@@ -144,7 +144,6 @@ const STRINGS = {
     inFlight: "진행 중",
     connected: "Claude Desktop 연결됨",
     notConnected: "Claude Desktop 연결 안 됨",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 이번 주 ${percent}% 사용`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "리플 재시작",
     startRouter: "리플 시작",
@@ -177,6 +176,7 @@ const STRINGS = {
       : code === "upstream" ? "Anthropic 연결 안 됨"
       : code === "picker-ca" ? "피커 모드: 인증서 신뢰 필요"
       : code === "picker-proxy" ? "피커 모드: Claude Desktop 프록시 설정 필요"
+      : code === "config" ? "설정 파일에 오류가 있음"
       : code.startsWith("provider:") ? `프로바이더 ${code.slice(9)} 연결 안 됨`
       : code,
     about: "ClaudeRipple 정보",
@@ -230,7 +230,6 @@ const STRINGS = {
     inFlight: "进行中",
     connected: "Claude Desktop 已连接",
     notConnected: "Claude Desktop 未连接",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 本周已用 ${percent}%`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "重启路由服务",
     startRouter: "启动路由服务",
@@ -263,6 +262,7 @@ const STRINGS = {
       : code === "upstream" ? "无法连接 Anthropic"
       : code === "picker-ca" ? "选择器模式：证书未被信任"
       : code === "picker-proxy" ? "选择器模式：未设置 Claude Desktop 代理"
+      : code === "config" ? "设置文件有错误"
       : code.startsWith("provider:") ? `无法连接供应商 ${code.slice(9)}`
       : code,
     about: "关于 ClaudeRipple",
@@ -316,7 +316,6 @@ const STRINGS = {
     inFlight: "処理中",
     connected: "Claude Desktop 接続済み",
     notConnected: "Claude Desktop 未接続",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 今週 ${percent}% 使用`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "ルーターを再起動",
     startRouter: "ルーターを起動",
@@ -349,6 +348,7 @@ const STRINGS = {
       : code === "upstream" ? "Anthropicに接続できません"
       : code === "picker-ca" ? "ピッカーモード：証明書が信頼されていません"
       : code === "picker-proxy" ? "ピッカーモード：Claude Desktopのプロキシが未設定です"
+      : code === "config" ? "設定ファイルにエラーがあります"
       : code.startsWith("provider:") ? `プロバイダー ${code.slice(9)} に接続できません`
       : code,
     about: "ClaudeRippleについて",
@@ -402,7 +402,6 @@ const STRINGS = {
     inFlight: "en curso",
     connected: "Claude Desktop conectado",
     notConnected: "Claude Desktop no conectado",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% esta semana`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Reiniciar router",
     startRouter: "Iniciar router",
@@ -435,6 +434,7 @@ const STRINGS = {
       : code === "upstream" ? "No se puede acceder a Anthropic"
       : code === "picker-ca" ? "modo selector: el certificado no es de confianza"
       : code === "picker-proxy" ? "modo selector: proxy de Claude Desktop sin configurar"
+      : code === "config" ? "el archivo de ajustes tiene errores"
       : code.startsWith("provider:") ? `no se puede acceder al proveedor ${code.slice(9)}`
       : code,
     about: "Acerca de ClaudeRipple",
@@ -488,7 +488,6 @@ const STRINGS = {
     inFlight: "em andamento",
     connected: "Claude Desktop conectado",
     notConnected: "Claude Desktop não conectado",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% nesta semana`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Reiniciar roteador",
     startRouter: "Iniciar roteador",
@@ -521,6 +520,7 @@ const STRINGS = {
       : code === "upstream" ? "A Anthropic está inacessível"
       : code === "picker-ca" ? "modo seletor: certificado não confiável"
       : code === "picker-proxy" ? "modo seletor: proxy do Claude Desktop não configurado"
+      : code === "config" ? "o arquivo de configuração tem erros"
       : code.startsWith("provider:") ? `provedor ${code.slice(9)} inacessível`
       : code,
     about: "Sobre o ClaudeRipple",
@@ -789,6 +789,7 @@ async function startRouter(): Promise<string> {
 
 function healthy(s: Status | null): "ok" | "warn" | "down" {
   if (!s) return "down";
+  if (s.readiness) return s.readiness.ready ? "ok" : "warn";
   const proxyOk = s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;
   const providersOk = Object.values(s.providers).every((p) => p.reachable !== false);
   if (!proxyOk || s.consecutiveUpstreamFailures > 0) return "warn";
@@ -932,11 +933,11 @@ function runCli(args: string[]): Promise<string> {
  * one object must not be mixed with warnings on stderr. With `timeoutMs` a CLI that hangs (a
  * supervisor that never answers) is ended rather than left holding a button down.
  */
-function runCliResult(args: string[], timeoutMs = 0): Promise<{ ok: boolean; output: string; stdout: string; timedOut: boolean }> {
+function runCliResult(args: string[], timeoutMs = 0, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ ok: boolean; output: string; stdout: string; timedOut: boolean }> {
   const { node, env, cli } = cliPaths();
   return new Promise((resolve) => {
     // An update prints npm's and the installer's own lines; the default 1MB buffer is not for that.
-    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home }, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(node, [cli, ...args], { env: { ...process.env, ...env, CLAUDERIPPLE_HOME: home, ...extraEnv }, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
       const timedOut = !!err && timeoutMs > 0 && (err as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
       resolve({ ok: !err, output: `${stdout}${stderr}${err ? `\n${err.message}` : ""}`.trim(), stdout: String(stdout), timedOut });
     });
@@ -1166,9 +1167,12 @@ function loadUpdateSeen(): UpdateSeen {
 }
 
 async function relaunchTray(): Promise<void> {
+  // The replacement starts as this one did: the CLI's own `tray` opens the window, which brought a
+  // hidden dashboard to the front after every automatic update (B14). A window that was up stays up.
+  const visible = windowVisible();
   app.releaseSingleInstanceLock();
   try {
-    const result = await runCliResult(["tray"], 30_000);
+    const result = await runCliResult(["tray", "--at-login"], 30_000, visible ? { CLAUDERIPPLE_APP_SHOW: "1" } : {});
     if (!result.ok) throw new Error(result.output || "could not relaunch tray");
   } catch (error) {
     // Keep a functioning tray if its replacement could not start, including spawn/timeout failures.
@@ -1331,7 +1335,14 @@ function windowsText(quota: Quota | undefined): string {
   const limits = quota?.rate_limits;
   return [limits?.primary, limits?.secondary]
     .filter((w): w is QuotaWindow => !!w && typeof w.used_percent === "number")
-    .map((w) => `${w.window_minutes === 300 ? L.window5h : L.windowWeek} ${Math.round(w.used_percent!)}%`)
+    .map((w) => {
+      const minutes = w.window_minutes;
+      const period = minutes === 300 ? L.window5h : minutes === 10080 ? L.windowWeek
+        : typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0
+          ? new Intl.NumberFormat(uiLang(), { style: "unit", unit: "minute", unitDisplay: "short" }).format(minutes)
+          : "?";
+      return `${period} ${Math.round(w.used_percent!)}%`;
+    })
     .join(" · ");
 }
 
@@ -1344,10 +1355,9 @@ function render(): void {
   const direct = shown === "direct";
   tray.setImage(icon(shown));
   const s = last;
-  const quota = Object.values(s?.chatgpt?.quota ?? {}).find((q) => q) as { plan_type?: string; rate_limits?: { primary?: { used_percent?: number; reset_after_seconds?: number } } } | undefined;
-  const quotaLine = quota?.rate_limits?.primary
-    ? L.percentOfWeekUsed(quota.rate_limits.primary.used_percent ?? "?", quota.plan_type ?? "")
-    : null;
+  const quota = Object.values(s?.chatgpt?.quota ?? {}).find((q) => q);
+  const quotaWindows = windowsText(quota ?? undefined);
+  const quotaLine = quotaWindows ? `${["ChatGPT", quota?.plan_type].filter(Boolean).join(" ")} · ${quotaWindows}` : null;
   // Two status lines (clickable: they open the window), then only the actions that need the tray.
   // Everything else lives in the GUI window. Disabled items render grey, so the status lines stay enabled.
   const connected = !!s && s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;

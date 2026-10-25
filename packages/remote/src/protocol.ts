@@ -9,6 +9,24 @@
 
 /** Largest WebSocket frame either side sends, in bytes of UTF-8 JSON (Paseo #2610: 8 MB killed the socket). */
 export const FRAME_CAP = 256 * 1024;
+/**
+ * A host frame over FRAME_CAP is split for a client that advertised `chunkedFrames`: a `chunk`
+ * frame carries one slice of the original frame's UTF-8 bytes, base64, and the shared Link joins
+ * them and hands the whole JSON text to the normal handling. The original bytes are never cut,
+ * escaped or rewritten, so a queue, edit answer or session list arrives exactly as it was built.
+ * Chunks are only ever sent to a client that asked; every other client keeps the one-frame wire.
+ *
+ * The size cap is fixed so a broken or hostile sender cannot grow the phone's memory without
+ * bound: past it the host takes today's `too_large` path instead of chunking.
+ */
+export const CHUNK_MESSAGE_MAX = 16 * 1024 * 1024;
+/** Bytes a chunk frame spends on keys, its id, index and numbers, before the base64 payload. */
+export const CHUNK_OVERHEAD = 1024;
+/** Payload bytes per chunk: the largest base64 that still leaves FRAME_CAP room for the envelope. */
+export const CHUNK_DATA_BYTES = Math.floor((FRAME_CAP - CHUNK_OVERHEAD) / 4) * 3;
+/** A partial assembly with no chunk for this long is dropped; the link then reconnects. */
+export const CHUNK_TIMEOUT_MS = 30_000;
+
 /** A string field longer than this is moved out of the event into a blob fetched on demand. */
 export const INLINE_CAP = 32 * 1024;
 /** Client pings this often; either side calls the link stale after STALE_MS of silence. */
@@ -255,7 +273,7 @@ export interface HostInfo { name: string; version: string; routerOk: boolean; ro
 // ---- client → host --------------------------------------------------------------------
 
 /** Per-connection opt-in. Missing/non-array lists mean no features; unknown entries are ignored. */
-export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles"] as const;
+export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames"] as const;
 export type ClientFeature = typeof CLIENT_FEATURES[number];
 
 export type ClientMsg =
@@ -368,7 +386,16 @@ export interface DiffFile {
 
 // ---- host → client --------------------------------------------------------------------
 
+/**
+ * One slice of a host frame too large for FRAME_CAP, sent only to a client whose hello listed
+ * `chunkedFrames`. `data` is base64 of the original frame's UTF-8 bytes at `index` of `total`;
+ * `bytes` is the whole original length, the same on every slice. The shared Link assembles these
+ * before any other handling (chunks.ts), so the app never sees this type.
+ */
+export interface ChunkFrame { t: "chunk"; id: string; index: number; total: number; bytes: number; data: string }
+
 export type HostMsg =
+  | ChunkFrame
   | { t: "ready"; host: HostInfo; sessions: SessionSummary[]; groups?: string[] | undefined }
   | { t: "pong"; n: number }
   | { t: "denied"; reason: "token" }

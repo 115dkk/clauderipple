@@ -213,6 +213,80 @@ test("ResponseUsageTap observes only the message id and reported tier, across sp
   assert.deepEqual(absent.finish(), { usage: { input: 1, cached: 0, output: 0 } });
 });
 
+function tapJson(chunks: Buffer[]): ReturnType<ResponseUsageTap["finish"]> {
+  const tap = new ResponseUsageTap("application/json", undefined);
+  for (const chunk of chunks) tap.feed(chunk);
+  return tap.finish();
+}
+
+test("ResponseUsageTap reads the top-level usage, not one nested in a tool input (B12)", () => {
+  const body = {
+    id: "msg_top",
+    content: [
+      {
+        type: "tool_use",
+        id: "toolu_1",
+        name: "probe",
+        input: {
+          usage: { input_tokens: 999, cache_read_input_tokens: 888, cache_creation_input_tokens: 777, output_tokens: 666, service_tier: "bogus" },
+          items: [{ usage: { input_tokens: 555, output_tokens: 444 } }],
+          note: 'quoted "usage":{"input_tokens":333,"output_tokens":222}',
+        },
+      },
+      { type: "tool_result", content: [{ type: "text", text: "plain" }] },
+    ],
+    usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 5, output_tokens: 3, service_tier: "standard" },
+  };
+  const text = JSON.stringify(body);
+  const expected = { messageId: "msg_top", servedTier: "standard", usage: { input: 10, cached: 20, cacheWrite: 5, output: 3 } };
+  // A non-streaming body often arrives whole; the nested and top-level usage share that chunk.
+  assert.deepEqual(tapJson([Buffer.from(text)]), expected);
+  assert.deepEqual(tapJson([Buffer.from(text.slice(0, 40)), Buffer.from(text.slice(40))]), expected);
+  assert.deepEqual(tapJson([...text].map((char) => Buffer.from(char))), expected);
+  // The top-level object can also precede the tool input; a later nested usage must not replace it.
+  const reordered = '{"usage":{"input_tokens":6,"output_tokens":1},"content":[{"type":"tool_use","input":{"usage":{"input_tokens":999,"output_tokens":888}}}]}';
+  assert.deepEqual(tapJson([Buffer.from(reordered)]), { usage: { input: 6, cached: 0, output: 1 } });
+});
+
+test("ResponseUsageTap does not inherit fields from a nested usage across chunks (B12)", () => {
+  const head = '{"id":"msg_x","content":[{"input":{"usage":{"input_tokens":999,"cache_read_input_tokens":888,"output_tokens":777}}}],';
+  const tail = '"usage":{"input_tokens":5,"output_tokens":2}}';
+  // The nested usage completes in the first chunk; the top-level one arrives in the next and
+  // reports no cache read, so a leaked 888 from the tool input would show.
+  assert.deepEqual(tapJson([Buffer.from(head), Buffer.from(tail)]), { messageId: "msg_x", usage: { input: 5, cached: 0, output: 2 } });
+});
+
+test("ResponseUsageTap ignores usage-shaped text inside JSON strings (B12)", () => {
+  const body = {
+    id: "msg_text",
+    content: [{ type: "text", text: 'note: "usage":{"input_tokens":999,"cache_read_input_tokens":888,"output_tokens":777}' }],
+    usage: { input_tokens: 4, output_tokens: 2 },
+  };
+  const text = JSON.stringify(body);
+  const expected = { messageId: "msg_text", usage: { input: 4, cached: 0, output: 2 } };
+  assert.deepEqual(tapJson([Buffer.from(text)]), expected);
+  assert.deepEqual(tapJson([...text].map((char) => Buffer.from(char))), expected);
+});
+
+test("ResponseUsageTap finds the top-level usage after a large tool input and survives a truncated body (B12)", () => {
+  const filler = '{"usage":{"input_tokens":999,"output_tokens":888}}' + "a".repeat(100 * 1024);
+  const body = { id: "msg_big", content: [{ type: "text", text: filler }], usage: { input_tokens: 7, cache_read_input_tokens: 8, output_tokens: 9 } };
+  const text = JSON.stringify(body);
+  assert.ok(text.length > 100 * 1024);
+  const chunks: Buffer[] = [];
+  for (let i = 0; i < text.length; i += 8192) chunks.push(Buffer.from(text.slice(i, i + 8192)));
+  assert.deepEqual(tapJson(chunks), { messageId: "msg_big", usage: { input: 7, cached: 8, output: 9 } });
+
+  assert.deepEqual(tapJson([Buffer.from('{"id":"msg_trunc","usage":{"input_tokens":12,"cache_read')]), { messageId: "msg_trunc" });
+  assert.deepEqual(tapJson([Buffer.from('{"id":"msg_trunc","content":[{"usage":{"input_tokens":12')]), { messageId: "msg_trunc" });
+});
+
+test("ResponseUsageTap reports no usage for empty, missing or non-object usage (B12)", () => {
+  assert.deepEqual(tapJson([Buffer.from("{}")]), {});
+  assert.deepEqual(tapJson([Buffer.from('{"id":"msg_only"}')]), { messageId: "msg_only" });
+  assert.deepEqual(tapJson([Buffer.from('{"id":"msg_null","usage":null}')]), { messageId: "msg_null" });
+});
+
 test("ResponseUsageTap drops an over-long SSE line whole and reads the events after it", () => {
   const tap = new ResponseUsageTap("text/event-stream", "identity");
   tap.feed(Buffer.from('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n\n'));

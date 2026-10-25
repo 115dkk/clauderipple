@@ -155,20 +155,96 @@ export function npmEnv(base: NodeJS.ProcessEnv = process.env, nodeDir = path.dir
   return out;
 }
 
+/** The Electron range the fetched tray runtime records, or null when there is no readable copy. */
+export function trayRuntimeRange(dir = trayRuntimeDir()): string | null {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
+    return pkg.dependencies?.electron ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the fetched Electron is the one this CLI asks for. An install from an older version is
+ * never updated by `npm install` of ClaudeRipple itself: the runtime lives in the home folder, not
+ * in the package (B15). A copy without the record cannot be proved current, so it is replaced.
+ */
+export function trayRuntimeMatches(range = ELECTRON_RANGE, dir = trayRuntimeDir()): boolean {
+  return trayRuntimeRange(dir) === range;
+}
+
+export type RuntimeSwap = { ok: true } | { ok: false; message: string };
+
+/**
+ * Put a fully installed staging copy at `target`, keeping the working copy until the move works.
+ * On Windows a running electron.exe holds its files: the rename then fails, and the old copy is
+ * left exactly as it was rather than half-replaced (B15).
+ */
+export function swapTrayRuntime(target: string, staging: string, backup = `${target}.old-${process.pid}`): RuntimeSwap {
+  if (!fs.existsSync(target)) {
+    try { fs.renameSync(staging, target); return { ok: true }; }
+    catch (error) { return { ok: false, message: `could not move the new Electron into ${target} (${(error as Error).message})` }; }
+  }
+  try { fs.renameSync(target, backup); }
+  catch (error) {
+    return { ok: false, message: `the running tray still holds ${target}; quit it and run the update again (${(error as Error).message})` };
+  }
+  try { fs.renameSync(staging, target); }
+  catch (error) {
+    try { fs.renameSync(backup, target); } catch { /* the old copy is where it was */ }
+    return { ok: false, message: `could not move the new Electron into ${target} (${(error as Error).message})` };
+  }
+  try { fs.rmSync(backup, { recursive: true, force: true }); } catch { /* left for the next refresh */ }
+  return { ok: true };
+}
+
+/** Staging and backup folders an interrupted refresh left behind; a live tray's copy is untouched. */
+function pruneTrayRuntimes(target = trayRuntimeDir()): void {
+  const dir = path.dirname(target);
+  const name = path.basename(target);
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const entry of entries) {
+    if (entry === name) continue;
+    if (!entry.startsWith(`${name}.new-`) && !entry.startsWith(`${name}.old-`)) continue;
+    try { fs.rmSync(path.join(dir, entry), { recursive: true, force: true }); } catch { /* in use: the next run */ }
+  }
+}
+
 /** Fetches Electron into this installation so the tray can run. Prints npm's own progress. */
-export function installTrayRuntime(): TrayStart {
-  if (electronPath()) return { ok: true, message: "✓ Electron is already installed" };
+export function installTrayRuntime(options: { refresh?: boolean } = {}): TrayStart {
+  // A refresh replaces a runtime an older ClaudeRipple fetched; without one, an existing copy is
+  // what the tray runs and is left alone.
+  if (electronPath() && (!options.refresh || trayRuntimeMatches())) return { ok: true, message: "✓ Electron is already installed" };
   const cli = npmCli();
   if (!cli) return { ok: false, message: `found no npm next to ${process.execPath}; install Electron yourself: npm install electron` };
   const target = trayRuntimeDir();
-  fs.mkdirSync(target, { recursive: true });
-  const result = spawnSync(process.execPath, [cli, "install", "--prefix", target, "--no-package-lock", "--loglevel", "error", `electron@${ELECTRON_RANGE}`], {
-    cwd: target,
+  // Into a copy of its own first: npm failing (offline, a locked file) must leave the tray runnable.
+  const staging = `${target}.new-${process.pid}`;
+  pruneTrayRuntimes(target);
+  try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* nothing to clear */ }
+  fs.mkdirSync(staging, { recursive: true });
+  const result = spawnSync(process.execPath, [cli, "install", "--prefix", staging, "--no-package-lock", "--loglevel", "error", `electron@${ELECTRON_RANGE}`], {
+    cwd: staging,
     env: npmEnv(),
     stdio: "inherit",
   });
-  if (result.status !== 0) return { ok: false, message: `npm could not install Electron into ${target}` };
+  if (result.status !== 0) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* left for the next run */ }
+    return { ok: false, message: `npm could not install Electron into ${staging}` };
+  }
+  // Resolve the binary inside the staging tree before trusting the copy over the working one.
+  if (!resolveElectron(path.join(staging, "package.json"))) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* left for the next run */ }
+    return { ok: false, message: `npm reported success but Electron is not resolvable from ${staging}` };
+  }
+  const swapped = swapTrayRuntime(target, staging);
+  if (!swapped.ok) {
+    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* left for the next run */ }
+    return { ok: false, message: swapped.message };
+  }
   return electronPath()
     ? { ok: true, message: "✓ Electron installed — start the tray with: clauderipple tray" }
-    : { ok: false, message: `npm reported success but Electron is still not resolvable from ${target}` };
+    : { ok: false, message: `Electron is still not resolvable from ${target}` };
 }

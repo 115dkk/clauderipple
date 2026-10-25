@@ -150,6 +150,8 @@ export class BridgeClient {
   private loadAuth: () => BridgeAuth;
   private cached: BridgeAuth | null = null;
   private readAt = 0;
+  /** What the last read threw, kept with `readAt` so the same failure answers requests for one window. */
+  private readFailure: { error: unknown } | null = null;
   private now: () => number;
   constructor(options: { fetch?: typeof fetch; auth?: () => BridgeAuth; now?: () => number } = {}) {
     this.fetchFn = options.fetch ?? fetch;
@@ -161,17 +163,37 @@ export class BridgeClient {
    * event loop under the 3 s state poll until relay pings timed out (2026-10-12). Kept in memory
    * and reread only near expiry or after a 401 (Claude Code refreshes the token on its own) — and
    * near or past expiry at most every AUTH_REREAD_MS: an expired login otherwise meant one keychain
-   * read per request, every poll, for as long as it stayed expired (2026-10-15).
+   * read per request, every poll, for as long as it stayed expired (2026-10-15). A read that fails
+   * outright is kept the same way — its time and the error it threw — so twenty sessions failing at
+   * the same moment read the login once and each is given that error: no invented login, and no
+   * second keychain read until the window is up (2026-10-25). A login written later (Claude Code
+   * refreshing its own, or a restarted host with a new client) is read at the next request at or
+   * after the window; a 401 drops the kept failure so the next request reads it at once.
    */
   private auth(): BridgeAuth {
     const now = this.now();
     const stale = !this.cached || this.refused || this.cached.expiresAt - now < 5 * 60_000;
-    if (stale && (!this.cached || now - this.readAt >= AUTH_REREAD_MS)) {
-      this.readAt = now;
+    // The first read is forced; after that only the window decides, including while the read fails.
+    if (stale && ((!this.cached && !this.readFailure) || now - this.readAt >= AUTH_REREAD_MS)) this.read(now);
+    if (this.readFailure) throw this.readFailure.error;
+    return this.cached!;
+  }
+  /** One read of this host's login, and the outcome kept as this client's; it is never shared. */
+  private read(now: number): void {
+    this.readAt = now;
+    this.readFailure = null;
+    try {
       this.cached = this.loadAuth();
       this.refused = false;
+    } catch (error) {
+      this.cached = null;
+      this.readFailure = { error };
     }
-    return this.cached!;
+  }
+  /** Forget the read so the next request reads the login again at once (the 401 path). */
+  private forget(): void {
+    this.cached = null;
+    this.readFailure = null;
   }
   /** The API answered 401 to the token in `cached`; cleared when the keychain is read again. */
   private refused = false;
@@ -193,7 +215,7 @@ export class BridgeClient {
       if (response.status === 401) {
         // Refused: the keychain is read again (Claude Code may have refreshed it) — at once if the
         // last read is AUTH_REREAD_MS old, else then; until then requests fail here without a call.
-        if (this.now() - this.readAt >= AUTH_REREAD_MS) this.cached = null;
+        if (this.now() - this.readAt >= AUTH_REREAD_MS) this.forget();
         else this.refused = true;
         throw new BridgeAuthError(LOGIN_REFUSED);
       }

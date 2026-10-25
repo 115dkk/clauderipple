@@ -8,6 +8,7 @@ import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promi
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
 import { reduce } from "../web/timeline.ts";
+import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
@@ -302,6 +303,45 @@ test("steer keeps the running query; interrupt closes it and withdraws unstarted
   assert.equal(f.fake.options.length, 2);
 });
 
+for (const controlFails of [false, true]) test(`sends during interrupt are rejected without receipts and retry once after control ${controlFails ? "failure" : "success"}`, async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await nextTick();
+  const first = boundary.queries[0]!;
+  assert.deepEqual(first.users.map(user => user.message.content), ["ping"]);
+  const interrupted = f.sessions.interrupt(id);
+  const outcome = controlFails ? assert.rejects(interrupted, /control failed/) : interrupted;
+  const before = f.sessions.log(id).lastSeq;
+  for (let retry = 0; retry < 2; retry++) {
+    assert.throws(() => f.sessions.send(id, "during-stop", "must not disappear"), /interrupt/i);
+    assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-stop`), null);
+    assert.equal(f.sessions.log(id).lastSeq, before, "rejection must not record a user event or poison the seen index");
+  }
+  assert.equal(await f.sessions.send(id, "create-1", "already accepted"), id, "completed retries remain idempotent during Stop");
+  await nextTick();
+  assert.deepEqual(first.users.map(user => user.message.content), ["ping"]);
+  if (controlFails) first.interruptReply.reject(new Error("control failed"));
+  else first.interruptReply.resolve();
+  await outcome;
+  assert.equal(first.closed, true);
+  assert.equal(f.sessions.summaryOf(id)?.state, "idle");
+  const sends = await Promise.all([
+    f.sessions.send(id, "during-stop", "must not disappear"),
+    f.sessions.send(id, "during-stop", "must not disappear"),
+  ]);
+  assert.deepEqual(sends, [id, id]);
+  await nextTick();
+  assert.equal(boundary.queries.length, 2);
+  assert.deepEqual(boundary.queries[1]!.users.map(user => user.message.content), ["must not disappear"]);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-stop`), "completed");
+  assert.equal(f.sessions.log(id).tail().events.filter(event => event.kind === "user" && event.clientMsgId === "during-stop").length, 1);
+  f.sessions.shutdown();
+  const { recovered, fake } = reopen(t, f);
+  assert.equal(await recovered.send(id, "during-stop", "must not disappear"), id);
+  assert.equal(fake.options.length, 0, "the accepted retry also deduplicates after restart");
+});
+
 test("phone images reach SDK blocks and files are written under cwd", async t => {
   const f = fixture(t);
   const id = await f.create();
@@ -373,18 +413,35 @@ test("SDK main and worker file deliveries share the session boundary and never d
   assert.ok(main.some(event => event.kind === "result" && event.ok));
 });
 
-test("clear and new create an empty fresh session with identical settings", async t => {
+test("clear and new preserve the title in a fresh empty session, retries and restart snapshots", async t => {
   const f = fixture(t);
   const id = await f.sessions.create({ clientMsgId: 'original', cwd: f.cwd, model: 'routed', effort: 'high', permissionMode: 'plan', text: 'ping' });
   await waitFor(() => f.sessions.summaryOf(id)?.state === 'idle');
+  const freshIds: string[] = [];
   for (const command of ['/clear', '/new']) {
     const fresh = await f.sessions.send(id, command, command);
+    freshIds.push(fresh);
     assert.notEqual(fresh, id);
     const s = f.sessions.summaryOf(fresh)!;
     assert.deepEqual([s.cwd, s.model, s.effort, s.permissionMode, s.state], [f.cwd, 'routed', 'high', 'plan', 'idle']);
+    assert.equal(s.title, 'ping');
+    assert.equal(s.attention, null);
     assert.equal(f.sessions.log(fresh).before(Number.MAX_SAFE_INTEGER).events.some(e => e.kind === 'user'), false);
     assert.equal(await f.sessions.send(id, command, command), fresh);
   }
+  assert.equal(f.fake.options.length, 1, 'clear creates metadata, not a new running query');
+  const snapshot = f.sessions.list();
+  f.sessions.shutdown();
+  const { recovered, fake } = reopen(t, f);
+  recovered.recover();
+  assert.deepEqual(recovered.list(), snapshot, 'reconnection after restart retains titles and fresh ids');
+  const fresh = await recovered.send(id, '/clear', '/clear');
+  assert.equal(fresh, freshIds[0]);
+  assert.equal(recovered.list().length, 3, 'a replayed clear does not create another session');
+  await recovered.send(fresh, 'after-clear', 'A new context');
+  await waitFor(() => fake.options.length === 1);
+  assert.equal(fake.options[0]?.title, 'ping', 'the original title reaches the SDK, not just the list');
+  assert.equal(fake.options[0]?.resume, undefined, 'clear does not resume the old conversation');
 });
 
 test("creation carries permission mode, enables bypass explicitly, and defaults to auto", async t => {
@@ -861,6 +918,25 @@ test("attention: a permission request is set, survives `seen`, and clears when t
   await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
   await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
   assert.notEqual(f.sessions.summaryOf(id)?.attention?.reason, "permission");
+});
+
+test("real host transitions classify identically in home sections and switcher glyphs", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  const state = () => {
+    const snapshot = f.sessions.list().find(s => s.id === id)!;
+    return [sessionGroup(snapshot), sidebarState(snapshot)];
+  };
+  assert.deepEqual(state(), ["working", "running"]);
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  assert.deepEqual(state(), ["input", "waiting"]);
+  f.sessions.markSeen(id);
+  assert.deepEqual(state(), ["input", "waiting"], "looking does not answer an approval");
+  await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.deepEqual(state(), ["review", "unread"]);
+  f.sessions.markSeen(id);
+  assert.deepEqual(state(), ["done", "read"]);
 });
 
 test("attention: a finished turn is marked unseen, cleared by seen, and restorable", async t => {
