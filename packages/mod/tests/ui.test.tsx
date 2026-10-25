@@ -661,7 +661,7 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
     // Two agents finished: nothing hides behind "more".
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeUndefined()
     const empty = await mount($, 'agents-empty', surface, 64)
-    expect(await empty.find({ type: 'Text', text: 'No agents yet' }), "empty { type: 'Text', text: 'No agents yet' } " + surface).toBeDefined()
+    expect(await empty.find({ type: 'Text', text: 'No agents or background tasks yet' }), "empty { type: 'Text', text: 'No agents or background tasks yet' } " + surface).toBeDefined()
   }
   expect(calls).toEqual([])
 })
