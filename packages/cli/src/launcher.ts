@@ -169,7 +169,7 @@ function runPowerShell(script: string): string {
 }
 
 /** Bundle id of an existing .app, or null when it has none we can read. */
-function bundleIdOf(app: string): string | null {
+export function bundleIdOf(app: string): string | null {
   try {
     const plist = fs.readFileSync(path.join(app, "Contents", "Info.plist"), "utf8");
     return /<key>CFBundleIdentifier<\/key>\s*<string>([^<]*)<\/string>/.exec(plist)?.[1] ?? null;
