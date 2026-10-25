@@ -106,6 +106,7 @@ export class App {
   private pinned = true;
   private tasksOpen = false;
   private planOpen = false;
+  private taskSeen = new Map<string, Set<string>>();
   private workerPath: V.WorkerSheet[] = [];
   private timelineSize: ResizeObserver | null = null;
   private imageUrls = new Map<string, Promise<string>>();
@@ -701,7 +702,7 @@ export class App {
     setHTML(top, V.sessionTop(this.ui, s, view));
     setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
     const perm = s?.readOnly ? "" : V.permCard(view, this.ui);
-    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.plan(s, this.planOpen) + V.tasks(this.ui, s, this.tasksOpen));
+    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.plan(s, this.planOpen) + V.tasks(this.ui, s, this.tasksOpen, timelineItems(view), this.taskSeen.get(id)));
     // Stop only when the host can hear it; offline the button sends (queues) instead.
     const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
     if (s?.readOnly) {
@@ -971,6 +972,13 @@ export class App {
       case "open": this.go({ name: "session", id }); break;
       case "toggle-tasks": this.tasksOpen = !this.tasksOpen; this.renderSession(true); break;
       case "plan-toggle": this.planOpen = !this.planOpen; this.renderSession(true); break;
+      case "task-read": {
+        const seen = this.taskSeen.get(session) ?? new Set<string>();
+        seen.add(id); this.taskSeen.set(session, seen);
+        if (el.dataset.sub) await this.openSub(el.dataset.sub);
+        this.renderSession(true);
+        break;
+      }
       case "send": {
         const ta = document.getElementById("input") as HTMLTextAreaElement | null;
         if (!ta) return;
@@ -1112,7 +1120,9 @@ export class App {
       return;
     }
     const items = parent?.items ?? timelineItems(this.view(this.screen.id));
-    const frame: V.WorkerSheet = { kind: "worker", worker: workerFor(items, sub, t("sub.worker")), items: [], loading: false, error: "", depth: this.workerPath.length + 1, scroll: 0, expanded: new Map() };
+    const summary = this.summary(this.screen.id);
+    const task = [...(summary?.taskList ?? []), ...(summary?.taskHistory ?? [])].find(task => task.sub === sub);
+    const frame: V.WorkerSheet = { kind: "worker", worker: workerFor(items, sub, task?.label ?? t("sub.worker"), task?.state === "unknown" ? undefined : task?.state), items: [], loading: false, error: "", depth: this.workerPath.length + 1, scroll: 0, expanded: new Map() };
     this.workerPath.push(frame);
     this.ui.sheet = frame;
     const loading = this.loadWorker(frame, this.screen.id);

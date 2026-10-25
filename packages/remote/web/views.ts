@@ -7,6 +7,7 @@ import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
 import { t, lang } from "./i18n.ts";
 import { activitySummary } from "../src/tool-details.ts";
+import { activityOverview, activityStateKey } from "./activity.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
@@ -283,8 +284,8 @@ export function item(it: TimelineItem, ui: UI): string {
       return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}</div>`;
     }
     case "subagent": {
-      const st = it.status === "running" ? t("sub.running") : it.status === "done" ? t("sub.done") : t("sub.failed");
-      return `<button class="sub" data-act="sub" data-id="${esc(it.sub)}">${stateRing(it.status === "running" ? "running" : it.status === "done" ? "idle" : "error", 28)}<div class="body"><div class="k">${esc(t("sub.worker"))}${it.model ? `<span class="model">${esc(it.model)}</span>` : ""}<span>· ${esc(st)} · ${esc(t("sub.steps", { n: it.steps }))}</span></div><div class="d">${esc(it.description)}</div></div>${icon.chevron(18)}</button>`;
+      const st = t(`sub.${it.status}`);
+      return `<button class="sub" data-act="sub" data-id="${esc(it.sub)}">${stateRing(it.status === "running" ? "running" : it.status === "done" ? "idle" : it.status === "stopped" ? "stopped" : "error", 28)}<div class="body"><div class="k">${esc(t("sub.worker"))}${it.model ? `<span class="model">${esc(it.model)}</span>` : ""}<span>· ${esc(st)} · ${esc(t("sub.steps", { n: it.steps }))}</span></div><div class="d">${esc(it.description)}</div></div>${icon.chevron(18)}</button>`;
     }
     case "permission": {
       if (it.decision === null) return `<div class="perm-done open">${icon.shield(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(t("state.waiting"))}</span></div>`;
@@ -334,13 +335,18 @@ export function plan(s: SessionSummary | undefined, open: boolean): string {
 }
 
 /** The background-task chip; with a task list from the host it opens to show what is running. */
-export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean): string {
-  if (!s?.tasks) return "";
-  const list = s.taskList ?? [];
-  const chip = esc(t("tasks.running", { n: s.tasks }));
-  if (!list.length) return `<div class="tasks-chip" role="status">${chip}</div>`;
-  const rows = open ? `<div class="tasks-list">${list.map(task => `<div class="task">${task.kind === "shell" ? icon.terminal(16) : icon.model(16)}<span>${esc(task.label)}</span>${task.startedAt === null ? "" : `<time>${esc(duration(ui.now - task.startedAt))}</time>`}</div>`).join("")}</div>` : "";
-  return `${rows}<button class="tasks-chip" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
+export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean, items: TimelineItem[] = [], seen: ReadonlySet<string> = new Set()): string {
+  const { active, recent, counts } = activityOverview(items, s?.taskList, s?.taskHistory);
+  counts.unknown += Math.max(0, (s?.tasks ?? 0) - (s?.taskList?.length ?? 0));
+  if (!active.length && !recent.length && !counts.unknown && s?.backgroundKnown) return "";
+  const unread = recent.filter(task => task.state === "failed" && !seen.has(task.sub ?? task.id)).length;
+  const note = !s?.backgroundKnown ? `<div class="foot">${esc(t("tasks.visibility"))}</div>` : "";
+  const rows = open ? `<div class="tasks-list">${[...active, ...recent].map(task => {
+    const state = t(activityStateKey(task));
+    return `<button class="tool" data-act="task-read" data-id="${esc(task.sub ?? task.id)}"${task.sub ? ` data-sub="${esc(task.sub)}"` : ""}><span class="nm">${esc(t(`tasks.kind.${task.kind}`))} · ${esc(state)}</span><span style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(task.label)}${task.command && task.command !== task.label ? `<br>${esc(task.command)}` : ""}${task.schedule ? `<br>${esc(task.schedule)}` : ""}${task.nextAt === undefined ? "" : `<br>${esc(clock(task.nextAt))}`}</span></button>`;
+  }).join("")}${note}${s?.activityAt == null ? "" : `<div class="foot">${esc(t("band.updated", { time: clock(s.activityAt) }))}</div>`}</div>` : "";
+  const chip = `${esc(t("tasks.summary", counts))}${unread ? ` · ${esc(t("tasks.unread", { n: unread }))}` : ""}${!s?.backgroundKnown ? ` · ${esc(t("tasks.unknown"))}` : ""}`;
+  return `${rows}<button class="tasks-chip${unread ? " bad" : ""}" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
 }
 
 // ---- sheets ------------------------------------------------------------------------------------

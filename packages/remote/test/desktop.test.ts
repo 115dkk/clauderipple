@@ -37,8 +37,8 @@ test("background task list carries the launch description, command fallback and 
   tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "b", input: { command: "npm test", run_in_background: true } }] } }));
   tasks.accept(line({ type: "user", toolUseResult: { backgroundTaskId: "s1" }, message: { content: [{ type: "tool_result", tool_use_id: "b", content: "started" }] } }));
   assert.deepEqual(tasks.list, [
-    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z"), sub: "sub-a" },
-    { id: "s1", kind: "shell", label: "npm test", startedAt: null },
+    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z"), state: "running", sub: "sub-a" },
+    { id: "s1", kind: "shell", label: "npm test", command: "npm test", startedAt: null, state: "running" },
   ]);
 });
 
@@ -485,7 +485,7 @@ test("a Mac session's worker status follows its result, its notification, a queu
   assert.deepEqual(run([toolUse("a"), launch("a")]), [["a", "running"]], "an async launch is not an end");
   assert.deepEqual(run([toolUse("a"), launch("a"), notice("a", "completed")]), [["a", "running"], ["a", "done"]]);
   assert.deepEqual(run([toolUse("b"), launch("b"), notice("b", "completed", true)]), [["b", "running"], ["b", "done"]], "a queued notification ends it");
-  assert.deepEqual(run([toolUse("c"), launch("c"), notice("c", "killed")]), [["c", "running"], ["c", "failed"]]);
+  assert.deepEqual(run([toolUse("c"), launch("c"), notice("c", "killed")]), [["c", "running"], ["c", "stopped"]]);
   const sync = (tid: string, error = false) => line({ type: "user", toolUseResult: { agentId: "w" }, message: { content: [{ type: "tool_result", tool_use_id: tid, is_error: error, content: "answer" }] } });
   assert.deepEqual(run([toolUse("d"), sync("d")]), [["d", "running"], ["d", "done"]], "a synchronous worker ends at its result");
   assert.deepEqual(run([toolUse("e"), sync("e", true)]), [["e", "running"], ["e", "failed"]]);

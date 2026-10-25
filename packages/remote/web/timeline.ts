@@ -9,7 +9,7 @@ export type Item =
   | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
-  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
+  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; ruleStatus?: RuleStatus; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
@@ -296,12 +296,12 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
 export type WorkerItem = Extract<ActivityRow, { type: "subagent" }>;
 
 /** Resolve within the conversation that launched the worker, retaining the full launch input. */
-export function workerFor(items: readonly TimelineItem[], sub: string, label: string): WorkerItem {
+export function workerFor(items: readonly TimelineItem[], sub: string, label: string, status: WorkerItem["status"] = "running"): WorkerItem {
   for (const item of items) {
-    if (item.type === "subagent" && item.sub === sub) return item;
-    if (item.type === "toolGroup") for (const row of item.rows) if (row.type === "subagent" && row.sub === sub) return row;
+    if (item.type === "subagent" && item.sub === sub) return item.status === "running" && status !== "running" ? { ...item, status } : item;
+    if (item.type === "toolGroup") for (const row of item.rows) if (row.type === "subagent" && row.sub === sub) return row.status === "running" && status !== "running" ? { ...row, status } : row;
   }
-  return { type: "subagent", key: `s${sub}`, ver: "0", toolUseId: sub, sub, description: label, model: null, status: "running", steps: 0 };
+  return { type: "subagent", key: `s${sub}`, ver: "0", toolUseId: sub, sub, description: label, model: null, status, steps: 0 };
 }
 
 /** Labels are not instructions; a later follow-up must not replace the worker's actual launch prompt. */

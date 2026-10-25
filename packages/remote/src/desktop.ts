@@ -10,6 +10,7 @@ import { fileImages, messageContent, sessionFileTool, type ImageSink } from "./i
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
 import { TaskPlan } from "./task-plan.ts";
+import { BackgroundActivity } from "./background-activity.ts";
 export { nextPlan } from "./task-plan.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -203,7 +204,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         const running = state?.get(toolUseId);
         if (running && resolve) {
           const info = resolve(toolUseId, running.input);
-          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: status === "completed" ? "done" : "failed", steps: info.steps });
+          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: status === "completed" ? "done" : status === "killed" || status === "stopped" ? "stopped" : "failed", steps: info.steps });
         }
         state?.delete(toolUseId);
       }
@@ -337,12 +338,11 @@ function withoutEffort(model: string): string {
  * summaries and task notifications are not), until the model ends its turn or the person interrupts,
  * and that turn's task list, which the person's next message clears. */
 export class BackgroundTasks {
-  private tools = new Map<string, { name: string; background: boolean; label: string }>();
-  private active = new Map<string, BackgroundTask>();
-  private terminal = new Set<string>();
+  private activity = new BackgroundActivity();
   private planState = new TaskPlan();
-  get count(): number { return this.active.size; }
-  get list(): BackgroundTask[] { return Array.from(this.active.values()); }
+  get count(): number { return this.activity.active.length; }
+  get list(): BackgroundTask[] { return this.activity.active; }
+  get history(): BackgroundTask[] { return this.activity.history; }
   get plan(): PlanStep[] { return this.planState.list; }
   turnStartedAt: number | null = null;
 
@@ -363,8 +363,7 @@ export class BackgroundTasks {
     const queued = r.type === "attachment" && object(r.attachment)?.type === "queued_command" ? str(object(r.attachment)?.prompt) : "";
     const notification = queued || (r.type === "user" ? text(content) : "");
     if (notification.startsWith("<task-notification>")) {
-      const id = /<task-id>([^<]+)<\/task-id>/.exec(notification)?.[1];
-      if (id && /<status>(completed|killed|failed|stopped)<\/status>/.test(notification)) this.end(id);
+      this.activity.notice(notification, Number.isFinite(at) ? at : null);
       return;
     }
     for (const value of Array.isArray(content) ? content : []) {
@@ -372,36 +371,14 @@ export class BackgroundTasks {
       if (r.type === "assistant" && b?.type === "tool_use" && typeof b.id === "string") {
         const name = str(b.name);
         const input = object(b.input);
-        if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: input?.run_in_background === true, label: str(input?.description) || str(input?.command) || name });
-        // A task stopped with TaskStop gets no notification at all (seen 2026-10-16: a shell "running" four hours).
-        if (name === "TaskStop") this.tools.set(b.id, { name, background: false, label: str(input?.task_id) || str(input?.shell_id) });
-        if (input) this.planState.call(b.id, name, input);
+        if (input) { this.planState.call(b.id, name, input); this.activity.call(b.id, name, input); }
       }
-      if (r.type === "user" && b?.type === "tool_result") this.planState.result(str(b.tool_use_id), b.is_error !== true, text(b.content));
-      if (r.type !== "user" || b?.type !== "tool_result" || b.is_error === true) continue;
-      const tool = this.tools.get(str(b.tool_use_id));
-      if (!tool) continue;
-      if (tool.name === "TaskStop") {
-        if (tool.label) this.end(tool.label);
-        this.tools.delete(str(b.tool_use_id));
-        continue;
+      if (r.type === "user" && b?.type === "tool_result") {
+        const tool = str(b.tool_use_id), ok = b.is_error !== true, body = text(b.content);
+        this.planState.result(tool, ok, body);
+        this.activity.result(tool, ok, body, Number.isFinite(at) ? at : null, object(r.toolUseResult));
       }
-      const result = object(r.toolUseResult);
-      const body = text(b.content);
-      let id = "";
-      if (tool.name === "Bash") {
-        id = str(result?.backgroundTaskId) || (tool.background ? /(?:ID|id):\s*([\w-]+)/.exec(body)?.[1] ?? "" : "");
-      } else if (result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(body)) {
-        id = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(body)?.[1] || "";
-      }
-      if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null, ...(tool.name === "Bash" ? {} : { sub: `sub-${str(b.tool_use_id)}` }) });
-      this.tools.delete(str(b.tool_use_id));
     }
-  }
-
-  private end(id: string): void {
-    this.active.delete(id);
-    this.terminal.add(id);
   }
 }
 
@@ -438,10 +415,11 @@ export class DesktopSessions {
       const live = this.liveProcess(s.summary.id);
       if (live?.bridgeSessionId) {
         const working = live.status === "busy" || live.status === "shell";
-        const taskList = working ? this.backgroundTaskList(s.summary.id) : [];
-        s.summary = { ...s.summary, tasks: taskList.length, taskList, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null, plan: this.plan(s.summary.id) };
+        const taskList = this.backgroundTaskList(s.summary.id);
+        s.summary = { ...s.summary, tasks: taskList.length, taskList, taskHistory: this.backgroundTaskHistory(s.summary.id), backgroundKnown: false, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null, plan: this.plan(s.summary.id) };
       } else if (this.imported.has(s.summary.id) || this.tasks.has(s.summary.id)) {
-        s.summary = { ...s.summary, plan: this.plan(s.summary.id) };
+        const taskList = this.backgroundTaskList(s.summary.id).map(task => !live ? { ...task, state: "unknown" as const } : task);
+        s.summary = { ...s.summary, tasks: taskList.length, taskList, taskHistory: this.backgroundTaskHistory(s.summary.id), backgroundKnown: false, plan: this.plan(s.summary.id) };
       }
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
@@ -529,6 +507,7 @@ export class DesktopSessions {
   }
 
   backgroundTasks(id: string): number { return this.backgroundTaskList(id).length; }
+  backgroundTaskHistory(id: string): BackgroundTask[] { return this.scan(id)?.history ?? []; }
   /** A background agent whose own transcript ends on its final answer is done, notification or not:
    * one read through TaskOutput, or finished before a compaction, never gets a <task-notification> line
    * in the session's transcript and otherwise stays "running" for good (seen 2026-10-14, five hours). */

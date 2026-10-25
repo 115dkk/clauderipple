@@ -134,6 +134,42 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
 
+test("an async SDK launch stays active until its own terminal notification, with stopped separate from failure", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "assistant", message: { id: "launch", model: "sol", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"async-agent"}' }] } });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "running");
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>async-agent</task-id><tool-use-id>agent</tool-use-id><status>killed</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.taskHistory?.[0]?.state === "stopped");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 0);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+});
+
+test("SDK Stop inventory exposes pending PR/CI subscriptions, monitors and scheduled wakeups in the session snapshot", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const hooks = query.options.hooks as { Stop: { hooks: ((input: Record<string, unknown>) => Promise<unknown>)[] }[] };
+  await hooks.Stop[0]!.hooks[0]!({ background_tasks: [{ id: "ci", type: "pr_ci_subscription", status: "pending", description: "PR #3 CI subscription" }, { id: "monitor", type: "monitor", status: "running", description: "Build watch" }], session_crons: [{ id: "scheduled", schedule: "0 9 * * *", prompt: "Check CI", recurring: true }] });
+  const summary = f.sessions.summaryOf(id)!;
+  assert.equal(summary.backgroundKnown, true);
+  assert.equal(summary.tasks, 3);
+  assert.equal(summary.taskList?.find(task => task.id === "ci")?.kind, "subscription");
+  assert.equal(summary.taskList?.find(task => task.id === "scheduled")?.schedule, "0 9 * * *");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 3, "a main result does not discard waiting subscriptions");
+  assert.ok(f.sessions.log(id).readAfter(0).events.some(event => event.kind === "background"));
+});
+
 test("SDK task snapshots normalize confirmed tools, survive turn completion and rebuild after restart", async t => {
   const boundary = controlledQueries();
   const f = fixture(t, {}, { queryFn: boundary.queryFn });
