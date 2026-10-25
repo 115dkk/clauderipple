@@ -824,6 +824,35 @@ test('a failed first limits read is tried again at the next tick, not a minute l
   await ui.unmount()
 })
 
+// 2026-10-25: the owner moved the reset times off the band into a pane the limits row opens. The
+// row is a button (pressed again it closes), and the pane says each window's share and reset.
+test('the limits row opens the limits pane, which says when each window resets', async ($, on) => {
+  const b = boundaries(on, { extras: ['limits'] })
+  const limits = { providers: [{ provider: 'claude', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, at: NOW, windows: [
+    { kind: 'five_hour', used_percent: 28, window_minutes: 300, reset_at: (NOW + 2 * 3_600_000) / 1000 },
+    { kind: 'seven_day', used_percent: 8, window_minutes: 10080, reset_at: (NOW + 7 * 86_400_000) / 1000 },
+  ] }] }] }
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/limits') ? limits : { requests: [] }) } }
+  })
+  await start($)
+  await b.clock.advance(15000)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'limits-open' })
+  expect(b.panes.has('ripple-limits')).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-limits', surface: 'terminal', props: { title: 'Limits', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  expect(await pane.find({ type: 'Text', text: 'Claude' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^(28%|8%)$/ })).toBeDefined()
+  // Two hours out reads as the time left, a week out as the weekday and the clock.
+  expect((await pane.findAll({ type: 'Text' })).some(text => /^(in 2h|2시간 뒤)$/.test(text.text)), 'the near reset').toBe(true)
+  expect((await pane.findAll({ type: 'Text' })).some(text => /^\w{3} \d\d:\d\d$|^[월화수목금토일] \d\d:\d\d$/.test(text.text)), 'the far reset').toBe(true)
+  await pane.unmount()
+  await ui.press({ key: 'limits-open' })
+  expect(b.panes.has('ripple-limits')).toBe(false)
+  await ui.unmount()
+})
+
 for (const subagentType of ['Explore', 'Plan', 'statusline-setup', 'claude-code-guide']) test(`${subagentType} stays native in all mode, including its prompt and model`, async ($, on) => {
   boundaries(on, { agentAuto: 'all' })
   http(on)

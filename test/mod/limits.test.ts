@@ -9,7 +9,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { limitGroupName, limitGroups, limitItemName, limitItemTip, narrowLimitGroups } = await import('../../packages/mod/hooks/ui/view.ts')
+const { limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetShort } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -90,6 +90,43 @@ test('the row names windows, groups accounts, and tips the reset', () => {
   assert.equal(limitGroupName(groups[2]!, true), 'GPT 2')
   assert.equal(limitItemTip({ ...items[1]!, provider: 'claude', account: 0, kind: 'seven_day', label: '', resetsAt: new Date(NOW + 30 * 60_000).toISOString() }, 'Claude', 'ko', NOW), 'Claude 주간 88% · 30분 뒤 초기화')
   assert.equal(limitItemTip({ ...items[0]!, provider: 'claude', account: 0, kind: 'five_hour', label: '' }, 'Claude', 'en', NOW), 'Claude 5-hour 1%')
+})
+
+// 2026-10-25: the limits pane reads each window's reset short — the time left while close, the
+// weekday and clock once far, "resetting" once it has passed.
+test('a window\'s reset reads short in the limits pane', () => {
+  // Local times, so the weekday and the clock do not depend on the machine's zone.
+  const now = new Date(2026, 9, 12, 13, 20).getTime()
+  const at = (ms: number) => new Date(now + ms).toISOString()
+  assert.equal(resetShort(at(25 * 60_000), now, 'ko'), '25분 뒤')
+  assert.equal(resetShort(at(2 * 3_600_000), now, 'ko'), '2시간 뒤')
+  assert.equal(resetShort(at(25 * 60_000), now, 'en'), 'in 25m')
+  assert.equal(resetShort(at(2 * 3_600_000), now, 'en'), 'in 2h')
+  assert.equal(resetShort(at(19 * 3_600_000), now, 'ko'), '19시간 뒤')
+  // Past twenty hours the weekday and the clock say more than a long count of hours — the line the
+  // router's own status label (`limitLabel` in session.ts) draws at the same place.
+  const far = new Date(2026, 9, 15, 9, 0).toISOString()
+  assert.equal(resetShort(far, now, 'ko'), '목 09:00')
+  assert.equal(resetShort(far, now, 'en'), 'Thu 09:00')
+  assert.equal(resetShort(far, now, 'zh'), '周四 09:00')
+  assert.equal(resetShort(far, now, 'ja'), '木 09:00')
+  // A reset that has passed, no reset at all, and a time that is not one.
+  assert.equal(resetShort(at(-60_000), now, 'ko'), '초기화 중')
+  assert.equal(resetShort(undefined, now, 'ko'), undefined)
+  assert.equal(resetShort('not a time', now, 'ko'), undefined)
+})
+
+// A provider with several accounts numbers every one of them, read from the whole set before any
+// narrowing; a provider with one goes unnumbered.
+test('only a provider with several accounts numbers them', () => {
+  const groups = limitGroups([
+    { provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 1 },
+    { provider: 'chatgpt', account: 0, kind: 'seven_day', label: '', percent: 2 },
+    { provider: 'chatgpt', account: 1, kind: 'seven_day', label: '', percent: 3 },
+  ])
+  const numbered = limitGroupNumbered(groups)
+  assert.deepEqual(groups.map(g => limitGroupName(g, numbered(g))), ['Claude', 'GPT 1', 'GPT 2'])
+  assert.equal(limitGroupNumbered(groups.slice(0, 1))(groups[0]!), false)
 })
 
 test('the bar rounds to integers, and tones the fill', () => {
