@@ -4,6 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { MOD_SETTINGS_SCHEMA_VERSION, DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
 import { QUICK_PROMPT } from '../hooks/handoff'
+import { t } from '../hooks/i18n'
 import type { Lang } from '../hooks/i18n'
 import type { AgentRec, BgTask, ModSettingsSnapshot, Settings } from '../types'
 
@@ -134,6 +135,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   const contexts: (readonly string[])[] = []
   on('prompt.submit', ($, e) => { submitted.push(e.text); contexts.push(e.context ?? []); return { text: e.text } })
   on('turn.complete', () => ({ text: '' }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
   return { files, failWorkerLog: (value: 'read' | 'write' | null) => { logFailure = value }, registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, contexts, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
@@ -1593,6 +1595,123 @@ test('the compaction model is the chosen one, with an @effort split off for the 
   const out = await $.session.compact({ trigger: 'manual', messages: MESSAGES })
   expect(calls[0]).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' })
   expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
+})
+
+// 2026-10-25: the band's Compact asks the chat to tidy up first, as a prompt of its own, and only
+// the turn that prompt became compacts — never another prompt's end.
+const TIDY = t('en', 'alerts.tidyPrompt')
+
+function compacts(on: On) {
+  const args: string[] = []
+  on('command.run', { command: 'compact' }, ($, e) => { args.push(e.args); return { text: 'Compacted.' } })
+  return args
+}
+
+/** The band's Compact pressed on the desktop, its note sent with Enter, and the band left mounted. */
+async function pressCompact($: Engine, note: string) {
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: note })
+  return ui
+}
+
+test('a Compact press tidies up first, and only its own turn\'s answer compacts', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  expect(b.submitted).toEqual([TIDY])
+  expect(notes).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'Tidying up…' })).toBeDefined()
+  // A prompt queued before it ends first: nothing is compacted and the card still says tidying.
+  await $.turn.start({ text: 'the prompt queued before it', turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: 'done', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'Tidying up…' })).toBeDefined()
+  // The tidy prompt's own turn, answered, compacts with the note the card carried.
+  await $.turn.start({ text: TIDY, turnId: 'turn-3' })
+  await $.turn.complete({ turnId: 'turn-3', answer: 'Everything is written down.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  expect(await ui.find({ type: 'Text', text: 'Compacted' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a tidy turn that is stopped compacts nothing and says the chat was left alone', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: '', reason: 'aborted', durationMs: 10, isAborted: true })
+  await b.clock.advance(10)
+  expect(notes).toEqual([])
+  expect(b.toasts.some(text => text.includes('the tidy-up did not finish'))).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /did not finish, so the chat was not compacted/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the tidy switch is on by default, kept, and off compacts at once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' })
+  expect(JSON.stringify(await ui.drawn())).toContain('Tidy up first: On')
+  await ui.press({ key: 'tidy' })
+  expect(JSON.stringify(await ui.drawn())).toContain('Tidy up first: Off')
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([])
+  expect(notes).toEqual(['Keep the router decision.'])
+  // The last choice is the next card's too.
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  expect(JSON.stringify(await ui.drawn())).toContain('Tidy up first: Off')
+  await ui.unmount()
+})
+
+test('a Compact pressed again while the tidy turn runs sends one prompt', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  // The card let go, the band is back: a second press waits on the tidy turn already running.
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([TIDY])
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  await ui.unmount()
+})
+
+// 2026-10-25: a tidy prompt that never became a turn (the person dropped it from the queue, the
+// engine let it go) used to leave the wait standing, and the Compact button dead until the mod
+// reloaded. Pressing again now gives that wait up and sends the prompt again.
+test('a Compact pressed again before the tidy prompt becomes a turn sends it again', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  expect(b.submitted).toEqual([TIDY])
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([TIDY, TIDY])
+  // The prompt sent again is the one that becomes a turn, and its answer compacts once.
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  await ui.unmount()
 })
 
 test('the band measures context against the compaction window, not the whole model window', async ($, on) => {
