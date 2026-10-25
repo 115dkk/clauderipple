@@ -69,6 +69,7 @@ export function directOn(home: string): DirectResult {
   const removedCli: Record<string, string> = {};
   const notes: string[] = [];
 
+  let blocked = false;
   let desktop: DirectState["desktop"] = null;
   const edit = editSettingsEnv((env) => {
     const previous = readState(home);
@@ -76,6 +77,16 @@ export function directOn(home: string): DirectResult {
     if (record.error) throw new Error(record.error);
     const mine = claimsOf(record.store, home);
     const proxy = cliProxyState(env, proxyUrl, caPath);
+    // Validate the whole transition before changing either client or the restoration snapshot.
+    for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
+      const value = env[name];
+      if (value === undefined) continue;
+      if (mine.slots?.[slot] !== value || claimedElsewhere(record.store, home, c => c.slots?.[slot], value)) {
+        notes.push(`left ${name} (ownership unknown or shared)`);
+        blocked = true;
+      }
+    }
+    if (blocked) return false;
     if ((proxy.proxy === "ripple" || proxy.stale) && env.NODE_EXTRA_CA_CERTS === caPath) {
       removedCli.HTTPS_PROXY = env.HTTPS_PROXY!;
       delete env.HTTPS_PROXY;
@@ -117,6 +128,7 @@ export function directOn(home: string): DirectResult {
     return Object.keys(removedCli).length > 0;
   });
 
+  if (blocked) return { ok: false, mode: currentMode(home), restartClaude: true, detail: notes.join(" ") };
   const changed = edit.changed || desktop !== null;
   const removed = [
     ...Object.keys(removedCli).map((k) => `settings.json env.${k}`),

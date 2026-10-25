@@ -80,6 +80,20 @@ test("direct double on/off restores owned values and protects shared claims", as
   assert.equal(settingsEnv().ANTHROPIC_SMALL_FAST_MODEL, "routed-model");
 });
 
+test("direct refuses shared routed slots and preserves the existing connection", () => {
+  const c = setup();
+  c.apply(c.a);
+  c.apply(c.b);
+  applyAppProxy(c.proxyUrl, c.a);
+  const before = fs.readFileSync(c.settings, "utf8");
+  const desktop = currentAppProxy();
+  const result = directOn(c.a);
+  assert.equal(result.ok, false);
+  assert.equal(fs.readFileSync(c.settings, "utf8"), before);
+  assert.deepEqual(currentAppProxy(), desktop);
+  assert.equal(fs.existsSync(directStatePath(c.a)), false);
+});
+
 test("direct rejects corrupt snapshots without modifying their raw text or clients", async () => {
   const c = setup();
   c.apply(c.a);
