@@ -26,13 +26,16 @@ const link = (): FakeLink => {
   return made;
 };
 
-/** The app on a screen talking to no computer: the socket only records what the app says. */
-async function start(browser: { el(key: string): Element }): Promise<AppBoundary> {
-  if (AppClass === null) AppClass = (await import("../web/app.ts")).App as AppCtor;
+/** The app on a screen talking to no computer: the socket only records what the app says. The import
+ * is untyped on purpose — app.ts is browser code, type-checked by the web project, not by this one. */
+async function start(): Promise<AppBoundary> {
+  if (AppClass === null) {
+    const specifier = "../web/app.ts";
+    AppClass = ((await import(specifier)) as { App: AppCtor }).App;
+  }
   const app = new AppClass({ state: "open", attempt: 0, nextAt: null, lastRx: null, downSince: null });
   app.ui.models = [{ provider: "test", label: "Test", usable: true, models: [{ model: "m", name: "M", provider: "test", efforts: [], usable: true }] }];
   app.link = link();
-  void browser;
   return app;
 }
 
@@ -42,7 +45,7 @@ const asks = (app: AppBoundary) => app.link.sent.filter(message => message.t ===
 
 test("the oldest loaded page is asked for one at a time, and a page that failed offers its own retry", async () => {
   const browser = install(new Storage());
-  const app = await start(browser);
+  const app = await start();
   app.go({ name: "session", id: "s1" });
   const tail = (hasOlder: boolean) => app.onHost({ t: "events", session: "s1", epoch: "e", events: [words(5)], more: false, tail: { hasOlder } });
 
@@ -78,7 +81,7 @@ test("the oldest loaded page is asked for one at a time, and a page that failed 
 
 test("a conversation opens where the reader left it, and at its newest message when they left it there", async () => {
   const browser = install(new Storage());
-  const app = await start(browser);
+  const app = await start();
   const main = browser.el("main"), tl = browser.el("#tl");
   main.clientHeight = 600;
   main.scrollHeight = 2000;
