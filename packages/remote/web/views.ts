@@ -304,9 +304,17 @@ export function item(it: TimelineItem, ui: UI): string {
       const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</span>` : "";
       return `<div class="perm-done ${cls}">${it.decision === "allow" || it.decision === "allow_always" ? icon.check(16) : icon.x(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(label)}</span></div>${why ? `<div class="foot">${why}</div>` : ""}`;
     }
-    case "result":
-      if (!it.ok) return `<div class="foot bad">${icon.x(14)}${esc(t("turn.failed", { error: it.error ?? "" }))}</div>`;
-      return `<div class="foot">${esc(t("turn.footer", { model: modelName(ui.models, it.model), effort: effortLabel(it.effort) || "—", dur: duration(it.ms) }))}</div>`;
+    case "result": {
+      const turn = it.turn === undefined ? "" : `${t("turn.number", { n: it.turn })} · `;
+      if (!it.ok) return `<div class="foot bad">${icon.x(14)}${esc(turn + t("turn.failed", { error: it.error ?? "" }))}</div>`;
+      return `<div class="foot">${esc(turn + t("turn.footer", { model: modelName(ui.models, it.model), effort: effortLabel(it.effort) || "—", dur: duration(it.ms) }))}</div>`;
+    }
+    case "control": {
+      // A session command drawn as the state of what it asked for; it is never a button, because
+      // undoing files or turns is designed apart from this display.
+      const state = it.state === "running" ? icon.clock(15) : it.state === "done" ? icon.check(15) : icon.x(15);
+      return `<div class="notice control ${it.state}">${state}${esc(t(`control.${it.command}.${it.state}` as Key))}</div>`;
+    }
     case "notice":
       return `<div class="notice">${esc(t(`notice.${it.code}` as Key, { text: it.text ?? "", host: hostName(ui) }))}</div>`;
     case "chapter":

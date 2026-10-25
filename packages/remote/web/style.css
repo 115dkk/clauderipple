@@ -241,6 +241,12 @@ main.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -web
 .foot { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: -6px; }
 .foot.bad { color: var(--bad); }
 .notice { align-self: center; font-size: 13px; color: var(--muted); background: var(--surface-2); padding: 5px 12px; border-radius: 99px; text-align: center; max-width: 92%; }
+/* A session command: what happened to the conversation, not what somebody said. */
+.notice.control { display: inline-flex; align-items: center; gap: 6px; }
+.notice.control .ic { color: var(--muted); }
+.notice.control.done .ic { color: var(--ok); }
+.notice.control.failed { color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.notice.control.failed .ic { color: var(--bad); }
 .start { align-self: center; font-size: 12.5px; color: var(--faint); padding: 4px 0; }
 .loading-older { text-align: center; font-size: 13px; color: var(--muted); padding: 8px; }
 
