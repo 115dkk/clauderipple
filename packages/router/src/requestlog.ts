@@ -202,9 +202,6 @@ export class ResponseUsageTap {
   private event = "";
   private data: string[] = [];
   private dropUntilNewline = false;
-  private jsonUsageStarted = false;
-  private jsonUsageDepth = 0;
-  private jsonUsageText = "";
   private stopCarry = "";
   private stopReason: string | undefined;
   private messageId: string | undefined;
@@ -214,6 +211,12 @@ export class ResponseUsageTap {
   private jsonEscaped = false;
   private jsonKey: string | undefined;
   private jsonValue = false;
+  /** Text of a top-level `usage` object while it is being read; null when not inside one. */
+  private usageText: string | null = null;
+  private usageDepth = 0;
+  private usageQuoted = false;
+  private usageEscaped = false;
+  private usageOverflow = false;
   private usage: RequestUsage | undefined;
 
   // Compressed responses (Anthropic answers the CLI with gzip/br) are collected side-band up to a cap
@@ -341,8 +344,33 @@ export class ResponseUsageTap {
   }
 
   private feedJson(text: string): void {
-    // Read only the top-level id, never an id quoted in content or a tool input.
+    // Read only the top-level id and usage. A string or object quoted in content or a tool input
+    // sits below depth 1, so a `usage` key repeated there is never taken for the real usage.
     for (const char of text) {
+      if (this.usageText !== null) {
+        if (this.usageQuoted) {
+          if (this.usageEscaped) this.usageEscaped = false;
+          else if (char === "\\") this.usageEscaped = true;
+          else if (char === '"') this.usageQuoted = false;
+        } else if (char === '"') this.usageQuoted = true;
+        else if (char === "{" || char === "[") this.usageDepth++;
+        else if (char === "}" || char === "]") this.usageDepth--;
+        if (!this.usageOverflow) {
+          if (this.usageText.length < MAX_CARRY) this.usageText += char;
+          else this.usageOverflow = true;
+        }
+        // The object is tracked to its closing brace even when it overflowed, so the depth of the
+        // enclosing document stays correct for a later top-level key.
+        if (this.usageDepth === 0) {
+          const captured = this.usageOverflow ? null : this.usageText;
+          this.usageText = null;
+          this.usageOverflow = false;
+          if (captured !== null) {
+            try { this.setUsage(JSON.parse(captured) as unknown); } catch { /* malformed usage */ }
+          }
+        }
+        continue;
+      }
       if (this.jsonString !== null) {
         if (this.jsonString.length < 256) this.jsonString += char;
         if (this.jsonEscaped) this.jsonEscaped = false;
@@ -353,61 +381,32 @@ export class ResponseUsageTap {
               const value: unknown = JSON.parse(this.jsonString);
               if (!this.jsonValue && typeof value === "string") this.jsonKey = value;
               else if (this.jsonKey === "id" && typeof value === "string") this.messageId = value;
-            } catch { /* oversized or malformed string */ }
+            } catch {
+              // An oversized key must not leave an older key for the object that follows.
+              if (!this.jsonValue) this.jsonKey = undefined;
+            }
           }
           this.jsonString = null;
         }
       } else if (char === '"') this.jsonString = '"';
-      else if (char === "{" || char === "[") this.jsonDepth++;
-      else if (char === "}" || char === "]") this.jsonDepth--;
+      else if (char === "{" || char === "[") {
+        if (char === "{" && this.jsonDepth === 1 && this.jsonValue && this.jsonKey === "usage") {
+          this.usageText = "{";
+          this.usageDepth = 1;
+          this.usageQuoted = false;
+          this.usageEscaped = false;
+          this.usageOverflow = false;
+          continue;
+        }
+        this.jsonDepth++;
+      } else if (char === "}" || char === "]") this.jsonDepth--;
       else if (this.jsonDepth === 1 && char === ":") this.jsonValue = true;
       else if (this.jsonDepth === 1 && char === ",") { this.jsonValue = false; this.jsonKey = undefined; }
     }
-    this.carry += text;
     this.stopCarry = (this.stopCarry + text).slice(-MAX_CARRY);
     const stop = /"stop_reason"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/.exec(this.stopCarry);
     if (stop) {
       try { this.stopReason = JSON.parse(`"${stop[1]}"`) as string; } catch { /* ignore */ }
-    }
-    if (!this.jsonUsageStarted) {
-      const match = /"usage"\s*:\s*\{/.exec(this.carry);
-      if (!match) {
-        if (this.carry.length > MAX_CARRY) this.carry = this.carry.slice(-MAX_CARRY);
-        return;
-      }
-      this.jsonUsageStarted = true;
-      const start = (match.index ?? 0) + match[0].lastIndexOf("{");
-      this.jsonUsageText = this.carry.slice(start);
-      this.carry = "";
-      this.jsonUsageDepth = 0;
-    } else {
-      this.jsonUsageText += this.carry;
-      this.carry = "";
-    }
-    if (this.jsonUsageText.length > MAX_CARRY) {
-      this.jsonUsageStarted = false;
-      this.jsonUsageText = "";
-      return;
-    }
-    this.jsonUsageDepth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let i = 0; i < this.jsonUsageText.length; i++) {
-      const char = this.jsonUsageText[i]!;
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === "\\") escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') quoted = true;
-      else if (char === "{") this.jsonUsageDepth++;
-      else if (char === "}" && --this.jsonUsageDepth === 0) {
-        try { this.setUsage(JSON.parse(this.jsonUsageText.slice(0, i + 1)) as unknown); } catch { /* ignore */ }
-        this.jsonUsageStarted = false;
-        this.jsonUsageText = "";
-        return;
-      }
     }
   }
 
