@@ -70,6 +70,9 @@ export function flatPictures(appearance: Appearance): Paint {
     // over the host's slot read as a dark block beside the prompt box.
     sea: (width, height) => doc(width, height, '<rect class="s" width="' + r(width) + '" height="' + r(height) + '" rx="9"/>', themed('.s', 'fill:#ffffff', 'fill:#30302e')),
 
+    // Flat has no water and so no current: work reads from 리플이's face and the band's own words.
+    current: () => '',
+
     // The capsule's own surface: it hides the words beneath a tip.
     plate: (width, height) => doc(width, height, '<rect class="p" width="' + r(width) + '" height="' + r(height) + '"/>', themed('.p', 'fill:#ffffff', 'fill:#30302e')),
 

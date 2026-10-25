@@ -119,7 +119,9 @@ export type Sea = {
   reach?: number
   /** A sonar sweep across the water: the judge sounding how deep to think. */
   sweep?: boolean
-  /** A current along the floor: work going on. */
+  /** A current along the floor: work going on. The capsule draws it at its own true bottom
+   * (kit.tsx `currentArt`), never inside this picture: the sea is drawn taller than the capsule,
+   * so a floor placed at its height lands wherever the host's row metrics put it. */
   current?: boolean
   /** Motes drifting up (the deep's plankton), quiet life at rest. */
   motes?: boolean
@@ -202,11 +204,6 @@ export function seaArt(width: number, height: number, sea: Sea): string {
       '<rect class="sw" x="-120" width="120" height="' + full + '" fill="url(#sw)"/>'
     css += '.sw{animation:sw 2.2s cubic-bezier(.45,0,.25,1) infinite;animation-delay:-.3s}@keyframes sw{0%{transform:translateX(' + r(ax) + 'px)}100%{transform:translateX(' + (w + 120) + 'px)}}'
   }
-  if (sea.current) {
-    body += '<defs><linearGradient id="cu" x1="0" x2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity="0"/><stop offset=".5" stop-color="#67e8f9" stop-opacity=".9"/><stop offset="1" stop-color="' + t.hi + '" stop-opacity="0"/></linearGradient></defs>' +
-      '<rect class="cu" x="-180" y="' + (h - 1.6) + '" width="180" height="1.6" fill="url(#cu)"/>'
-    css += '.cu{animation:cu 1.7s linear infinite;animation-delay:-.6s}@keyframes cu{0%{transform:translateX(0)}100%{transform:translateX(' + (w + 180) + 'px)}}'
-  }
   if (sea.weather) {
     const made = weather(sea.weather, w, h, t, ax)
     body += made.body
@@ -269,6 +266,29 @@ function weather(kind: NonNullable<Sea['weather']>, w: number, h: number, t: Lig
     css += '.sc{animation:sc 3.2s linear infinite}@keyframes sc{0%{transform:translateY(-6px)}100%{transform:translateY(' + (h + 6) + 'px)}}'
   }
   return { body, css }
+}
+
+/** The work current's height, px: the line and the air under it that keeps it off the edge. */
+export const CURRENT_PX = 2
+
+/**
+ * The current that says work is going on, `width` × 2 px: a cyan streak crossing the capsule's
+ * floor and out at the right. The capsule draws it at its own true bottom (kit.tsx `capsule`), not
+ * in the sea, whose height is only an estimate of the capsule's: a floor placed there crossed the
+ * limits' words (2026-10-25).
+ *
+ * Nothing but the width goes into the document, rounded: the same band within a pixel or so is the
+ * same string, so a host that keeps a plain picture whose source did not change keeps its motion
+ * running instead of starting it over. No negative delay opens the loop part way: a loop that does
+ * start over opens off the left edge, which reads as carrying on.
+ */
+export function currentArt(width: number): string {
+  const w = Math.max(80, Math.round(width))
+  const body =
+    '<defs><linearGradient id="cu" x1="0" x2="1"><stop offset="0" stop-color="#67e8f9" stop-opacity="0"/><stop offset=".5" stop-color="#67e8f9" stop-opacity=".9"/><stop offset="1" stop-color="#67e8f9" stop-opacity="0"/></linearGradient></defs>' +
+    '<rect class="cu" x="-180" y=".2" width="180" height="1.6" fill="url(#cu)"/>'
+  const css = '.cu{animation:cu 1.7s linear infinite}@keyframes cu{0%{transform:translateX(0)}100%{transform:translateX(' + (w + 180) + 'px)}}'
+  return svg(w, CURRENT_PX, body, css)
 }
 
 /**
