@@ -174,7 +174,11 @@ esac
 
 # Commit the runtime only after npm and the executable wrapper are usable. Later setup errors must
 # not roll back Node beneath a successfully installed package.
-if [ -n "$BACKUP" ]; then rm -rf "$BACKUP"; BACKUP=""; fi
+committed_backup="$BACKUP"
+BACKUP=""
+if [ -n "$committed_backup" ] && ! rm -rf "$committed_backup"; then
+  die "새 Node 설치는 유지했습니다. 이전 Node 백업을 모두 삭제하지 못했습니다. 남은 파일을 확인해 주세요. ($committed_backup)"
+fi
 
 # --- PATH ---------------------------------------------------------------------------------------
 

@@ -27,6 +27,7 @@ function fixture(t: { after(fn: () => void): void }) {
   const checksum = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   script(path.join(bin, "curl"), 'url=""; out=""\nwhile [ "$#" -gt 0 ]; do case "$1" in -o) shift; out="$1";; https:*) url="$1";; esac; shift; done\ncase "$url" in */index.json) printf \'[{"version":"v24.0.0"}]\';; */SHASUMS256.txt) printf "%s  node-v24.0.0-%s-%s.tar.gz\\n" "$TEST_CHECKSUM" "$TEST_OS" "$TEST_ARCH" > "$out";; *.tar.gz) /bin/cp "$TEST_ARCHIVE" "$out";; *) exit 90;; esac');
   script(path.join(bin, "mv"), 'case "$1" in *.new.*) if [ "$FAIL_POINT" = second-rename ]; then exit 73; fi;; esac\n/bin/mv "$@"\ncase "$2" in *.old.*) if [ "$FAIL_POINT" = first-rename ]; then exit 73; fi;; esac');
+  script(path.join(bin, "rm"), 'case "$*" in *runtime.old.*) if [ "$FAIL_POINT" = backup-cleanup ]; then for arg in "$@"; do case "$arg" in *runtime.old.*) /bin/rm -f "$arg/bin/node";; esac; done; exit 75; fi;; esac\nexec /bin/rm "$@"');
   script(path.join(bin, "tar"), 'if [ "$FAIL_POINT" = extract ]; then exit 72; fi\nexec /usr/bin/tar "$@"');
   const osName = process.platform === "darwin" ? "darwin" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
@@ -39,6 +40,17 @@ function fixture(t: { after(fn: () => void): void }) {
   };
   return { root, prefix, run, preserved };
 }
+
+test("install.sh keeps the committed runtime after partial backup cleanup fails", { skip: process.platform === "win32" }, t => {
+  const f = fixture(t);
+  const result = f.run("backup-cleanup");
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(path.join(f.prefix, "runtime/bin/node")), true);
+  assert.equal(fs.existsSync(path.join(f.prefix, "runtime/identity")), false);
+  assert.match(fs.readFileSync(path.join(f.prefix, "bin/clauderipple"), "utf8"), /exec/);
+  assert.equal(fs.readdirSync(f.prefix).filter(name => name.startsWith("runtime.old.")).length, 1);
+  assert.match(result.stderr, /runtime.old/);
+});
 
 for (const point of ["first-rename", "second-rename", "npm", "extract"]) {
   test(`install.sh restores the previous runtime after ${point} failure`, { skip: process.platform === "win32" }, t => {
