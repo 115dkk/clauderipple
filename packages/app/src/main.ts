@@ -20,7 +20,7 @@ import { parseJsonOutput, repairDetails, restartStillOwed, shouldNotifyDown, tai
 import { mainWindow, openWindow, sendToWindow, windowVisible, type Bounds } from "./window";
 
 type QuotaWindow = { used_percent?: number; window_minutes?: number };
-type Quota = { rate_limits?: { primary?: QuotaWindow | null; secondary?: QuotaWindow | null } };
+type Quota = { plan_type?: string; rate_limits?: { primary?: QuotaWindow | null; secondary?: QuotaWindow | null } };
 
 type Status = {
   version: string;
@@ -37,7 +37,7 @@ type Status = {
   providers: Record<string, { url?: string; reachable: boolean; type?: string }>;
   settings: { HTTPS_PROXY?: string; NODE_EXTRA_CA_CERTS?: string };
   cliVersion: string;
-  chatgpt?: { quota: Record<string, Record<string, unknown> | null>; auth: Record<string, string>; signedIn?: Record<string, boolean> };
+  chatgpt?: { quota: Record<string, Quota | null>; auth: Record<string, string>; signedIn?: Record<string, boolean> };
   /** Reported from 0.6.0 on, where a Claude subscription provider is configured. */
   claude?: { accounts: { id: string; label: string; quota: Quota }[] };
   picker?: { enabled: boolean; hosts: string[]; last: unknown };
@@ -58,7 +58,6 @@ const STRINGS = {
     inFlight: "in flight",
     connected: "Claude Desktop connected",
     notConnected: "Claude Desktop not connected",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% this week`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Restart Router",
     startRouter: "Start Router",
@@ -144,7 +143,6 @@ const STRINGS = {
     inFlight: "진행 중",
     connected: "Claude Desktop 연결됨",
     notConnected: "Claude Desktop 연결 안 됨",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 이번 주 ${percent}% 사용`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "리플 재시작",
     startRouter: "리플 시작",
@@ -230,7 +228,6 @@ const STRINGS = {
     inFlight: "进行中",
     connected: "Claude Desktop 已连接",
     notConnected: "Claude Desktop 未连接",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 本周已用 ${percent}%`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "重启路由服务",
     startRouter: "启动路由服务",
@@ -316,7 +313,6 @@ const STRINGS = {
     inFlight: "処理中",
     connected: "Claude Desktop 接続済み",
     notConnected: "Claude Desktop 未接続",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} 今週 ${percent}% 使用`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "ルーターを再起動",
     startRouter: "ルーターを起動",
@@ -402,7 +398,6 @@ const STRINGS = {
     inFlight: "en curso",
     connected: "Claude Desktop conectado",
     notConnected: "Claude Desktop no conectado",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% esta semana`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Reiniciar router",
     startRouter: "Iniciar router",
@@ -488,7 +483,6 @@ const STRINGS = {
     inFlight: "em andamento",
     connected: "Claude Desktop conectado",
     notConnected: "Claude Desktop não conectado",
-    percentOfWeekUsed: (percent: string | number, plan: string) => `ChatGPT ${plan} ${percent}% nesta semana`,
     cliVersion: (v: string) => `Claude Code CLI ${v}`,
     restartRouter: "Reiniciar roteador",
     startRouter: "Iniciar roteador",
@@ -789,6 +783,7 @@ async function startRouter(): Promise<string> {
 
 function healthy(s: Status | null): "ok" | "warn" | "down" {
   if (!s) return "down";
+  if (s.readiness) return s.readiness.ready ? "ok" : "warn";
   const proxyOk = s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;
   const providersOk = Object.values(s.providers).every((p) => p.reachable !== false);
   if (!proxyOk || s.consecutiveUpstreamFailures > 0) return "warn";
@@ -1331,7 +1326,14 @@ function windowsText(quota: Quota | undefined): string {
   const limits = quota?.rate_limits;
   return [limits?.primary, limits?.secondary]
     .filter((w): w is QuotaWindow => !!w && typeof w.used_percent === "number")
-    .map((w) => `${w.window_minutes === 300 ? L.window5h : L.windowWeek} ${Math.round(w.used_percent!)}%`)
+    .map((w) => {
+      const minutes = w.window_minutes;
+      const period = minutes === 300 ? L.window5h : minutes === 10080 ? L.windowWeek
+        : typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0
+          ? new Intl.NumberFormat(uiLang(), { style: "unit", unit: "minute", unitDisplay: "short" }).format(minutes)
+          : "?";
+      return `${period} ${Math.round(w.used_percent!)}%`;
+    })
     .join(" · ");
 }
 
@@ -1344,10 +1346,9 @@ function render(): void {
   const direct = shown === "direct";
   tray.setImage(icon(shown));
   const s = last;
-  const quota = Object.values(s?.chatgpt?.quota ?? {}).find((q) => q) as { plan_type?: string; rate_limits?: { primary?: { used_percent?: number; reset_after_seconds?: number } } } | undefined;
-  const quotaLine = quota?.rate_limits?.primary
-    ? L.percentOfWeekUsed(quota.rate_limits.primary.used_percent ?? "?", quota.plan_type ?? "")
-    : null;
+  const quota = Object.values(s?.chatgpt?.quota ?? {}).find((q) => q);
+  const quotaWindows = windowsText(quota ?? undefined);
+  const quotaLine = quotaWindows ? `${["ChatGPT", quota?.plan_type].filter(Boolean).join(" ")} · ${quotaWindows}` : null;
   // Two status lines (clickable: they open the window), then only the actions that need the tray.
   // Everything else lives in the GUI window. Disabled items render grey, so the status lines stay enabled.
   const connected = !!s && s.settings.HTTPS_PROXY === `http://127.0.0.1:${s.listen.port}`;
