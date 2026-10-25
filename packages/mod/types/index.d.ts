@@ -305,6 +305,8 @@ export type AgentRec = {
   outputTotal?: number
   /** Tool calls it started. */
   tools?: number
+  /** Coordinator deliveries, newest 20, anchored after the transcript rows visible at receipt. */
+  instructions?: { text: string; after: number; ordinal: number }[]
 }
 
 /**

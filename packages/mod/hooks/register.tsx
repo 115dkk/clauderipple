@@ -150,6 +150,8 @@ let handoffRun = 0
  * per tick per open pane (B19). A resumed agent runs again first, which changes the key.
  */
 let agentTalkCache: { id: string; key: string; talk: AgentTalk } | null = null
+/** Preserve delivery order when transcript reads overlap; reset guards below reject stale work. */
+let receiveWork: Promise<void> = Promise.resolve()
 let carriedPick = false
 /**
  * An agent's end that came before its spawn was recorded, kept until the record lands. A worker
@@ -1519,7 +1521,8 @@ async function countAgents($: EngineInterface): Promise<void> {
  */
 const AGENTS_KEPT = 40
 function retainAgents(list: AgentRec[]): AgentRec[] {
-  const ended = list.filter(a => a.state !== 'running' && a.state !== 'waiting')
+  // A record saved before the waiting state was retired may still say so until it is read back.
+  const ended = list.filter(a => a.state !== 'running' && String(a.state) !== 'waiting')
   const over = ended.length - AGENTS_KEPT
   if (over <= 0) return list
   const drop = new Set(ended.slice().sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt)).slice(0, over).map(a => a.id))
@@ -1679,13 +1682,15 @@ function agentsActions($: EngineInterface): AgentsActions {
  * whichever agent is still running, and the open one being finished changed nothing it shows (B19).
  */
 async function agentTalk($: EngineInterface, id: string, record?: AgentRec): Promise<AgentTalk> {
-  const key = record ? `${record.state}:${record.endedAt ?? 0}:${record.tools}` : 'unknown'
+  // An instruction received after the agent ended still changes what its conversation shows.
+  const key = record ? `${record.state}:${record.endedAt ?? 0}:${record.tools}:${record.instructions?.length ?? 0}` : 'unknown'
   if (record && record.state !== 'running' && agentTalkCache?.id === id && agentTalkCache.key === key) return agentTalkCache.talk
   try {
     const found = await $.session.messages({ agentId: id })
     if (!Array.isArray(found)) return { deny: found.deny }
     const cwd = await $.session.cwd().catch(() => undefined)
-    const talk: AgentTalk = { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }) }
+    const instructions = record?.instructions ?? (await read($, agents)).find(a => a.id === id)?.instructions ?? []
+    const talk: AgentTalk = { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }, instructions) }
     if (record && record.state !== 'running') agentTalkCache = { id, key, talk }
     else if (agentTalkCache?.id === id) agentTalkCache = null
     return talk
@@ -1872,6 +1877,28 @@ export const register: Register = on => {
         }
       }
     } catch (error) { await report($, 'classic.Stop', error) }
+    return next(e)
+  })
+  on('session.receive', { origin: { kind: 'coordinator' } }, async ($, e, next) => {
+    if (!e.agentId) return next(e)
+    const epoch = generation
+    const work = receiveWork.then(async () => {
+      if (epoch !== generation) return
+      const found = await $.session.messages({ agentId: e.agentId })
+      if (!Array.isArray(found)) throw new Error(found.deny)
+      if (epoch !== generation) return
+      // This event precedes queueing, not model consumption. SessionMessage has no stable id;
+      // the visible row count is an approximate receipt position, never a delivery assertion.
+      await update($, agents, list => list.map(a => {
+        if (a.id !== e.agentId || epoch !== generation) return a
+        const previous = a.instructions ?? []
+        return { ...a, instructions: [...previous, { text: e.text, after: found.length, ordinal: (previous.at(-1)?.ordinal ?? 0) + 1 }].slice(-20) }
+      }))
+    })
+    receiveWork = work.then(() => undefined, () => undefined)
+    // The message goes on at once: recording it reads the agent's transcript, and a slow or broken
+    // read must never hold the instruction back from the agent.
+    void work.catch(error => report($, 'agent instruction', error).catch(() => undefined))
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {

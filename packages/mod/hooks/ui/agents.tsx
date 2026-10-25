@@ -208,9 +208,19 @@ function totals(frame: Frame, agents: readonly AgentRec[]): string {
  * answered (a call's `text` is there once answered, also in a subagent's transcript, which keeps no
  * `result`; `isError` when it failed), and an edit's lines added and removed (tools.ts `editLines`).
  */
-export function talkOf(messages: readonly SessionMessage[], place: Place = {}): AgentEntry[] {
+export function talkOf(messages: readonly SessionMessage[], place: Place = {}, instructions: NonNullable<AgentRec['instructions']> = []): AgentEntry[] {
   const out: AgentEntry[] = []
-  for (const m of messages) {
+  const pending = [...instructions].sort((a, b) => a.ordinal - b.ordinal)
+  let received = 0
+  // A shortened transcript (compaction or the API's 4096-row window) clamps old anchors to
+  // its end. There is no stable message id to recover the original position from.
+  for (let i = 0; i <= messages.length; i++) {
+    while (received < pending.length && Math.min(pending[received]!.after, messages.length) <= i) {
+      const instruction = pending[received++]!
+      out.push({ kind: 'prompt', text: instruction.text, receipt: instruction.ordinal })
+    }
+    const m = messages[i]
+    if (!m) break
     if (m.role === 'user') {
       if (m.text.trim()) out.push({ kind: 'prompt', text: m.text.trim() })
       continue
@@ -781,7 +791,7 @@ function promptCard(el: Els, frame: Frame, key: string, text: string, open: bool
   const folded = folds && !open
   const width = Math.max(40, frame.columns) * CELL_PX + 48
   // Taken well past the card: a card taller than its plate would show the page beneath.
-  const height = Math.round(((folded ? FOLD_ROWS : promptRows(text, frame)) + 2) * ROW_PX) + 220
+  const height = Math.min(SVG_MAX_PX, Math.round(((folded ? FOLD_ROWS : promptRows(text, frame)) + 2) * ROW_PX) + 220)
   const label = t(frame.lang, open ? 'agents.showLess' : 'agents.showMore')
   return (
     <Box key={key} position="relative" flexDirection="column" width="100%" minWidth={0} overflow="hidden" borderStyle="round" borderColor="rgba(0,0,0,0)">
@@ -935,8 +945,8 @@ function talkDrawn(el: Els, frame: Frame, view: AgentsView, agent: AgentRec, tal
   const items: RenderNode[] = []
   // Runs unfolded by their first call's id, long prompts by `prompt:<n>` (the first `prompt:first`).
   const opened = view.open?.runsOpen ?? []
-  const prompt = (key: string, id: string, text: string) => promptCard(el, frame, key, cut(text, PROMPT_MAX), opened.includes(id), () => actions.toggleRun(id))
-  if (page.first?.kind === 'prompt') items.push(prompt('task', 'prompt:first', page.first.text))
+  const prompt = (key: string, id: string, text: string, whole = false) => promptCard(el, frame, key, whole ? text : cut(text, PROMPT_MAX), opened.includes(id), () => actions.toggleRun(id))
+  if (page.first?.kind === 'prompt') items.push(prompt('task', 'prompt:first', page.first.text, page.first.receipt !== undefined))
   if (page.dropped > 0) {
     items.push(
       <Box key="dropped" flexDirection="row" justifyContent="center">
@@ -954,7 +964,10 @@ function talkDrawn(el: Els, frame: Frame, view: AgentsView, agent: AgentRec, tal
   const at = new Map(page.shown.map((entry, i) => [entry, page.dropped + i + 1]))
   for (const part of partsOf(page.shown)) {
     if (part.kind === 'run') items.push(runDrawn(el, frame, part.calls, live(agent), opened.includes(part.calls[0]!.id), inFlight, since, actions.toggleRun))
-    else if (part.kind === 'prompt') items.push(prompt('prompt-' + at.get(part), 'prompt:' + at.get(part), part.text))
+    else if (part.kind === 'prompt') {
+      const id = part.receipt === undefined ? 'prompt:' + at.get(part) : 'receipt:' + part.receipt
+      items.push(prompt(part.receipt === undefined ? 'prompt-' + at.get(part) : id, id, part.text, part.receipt !== undefined))
+    }
     else items.push(<Box key={'text-' + items.length} minWidth={0}><Markdown text={cut(part.text, TEXT_MAX)} /></Box>)
   }
   if (page.answer !== undefined) {
@@ -1141,7 +1154,7 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
   if ('deny' in talk) lines.push(<Text key="deny" dimColor wrap="wrap">{t(L, 'agents.deny', { reason: talk.deny })}</Text>)
   else {
     const page = pageOf(talk.entries, !live(agent))
-    if (page.first?.kind === 'prompt') lines.push(<Box key="task" flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(page.first.text, 600)}</Text></Box>)
+    if (page.first?.kind === 'prompt') lines.push(<Box key="task" flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{page.first.receipt === undefined ? cut(page.first.text, 600) : page.first.text}</Text></Box>)
     if (page.dropped > 0) lines.push(<Box key="dropped"><Text dimColor>{t(L, 'agents.dropped', { count: page.dropped })}</Text></Box>)
     // A run of calls folds into one line here too; a single call, and the one in flight, stay lines.
     const inFlight = live(agent) ? page.shown.findLast(e => e.kind === 'tool' && e.state === 'running') : undefined
@@ -1175,7 +1188,7 @@ function openText(el: Els, frame: Frame, view: AgentsView, actions: AgentsAction
             {rows}
           </Box>,
         )
-      } else if (part.kind === 'prompt') lines.push(<Box key={'e' + i} flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{cut(part.text, 600)}</Text></Box>)
+      } else if (part.kind === 'prompt') lines.push(<Box key={'e' + i} flexDirection="column"><Text dimColor>{t(L, 'agents.task')}</Text><Text wrap="wrap">{part.receipt === undefined ? cut(part.text, 600) : part.text}</Text></Box>)
       else lines.push(<Text key={'e' + i} wrap="wrap">{cut(part.text, 1500)}</Text>)
     })
     if (page.answer !== undefined) lines.push(<Box key="answer" flexDirection="column"><Text bold color={agent.state === 'done' ? tone.ok : tone.bad}>{t(L, 'agents.answer')}</Text><Text wrap="wrap">{cut(page.answer, 4000)}</Text></Box>)
@@ -1260,7 +1273,7 @@ export function renderAgents(el: Els, frame: Frame, view: AgentsView, actions: A
       ...(agent.pick ? { pick: { ...agent.pick, why: displayText(agent.pick.why), ...(agent.pick.fallbackReason ? { fallbackReason: displayText(agent.pick.fallbackReason) } : {}) } } : {}),
     })),
     ...(view.tasks ? { tasks: view.tasks.map(task => ({ ...task, title: displayText(task.title, DISPLAY.name), ...(task.command ? { command: displayText(task.command) } : {}), ...(task.summary ? { summary: displayText(task.summary) } : {}) })) } : {}),
-    ...(view.open ? { open: { ...view.open, talk: 'deny' in view.open.talk ? { deny: displayText(view.open.talk.deny) } : { entries: view.open.talk.entries.map(entry => entry.kind === 'tool' ? { ...entry, tool: displayText(entry.tool, DISPLAY.name), detail: displayText(entry.detail) } : { ...entry, text: displayText(entry.text, DISPLAY.conversation) }) } } } : {}),
+    ...(view.open ? { open: { ...view.open, talk: 'deny' in view.open.talk ? { deny: displayText(view.open.talk.deny) } : { entries: view.open.talk.entries.map(entry => entry.kind === 'tool' ? { ...entry, tool: displayText(entry.tool, DISPLAY.name), detail: displayText(entry.detail) } : { ...entry, text: displayText(entry.text, entry.kind === 'prompt' && entry.receipt !== undefined ? Infinity : DISPLAY.conversation) }) } } } : {}),
   }
   const tree = agentsTree(el, frame, view, actions)
   let nodes = 0
