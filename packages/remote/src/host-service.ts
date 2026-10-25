@@ -7,6 +7,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as launchd from "./service.ts";
 import * as windows from "../../cli/src/schtasks.ts";
 import { renderUnit } from "../../cli/src/systemd.ts";
+import { recordedLaunchHome } from "../../cli/src/launcher.ts";
+import { type Ownership, ownerOf, plistEnvironment, unitEnvironment } from "../../cli/src/ownership.ts";
 import { loadConfig, remoteHome } from "./config.ts";
 
 export const TASK = "ClaudeRippleHost";
@@ -18,6 +20,33 @@ export function servicePaths(platform = process.platform, home = os.homedir()): 
   if (platform === "darwin") { const p = launchd.paths(home); return { definition: p.plist, log: p.log, runtime }; }
   if (platform === "win32") return { definition: path.join(runtime, `${TASK}.ps1`), log: path.join(runtime, "logs", "launcher.log"), runtime };
   return { definition: path.join(process.env.XDG_CONFIG_HOME || path.join(home, ".config"), "systemd", "user", UNIT), log: `journalctl --user -u ${UNIT}`, runtime };
+}
+
+/** The home an install without CLAUDERIPPLE_HOME uses. */
+function defaultInstallationHome(): string {
+  return process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
+}
+
+/**
+ * Who the registered host service belongs to (D1, 2026-10-25). The definition is account-wide
+ * (one label, one task, one unit) and records the installation home it was written for — the same
+ * evidence a router service definition carries. Pure: parses text and compares homes.
+ */
+export function hostServiceOwnership(definitionText: string | null, platform: NodeJS.Platform, installationHome: string): Ownership {
+  if (definitionText === null) return { state: "absent", home: null };
+  const recorded = platform === "darwin" ? plistEnvironment(definitionText).CLAUDERIPPLE_HOME ?? null
+    : platform === "linux" ? unitEnvironment(definitionText).CLAUDERIPPLE_HOME ?? null
+    : recordedLaunchHome(definitionText, "win32");
+  return ownerOf(recorded, installationHome);
+}
+
+function readDefinition(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 function systemctl(args: string[]): string {
   return execFileSync("systemctl", ["--user", ...args], { encoding: "utf8", timeout: 150_000, stdio: ["ignore", "pipe", "pipe"] });
@@ -128,8 +157,11 @@ export async function refreshRunningHost(version: string, dir = remoteHome()): P
 
 export async function installService(spec: Spec): Promise<string[]> {
   const platform = process.platform;
-  if (platform === "darwin") return launchd.install(spec);
+  const installationHome = spec.env.CLAUDERIPPLE_HOME ?? defaultInstallationHome();
   const p = servicePaths();
+  const owner = hostServiceOwnership(readDefinition(p.definition), platform, installationHome);
+  if (owner.state === "other") throw new Error(`the phone host service belongs to another ClaudeRipple installation (${owner.home}); remove it with that installation's uninstall`);
+  if (platform === "darwin") return launchd.install(spec);
   if (platform === "win32") {
     await controlShutdown();
     windows.stopAgent(TASK);
@@ -147,19 +179,58 @@ export async function installService(spec: Spec): Promise<string[]> {
   await waitForHost();
   return [`installed and started ${p.definition}`, `logs: ${p.log}`];
 }
-export async function uninstallService(): Promise<string[]> {
-  if (process.platform === "darwin") return launchd.uninstall();
-  const p = servicePaths();
-  if (process.platform === "win32") {
+/** What a caller may inject so an uninstall can be tested without launchd, systemd or PowerShell. */
+export type HostServiceDeps = {
+  platform?: NodeJS.Platform;
+  installationHome?: string;
+  readDefinition?: () => string | null;
+  stop?: () => Promise<void> | void;
+  removeDefinition?: () => void;
+  /** `remote uninstall` is an explicit request: an unrecorded service (an older version's) is removed. */
+  explicit?: boolean;
+};
+
+/**
+ * Removes the phone host service, but only one this home may take. It is account-wide, so a
+ * release check under its own home must not remove the real installation's host; a definition that
+ * records another home is refused, and one that records none is preserved unless the user asked
+ * explicitly (`remote uninstall`) — the same rule as the router's service (B01, D1).
+ */
+export async function uninstallService(deps: HostServiceDeps = {}): Promise<string[]> {
+  const platform = deps.platform ?? process.platform;
+  const home = deps.installationHome ?? defaultInstallationHome();
+  const p = servicePaths(platform);
+  let text: string | null;
+  try {
+    text = (deps.readDefinition ?? (() => readDefinition(p.definition)))();
+  } catch (error) {
+    throw new Error(`the phone host service definition could not be read (${(error as Error).message}); left it alone`);
+  }
+  const owner = hostServiceOwnership(text, platform, home);
+  if (owner.state === "absent") return ["no phone host service was installed"];
+  if (owner.state === "other") throw new Error(`the phone host service belongs to another ClaudeRipple installation (${owner.home}); left it alone`);
+  if (owner.state === "unknown" && !deps.explicit) {
+    throw new Error("the phone host service does not record which installation it belongs to; left it alone (run `clauderipple remote uninstall` to remove it explicitly)");
+  }
+  const lines: string[] = [];
+  if (!deps.stop && !deps.removeDefinition && platform === "darwin") {
+    lines.push(...launchd.uninstall());
+    return lines;
+  }
+  if (deps.stop) await deps.stop();
+  else if (platform === "win32") {
     await controlShutdown();
     windows.stopAgent(TASK);
     if (windows.agentState(TASK) !== "not-loaded" && !windows.removeAgent(TASK)) throw new Error("could not remove the host scheduled task");
-  } else if (process.platform === "linux") {
-    systemctl(["disable", "--now", UNIT]);
-  } else throw new Error(`host service is unsupported on ${process.platform}`);
-  fs.rmSync(p.definition, { force: true });
-  if (process.platform === "linux") systemctl(["daemon-reload"]);
-  return [`removed ${p.definition}`];
+  } else if (platform === "linux") systemctl(["disable", "--now", UNIT]);
+  else throw new Error(`host service is unsupported on ${platform}`);
+  if (deps.removeDefinition) deps.removeDefinition();
+  else {
+    fs.rmSync(p.definition, { force: true });
+    if (platform === "linux") systemctl(["daemon-reload"]);
+  }
+  lines.push(`removed ${p.definition}`);
+  return lines;
 }
 export function serviceStatus(): ReturnType<typeof launchd.agentStatus> {
   if (process.platform === "darwin") return launchd.agentStatus();

@@ -16,17 +16,17 @@ import { adminPort } from "../../router/src/admin.ts";
 import { CLI_WINDOW_MAX } from "../../router/src/bootstrap.ts";
 import { certsExist, certPaths, generateCerts } from "./certs.ts";
 import { applyProxyEnv, checkProxyEnv, currentProxyEnv, removeProxyEnv, settingsPath } from "./settings.ts";
-import { agentDefinitionPath, agentState, installAgent, isLinux, isSupported, isWindows, removeAgent, restartAgent, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
+import { agentDefinitionPath, agentState, installAgent, isLinux, isSupported, isWindows, removeAgent, restartAgent, serviceOwnership, startAgent, stopAgent, supervisorName } from "./supervisor.ts";
 import { removeBundle, writeBundle } from "./bundle.ts";
 import { installTrayAgent, removeTrayAgent, trayLoginItemDecision, trayPlistPath } from "./launchd.ts";
 import { nativeSupervisor, registration, writePaths } from "./registration.ts";
 import { installLauncher, uninstallLauncher } from "./launcher.ts";
 import type { RecoveryDeps } from "./doctor.ts";
-import { applyAppProxy, caTrusted, currentAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
-import { defaultHome, removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
+import { applyAppProxy, caTrusted, CA_NAME, currentAppProxy, nssDb, removeAppProxy, trustCa, untrustCa } from "./picker.ts";
+import { removeClientIntegrations, setPickerEnabled } from "./integrations.ts";
 import { withCommandHelp } from "./help-gate.ts";
 import { runtime } from "./runtime.ts";
-import { codexOff, codexOn } from "./codex.ts";
+import { codexOff, codexOn, ingressPort } from "./codex.ts";
 import { ingressModels } from "../../router/src/ingress/models.ts";
 import { GROK_DEFAULT_URL } from "../../router/src/providers/grok/catalog.ts";
 import { claudeLogin, claudeLogout, desktopClaudeCodeDirs } from "./claude-auth.ts";
@@ -75,14 +75,23 @@ function describeRestart(r: ReturnType<typeof restartAgent>): string {
   if (r === "drained") return "✓ router restarted (in-flight model calls were allowed to finish)";
   if (r === "kickstarted") return "✓ router restarted (hard restart: it did not exit on its own in time)";
   if (r === "direct") return `! router restarted outside the ${supervisorName()}: its start did not bring one up. ${resupervise()}`;
+  if (r === "other-installation") return `! not restarted: the ${supervisorName()} belongs to another ClaudeRipple installation (this one's was never registered)`;
+  if (r === "ownership-unknown") return `! not restarted: the ${supervisorName()} does not record which installation it belongs to`;
+  if (r === "identity-unknown") return "! not restarted: the running instance could not be verified as this installation's";
   return "✗ router not restarted — run `clauderipple repair` (or `clauderipple install`)";
+}
+
+/** One line for a service operation that refused to touch an unverified definition or instance (B01). */
+function describeOwnership(result: "other-installation" | "ownership-unknown" | "identity-unknown"): string {
+  if (result === "other-installation") return `! left it alone: the ${supervisorName()} belongs to another ClaudeRipple installation`;
+  if (result === "ownership-unknown") return `! left it alone: the ${supervisorName()} does not record which installation it belongs to`;
+  return "! left it alone: its running instance could not be verified as this installation's (no installation id)";
 }
 
 function pickerOff(): void {
   const home = homeDir();
   // Under another CLAUDERIPPLE_HOME only this install's entry and CA go (integrations.ts).
-  const isDefault = path.resolve(home) === path.resolve(defaultHome());
-  const removed = removeAppProxy(isDefault ? undefined : proxyUrlFor(new ConfigStore(configPath()).get().listen.port));
+  const removed = removeAppProxy(proxyUrlFor(new ConfigStore(configPath()).get().listen.port), home);
   console.log(removed ? "✓ Claude Desktop config library entry removed (previous entry restored if there was one)" : "✓ no ClaudeRipple config library entry");
   try {
     setPickerEnabled(false);
@@ -92,7 +101,12 @@ function pickerOff(): void {
   }
   if (isWindows) console.log("Removing the CA: Windows will ask you to confirm once more.");
   const store = isWindows ? "your user certificate store" : isLinux ? `your NSS database (${nssDb()})` : "the login keychain";
-  console.log(untrustCa(certPaths(home).caPem, { sweep: isDefault }) ? `✓ CA removed from ${store}` : `✓ CA was not in ${store}`);
+  const removal = untrustCa(certPaths(home).caPem, { sweep: false });
+  console.log(
+    removal === "removed" ? `✓ CA removed from ${store}`
+    : removal === "absent" ? `✓ CA was not in ${store}`
+    : `! CA removal was not confirmed; it may still be trusted. Remove the "${CA_NAME}" certificate from ${store} by hand.`,
+  );
   console.log("\nQuit and reopen Claude Desktop to apply.");
 }
 
@@ -280,7 +294,7 @@ async function install(): Promise<void> {
   }
   // The cap sits at Claude Code's ceiling for a per-model window, so each routed model compacts at
   // its own window from the bootstrap (CLI_WINDOW_MAX); a flag still sets another.
-  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), maxContextTokens: maxCtx ? Number(maxCtx) : CLI_WINDOW_MAX, models: cfg.cli.models ?? {}, respectDirect: true });
+  const edit = applyProxyEnv({ proxyUrl, caPath, force: flag("force"), maxContextTokens: maxCtx ? Number(maxCtx) : CLI_WINDOW_MAX, models: cfg.cli.models ?? {}, respectDirect: true, home });
   console.log(edit.changed ? `✓ ${settingsPath()} updated (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} already correct`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
   // Something to double-click for the menu-bar app, which is what offers repair when the router is
@@ -305,30 +319,89 @@ async function install(): Promise<void> {
 async function uninstall(): Promise<void> {
   const home = homeDir();
   const cfg = new ConfigStore(configPath()).get();
+  // Read before anything is unregistered: a Codex block from a version that recorded no home is
+  // this installation's to remove only when this home's own definition was the one registered
+  // when the uninstall started (B03).
+  const serviceWasOurs = serviceOwnership(home).state === "ours";
+  // The phone host is its own account-wide service and is not inside the router's definition: stop
+  // and remove it first, so nothing keeps running against files this uninstall removes. Its own
+  // definition decides ownership, so another installation's host is reported, not touched (D1).
+  let hostRemoved = true;
+  try {
+    const { uninstallService } = await import("../../remote/src/host-service.ts");
+    for (const line of await uninstallService({ installationHome: home })) console.log(`  ${line}`);
+  } catch (e) {
+    hostRemoved = false;
+    process.exitCode = 1;
+    console.log(`! the phone host service was not removed: ${(e as Error).message}`);
+  }
   // Stop the router before unregistering it. On macOS unloading the agent takes the process with
   // it; on Windows removing the task leaves it running, and a running router holds router.log open,
   // so --purge then fails with EPERM and leaves the home directory behind (measured 2026-09-16 in a
-  // Windows 11 arm64 VM).
-  if (stopAgent()) console.log("✓ router stopped");
+  // Windows 11 arm64 VM). A definition that belongs to another installation is left untouched.
+  const stop = stopAgent(home);
+  console.log(
+    stop === "stopped" ? "✓ router stopped"
+    : stop === "not-loaded" ? "✓ no router registered (nothing to stop)"
+    : stop === "failed" ? "! the running router did not accept a shutdown request; it was left running"
+    : describeOwnership(stop),
+  );
+  // An instance that cannot be proven to be this installation's, or one that refused to drain, is
+  // not stopped: its registration stays, and the rest of the uninstall waits rather than removing
+  // settings under a live process.
+  if (stop === "failed") {
+    process.exitCode = 1;
+    console.log("Uninstall is incomplete: the running router did not accept the shutdown request and was left running. Stop it, then run uninstall again.");
+    return;
+  }
+  if (stop === "identity-unknown") {
+    process.exitCode = 1;
+    console.log(`Uninstall is incomplete: the ${supervisorName()} was left in place. Update this installation (\`clauderipple install\`) so its router reports an installation id, stop it, then run uninstall again.`);
+    return;
+  }
   // Before --purge can take the journal that says whether the router left sleep disabled.
   await releaseHeldSleep("uninstalled");
-  const removed = removeAgent();
-  console.log(removed ? `✓ ${supervisorName()} removed (${agentDefinitionPath()})` : `✓ no ${supervisorName()} registered`);
-  if (process.platform === "darwin") removeTrayAgent();
+  const removed = removeAgent(home);
+  console.log(
+    removed === "removed" ? `✓ ${supervisorName()} removed (${agentDefinitionPath()})`
+    : removed === "absent" ? `✓ no ${supervisorName()} registered`
+    : describeOwnership(removed),
+  );
+  if (removed === "identity-unknown") {
+    process.exitCode = 1;
+    console.log("Uninstall is incomplete: the service registration was left in place because its running instance could not be verified as this installation's. Stop it, then run uninstall again.");
+    return;
+  }
+  if (process.platform === "darwin") {
+    const tray = removeTrayAgent(home);
+    console.log(
+      tray === "removed" ? `✓ tray login item removed (${trayPlistPath()})`
+      : tray === "absent" ? "✓ no tray login item"
+      : `${describeOwnership(tray)} (${trayPlistPath()})`,
+    );
+  }
   removeBundle(home);
+  let launcherRemoved = false;
   try {
     const app = uninstallLauncher({ rt: installedRuntime, home, version: VERSION });
+    launcherRemoved = app.ok;
+    if (!app.ok) console.log(`  ${app.detail}`);
     if (app.paths.length) console.log(`✓ menu-bar app launcher removed (${app.paths.join(", ")})`);
   } catch (e) {
     console.log(`  could not remove the menu-bar app launcher: ${(e as Error).message}`);
   }
-  const integrationsRemoved = removeClientIntegrations(home, undefined, { port: cfg.listen.port });
+  const integrationsRemoved = removeClientIntegrations(home, undefined, {
+    port: cfg.listen.port,
+    ...(serviceWasOurs ? { legacyCodexIngressPort: ingressPort(cfg) } : {}),
+  });
   if (!integrationsRemoved) process.exitCode = 1;
-  const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem, ...(cfg.cli.models ? { models: cfg.cli.models } : {}) });
+  const edit = removeProxyEnv({ proxyUrl: proxyUrlFor(cfg.listen.port), caPath: certPaths(home).caPem, ...(cfg.cli.models ? { models: cfg.cli.models } : {}), home });
   console.log(edit.changed ? `✓ ${settingsPath()} restored (backup: ${edit.backup ?? "none"})` : `✓ ${settingsPath()} had no ClaudeRipple keys`);
   for (const n of edit.notes) console.log(`  note: ${n}`);
+  await reportLeftovers(home);
   if (flag("purge")) {
-    if (!integrationsRemoved) {
+    if (!integrationsRemoved || !launcherRemoved || !hostRemoved || edit.notes.some(note => /left |could not /i.test(note)) || (removed !== "removed" && removed !== "absent")) {
+      process.exitCode = 1;
       console.error("일부 등록을 제거하지 못해 설치 폴더를 보존했습니다. 오류를 해결한 뒤 다시 제거해 주세요.");
       return;
     }
@@ -339,6 +412,25 @@ async function uninstall(): Promise<void> {
       console.log(`실행 중인 Node가 종료된 뒤 설치 폴더를 삭제합니다. 아직 완료되지 않았습니다. 종료 코드 2는 대기 상태이며, 최종 결과는 ${result.resultFile}에서 확인해 주세요 (exitCode 0: 완료, 1: 실패).`);
     } else console.log(`설치 폴더를 삭제했습니다. ${home}`);
   } else console.log(`  kept ${home} (config, certs, logs). Add --purge to delete it.`);
+}
+
+/**
+ * What an uninstall leaves outside the installation home, said before that home (and with it the
+ * record of the remote hosts) goes. None of it is removed here: the sudoers grant needs an
+ * administrator's approval and the PATH line still serves the command that was just run, so each is
+ * named with the command that removes it when the user no longer wants it (G-D02, G-D16).
+ */
+async function reportLeftovers(home: string): Promise<void> {
+  const { remainingAwakeGrantHint } = await import("./awake-setup.ts");
+  const hint = remainingAwakeGrantHint();
+  if (hint) console.log(`  ${hint}`);
+  const { configuredHosts } = await import("./remote.ts");
+  const hosts = configuredHosts(configPath()).map((host) => host.host).filter(Boolean);
+  if (hosts.length > 0) {
+    console.log(`  원격(SSH) 호스트 ${hosts.length}대의 설정이 남아 있습니다: ${hosts.join(", ")}`);
+    console.log("  더 이상 필요하지 않다면 각 호스트에서 `clauderipple remote remove <호스트>`를 실행해 주세요.");
+  }
+  console.log("  설치 명령이 셸 프로필에 추가한 PATH 줄은 그대로 두었습니다. ClaudeRipple을 완전히 지울 때는 그 줄(주석 `# ClaudeRipple`)을 삭제해 주세요.");
 }
 
 async function status(): Promise<void> {
@@ -686,21 +778,30 @@ async function dispatchCommand(): Promise<void> {
         r === "already-running" ? "already running"
         : r === "started" ? "started"
         : r === "started-directly" ? `started without the ${supervisorName()}. ${resupervise()}`
+        : r === "other-installation" || r === "ownership-unknown" ? describeOwnership(r)
         : "start failed (is it installed?)",
       );
-      if (r === "failed") process.exitCode = 1;
+      if (r === "failed" || r === "other-installation" || r === "ownership-unknown") process.exitCode = 1;
       break;
     }
     case "restart": {
       const r = restartAgent({ onProgress: (m) => console.log(`  ${m}`) });
       console.log(describeRestart(r));
-      if (r === "failed") process.exitCode = 1;
+      if (r === "failed" || r === "other-installation" || r === "ownership-unknown" || r === "identity-unknown") process.exitCode = 1;
       break;
     }
-    case "stop":
-      console.log(stopAgent() ? "stopped (run `clauderipple start` or `install` to bring it back)" : "stop failed (not loaded?)");
+    case "stop": {
+      const stopped = stopAgent();
+      console.log(
+        stopped === "stopped" ? "stopped (run `clauderipple start` or `install` to bring it back)"
+        : stopped === "not-loaded" ? "stop failed (not loaded?)"
+        : stopped === "failed" ? "! the router did not accept the shutdown request; it was left running"
+        : describeOwnership(stopped),
+      );
+      if (stopped !== "stopped" && stopped !== "not-loaded") process.exitCode = 1;
       await releaseHeldSleep("router stopped");
       break;
+    }
     case "logs":
       logs();
       break;
@@ -721,7 +822,7 @@ async function dispatchCommand(): Promise<void> {
         break;
       }
       const cfg = new ConfigStore(configPath()).get();
-      const result = sub === "on" ? codexOn(cfg.listen.openaiPort ?? cfg.listen.port + 2, undefined, ingressModels(cfg)) : codexOff();
+      const result = sub === "on" ? codexOn(ingressPort(cfg), undefined, ingressModels(cfg), homeDir()) : codexOff(undefined, homeDir(), { legacyIngressPort: ingressPort(cfg) });
       console.log(result.changed ? `✓ Codex ${sub}: ${result.config}${sub === "on" ? `\n✓ profile: ${result.profile}` : ""}` : `✓ Codex already ${sub}`);
       if (result.backup) console.log(`  backup: ${result.backup}`);
       if (result.profileBackup) console.log(`  profile backup: ${result.profileBackup}`);
