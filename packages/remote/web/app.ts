@@ -126,6 +126,8 @@ export class App {
     const link = new Link({
       url: viaRelay ? relayClientUrl(relay) : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
       token, clientId,
+      // Only the transport chunks are asked for; the rest of this client's answers stay as they are.
+      features: ["chunkedFrames"],
       makeSocket: viaRelay
         ? (url) => new RelaySocket(new WebSocket(url) as unknown as RawSocket, relay, browserNacl())
         : (url) => new WebSocket(url) as unknown as import("./conn.ts").SocketLike,

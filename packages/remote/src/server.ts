@@ -5,15 +5,17 @@ import fs from "node:fs";
 import http from "node:http";
 import module from "node:module";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { tokenMatches } from "./config.ts";
 import { clientEvent, clientFeatures, settingsResponse } from "./client-compat.ts";
+import { chunkFrames } from "./chunks.ts";
 import type { Phone } from "./local-control.ts";
 import { browse, macConsent, makeFolder, recentFolders } from "./folders.ts";
 import type { RecentSource } from "./folders.ts";
 import { diffView } from "./diff.ts";
 import { gitInfo } from "./worktree.ts";
-import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
+import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "./protocol.ts";
 import type { BlobChunk, ClientMsg, HostInfo, HostMsg, ProviderGroup, ReqOp, RippleStatus } from "./protocol.ts";
 import { SEEN_MS, VISIBLE_MS } from "./push.ts";
 import type { Notifier } from "./push.ts";
@@ -40,6 +42,7 @@ const require = module.createRequire(import.meta.url);
 /** Published path → file, for what the PWA loads from outside web/. The relay's build serves the same paths. */
 export const SHARED: Record<string, (pkgDir: string) => string> = {
   "src/protocol.ts": (pkg) => path.join(pkg, "src", "protocol.ts"),
+  "src/chunks.ts": (pkg) => path.join(pkg, "src", "chunks.ts"),
   "src/tool-details.ts": (pkg) => path.join(pkg, "src", "tool-details.ts"),
   "src/wrap-up.ts": (pkg) => path.join(pkg, "src", "wrap-up.ts"),
   "src/e2ee.ts": (pkg) => path.join(pkg, "src", "e2ee.ts"),
@@ -369,9 +372,20 @@ export class HostServer {
     if (c.ws.readyState !== c.ws.OPEN) return;
     if (msg.t === "events" || msg.t === "history") msg = { ...msg, events: msg.events.map(event => clientEvent(event, c.features)) };
     const text = JSON.stringify(msg);
-    if (Buffer.byteLength(text) > FRAME_CAP) {
+    const bytes = Buffer.byteLength(text);
+    if (bytes > FRAME_CAP) {
+      // A client that asked for chunkedFrames gets the same frame in slices of its exact bytes, so
+      // a big queue, edit answer or session list arrives whole; everyone else keeps the old wire.
+      // Past CHUNK_MESSAGE_MAX the message is not chunked at all: the phone's memory stays bounded.
+      if (c.features.has("chunkedFrames") && bytes <= CHUNK_MESSAGE_MAX) {
+        for (const chunk of chunkFrames(text, randomUUID())) {
+          if (c.ws.readyState !== c.ws.OPEN) return;
+          c.ws.send(JSON.stringify(chunk));
+        }
+        return;
+      }
       // The log caps events and pages, so this means a bug; say so rather than kill the socket (Paseo #2610).
-      this.opts.log?.(`frame over cap dropped: ${msg.t} ${Buffer.byteLength(text)} bytes`);
+      this.opts.log?.(`frame over cap dropped: ${msg.t} ${bytes} bytes`);
       if (msg.t !== "error") this.send(c, { t: "error", code: "too_large", message: `${msg.t} frame over ${FRAME_CAP} bytes` });
       return;
     }

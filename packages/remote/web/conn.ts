@@ -7,6 +7,7 @@
 // would be a lie.
 import { BACKOFF_CAP_MS, PING_MS, READY_MS, STALE_MS } from "../src/protocol.ts";
 import type { ClientFeature, ClientMsg, HostMsg } from "../src/protocol.ts";
+import { FrameAssembler, isChunkFrame, isHostFrame } from "../src/chunks.ts";
 
 /** A socket that opens but never says `ready` is as good as down (through the relay: the handshake counts too). */
 export { READY_MS };
@@ -65,6 +66,8 @@ export class Link {
 
   private deps: LinkDeps;
   private sock: SocketLike | null = null;
+  /** Chunk frames for this socket; one shot at a time, discarded whenever the socket is replaced. */
+  private assembler: FrameAssembler;
   private retryTimer: unknown = null;
   private tickTimer: unknown = null;
   private pingTimer: unknown = null;
@@ -81,7 +84,7 @@ export class Link {
    */
   private epoch = 0;
 
-  constructor(deps: LinkDeps) { this.deps = deps; }
+  constructor(deps: LinkDeps) { this.deps = deps; this.assembler = new FrameAssembler(() => this.deps.now()); }
 
   start(): void { this.stopped = false; this.connect(); }
 
@@ -123,6 +126,8 @@ export class Link {
     for (const id of [this.retryTimer, this.tickTimer, this.pingTimer, this.readyTimer, this.probeTimer]) if (id !== null) this.deps.clearTimer(id);
     this.retryTimer = this.tickTimer = this.pingTimer = this.readyTimer = this.probeTimer = null;
     this.probeN = null;
+    // A half-received message belongs to the socket that was carrying it; nothing survives a teardown.
+    this.assembler.reset();
   }
 
   /** Forget the current socket before closing it, so its late close is not read as a live failure. */
@@ -160,22 +165,29 @@ export class Link {
       this.armPing();
     };
     // From creation, not from open: a connect that hangs (a dead address after a network switch)
-    // may fire neither open nor close for minutes.
-    this.readyTimer = this.deps.setTimer(() => {
-      // Only this socket's own timeout may clear the reference first: a queued old one would forget
-      // the live connect timeout, and stop() could then leave it running.
-      if (this.sock !== sock) return;
-      this.readyTimer = null;
-      if (authed) return;
-      this.sock = null;
-      try { sock.close(4002, "no ready"); } catch { /* gone */ }
-      this.fail();
-    }, READY_MS);
-    sock.onmessage = (ev) => {
-      if (this.sock !== sock) return;
-      this.status.lastRx = this.deps.now();
-      let msg: HostMsg;
-      try { msg = JSON.parse(String(ev.data)) as HostMsg; } catch { return; }
+    // may fire neither open nor close for minutes. A chunked ready is progress, not silence, so
+    // each slice pushes this deadline out while the whole message is still coming; the assembler's
+    // own cap and timeout bound a host that stops halfway.
+    let readyArm = 0;
+    const armReady = (): void => {
+      const arm = ++readyArm;
+      if (this.readyTimer !== null) this.deps.clearTimer(this.readyTimer);
+      this.readyTimer = this.deps.setTimer(() => {
+        // A callback already queued when its timer was cleared still runs; only the latest arming
+        // may spend this deadline or clear its reference, or a slice would cancel the new deadline.
+        if (arm !== readyArm) return;
+        // Only this socket's own timeout may clear the reference first: a queued old one would forget
+        // the live connect timeout, and stop() could then leave it running.
+        if (this.sock !== sock) return;
+        this.readyTimer = null;
+        if (authed) return;
+        this.sock = null;
+        try { sock.close(4002, "no ready"); } catch { /* gone */ }
+        this.fail();
+      }, READY_MS);
+    };
+    armReady();
+    const deliver = (msg: HostMsg): void => {
       if (msg.t === "pong") {
         // Only the answer to the probe still pending clears it; an older pong (or a later one after
         // the probe timed out) changes nothing.
@@ -196,8 +208,39 @@ export class Link {
       }
       this.onMessage(msg);
     };
+    sock.onmessage = (ev) => {
+      if (this.sock !== sock) return;
+      this.status.lastRx = this.deps.now();
+      let parsed: unknown;
+      try { parsed = JSON.parse(String(ev.data)); } catch { return; }
+      if (isChunkFrame(parsed)) {
+        // Only ever sent to a client that asked for them; a host that does it anyway is not
+        // speaking this contract, and a lie is worse than a reconnect.
+        if (!this.deps.features?.includes("chunkedFrames")) return;
+        if (!authed) armReady();
+        const result = this.assembler.push(parsed);
+        if (result.kind === "pending") return;
+        if (result.kind === "error") { this.dropChunked(sock); return; }
+        // The assembled text is the exact frame the host serialized; it takes the normal path,
+        // including the `ready` that opens the link and stops the connect deadline. Anything that
+        // is not one host frame (null, an array, another chunk envelope) is not delivered at all.
+        let assembled: unknown;
+        try { assembled = JSON.parse(result.text); } catch { this.dropChunked(sock); return; }
+        if (!isHostFrame(assembled)) { this.dropChunked(sock); return; }
+        parsed = assembled;
+      }
+      deliver(parsed as HostMsg);
+    };
     sock.onclose = () => { if (this.sock === sock) this.fail(); };
     sock.onerror = () => { /* onclose follows */ };
+  }
+
+  /** A slice that cannot be completed or is malformed: reconnect instead of waiting for a frame that will never come. */
+  private dropChunked(sock: SocketLike): void {
+    if (this.sock !== sock) return;
+    this.sock = null;
+    try { sock.close(4002, "bad chunk"); } catch { /* gone */ }
+    this.fail();
   }
 
   private fail(immediate = false): void {
@@ -276,6 +319,14 @@ export class Link {
   private ping(): void {
     const sock = this.sock;
     if (!sock) return;
+    if (this.assembler.expire()) {
+      // A slice stopped arriving; the rest of that message will never come. Starting over is the
+      // only way to get a complete one, and it costs one reconnect.
+      this.sock = null;
+      try { sock.close(4002, "lost chunks"); } catch { /* gone */ }
+      this.fail(true);
+      return;
+    }
     const last = this.status.lastRx ?? 0;
     if (this.deps.now() - last > STALE_MS) {
       // Silence may be the phone's background, not the host's. Probe before dropping: a socket that

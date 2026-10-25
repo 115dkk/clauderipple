@@ -3,12 +3,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { backoff, Link, PROBE_MS, READY_MS } from "../web/conn.ts";
 import type { SocketLike } from "../web/conn.ts";
+import { chunkFrames } from "../src/chunks.ts";
 import { dictionaries } from "../web/i18n.ts";
 import { markdown } from "../web/md.ts";
 import { pushAvailability } from "../web/pushstate.ts";
 import { mergeEvents, reduce } from "../web/timeline.ts";
-import { BACKOFF_CAP_MS, PING_MS, STALE_MS } from "../src/protocol.ts";
-import type { EventBody, SessionEvent } from "../src/protocol.ts";
+import { BACKOFF_CAP_MS, CHUNK_TIMEOUT_MS, PING_MS, STALE_MS } from "../src/protocol.ts";
+import type { ClientFeature, EventBody, HostMsg, SessionEvent } from "../src/protocol.ts";
 
 test("quoted paragraphs, line breaks, lists and code keep their structure", () => {
   assert.equal(markdown("> First line\n> Second line\n>\n> 1. First\n>    continuation\n> 2. Second\n>\n> ```\n> a\n> b\n> ```"),
@@ -56,17 +57,19 @@ class FakeSocket implements SocketLike {
   recv(msg: unknown): void { this.onmessage?.({ data: JSON.stringify(msg) }); }
 }
 
-function setup(online = { value: true }) {
+function setup(online = { value: true }, features?: ClientFeature[]) {
   const clock = new Clock();
   const sockets: FakeSocket[] = [];
   const link = new Link({
-    url: "ws://h/ws", token: "tok", clientId: "c",
+    url: "ws://h/ws", token: "tok", clientId: "c", ...(features ? { features } : {}),
     makeSocket: () => { const s = new FakeSocket(); sockets.push(s); return s; },
     now: () => clock.now, setTimer: clock.set, clearTimer: clock.clear, isOnline: () => online.value,
   });
   let readies = 0;
+  const messages: HostMsg[] = [];
   link.onReady = () => { readies++; };
-  return { clock, sockets, link, readies: () => readies };
+  link.onMessage = (msg) => { messages.push(msg); };
+  return { clock, sockets, link, readies: () => readies, messages };
 }
 
 const ready = { t: "ready", host: { name: "m", version: "0", routerOk: true }, sessions: [] };
@@ -85,6 +88,169 @@ test("hello carries the token; ready opens the link", () => {
   sockets[0]!.recv(ready);
   assert.equal(link.status.state, "open");
   assert.equal(readies(), 1);
+});
+
+const bigReady = () => JSON.stringify({ ...ready, host: { ...ready.host, name: "x".repeat(300_000) } });
+
+test("a chunked ready opens the link only after its last slice arrives", () => {
+  const { sockets, link, readies, messages } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  const chunks = [...chunkFrames(bigReady(), "ready-1")];
+  assert.ok(chunks.length > 1);
+  for (const chunk of chunks.slice(0, -1)) sock.recv(chunk);
+  assert.equal(link.status.state, "connecting");
+  assert.equal(readies(), 0);
+  assert.equal(messages.length, 0, "no slice reaches the app");
+  sock.recv(chunks.at(-1)!);
+  assert.equal(link.status.state, "open");
+  assert.equal(readies(), 1);
+  assert.deepEqual(messages.map(msg => msg.t), ["ready"]);
+  const opened = messages[0] as Extract<HostMsg, { t: "ready" }>;
+  assert.equal(opened.host.name.length, 300_000, "the whole frame, not a summary");
+});
+
+test("slices of a large ready count as progress for the connect deadline", () => {
+  const { clock, sockets, link, readies } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  const chunks = [...chunkFrames(bigReady(), "slow-ready")];
+  clock.advance(READY_MS - 2_000);
+  sock.recv(chunks[0]!);
+  clock.advance(READY_MS - 2_000); // past the original deadline, 6 s since that slice
+  assert.equal(sock.closed, false, "a slice is not silence");
+  assert.equal(link.status.state, "connecting");
+  sock.recv(chunks[1]!);
+  assert.equal(link.status.state, "open");
+  assert.equal(readies(), 1);
+});
+
+test("a malformed slice reconnects instead of waiting for a message that cannot complete", () => {
+  const { clock, sockets, link } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  sock.recv(ready);
+  sock.recv({ t: "chunk", id: "bad", index: 0, total: 2, bytes: 10, data: "!!" });
+  assert.equal(sock.closed, true);
+  assert.equal(link.status.state, "waiting");
+  clock.advance(1000);
+  assert.equal(sockets.length, 2);
+});
+
+test("a ready deadline that already fired cannot cancel the one a slice re-armed", () => {
+  const { clock, sockets, link, readies } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  // The callbacks already queued before any slice arrives: the ready deadline, then the first ping.
+  const stale = clock.take();
+  const chunks = [...chunkFrames(bigReady(), "race")];
+  sock.recv(chunks[0]!);
+  stale[0]!();
+  assert.equal(sock.closed, false, "a stale arming may not drop the socket or clear the live deadline");
+  assert.equal(link.status.state, "connecting");
+  clock.advance(READY_MS);
+  assert.equal(sock.closed, true, "the current deadline still decides");
+  assert.equal(readies(), 0);
+});
+
+test("a completed message that is not one host frame is not delivered", () => {
+  const bads = ["null", "[]", JSON.stringify({ t: "chunk", id: "x", index: 0, total: 1, bytes: 0, data: "" })];
+  for (const bad of bads) {
+    const { sockets, link, readies, messages } = setup({ value: true }, ["chunkedFrames"]);
+    link.start();
+    const sock = sockets[0]!;
+    sock.open();
+    sock.recv(ready);
+    messages.length = 0;
+    for (const chunk of chunkFrames(bad, `bad-${bad.length}`)) sock.recv(chunk);
+    assert.equal(sock.closed, true, bad);
+    assert.equal(messages.length, 0, bad);
+    assert.equal(readies(), 1, "the earlier ready still counted");
+  }
+});
+
+test("slices that stop arriving after the link opened start over after the assembly timeout", () => {
+  const { clock, sockets, link } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  sock.recv(ready);
+  const chunks = [...chunkFrames(JSON.stringify({ t: "sessions", sessions: [{ id: "s", note: "x".repeat(300_000) }] }), "lost")];
+  sock.recv(chunks[0]!);
+  clock.advance(CHUNK_TIMEOUT_MS + PING_MS);
+  assert.equal(sock.closed, true);
+  assert.equal(sockets.length, 2, "a fresh attempt starts at once");
+  assert.equal(link.status.state, "connecting");
+});
+
+test("a repeated slice after a completed message changes nothing", () => {
+  const { sockets, link, readies, messages } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  const chunks = [...chunkFrames(bigReady(), "duplicate")];
+  for (const chunk of chunks) sock.recv(chunk);
+  assert.equal(readies(), 1);
+  sock.recv(chunks.at(-1)!);
+  assert.equal(readies(), 1);
+  assert.deepEqual(messages.map(msg => msg.t), ["ready"]);
+});
+
+test("slices of two messages may interleave on one socket", () => {
+  const { sockets, link, messages } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  sock.recv(ready);
+  messages.length = 0;
+  const a = JSON.stringify({ t: "sessions", sessions: [{ id: "a", title: "가".repeat(90_000) }] });
+  const b = JSON.stringify({ t: "events", session: "s", epoch: "e", events: [{ kind: "user", text: "x".repeat(300_000) }] });
+  const as = [...chunkFrames(a, "msg-a")];
+  const bs = [...chunkFrames(b, "msg-b")];
+  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+    for (const chunk of [as[i], bs[i]]) if (chunk) sock.recv(chunk);
+  }
+  assert.deepEqual(messages.map(msg => JSON.stringify(msg)), [a, b]);
+});
+
+test("a client that did not ask for chunks never sees one", () => {
+  const { clock, sockets, link, readies, messages } = setup();
+  link.start();
+  const sock = sockets[0]!;
+  sock.open();
+  for (const chunk of chunkFrames(bigReady(), "unasked")) sock.recv(chunk);
+  assert.equal(readies(), 0);
+  assert.equal(messages.length, 0);
+  assert.equal(link.status.state, "connecting");
+  clock.advance(READY_MS);
+  assert.equal(sock.closed, true, "the normal ready deadline still decides");
+});
+
+test("a new socket never mixes slices from the one before it", () => {
+  const { clock, sockets, link, messages } = setup({ value: true }, ["chunkedFrames"]);
+  link.start();
+  const first = sockets[0]!;
+  first.open();
+  first.recv(ready);
+  const text = JSON.stringify({ t: "sessions", sessions: [{ id: "s", note: "x".repeat(300_000) }] });
+  const chunks = [...chunkFrames(text, "mixed")];
+  first.recv(chunks[0]!);
+  first.close();
+  clock.advance(1000);
+  const second = sockets[1]!;
+  second.open();
+  second.recv(ready);
+  assert.equal(link.status.state, "open");
+  second.recv(chunks[1]!);
+  assert.equal(messages.filter(msg => msg.t === "sessions").length, 0, "the old socket's slice is gone");
+  second.recv(chunks[0]!);
+  const sessions = messages.filter(msg => msg.t === "sessions");
+  assert.equal(sessions.length, 1);
+  assert.deepEqual(sessions[0], JSON.parse(text));
 });
 
 test("a dropped link retries forever with capped backoff and recovers", () => {

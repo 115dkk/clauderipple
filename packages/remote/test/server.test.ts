@@ -11,8 +11,9 @@ import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promi
 import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
-import { ATTACHMENT_CAP, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
+import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
+import { FrameAssembler } from "../src/chunks.ts";
 import { HostServer } from "../src/server.ts";
 import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
 import { VISIBLE_MS } from "../src/push.ts";
@@ -224,6 +225,42 @@ class MemoryPeer extends EventEmitter implements ServerPeer {
   }
 }
 
+/**
+ * Drains a peer's chunk frames through the shared decoder until `want` matches. `sizes` collects
+ * each chunk's actual wire size, so a test can prove every slice fits FRAME_CAP.
+ */
+async function chunkedFrame(peer: MemoryPeer, want: (msg: HostMsg) => boolean, sizes: number[] = []): Promise<HostMsg> {
+  const assembler = new FrameAssembler(Date.now);
+  for (let attempt = 0; attempt < 500; attempt++) {
+    await nextTick();
+    for (const frame of peer.frames.splice(0)) {
+      if (frame.t !== "chunk") { if (want(frame)) return frame; continue; }
+      sizes.push(Buffer.byteLength(JSON.stringify(frame)));
+      const result = assembler.push(frame);
+      assert.notEqual(result.kind, "error", result.kind === "error" ? result.reason : "");
+      if (result.kind !== "assembled") continue;
+      const msg = JSON.parse(result.text) as HostMsg;
+      if (want(msg)) return msg;
+    }
+  }
+  throw new Error("no matching frame arrived");
+}
+
+/** A query that starts a turn and never ends it, so queued messages stay queued. */
+function holdingQuery(users: string[]) {
+  const hold = Promise.withResolvers<void>();
+  const queryFn: QueryFn = params => ({
+    async *[Symbol.asyncIterator]() {
+      for await (const user of params.prompt) {
+        users.push(String(user.message.content));
+        await hold.promise;
+      }
+    },
+    interrupt: async () => {}, setModel: async () => {}, setPermissionMode: async () => {}, close: () => { hold.resolve(); },
+  });
+  return { queryFn, hold };
+}
+
 /** No listener, real SDK, router, credentials or desktop sessions; only owned temporary storage. */
 async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
@@ -260,7 +297,7 @@ async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().que
     } while (offset < data.length);
     return response;
   };
-  return { dir, sessions, peer, id, upload };
+  return { dir, sessions, peer, id, upload, server };
 }
 
 for (const size of [4 * 1024 * 1024, ATTACHMENT_CAP - 2, ATTACHMENT_CAP - 1, ATTACHMENT_CAP]) {
@@ -611,6 +648,120 @@ test("set_mode returns correlated success/error and broadcasts the mode event", 
   assert.equal((await peer.take('res', m => m.reqId === 'mode-error')).msg.ok, false);
 });
 
+test("a legal queue over one frame arrives chunked, exact, and edit and send read the original", async t => {
+  const users: string[] = [];
+  const { queryFn, hold } = holdingQuery(users);
+  const f = await memoryHost(t, queryFn);
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "busy", text: "hold the turn" });
+  await f.peer.take("ack");
+  const korean = "가".repeat(70_000); // 210,000 UTF-8 bytes
+  const ascii = "a".repeat(140_000);
+  f.sessions.enqueue(f.id, "queued-0", korean);
+  f.sessions.enqueue(f.id, "queued-1", ascii);
+  f.sessions.holdQueue(f.id);
+  const chunked = new MemoryPeer();
+  f.server.connected(chunked);
+  chunked.receive({ t: "hello", token, clientId: "chunked", features: ["chunkedFrames"] });
+  const sizes: number[] = [];
+  const ready = await chunkedFrame(chunked, msg => msg.t === "ready", sizes) as Extract<HostMsg, { t: "ready" }>;
+  assert.ok(sizes.length > 1, "the list did not fit one frame");
+  assert.ok(sizes.every(size => size <= FRAME_CAP), `${Math.max(...sizes)} bytes`);
+  const listed = ready.sessions.find(session => session.id === f.id)!;
+  assert.deepEqual(listed.queue?.map(row => row.id), ["queued-0", "queued-1"]);
+  assert.equal(listed.queue?.[0]?.text, korean, "the whole text, not a preview");
+  assert.equal(listed.queue?.[1]?.text, ascii);
+  assert.equal(listed.queueHeld, true);
+  // The sessions broadcast takes the same path.
+  f.server.onSessions();
+  t.mock.timers.tick(150);
+  const broadcast = await chunkedFrame(chunked, msg => msg.t === "sessions") as Extract<HostMsg, { t: "sessions" }>;
+  assert.equal(broadcast.sessions.find(session => session.id === f.id)?.queue?.[1]?.text, ascii);
+  // A single row whose JSON escaping outgrows a frame is chunked too and comes back whole.
+  const escapes = "\u0000".repeat(44_000);
+  f.sessions.enqueue(f.id, "escaped", escapes);
+  chunked.receive({ t: "req", reqId: "edit", op: { op: "queue_remove", session: f.id, id: "escaped" } });
+  const edit = await chunkedFrame(chunked, msg => msg.t === "res" && msg.reqId === "edit") as Extract<HostMsg, { t: "res" }>;
+  assert.ok(edit.ok);
+  if (edit.ok) assert.equal((edit.data as { text: string }).text, escapes);
+  // Sending hands the stored text to the model unchanged.
+  chunked.receive({ t: "req", reqId: "send-now", op: { op: "queue_send", session: f.id, id: "queued-1" } });
+  const sent = await chunkedFrame(chunked, msg => msg.t === "res" && msg.reqId === "send-now") as Extract<HostMsg, { t: "res" }>;
+  assert.ok(sent.ok, sent.ok ? "" : sent.error);
+  hold.resolve();
+  for (let i = 0; i < 50 && !users.includes(ascii); i++) await nextTick();
+  assert.ok(users.includes(ascii), "the queued message reached the SDK whole");
+});
+
+test("an old client keeps the old wire while a requesting one gets the same list chunked", async t => {
+  const { queryFn } = holdingQuery([]);
+  const f = await memoryHost(t, queryFn);
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "busy", text: "hold" });
+  await f.peer.take("ack");
+  f.sessions.enqueue(f.id, "q0", "a".repeat(140_000));
+  f.sessions.enqueue(f.id, "q1", "b".repeat(140_000));
+  const old = new MemoryPeer();
+  f.server.connected(old);
+  old.receive({ t: "hello", token, clientId: "old" });
+  assert.equal((await old.take("error")).code, "too_large");
+  assert.equal(old.frames.some(frame => frame.t === "ready" || frame.t === "chunk"), false, "no chunk is sent unasked");
+  const fresh = new MemoryPeer();
+  f.server.connected(fresh);
+  fresh.receive({ t: "hello", token, clientId: "new", features: ["chunkedFrames"] });
+  const ready = await chunkedFrame(fresh, msg => msg.t === "ready") as Extract<HostMsg, { t: "ready" }>;
+  assert.equal(ready.sessions.find(session => session.id === f.id)?.queue?.length, 2);
+});
+
+test("small answers stay one frame for a client that asked for chunks", async t => {
+  const f = await memoryHost(t);
+  const peer = new MemoryPeer();
+  f.server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "small", features: ["chunkedFrames"] });
+  const ready = await peer.take("ready");
+  assert.ok(Buffer.byteLength(JSON.stringify(ready)) <= FRAME_CAP);
+  assert.equal(peer.frames.some(frame => frame.t === "chunk"), false);
+});
+
+test("many sessions with full queues still arrive chunked, in order and exact", async t => {
+  const { queryFn } = holdingQuery([]);
+  const f = await memoryHost(t, queryFn);
+  const whole = ["가".repeat(70_000), "b".repeat(140_000)];
+  const ids: string[] = [];
+  for (let n = 0; n < 4; n++) {
+    const id = await f.sessions.create({ clientMsgId: `many-${n}`, cwd: f.dir, model: "test", effort: null, text: "" });
+    f.sessions.send(id, `hold-${n}`, "hold");
+    f.sessions.enqueue(id, `m${n}-0`, whole[0]!);
+    f.sessions.enqueue(id, `m${n}-1`, whole[1]!);
+    ids.push(id);
+  }
+  const peer = new MemoryPeer();
+  f.server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "many", features: ["chunkedFrames"] });
+  const sizes: number[] = [];
+  const ready = await chunkedFrame(peer, msg => msg.t === "ready", sizes) as Extract<HostMsg, { t: "ready" }>;
+  assert.ok(sizes.length > 1);
+  assert.ok(sizes.every(size => size <= FRAME_CAP));
+  assert.equal(ready.sessions.length, ids.length + 1, "the fixture's own session plus four");
+  for (const [n, id] of ids.entries()) {
+    const session = ready.sessions.find(candidate => candidate.id === id);
+    assert.deepEqual(session?.queue?.map(row => row.id), [`m${n}-0`, `m${n}-1`]);
+    assert.equal(session?.queue?.[0]?.text, whole[0]);
+    assert.equal(session?.queue?.[1]?.text, whole[1]);
+  }
+});
+
+test("a message past the chunk bound is not split; the existing too_large answer stands", async t => {
+  const sessions = { list: () => [], groups: () => undefined, watchAttached: () => {}, pollDesktop: async () => {}, pollQueued: () => {}, prepareRefresh: () => true } as never;
+  const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
+    hostName: "x".repeat(CHUNK_MESSAGE_MAX + 1), version: "0", recentCli: async () => [] });
+  await server.listen();
+  t.after(() => server.close());
+  const peer = new MemoryPeer();
+  server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "oversized", features: ["chunkedFrames"] });
+  assert.equal((await peer.take("error")).code, "too_large");
+  assert.equal(peer.frames.some(frame => frame.t === "chunk"), false);
+});
+
 test("queued desktop sends catch a one-second idle gap with no phone and no full or network poll", async t => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const f = bridgeFixture(t);
@@ -795,8 +946,14 @@ test("static serves HTML, strips app TypeScript, exposes only the shared protoco
   assert.match(protocol.type, /^text\/javascript/);
   assert.match(protocol.body, /export const FRAME_CAP/);
   assert.ok(!protocol.body.includes("export interface"));
-  // The relay's encryption and tweetnacl are the other shared files; the service worker is an app file.
+  // The relay's encryption, the chunk codec and tweetnacl are the other shared files; the service
+  // worker is an app file.
   assert.match((await get(f.port, "/src/e2ee.ts")).body, /export function phoneHello/);
+  const chunks = await get(f.port, "/src/chunks.ts");
+  assert.equal(chunks.status, 200);
+  assert.match(chunks.type, /^text\/javascript/);
+  assert.match(chunks.body, /export class FrameAssembler/, "the browser link loads the same decoder");
+  assert.ok(!chunks.body.includes("export interface"));
   const naclJs = await get(f.port, "/vendor/nacl-fast.min.js");
   assert.equal(naclJs.status, 200);
   assert.match(naclJs.type, /^text\/javascript/);
