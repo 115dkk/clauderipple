@@ -32,7 +32,7 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort, LimitItem } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, DEPTH, countedWidth, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -781,18 +781,24 @@ function rule(el: Els, frame: Frame, key: string): RenderNode {
   )
 }
 
-type DrawnControl = { key: string; cells: number; node: RenderNode; tip: string }
+/** `counted`: what the row's budget takes for a control drawn narrower than it can grow (see DrawnFact). */
+type DrawnControl = { key: string; cells: number; counted?: number; node: RenderNode; tip: string }
 
-/** An icon control, lit under the pointer: its picture, its word when the band has room, its press. */
-function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word): DrawnControl {
+/**
+ * An icon control, lit under the pointer: its picture, its word when the band has room, its press.
+ * `widestPx`: the picture's width at its widest (a counted icon with its badge), which the budget takes.
+ */
+function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word, widestPx = artPx): DrawnControl {
   const { Text } = el
   const pad = label ? 0.5 : 0.25
   // Exact, not rounded up to whole cells: the host takes fractions, and up to 0.7 of a cell after
   // each icon read as a gap once the app's type made a cell wider (2026-10-25).
-  const cells = (artPx + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2
+  const slot = (px: number) => (px + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2
+  const cells = slot(artPx)
   return {
     key,
     cells,
+    counted: slot(widestPx),
     tip,
     node: lit(el, frame, key, cells, [pic(el, key, source, alt, artPx, 16), label ? <Text key={key + '-word'} {...(word ?? lookOf(frame).sub)}>{label}</Text> : '', press(el, key, cells * CELL_PX, onPress)], pad, tipScope(key)),
   }
@@ -816,14 +822,15 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   out.push(iconControl(el, frame, 'warm', k.art.icon('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, view.warm.here ? 'band.warmHere' : 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? { color: k.tone('amber') } : k.sub))
   const agentsLabel = t(L, 'band.agents')
   const live = view.agents.live
-  // The live count sits on the icon's shoulder, in one picture of one width: no width change.
-  out.push(iconControl(el, frame, 'agents', k.art.agents(live, view.agentsOpen || live > 0), AGENTS_W, live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? k.ink : k.sub))
+  // The live count sits on the icon's shoulder, which is drawn only while there is a count: kept
+  // blank at zero it read as a gap after the icon (2026-10-25). The budget counts the shoulder.
+  out.push(iconControl(el, frame, 'agents', k.art.agents(live, view.agentsOpen || live > 0), countedWidth(live), live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? k.ink : k.sub, AGENTS_W))
   const compactLabel = t(L, 'band.compact')
   // How many times the chat was compacted sits on the icon's shoulder, as the agents' live count
-  // does, in one picture of one width: the first compaction moves no neighbour.
+  // does, drawn only once there is one.
   const compactions = view.compactions
   const compactTip = t(L, 'band.compactAlt') + (compactions > 0 ? ' · ' + t(L, 'band.compactedTimes', { count: compactions }) : '')
-  out.push(iconControl(el, frame, 'compact', k.art.counted('compact', compactions, false), AGENTS_W, compactions > 0 ? compactLabel + ' ' + compactions : compactLabel, compactTip, actions.compact, words.includes('compact') ? compactLabel : undefined))
+  out.push(iconControl(el, frame, 'compact', k.art.counted('compact', compactions, false), countedWidth(compactions), compactions > 0 ? compactLabel + ' ' + compactions : compactLabel, compactTip, actions.compact, words.includes('compact') ? compactLabel : undefined, undefined, AGENTS_W))
   const clearLabel = t(L, 'band.clear')
   out.push(iconControl(el, frame, 'clear', k.art.icon('clear', false), ICON_PX, clearLabel, t(L, 'band.clearAlt'), actions.clear, words.includes('clear') ? clearLabel : undefined))
   const settingsLabel = t(L, 'band.settings')
@@ -944,7 +951,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // cell, as the facts' air), and the hide button a half-separator of its own.
   const counted = (w: readonly string[]) => {
     const list = controlsDrawn(el, frame, view, actions, w)
-    return list.reduce((n, c) => n + c.cells, 0) + 0.15 * (list.length - 1) + (actions.hide ? 0.15 : 0)
+    return list.reduce((n, c) => n + (c.counted ?? c.cells), 0) + 0.15 * (list.length - 1) + (actions.hide ? 0.15 : 0)
   }
   let controlCells = counted(words)
   let route = view.hide.includes('route') ? 0 : ROUTE_ROOM

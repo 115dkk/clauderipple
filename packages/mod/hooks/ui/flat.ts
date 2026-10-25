@@ -7,7 +7,7 @@
 // No gradient, glow, water or weather; 리플이 keeps its life. Every size is art.ts's, so the presses
 // laid over the pictures line up (kit.tsx). Pure: SVG only, so node tests can load it.
 
-import { AGENTS_W, CELL_PX, CLOSE_PX, CONTROL_PX, FLAME, GLYPH, ICON, ICON_PX, METER_H, METER_W, SWITCH_H, SWITCH_W, TILE_PX, esc, labelPx, r } from './art.ts'
+import { CELL_PX, CLOSE_PX, CONTROL_PX, countedWidth, FLAME, GLYPH, ICON, ICON_PX, METER_H, METER_W, SWITCH_H, SWITCH_W, TILE_PX, esc, labelPx, r } from './art.ts'
 import type { Icon, Tone } from './art.ts'
 import type { Paint } from './look.ts'
 import { svgDoc } from './theme.ts'
@@ -61,7 +61,7 @@ export function flatPictures(appearance: Appearance): Paint {
     const badge = count > 0
       ? '<circle cx="19.2" cy="4.8" r="4.8" fill="' + ACCENT + '"/><text x="19.2" y="7.6" text-anchor="middle" font-size="' + (text.length > 1 ? 6 : 7.8) + '" font-weight="750"' + fillOf('#fff') + '>' + text + '</text>'
       : ''
-    return doc(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge)
+    return doc(countedWidth(count), 16, '<g transform="translate(0 .5)" fill="none" stroke="' + (on ? ACCENT : MUTED) + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge)
   }
 
   return {

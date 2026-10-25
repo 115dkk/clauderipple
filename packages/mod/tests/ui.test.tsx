@@ -1284,9 +1284,9 @@ test('no value moves a neighbour: every slot keeps its width whatever it shows',
   for (const lang of LANGS) {
     for (const surface of SURFACES) {
       const seen: Record<string, unknown> = {}
-      // The drawn band's effort and context take the value shown, tight (2026-10-25): a new level or
-      // digit count moves what follows. Everything else keeps its width.
-      const tight = surface === 'desktop' ? ['fact-effort', 'fact-context'] : []
+      // The drawn band's effort and context take the value shown, and the agents icon its badge only
+      // while it has a count, tight (2026-10-25): what follows moves. Everything else keeps its width.
+      const tight = surface === 'desktop' ? ['fact-effort', 'fact-context', 'agents'] : []
       for (let i = 0; i < views.length; i++) {
         const ui = await mount($, lang + '-' + surface + '-' + i, surface, 110)
         for (const [key, value] of Object.entries(layoutOf(await ui.drawn()))) {

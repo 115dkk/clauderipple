@@ -613,11 +613,16 @@ export function iconArt(icon: Icon, on: boolean, tone: Tone = 'violet'): string 
 }
 
 /**
- * A counted icon's width: the 16 px glyph and its badge's overhang. The disc starts just past the
- * agents' second head (x 13.5) and above their shoulders: over the glyph's corner it covered that
- * head, and the 10 px shoulder of 26 px read as a gap after the icon (2026-10-25).
+ * A counted icon's width with its count: the 16 px glyph and its badge's overhang. The disc starts
+ * just past the agents' second head (x 13.5) and above their shoulders: over the glyph's corner it
+ * covered that head (2026-10-25).
  */
 export const AGENTS_W = 24
+
+/** A counted icon's width: the glyph alone at zero, so no blank shoulder follows it (2026-10-25). */
+export function countedWidth(count: number): number {
+  return count > 0 ? AGENTS_W : ICON_PX
+}
 
 /** A control's icon with a count in a lit disc on its shoulder, one width whatever the count. */
 export function countedArt(icon: Icon, count: number, on: boolean): string {
@@ -626,7 +631,7 @@ export function countedArt(icon: Icon, count: number, on: boolean): string {
   const badge = count > 0
     ? '<circle cx="19.2" cy="4.8" r="4.8" fill="#22d3ee"/><text x="19.2" y="7.6" text-anchor="middle" font-size="' + (label.length > 1 ? 6 : 7.8) + '" font-weight="750" fill="#04252e">' + label + '</text>'
     : ''
-  return svg(AGENTS_W, 16, '<g transform="translate(0 .5)" fill="none" stroke="' + stroke + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge, '', lit(on))
+  return svg(countedWidth(count), 16, '<g transform="translate(0 .5)" fill="none" stroke="' + stroke + '" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">' + ICON[icon] + '</g>' + badge, '', lit(on))
 }
 
 /** The agents icon with the live count on its shoulder. */
