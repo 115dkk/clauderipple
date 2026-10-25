@@ -53,3 +53,38 @@ test("service lock preserves a recorded owner when its process lookup fails", t 
   assert.throws(() => withServiceLock(key, () => assert.fail("unknown owner stolen"), pid => pid === process.pid ? "self" : undefined), { code: "ELOCKED" });
   assert.equal(fs.existsSync(owner), true);
 });
+
+test("service lock is visible only with its owner file already inside", t => {
+  const { key } = fixture(t);
+  const lock = `${key}.operation-lock`;
+  withServiceLock(key, () => {
+    const entries = fs.readdirSync(lock);
+    assert.equal(entries.length, 1);
+    assert.match(entries[0]!, /^\d+-[a-f0-9]{64}\.owner$/);
+  }, () => "start");
+  assert.deepEqual(fs.readdirSync(path.dirname(key)), [], "the release leaves no staging directory behind");
+});
+
+test("a staging directory from an interrupted acquisition never blocks the next writer", t => {
+  const { key } = fixture(t);
+  const staging = `${key}.operation-lock.new-4242-deadbeef`;
+  fs.mkdirSync(staging);
+  fs.writeFileSync(path.join(staging, `4242-${"0".repeat(64)}.owner`), "");
+  let entered = false;
+  withServiceLock(key, () => { entered = true; }, () => "start");
+  assert.equal(entered, true);
+  assert.equal(fs.existsSync(`${key}.operation-lock`), false);
+  assert.equal(fs.existsSync(staging), true, "another writer's staging directory is not ours to delete");
+});
+
+test("service lock reports a writer that claims the path after recovery as locked", t => {
+  const { key } = fixture(t);
+  const lock = `${key}.operation-lock`;
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, `4242-${"0".repeat(64)}.owner`), "");
+  t.mock.method(fs, "renameSync", () => {
+    throw Object.assign(new Error("ENOTEMPTY: directory not empty"), { code: "ENOTEMPTY" });
+  });
+  assert.throws(() => withServiceLock(key, () => assert.fail("raced lock stolen"), pid => pid === process.pid ? "self" : null), { code: "ELOCKED" });
+  assert.deepEqual(fs.readdirSync(path.dirname(key)), [], "the failed claim cleans up its staging directory");
+});
