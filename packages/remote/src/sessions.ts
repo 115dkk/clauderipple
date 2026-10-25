@@ -14,7 +14,7 @@ import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_WAITING, DesktopBlockedError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -430,6 +430,8 @@ export class Sessions {
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     this.settings = new SessionSettings(path.join(opts.dir, "settings-operations.json"));
     this.sendQueue = SendQueue.open(opts.dir);
+    this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", DESKTOP_WAITING);
+    this.sendQueue.retryFailures(DESKTOP_BLOCKED, DESKTOP_WAITING);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
@@ -847,7 +849,7 @@ export class Sessions {
   private continueDesktop(id: string, clientMsgId: string, bridgeMode = false): SessionRecord {
     if (!this.desktop) throw new Error("no such session");
     const { summary: s, open } = this.desktop.continuation(id);
-    if (open && !bridgeMode) throw new Error(DESKTOP_BLOCKED);
+    if (open && !bridgeMode) throw new DesktopBlockedError();
     const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
     // The app's registry records the folder the conversation runs in now; the transcript's first
     // line keeps the one it started in (a conversation moved folders, issue #82).
@@ -1088,7 +1090,7 @@ export class Sessions {
       const r = this.records.get(id);
       if (r && !r.desktopBridge) { void this.drainQueue(id); continue; }
       const process = this.desktop?.liveProcess(r?.sdkSessionId ?? id);
-      if (process?.status === "idle") void this.drainQueue(id, true);
+      if (!process || process.status === "idle") void this.drainQueue(id, process?.status === "idle");
     }
   }
 
@@ -1117,6 +1119,15 @@ export class Sessions {
     if (this.shuttingDown || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    const process = this.desktop?.liveProcess(desktopId);
+    if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
+      if (this.sendQueue.wait(id, head.id, DESKTOP_WAITING)) this.opts.onSessions();
+      return;
+    }
+    // Registry idle can precede the accepted bridge turn actually starting.
+    const sent = process?.bridgeSessionId ? this.bridgeRunning.get(process.bridgeSessionId) : undefined;
+    if (sent !== undefined && this.now() - sent < 9000) return;
     if (!registryIdle) {
       const summary = this.has(id) ? this.summaryOf(id) : undefined;
       if (!summary || BUSY.has(summary.state)) return;
@@ -1160,7 +1171,8 @@ export class Sessions {
       this.opts.onSessions();
       return sent;
     } catch (error) {
-      this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
+      if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, DESKTOP_WAITING);
+      else this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
       this.opts.onSessions();
       throw error;
     }
@@ -1284,7 +1296,7 @@ export class Sessions {
         this.bridgeSends.set(key, sending);
         return sending;
       }
-      if (process || this.desktop.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+      if (process || this.desktop.isOpen(desktopId)) throw new DesktopBlockedError();
       if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
@@ -1759,7 +1771,7 @@ export class Sessions {
     if (!this.bridges.has(id) && bridgeId) { this.log(id); this.ensureBridge(id, bridgeId); }
     const connection = this.bridges.get(id);
     if (connection) {
-      if (connection.failed) throw new Error(DESKTOP_BLOCKED);
+      if (connection.failed) throw new DesktopBlockedError();
       try { await this.bridge.interrupt(connection.bridgeId); }
       catch (error) { this.bridgeFailure(id, error); throw error; }
       this.append(id, { kind: "notice", code: "interrupted" });
@@ -1814,7 +1826,7 @@ export class Sessions {
       this.ensureBridge(id, bridgeId);
       return bridgeId;
     }
-    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new DesktopBlockedError();
     return null;
   }
 
@@ -1947,7 +1959,7 @@ export class Sessions {
   // ---- the query ----------------------------------------------------------------------------
 
   private start(r: SessionRecord): Live {
-    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new Error(DESKTOP_BLOCKED);
+    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new DesktopBlockedError();
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};

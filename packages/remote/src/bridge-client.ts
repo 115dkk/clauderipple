@@ -26,7 +26,12 @@ type SettingRequest = { subtype: "set_model"; model: string }
   | { subtype: "set_permission_mode"; mode: PermissionMode };
 interface ControlWaiter { sessionId: string; fingerprint: string; promise: Promise<void>; resolve: () => void; reject: (error: Error) => void }
 
-export const DESKTOP_BLOCKED = "Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.";
+export const DESKTOP_BLOCKED = "Claude 앱에서 이 세션의 Remote Control을 켜거나 세션을 종료한 뒤 다시 보내 주세요. 대화 기록 충돌을 방지하기 위해 전송하지 않았습니다.";
+export const DESKTOP_WAITING = "Claude 앱에서 이 세션의 Remote Control을 켜거나 세션을 종료해 주세요. 전송할 수 있게 되면 대기 중인 메시지가 자동으로 전송됩니다.";
+/** The desktop still owns the transcript, but exposes no client transport. Never start a second writer. */
+export class DesktopBlockedError extends Error {
+  constructor() { super(DESKTOP_BLOCKED); }
+}
 export const LOGIN_EXPIRED = "이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.";
 export const LOGIN_REFUSED = "이 컴퓨터의 Claude 로그인이 거절되었습니다 (401). Claude 앱을 한 번 열어 주십시오.";
 // The Claude Code CLI has no login of its own. The host starts the CLI through the Agent SDK and
