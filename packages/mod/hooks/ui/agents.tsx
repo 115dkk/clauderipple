@@ -362,9 +362,10 @@ function cardBody(el: Els, frame: Frame, agent: AgentRec): RenderNode[] {
     rows.push(
       // Natural spacing: each label sits against its number and the figures a gap apart; a fixed
       // slot per number left a wide hole between them (2026-10-25). The app's cell gaps are wide, so
-      // they stay narrow, and a pane too narrow even then moves the last figure down rather than
-      // drawing it past the card's edge (it did at the narrowest width, 2026-10-25).
-      <Box key="nums" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1.5} minWidth={0}>
+      // they stay narrow; that is what keeps "도구" inside the card at the narrowest width. No wrap:
+      // the engine measures Korean wider than the app draws it, so a wrap fired with room to spare
+      // and made the card a line taller (2026-10-25).
+      <Box key="nums" flexDirection="row" alignItems="center" columnGap={1.5} minWidth={0}>
         {nums.map(f => (
           <Box key={'n-' + f.key} flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={0}>
             <Text key="label" {...k.mute}>{f.label}</Text>
