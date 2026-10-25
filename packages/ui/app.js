@@ -883,10 +883,20 @@ function renderClients() {
   toolsSwitch.onchange = () => { toolsSwitch.disabled = true; void toggleWorkerTools(!toolsLimited).finally(() => { toolsSwitch.disabled = false; }); };
   void renderCodexClient();
   const groups = groupedModels(currentConfig);
-  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => cell(
-    labelOf(claudeModels.find((model) => model.id === source) || { id: source }),
-    el("span", { text: labelOf((groups.find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model }) }),
-  ));
+  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => {
+    const target = (groups.find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model };
+    // Where a model goes when its provider cannot answer is part of what routes it: shown here, not
+    // only enforced by the router, and left to the config file rather than made a form (U36).
+    const fallbacks = (route.fallbacks || []).map((fallback) => {
+      const model = (groups.find((group) => group.name === fallback.provider) || { models: [] }).models.find((item) => item.id === fallback.model) || { id: fallback.model };
+      return `${labelOf(model)} · ${providerLabel(fallback.provider, currentConfig.providers[fallback.provider] || {})}`;
+    });
+    return cell(
+      labelOf(claudeModels.find((model) => model.id === source) || { id: source }),
+      el("span", { text: labelOf(target) }),
+      fallbacks.length ? el("span", { class: "cell-sub", text: t("slots.fallbacks", { list: fallbacks.join(" → ") }) }) : null,
+    );
+  });
   $("#client-claude-code-rows").replaceChildren(...(mapped.length ? mapped : [el("div", { class: "cell-note", text: t("slots.noChanges") })]));
 }
 // The five-second status poll re-runs the Clients screen. Rebuilding the model controls then would
@@ -895,6 +905,9 @@ function renderClients() {
 // data; the slot rows also read each provider's measured search ability, so that is part of their key.
 let pickerModelsDrawnFor = { key: null };
 let modelSlotsDrawnFor = { key: null };
+// A window field being typed into when a config or catalogue change rebuilds the rows: the text
+// and the caret stay, and the saved value does not overwrite them before the person is done (B20).
+const pickerWindowDrafts = new Map();
 function renderClientPickerModels(enabled) {
   const card = $("#client-picker-models-card");
   card.hidden = !enabled;
@@ -912,6 +925,11 @@ function renderClientPickerModels(enabled) {
   // Typing in a window changes none of this, and the catalogue arrives once with the screen, so a
   // repeat poll — or a save elsewhere on this screen — has nothing new to draw.
   if (key === pickerModelsDrawnFor.key && box.childElementCount) return;
+  const typing = document.activeElement;
+  const typingModel = typing && typing.classList && typing.classList.contains("model-window") && box.contains(typing) ? typing.dataset.model : null;
+  const typingCaret = typingModel ? typing.selectionStart : null;
+  const known = new Set(groups.flatMap((group) => group.models.map((model) => model.id)));
+  for (const id of [...pickerWindowDrafts.keys()]) if (!known.has(id)) pickerWindowDrafts.delete(id);
   box.replaceChildren();
   for (const group of groups) for (const model of group.models) {
     const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
@@ -921,10 +939,11 @@ function renderClientPickerModels(enabled) {
     const discovered = discoveredContextWindow(group.name, model.id);
     const saved = savedContextWindow(model.id);
     const catalogWindow = pickerContextWindows.catalogWindows[model.id];
+    const draft = pickerWindowDrafts.get(model.id);
     // Blank means "use the fallback" except when the live catalogue owns the value.
     const windowField = el("input", {
       type: "number", class: "model-window", min: "1", step: "1000",
-      value: catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
+      value: draft !== undefined ? draft : catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
       placeholder: discovered !== undefined ? String(discovered) : t("slots.windowGlobal"),
       title: t(catalogWindow !== undefined ? "slots.windowCodex" : "slots.windowHelp"),
       readonly: catalogWindow !== undefined ? "" : undefined,
@@ -933,6 +952,7 @@ function renderClientPickerModels(enabled) {
     windowField.hidden = !input.checked;
     if (windowNote) windowNote.hidden = !input.checked;
     windowField.dataset.model = model.id;
+    windowField.addEventListener("input", () => pickerWindowDrafts.set(model.id, windowField.value));
     windowField.addEventListener("change", () => void saveClientPickerModels());
     input.addEventListener("change", () => {
       windowField.hidden = !input.checked;
@@ -951,6 +971,15 @@ function renderClientPickerModels(enabled) {
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
   pickerModelsDrawnFor = { key };
+  // The person was typing here before the rows were rebuilt: the field has their text back, and the
+  // caret goes where it was so the next keystroke continues the number.
+  if (typingModel) {
+    const again = box.querySelector(`.model-window[data-model="${CSS.escape(typingModel)}"]`);
+    if (again && !again.hidden) {
+      again.focus();
+      if (typingCaret !== null) { try { again.setSelectionRange(typingCaret, typingCaret); } catch { /* number inputs have no selection */ } }
+    }
+  }
 }
 // Claude Code picks these before a request exists, so routing cannot reach them: a search, a title
 // or a subagent goes wherever the CLI already decided. Left empty, Claude answers them — which is
@@ -1111,7 +1140,14 @@ function clientPickerSelections() {
 async function saveClientPickerModels() {
   if (!currentConfig) return;
   const next = applyPickerSelections(clone(await latestConfig()), clientPickerSelections());
-  try { const out = await configRequest(next); currentConfig = next; configSaved(out, t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+  try {
+    const out = await configRequest(next);
+    currentConfig = next;
+    // Everything the fields held, drafts included, is now the saved copy: there is nothing left to
+    // carry over the next rebuild.
+    pickerWindowDrafts.clear();
+    configSaved(out, t("slots.saved"));
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 function pickerModeOn() {
   return Boolean(status && status.picker && status.picker.enabled);
@@ -2147,8 +2183,40 @@ function renderProviderRail() {
   else if (!visible.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.noSelection") }));
 }
 
+/**
+ * Everywhere a config names this provider besides its own block. Removing the block alone leaves a
+ * config the router refuses (a fallback or the search naming an unknown provider), so these are what
+ * a removal also cleans up — shown first, so nothing goes quietly (B13).
+ */
+function providerUsages(config, name) {
+  const routes = config.routes || {};
+  // The picker list names a provider per extra model; ownership follows the same rule the removal
+  // uses, so a model that routes elsewhere is not counted twice.
+  const extraModels = ((config.cli && config.cli.extraModels) || []).filter((entry) => {
+    const rule = (config.direct || []).filter((item) => entry.model.startsWith(item.prefix)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
+    const route = routes[entry.model];
+    return (rule ? rule.provider : route ? route.provider : pickerOwner(config, entry.model)) === name;
+  });
+  return {
+    routes: Object.entries(routes).filter(([, route]) => route && route.provider === name).map(([id]) => id),
+    fallbacks: Object.entries(routes).flatMap(([id, route]) => (route && Array.isArray(route.fallbacks) ? route.fallbacks : []).filter((fallback) => fallback && fallback.provider === name).map((fallback) => ({ route: id, model: fallback.model }))),
+    direct: (config.direct || []).filter((rule) => rule && rule.provider === name).length,
+    picker: extraModels.length,
+    search: Boolean(config.webSearch && config.webSearch.provider === name),
+    classifier: Boolean(config.autoModeClassifier && config.autoModeClassifier.provider === name),
+  };
+}
+/** The usage line's extra clauses, each absent when the config does not name this provider there. */
+function usageSuffix(usage, keys) {
+  return (usage.search ? keys.search : "") + (usage.classifier ? keys.classifier : "");
+}
 async function removeProvider(name, provider) {
-  if (!confirm(t("providers.removeConfirm", { name: providerLabel(name, provider) }))) return;
+  const usages = providerUsages(currentConfig || {}, name);
+  // What else goes with it is said before the confirm, never discovered afterwards.
+  const extra = usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
+    ? `\n\n${t("providers.removeExtra", { fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker })}${usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })}`
+    : "";
+  if (!confirm(`${t("providers.removeConfirm", { name: providerLabel(name, provider) })}${extra}`)) return;
   const next = clone(await latestConfig());
   // Resolve ownership before deleting declarations or the disambiguating direct rules.
   if (next.cli) next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => {
@@ -2157,8 +2225,23 @@ async function removeProvider(name, provider) {
     return (rule ? rule.provider : route ? route.provider : pickerOwner(next, entry.model)) !== name;
   });
   delete next.providers[name];
-  next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
+  // Routes and their fallbacks: a route that pointed here goes, and no other route keeps a fallback
+  // to a provider that no longer exists.
+  next.routes = Object.fromEntries(Object.entries(next.routes || {}).flatMap(([id, route]) => {
+    if (route.provider === name) return [];
+    const fallbacks = (route.fallbacks || []).filter((fallback) => fallback.provider !== name);
+    const cleaned = { ...route };
+    if (route.fallbacks !== undefined) {
+      if (fallbacks.length) cleaned.fallbacks = fallbacks;
+      else delete cleaned.fallbacks;
+    }
+    return [[id, cleaned]];
+  }));
   next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
+  // The search and the Auto-mode classifier name a provider of their own; left behind, they are the
+  // same unknown-provider error as a fallback.
+  if (next.webSearch && next.webSearch.provider === name) delete next.webSearch;
+  if (next.autoModeClassifier && next.autoModeClassifier.provider === name) delete next.autoModeClassifier;
   try {
     const out = await configRequest(next);
     currentConfig = next;
@@ -2169,7 +2252,13 @@ async function removeProvider(name, provider) {
     closeProviderDetail();
     renderProviderWorkspace();
     configSaved(out, t("common.saved"));
-  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+  } catch (error) {
+    // The router refused (another change landed first): say so and show the config it holds, rather
+    // than leaving the form's copy on screen as if the removal had happened.
+    toast(t("common.saveFailed"), true, error.message);
+    providersLoaded = false;
+    void loadProviders();
+  }
 }
 
 function providerTabs(name, provider) {
@@ -2202,8 +2291,20 @@ function providerOverview(name, provider) {
     running ? el("div", { class: "cell-note", text: t("measure.running", { done: measuring.done, total: measuring.total }) }) : null,
   ], running ? t("measure.help") : null);
   const quota = quotaLine(name);
+  // Where this provider is named besides its own block: routes, fallbacks, direct rules, the picker
+  // and the two single-provider settings. Seeing them before pressing remove is the point (B13).
+  const usages = providerUsages(currentConfig || {}, name);
+  const usedBy = usages.routes.length || usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
+    ? section(t("providers.usedBy"), [
+        cell(t("providers.usageCounts", { routes: usages.routes.length, fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker }) + usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })),
+        usages.fallbacks.length
+          ? el("div", { class: "cell-note" }, [el("span", { class: "cell-sub mono", text: t("providers.usageFallbacks", { list: usages.fallbacks.map((fallback) => `${fallback.route} → ${fallback.model}`).join(", ") }) })])
+          : null,
+      ])
+    : null;
   return el("div", { class: "provider-panel" }, [
     connection,
+    usedBy,
     quota ? section(null, [cell(t("providers.usage"), el("span", { text: quota }))]) : null,
     modelSummary,
   ]);
@@ -3375,6 +3476,9 @@ function openGrokProviderForm(options) {
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   let foundModels = modelsOf(existing);
   const currentChecked = new Set(foundModels.map((model) => model.id));
+  // What the checklist opened with. The first listing fills it out only while the person has left
+  // that set as it was: a model typed in before the list arrived is theirs and stays ticked (B21).
+  const initialSelection = new Set(currentChecked);
   let listed = false;
   const modelArea = el("div", { class: "form-field" });
   function renderModels(checked, help) {
@@ -3396,7 +3500,9 @@ function openGrokProviderForm(options) {
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
         const ticked = modelArea.querySelector(".model-picker").selected();
-        const keep = tickedAfterListing(!existing && !listed, ticked.map((model) => model.id), response.models.map((model) => model.id));
+        const tickedIds = ticked.map((model) => model.id);
+        const untouched = tickedIds.length === initialSelection.size && tickedIds.every((id) => initialSelection.has(id));
+        const keep = tickedAfterListing(!existing && !listed && untouched, tickedIds, response.models.map((model) => model.id));
         listed = true;
         foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
         renderModels(keep);

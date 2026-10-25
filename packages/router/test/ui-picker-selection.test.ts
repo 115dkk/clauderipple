@@ -461,15 +461,19 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
     const latestConfig = async () => clone(h.latest), configRequest = async next => { h.writes.push(clone(next)); };
     const loadProviders = async () => {}, offerPickerOn = async () => {}, startMeasurement = () => {};
     const confirm = () => true, closeProviderDetail = () => {}, renderProviderWorkspace = () => {};
-    ${dashboardBlock('async function removeProvider(', 'function providerTabs(')}
+    ${dashboardBlock('function providerUsages(', 'function providerTabs(')}
     ${dashboardBlock('function anthropicSourceText(', 'function openAnthropicProviderForm(')}
     ${dashboardBlock('function openAnthropicProviderForm(', 'function openProviderForm(')}
     ${dashboardBlock('function openProviderForm(', '// ---- ClaudeRipple mod')}
-    return { open: options => openProviderForm(options || {name:'p', provider:h.initial.providers.p}), remove: () => removeProvider('p', h.initial.providers.p) };
+    return { open: options => openProviderForm(options || {name:'p', provider:h.initial.providers.p}), remove: () => removeProvider('p', h.initial.providers.p), usages: config => providerUsages(config, 'p') };
   `);
-  const ui = make(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { open(options?: { name?: string; kind?: string; provider?: SavedProvider }): void; remove(): Promise<void> };
+  const ui = make(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as {
+    open(options?: { name?: string; kind?: string; provider?: SavedProvider }): void;
+    remove(): Promise<void>;
+    usages(config: unknown): { routes: string[]; fallbacks: { route: string; model: string }[]; direct: number; picker: number; search: boolean; classifier: boolean };
+  };
   const button = (text: string) => { const node = h.root?.find(node => node.tag === 'button' && node.attrs.text === text); assert.ok(node, text); return node; };
-  return { h, open: ui.open, remove: ui.remove, button, save: () => button('common.save').emit('click') };
+  return { h, open: ui.open, remove: ui.remove, usages: ui.usages, button, save: () => button('common.save').emit('click') };
 }
 
 test('an older provider form leaves the latest auth key and first pooled credential intact unless a key is typed', async () => {
@@ -601,6 +605,35 @@ test('removing a provider keeps shared picker models owned by a different provid
   assert.equal(ui.h.writes[0]!.providers.p, undefined);
 });
 
+// B13: a fallback, the web search or the classifier naming the provider made the saved config
+// invalid (an unknown provider), so the removal has to take them with it — and say so first.
+test('removing a provider clears the fallbacks, web search and classifier that named it', async () => {
+  const fixture = saveFixture() as SavedConfig & { webSearch?: unknown; autoModeClassifier?: unknown };
+  fixture.providers.q = { type: 'openai-compatible', models: [{ id: 'one' }] };
+  fixture.routes = {
+    one: { provider: 'q', model: 'one', fallbacks: [{ provider: 'p', model: 'two' }, { provider: 'q', model: 'one' }] },
+    two: { provider: 'q', model: 'one', fallbacks: [{ provider: 'p', model: 'two' }] },
+  };
+  fixture.webSearch = { provider: 'p', model: 'one' };
+  fixture.autoModeClassifier = { provider: 'p', model: 'one' };
+  const ui = providerSaveHarness(fixture); await ui.remove();
+  const saved = ui.h.writes[0] as unknown as Record<string, unknown>;
+  const routes = saved.routes as Record<string, { fallbacks?: unknown }>;
+  assert.deepEqual(routes.one!.fallbacks, [{ provider: 'q', model: 'one' }]);
+  assert.equal(routes.two!.fallbacks, undefined, 'an empty fallback list is not written back');
+  assert.equal(saved.webSearch, undefined);
+  assert.equal(saved.autoModeClassifier, undefined);
+});
+
+test('what a removal would also clean up is counted before the confirm', () => {
+  const fixture = saveFixture();
+  fixture.providers.q = { type: 'openai-compatible', models: [{ id: 'one' }] };
+  fixture.routes = { one: { provider: 'q', model: 'one', fallbacks: [{ provider: 'p', model: 'two' }] } };
+  fixture.direct = [{ prefix: 'two', provider: 'p' }];
+  const ui = providerSaveHarness(fixture);
+  assert.deepEqual(ui.usages(fixture), { routes: [], fallbacks: [{ route: 'one', model: 'two' }], direct: 1, picker: 1, search: false, classifier: false });
+});
+
 async function pickerWindowHarness(catalogWindows: Record<string, number>) {
   const config = saveFixture();
   config.providers.p = { type: 'chatgpt', models: [{ id: 'gpt-6.1-sol', contextWindow: 272000 }] };
@@ -610,6 +643,8 @@ async function pickerWindowHarness(catalogWindows: Record<string, number>) {
   const ui = new Function('h', 'el', `
     let currentConfig, pickerContextWindows = {catalogWindows:{}}, clientsLoaded, status = {};
     let pickerModelsDrawnFor = { key: null }, modelSlotsDrawnFor = { key: null };
+    const pickerWindowDrafts = new Map();
+    const document = { activeElement: null };
     const t = key => key;
     const CHATGPT_MODELS = [], CSS = {escape: value => value};
     const MODEL_SLOTS = ['smallFast', 'subagent', 'main'];
@@ -632,8 +667,7 @@ async function pickerWindowHarness(catalogWindows: Record<string, number>) {
   `)(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { load(): Promise<void>; selections(): Entry[]; setStatus(value: unknown): void; render(): void };
   await ui.load();
   const field = (model: string) => h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === model)!;
-  return { h, field, selections: ui.selections, load: ui.load, render: ui.render, setStatus: ui.setStatus };
-}
+  return { h, field, selections: ui.selections, load: ui.load, render: ui.render, setStatus: ui.setStatus };}
 
 test('the picker loads the resolved Codex window, makes it read-only and never saves its display as an override', async () => {
   const ui = await pickerWindowHarness({ 'gpt-6.1-sol': 475000 });
@@ -691,6 +725,18 @@ test('a changed search capability still redraws the slot rows', async () => {
   const after = ui.h.rows.children[0]!.children[0]!;
   assert.notEqual(after, before, 'new capability data reaches the controls');
   assert.ok(after.children.some(option => option.textContent.includes('slots.noWebSearch')));
+});
+
+test('a field being typed survives a real catalogue change instead of taking the saved value', async () => {
+  const ui = await pickerWindowHarness({});
+  const other = ui.field('other');
+  other.value = '900000'; // typed, not yet committed
+  await other.emit('input');
+  // A real config change elsewhere (a provider saved in another window, say) still redraws the rows.
+  ui.h.config.providers.r = { type: 'openai-compatible', models: [{ id: 'third' }] };
+  await ui.load();
+  assert.equal(ui.field('other').value, '900000', 'the words being typed are not replaced by the saved value');
+  assert.equal(ui.selections().find(entry => entry.id === 'other')?.contextWindow, 900000);
 });
 
 // The render keys deliberately carry no interface language: the selector reloads the page, which
