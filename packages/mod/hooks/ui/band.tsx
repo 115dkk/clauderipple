@@ -678,7 +678,10 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   return {
     node: (
       <Box key="band-limits" flexDirection="row" alignItems="center" paddingLeft={CREST_CELLS} paddingTop={0.5}>
-        <Box key="limits-row" position="relative" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} flexShrink={0} {...(onPress ? hoverLight(frame, tipScope('limits-open')) : {})}>
+        <Box key="limits-row" position="relative" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} flexShrink={0} {...(onPress ? { hover: { scope: tipScope('limits-open') } } : {})}>
+          {/* A bordered host Box adds 8 px above and below unless paddingY is set. Keep the
+              light out of flow as well: even its two border pixels must not grow this text row. */}
+          {onPress ? <Box key="limits-light" position="absolute" top={0} bottom={0} left={0} right={0} paddingY={0} {...hoverLight(frame, tipScope('limits-open'))} /> : null}
           {children}
           {onPress ? press(el, 'limits-open', width(density)(groups) * CELL_PX, onPress) : null}
         </Box>

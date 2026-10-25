@@ -1525,6 +1525,48 @@ test('the desktop limits row is a button that opens the limits pane', async ($, 
   await ui.unmount()
 })
 
+test('making the limits row pressable adds no in-flow height or vertical air', async ($, on) => {
+  const limits: DashboardView['limits'] = [
+    { provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 },
+    { provider: 'chatgpt', account: 0, kind: 'seven_day', label: '', percent: 8 },
+  ]
+  for (const skin of SKINS) for (const columns of [94, 200]) for (const active of [false, true]) {
+    const id = ['limits-height', skin, columns, active].join('-')
+    drawPane(on, id, el => renderBand(el, frameOf('desktop', columns, 12, skin), { ...DASH, extras: ['limits'], limits }, { ...BAND_ACTIONS, ...(active ? { toggleLimits: () => undefined } : {}) }))
+  }
+  for (const skin of SKINS) for (const columns of [94, 200]) {
+    const rows: string[] = []
+    for (const active of [false, true]) {
+      const ui = await mount($, ['limits-height', skin, columns, active].join('-'), 'desktop', columns)
+      const tree = await ui.drawn()
+      // Compare the actual in-flow tree with the unpressable row (1837316's layout):
+      // absolute paint and hit targets cannot add height, including round-border default padding.
+      const flow = (node: unknown): unknown => {
+        if (!node || typeof node !== 'object') return node
+        const n = node as Drawn
+        if (n.props?.position === 'absolute') return null
+        const { key, ...props } = n.props ?? {}
+        return { type: n.type, props, children: (n.children ?? []).map(flow).filter(n => n !== null) }
+      }
+      const row = await ui.find({ key: 'band-limits' })
+      expect(row?.props.paddingTop).toBe(0.5)
+      let rowTree: Drawn | undefined
+      walk(tree, n => { if (n.props?.key === 'band-limits') rowTree = n })
+      rows.push(JSON.stringify(flow(rowTree)))
+      const light = await ui.find({ key: 'limits-light' })
+      if (active) {
+        expect(light?.props.position).toBe('absolute')
+        expect(light?.props.paddingY).toBe(0)
+        expect(light?.props.top).toBe(0)
+        expect(light?.props.bottom).toBe(0)
+      } else expect(light).toBeUndefined()
+      expect((await ui.find({ key: 'limits-row' }))?.props.borderStyle).toBeUndefined()
+      await ui.unmount()
+    }
+    expect(rows[1], skin + ' ' + columns + ' in-flow layout').toBe(rows[0])
+  }
+})
+
 // ---- Tool runs (2026-10-20: a worker's commands read as a wall, each wrapped over lines) ------------
 
 test('a run of tool calls is headed in one line as the Claude app heads it', () => {
