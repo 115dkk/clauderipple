@@ -448,15 +448,7 @@ function tile(el: Els, frame: Frame, agent: AgentRec, now: number, onPress: () =
 
 // ---- Desktop: a background task's tile ---------------------------------------------------------
 // A command or a watch has a tile as an agent does, less what only an agent has (a model, tokens, a
-// conversation to open): its mark, what it does and its time, and under them what it runs.
-
-/** A task's mark: running in the accent, done green, failed red, stopped quiet. */
-function taskMark(k: Look, task: BgTask): { glyph: string; word: Look['ink'] } {
-  if (task.state === 'running') return { glyph: '●', word: { color: k.tone('violet') } }
-  if (task.state === 'done') return { glyph: '✓', word: { color: k.tone('green') } }
-  if (task.state === 'failed') return { glyph: '✕', word: { color: k.tone('red') } }
-  return { glyph: '■', word: k.mute }
-}
+// conversation to open): what it does and its time, and under them what it runs.
 
 /** How long a task ran, or has run so far. */
 function taskRanFor(task: BgTask, now: number, lang: Frame['lang']): string {
@@ -479,11 +471,6 @@ function taskTimeCells(frame: Frame, task: BgTask): number {
  */
 const CHEVRON_CELLS = 2
 
-/** Cells a task's title has on a line: the row less its mark, its time and the chevron's room. */
-function taskTitleCells(frame: Frame, task: BgTask): number {
-  return innerCells(frame) - 2 - (taskTimeCells(frame, task) + CHEVRON_CELLS + 1)
-}
-
 /** What a task runs, when its title is not that already. */
 function taskCommand(task: BgTask): string | undefined {
   return task.command && task.command !== task.title ? task.command : undefined
@@ -495,47 +482,42 @@ function taskCode(frame: Frame, task: BgTask): string {
   return code === undefined ? '' : t(frame.lang, 'agents.exitCode', { code })
 }
 
-/** Lines a background task's title takes at most; the rest is cut with an ellipsis. */
-const TITLE_LINES = 2
-
-/** Rows a task's tile draws, about, for the capsule's water. */
-function taskRows(frame: Frame, task: BgTask): number {
-  const cells = taskTitleCells(frame, task)
-  return Math.min(TITLE_LINES, linesOf(clipCh(task.title, TITLE_LINES * Math.max(10, cells) - 4), cells)) + 1.2 + 1.3
+/** Rows a task's tile draws, about, for the capsule's water: a one-line title and the command row. */
+function taskRows(): number {
+  return 1 + 1.2 + 1.3
 }
 
-/** A task's tile: the mark, its title and time, then what kind it is and what it runs. Nothing to open. */
+/**
+ * A task's tile laid out as an agent card is: a one-line title the engine cuts at the edge, its time
+ * on the right, then what kind it is and what it runs from the same left edge. No state mark — the
+ * time's colour and end word carry the state, as on an agent card. Nothing to open.
+ */
 function taskTile(el: Els, frame: Frame, task: BgTask, now: number): RenderNode {
   const { Box, Text } = el
   const k = lookOf(frame)
   const L = frame.lang
-  const m = taskMark(k, task)
   const end = taskEndWord(frame, task)
   const kind = t(L, task.kind === 'shell' ? 'agents.shell' : 'agents.monitor')
   const command = taskCommand(task)
   const code = taskCode(frame, task)
-  const room = innerCells(frame) - 2 - Math.ceil(chOf(kind)) - 1 - (code ? Math.ceil(chOf(code)) + 1 : 0)
   return (
     <Box key={'task-' + task.id} flexDirection="column" width="100%" minWidth={0} paddingX={1.5} paddingY={0.5} {...k.tile}>
-      <Box key="head" flexDirection="row" alignItems="flex-start" columnGap={1} width="100%" minWidth={0}>
-        <Box key="mark" flexShrink={0}>
-          <Text {...m.word} bold>{m.glyph}</Text>
-        </Box>
-        <Box key="title" flexGrow={1} flexShrink={1} minWidth={0}>
-          <Text bold {...k.ink} wrap="wrap">{clipCh(task.title, TITLE_LINES * Math.max(10, taskTitleCells(frame, task)) - 4)}</Text>
+      <Box key="head" flexDirection="row" alignItems="center" columnGap={1} width="100%" minWidth={0}>
+        <Box key="title" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Text bold {...k.ink} wrap="truncate-end">{task.title}</Text>
         </Box>
         <Box key="time" flexDirection="row" justifyContent="flex-end" columnGap={1} flexShrink={0} width={taskTimeCells(frame, task) + CHEVRON_CELLS} paddingRight={CHEVRON_CELLS}>
           {end ? <Text key="end" {...(task.state === 'failed' ? { color: k.tone('red') } : k.mute)}>{end}</Text> : null}
           <Text key="elapsed" {...(task.state === 'running' ? k.ink : k.sub)}>{taskRanFor(task, now, L)}</Text>
         </Box>
       </Box>
-      <Box key="runs" flexDirection="row" alignItems="center" columnGap={1} paddingLeft={2} minWidth={0} overflow="hidden">
+      <Box key="runs" flexDirection="row" alignItems="center" columnGap={1} minWidth={0} overflow="hidden">
         <Box key="kind" flexShrink={0}>
           <Text {...k.mute}>{kind}</Text>
         </Box>
         {command ? (
           <Box key="command" flexShrink={1} minWidth={0} overflow="hidden">
-            <Text {...k.sub} wrap="truncate-end">{clipCh(command, Math.max(8, room))}</Text>
+            <Text {...k.sub} wrap="truncate-end">{command}</Text>
           </Box>
         ) : null}
         {code ? <Box key="code" flexShrink={0}><Text {...k.sub}>{code}</Text></Box> : null}
@@ -591,7 +573,7 @@ function listDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
       </Box>,
     )
   }
-  const rows = 3 + [...running, ...shownDone].reduce((n, item) => n + (item.kind === 'agent' ? tileRows(frame, item.agent) : taskRows(frame, item.task)) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
+  const rows = 3 + [...running, ...shownDone].reduce((n, item) => n + (item.kind === 'agent' ? tileRows(frame, item.agent) : taskRows()) + 0.6, 0) + (done.length > DONE_SHOWN ? 2 : 0) + 3
   return capsule(el, frame, {
     key: 'agents',
     // While nothing runs 리플이 floats at the head in calm water; while one runs the water holds
