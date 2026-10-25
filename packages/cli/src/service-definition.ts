@@ -32,12 +32,12 @@ function processStart(pid: number): string | null | undefined {
 
 function recoverServiceLock(lock: string, lookup: ProcessStartLookup): boolean {
   const files = fs.readdirSync(lock);
-  if (files.length !== 1) return false; // Uninitialized, legacy or damaged lock: never guess.
+  if (files.length !== 1) throw lockHeld(lock, true); // Uninitialized, legacy or damaged: never guess.
   const file = files[0]!;
   const match = /^(\d+)-([a-f0-9]{64})\.owner$/.exec(file);
-  if (!match) return false;
+  if (!match) throw lockHeld(lock, true);
   const pid = Number(match[1]);
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw lockHeld(lock, true);
   const start = lookup(pid);
   if (start === undefined || (start !== null && definitionGeneration(start) === match[2])) return false;
   // Only the reaper that unlinks this exact owner may remove the now-empty directory. A second
@@ -50,8 +50,11 @@ function recoverServiceLock(lock: string, lookup: ProcessStartLookup): boolean {
   return true;
 }
 
-function lockHeld(lock: string): Error {
-  return Object.assign(new Error(`서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`), { code: "ELOCKED" });
+function lockHeld(lock: string, ownerUnknown = false): Error {
+  const message = ownerUnknown
+    ? `서비스 작업 잠금의 소유자를 확인할 수 없습니다. 다른 ClaudeRipple 설치·제거·재시작 작업이 실행 중이 아니라면 이 잠금 폴더를 지운 뒤 다시 시도해 주세요. (${lock})`
+    : `서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`;
+  return Object.assign(new Error(message), { code: "ELOCKED" });
 }
 
 /** mkdir is the atomic claim shared with older writers. Never rename over an existing lock. */

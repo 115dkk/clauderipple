@@ -54,6 +54,22 @@ test("service lock preserves a recorded owner when its process lookup fails", t 
   assert.equal(fs.existsSync(owner), true);
 });
 
+for (const damaged of [false, true]) {
+  test(`service lock gives manual recovery guidance for ${damaged ? "damaged" : "empty legacy or interrupted"} locks`, t => {
+    const { key } = fixture(t);
+    const lock = `${key}.operation-lock`;
+    fs.mkdirSync(lock);
+    if (damaged) fs.writeFileSync(path.join(lock, "broken.owner"), "unreadable identity");
+    const before = fs.readdirSync(lock);
+    assert.throws(() => withServiceLock(key, () => assert.fail("unproven lock stolen"), () => "self"), error => {
+      assert.equal((error as NodeJS.ErrnoException).code, "ELOCKED");
+      assert.equal((error as Error).message, `서비스 작업 잠금의 소유자를 확인할 수 없습니다. 다른 ClaudeRipple 설치·제거·재시작 작업이 실행 중이 아니라면 이 잠금 폴더를 지운 뒤 다시 시도해 주세요. (${lock})`);
+      return true;
+    });
+    assert.deepEqual(fs.readdirSync(lock), before);
+  });
+}
+
 test("service lock is visible only with its owner file already inside", t => {
   const { key } = fixture(t);
   const lock = `${key}.operation-lock`;
