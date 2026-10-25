@@ -8,6 +8,7 @@ import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } 
 import { t, lang } from "./i18n.ts";
 import { activitySummary } from "../src/tool-details.ts";
 import { activityOverview, activityStateKey } from "./activity.ts";
+import { emptyQuestionDraft, questionAnswers, questionsComplete, type QuestionDraft } from "./question-answers.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
@@ -66,6 +67,8 @@ export interface UI {
   expanded: Map<string, string | null>;
   workersOpen: boolean;
   permOpen: Set<string>;
+  questionDrafts?: Map<string, QuestionDraft>;
+  deciding?: Set<string>;
   toast: string | null;
   /** whether notifications can work here, and are on; null until known */
   push?: PushAvail | null;
@@ -315,10 +318,20 @@ export function item(it: TimelineItem, ui: UI): string {
 export function permCard(view: SessionView, ui: UI): string {
   const p = view.open[0];
   if (!p) return "";
+  if (p.requestKind === "question") return questionCard(p, ui);
   const open = ui.permOpen.has(p.id);
   const what = textOf(p.input) || p.summary;
   const long = what.split("\n").length > 5 || what.length > 280;
   return `<div class="perm" role="alertdialog" aria-label="${esc(t("perm.title", { tool: p.tool }))}"><div class="hd">${icon.shield(16)}<span>${esc(p.tool)}</span>${view.open.length > 1 ? `<span class="of">${esc(t("perm.of", { i: 1, n: view.open.length }))}</span>` : ""}</div><div class="q">${esc(p.title || t("perm.title", { tool: p.tool }))}</div><div class="what${open ? " open" : ""}">${esc(what)}</div>${long && !open ? `<button class="more" data-act="perm-more" data-id="${esc(p.id)}">${esc(t("perm.showAll"))}</button>` : ""}<div class="act"><button class="deny" data-act="deny" data-id="${esc(p.id)}">${esc(t("perm.deny"))}</button><button class="allow" data-act="allow" data-id="${esc(p.id)}">${icon.check(20)}${esc(t("perm.allow"))}</button></div>${p.canAlways ? `<button class="always" data-act="always" data-id="${esc(p.id)}">${esc(t("perm.always"))}</button>` : ""}</div>`;
+}
+
+function questionCard(p: Extract<TimelineItem, { type: "permission" }>, ui: UI): string {
+  const questions = p.questions ?? [], draft = ui.questionDrafts?.get(p.id) ?? emptyQuestionDraft();
+  const index = Math.max(0, Math.min(draft.current, questions.length - 1));
+  const question = questions[index], answers = questionAnswers(questions, draft), busy = ui.deciding?.has(p.id) ?? false;
+  const tabs = questions.length > 1 ? `<div class="act">${questions.map((q, i) => `<button class="btn ghost" data-act="question-jump" data-id="${esc(p.id)}" data-index="${i}" aria-current="${i === index ? "step" : "false"}" ${busy ? "disabled" : ""}>${esc(q.header || q.question)}<br><span id="question-preview-${esc(p.id)}-${i}">${esc(answers[q.question] || t("perm.unanswered"))}</span></button>`).join("")}</div>` : "";
+  const choices = question ? `<div class="q">${esc(question.question)}</div><div class="list"${question.multiSelect ? "" : ' role="radiogroup"'}>${question.options.map((option, i) => `<button class="opt" data-act="question-option" data-id="${esc(p.id)}" data-index="${index}" data-option="${i}" role="${question.multiSelect ? "checkbox" : "radio"}" aria-checked="${draft.selected[question.question]?.includes(option.label) ?? false}" ${busy ? "disabled" : ""}><div class="body"><div class="t1">${esc(option.label)}</div><div class="t2" style="white-space:pre-wrap">${esc(option.description)}</div></div></button>`).join("")}</div><textarea id="question-free-${esc(p.id)}-${index}" data-question-free="true" data-id="${esc(p.id)}" data-index="${index}" rows="2" placeholder="${esc(t("perm.customAnswer"))}" aria-label="${esc(t("perm.customAnswer"))}" ${busy ? "disabled" : ""}>${esc(draft.free[question.question] ?? "")}</textarea>` : "";
+  return `<div class="perm" role="group" aria-label="${esc(p.title || p.tool)}"><div class="hd">${esc(p.title || p.tool)} <span>${esc(t("perm.of", { i: question ? index + 1 : 0, n: questions.length }))}</span></div>${tabs}${choices}<div class="act"><button class="deny" data-act="deny" data-id="${esc(p.id)}" ${busy ? "disabled" : ""}>${esc(t("perm.deny"))}</button><button class="allow" data-act="allow" data-id="${esc(p.id)}" ${busy || !questionsComplete(questions, draft) ? "disabled" : ""}>${esc(busy ? t("queue.sending") : t("perm.submitAnswers"))}</button></div></div>`;
 }
 
 export function workingLine(view: SessionView, ui: UI, s?: SessionSummary): string {

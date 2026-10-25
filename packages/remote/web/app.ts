@@ -1,7 +1,7 @@
 // The phone app: one screen at a time (pair, home, session), a docked composer, sheets for
 // folder and model. State that must survive closing the app (the token, unsent messages, the
 // last folder and model) lives in localStorage; everything else is rebuilt from the host.
-import type { BlobChunk, BrowseResult, ClientMsg, Effort, FolderEntry, HostMsg, ProviderGroup, ReqOp, SessionEvent, SessionSummary, SubPage } from "../src/protocol.ts";
+import type { BlobChunk, BrowseResult, ClientMsg, Effort, FolderEntry, HostMsg, ProviderGroup, Question, ReqOp, SessionEvent, SessionSummary, SubPage } from "../src/protocol.ts";
 import { Link } from "./conn.ts";
 import type { LinkStatus } from "./conn.ts";
 import { esc, icon } from "./dom.ts";
@@ -19,6 +19,7 @@ import type { TimelineItem, SessionView } from "./timeline.ts";
 import * as V from "./views.ts";
 import type { UI } from "./views.ts";
 import { watchFrames } from "./watch.ts";
+import { emptyQuestionDraft, freeAnswer, questionAnswers, questionsComplete, toggleOption, type QuestionDraft } from "./question-answers.ts";
 
 interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean }
 type Screen = { name: "pair" } | { name: "home" } | { name: "session"; id: string };
@@ -107,6 +108,14 @@ export class App {
   private tasksOpen = false;
   private planOpen = false;
   private taskSeen = new Map<string, Set<string>>();
+  private questionStates = new Map<string, { drafts: Map<string, QuestionDraft>; deciding: Set<string> }>();
+
+  private questionState(session: string) {
+    const key = JSON.stringify([session, this.cache(session).epoch]);
+    let state = this.questionStates.get(key);
+    if (!state) { state = { drafts: new Map(), deciding: new Set() }; this.questionStates.set(key, state); }
+    return state;
+  }
   private workerPath: V.WorkerSheet[] = [];
   private timelineSize: ResizeObserver | null = null;
   private imageUrls = new Map<string, Promise<string>>();
@@ -153,7 +162,7 @@ export class App {
     this.ui = {
       now: Date.now(), link, host: null, home: undefined, sessions: [], models: [], sheet: null,
       draft: store.get("rr.draft", { cwd: null, model: null, effort: null }),
-      expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null,
+      expanded: new Map(), workersOpen: false, permOpen: new Set(), questionDrafts: new Map(), deciding: new Set(), toast: null,
       push: null, pushLater: store.get<boolean>("rr.pushLater", false),
     };
   }
@@ -297,7 +306,10 @@ export class App {
         if (m.tail || (c.epoch && c.epoch !== m.epoch)) { c.events = []; c.hasOlder = m.tail?.hasOlder ?? false; }
         c.epoch = m.epoch;
         c.events = mergeEvents(c.events, m.events);
-        for (const e of m.events) if (e.kind === "user") this.dropOutbox(e.clientMsgId);
+        for (const e of m.events) {
+          if (e.kind === "user") this.dropOutbox(e.clientMsgId);
+          if (e.kind === "permission_decided") this.questionState(m.session).deciding.delete(e.id);
+        }
         if (this.isCurrent(m.session)) this.renderSession();
         break;
       }
@@ -386,10 +398,12 @@ export class App {
     if (this.link?.send(msg)) this.watching = attach;
   }
 
-  req<T>(op: ReqOp): Promise<T> {
+  req<T>(op: ReqOp): Promise<T> { return this.requestFrame(reqId => ({ t: "req", reqId, op })); }
+
+  private requestFrame<T>(frame: (reqId: string) => ClientMsg): Promise<T> {
     const reqId = uid();
     return new Promise<T>((resolve, reject) => {
-      if (!this.link?.send({ t: "req", reqId, op })) { reject(new Error("offline")); return; }
+      if (!this.link?.send(frame(reqId))) { reject(new Error("offline")); return; }
       this.pending.set(reqId, { resolve: resolve as (v: unknown) => void, reject });
       setTimeout(() => { if (this.pending.delete(reqId)) reject(new Error("timeout")); }, 15_000);
     });
@@ -695,6 +709,8 @@ export class App {
   renderSession(chromeOnly = false): void {
     if (this.screen.name !== "session") return;
     const id = this.screen.id;
+    const questions = this.questionState(id);
+    this.ui.questionDrafts = questions.drafts; this.ui.deciding = questions.deciding;
     const view = this.view(id);
     const s = this.summary(id);
     const top = $("#top");
@@ -702,7 +718,9 @@ export class App {
     setHTML(top, V.sessionTop(this.ui, s, view));
     setHTML($("#pre"), V.band(this.ui, view) + V.banner(this.ui));
     const perm = s?.readOnly ? "" : V.permCard(view, this.ui);
-    setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.plan(s, this.planOpen) + V.tasks(this.ui, s, this.tasksOpen, timelineItems(view), this.taskSeen.get(id)));
+    const activeInput = document.activeElement as HTMLElement | null;
+    const editingQuestion = activeInput?.dataset.questionFree === "true" && !this.ui.deciding?.has(activeInput.dataset.id ?? "") && view.open.some(permission => permission.id === activeInput.dataset.id);
+    if (!editingQuestion) setHTML($("#dock-extra"), s?.readOnly ? `<div class="foot">${esc(t("session.readOnly", { host: V.hostName(this.ui) }))}</div>` : perm + (perm ? "" : V.workingLine(view, this.ui, s)) + V.plan(s, this.planOpen) + V.tasks(this.ui, s, this.tasksOpen, timelineItems(view), this.taskSeen.get(id)));
     // Stop only when the host can hear it; offline the button sends (queues) instead.
     const running = view.state === "running" || view.state === "starting" || id.startsWith("local:");
     if (s?.readOnly) {
@@ -824,6 +842,21 @@ export class App {
 
   // ---- input -----------------------------------------------------------------------------------
 
+  private editQuestion(id: string, index: number, change: (draft: QuestionDraft, question: Question) => QuestionDraft, redraw = true): void {
+    if (this.screen.name !== "session" || this.ui.deciding?.has(id)) return;
+    const permission = this.view(this.screen.id).open.find(item => item.id === id && item.requestKind === "question");
+    const questions = permission?.questions ?? [], question = questions[index];
+    if (!question) return;
+    const drafts = this.ui.questionDrafts ??= new Map();
+    const draft = change(drafts.get(id) ?? emptyQuestionDraft(), question);
+    drafts.set(id, draft);
+    if (redraw) { this.renderSession(true); return; }
+    const preview = document.getElementById(`question-preview-${id}-${index}`);
+    if (preview) preview.textContent = questionAnswers(questions, draft)[question.question] || t("perm.unanswered");
+    const submit = Array.from(document.querySelectorAll<HTMLButtonElement>('button[data-act="allow"]')).find(button => button.dataset.id === id);
+    if (submit) submit.disabled = !questionsComplete(questions, draft);
+  }
+
   private bind(): void {
     const root = $("#app");
     root.addEventListener("click", (ev) => {
@@ -834,6 +867,7 @@ export class App {
     root.addEventListener("input", (ev) => {
       const el = ev.target as HTMLElement;
       if (el.id === "input") { this.fitInput(); store.set(`rr.typed.${this.renderedScreen}`, (el as HTMLTextAreaElement).value); }
+      if (el.dataset.questionFree === "true") this.editQuestion(el.dataset.id ?? "", Number(el.dataset.index), (draft, question) => freeAnswer(draft, question, (el as HTMLTextAreaElement).value), false);
       if (el.id === "folder-filter" && this.ui.sheet?.kind === "folder") {
         this.ui.sheet.filter = (el as HTMLInputElement).value;
         const pos = (el as HTMLInputElement).selectionStart;
@@ -845,6 +879,16 @@ export class App {
     });
     root.addEventListener("keydown", (ev) => {
       const el = ev.target as HTMLElement;
+      if (el.dataset.act === "question-option" && el.getAttribute("role") === "radio" && ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"].includes(ev.key)) {
+        ev.preventDefault();
+        let option = Number(el.dataset.option);
+        this.editQuestion(el.dataset.id ?? "", Number(el.dataset.index), (draft, question) => {
+          option = ev.key === "Home" ? 0 : ev.key === "End" ? question.options.length - 1 : (option + (ev.key === "ArrowLeft" || ev.key === "ArrowUp" ? -1 : 1) + question.options.length) % question.options.length;
+          return toggleOption(draft, question, option);
+        });
+        Array.from(root.querySelectorAll<HTMLButtonElement>('button[data-act="question-option"]')).find(button => button.dataset.id === el.dataset.id && button.dataset.index === el.dataset.index && Number(button.dataset.option) === option)?.focus({ preventScroll: true });
+        return;
+      }
       if (this.ui.sheet?.kind === "worker" && ev.key === "Escape") {
         ev.preventDefault();
         if (this.workerPath.length > 1) this.workerBack();
@@ -972,6 +1016,13 @@ export class App {
       case "open": this.go({ name: "session", id }); break;
       case "toggle-tasks": this.tasksOpen = !this.tasksOpen; this.renderSession(true); break;
       case "plan-toggle": this.planOpen = !this.planOpen; this.renderSession(true); break;
+      case "question-jump":
+      case "question-option": {
+        const index = Number(el.dataset.index), option = Number(el.dataset.option);
+        this.editQuestion(id, index, (draft, question) => act === "question-jump" ? { ...draft, current: index } : toggleOption(draft, question, option));
+        Array.from(document.querySelectorAll<HTMLButtonElement>(`button[data-act="${act}"]`)).find(button => button.dataset.id === id && Number(button.dataset.index) === index && (act === "question-jump" || Number(button.dataset.option) === option))?.focus({ preventScroll: true });
+        break;
+      }
       case "task-read": {
         const seen = this.taskSeen.get(session) ?? new Set<string>();
         seen.add(id); this.taskSeen.set(session, seen);
@@ -995,15 +1046,24 @@ export class App {
         if (session) {
           const decision = act === "always" ? "allow_always" : act;
           const permission = reduce(this.cache(session).events).open.find(p => p.id === id);
-          const answers: Record<string, string> = {};
-          if (decision !== "deny" && permission?.requestKind === "question") {
-            for (const q of permission.questions ?? []) {
-              const answer = window.prompt(`${q.question}\n${q.options.map(o => `${o.label}: ${o.description}`).join("\n")}\n${q.multiSelect ? "Separate multiple answers with commas." : "Choose one or type your own answer."}`);
-              if (!answer?.trim()) return;
-              answers[q.question] = answer.trim();
+          if (!permission) return;
+          if (permission.requestKind === "question") {
+            const deciding = this.ui.deciding ??= new Set();
+            if (deciding.has(id) || decision === "allow_always") return;
+            const draft = this.ui.questionDrafts?.get(id) ?? emptyQuestionDraft();
+            if (decision !== "deny" && !questionsComplete(permission.questions ?? [], draft)) return;
+            const answers = questionAnswers(permission.questions ?? [], draft);
+            deciding.add(id); this.renderSession(true);
+            try { await this.requestFrame(reqId => ({ t: "decide", reqId, session, id, decision, ...(decision !== "deny" ? { answers } : {}) })); }
+            catch (error) {
+              if (deciding.has(id)) {
+                const unknown = error instanceof Error && error.message === "timeout";
+                if (!unknown) deciding.delete(id);
+                this.toast(unknown ? t("perm.unconfirmed") : t("error.generic", { text: error instanceof Error ? error.message : String(error) }));
+              }
+              if (this.isCurrent(session)) this.renderSession(true);
             }
-          }
-          if (!this.link?.send({ t: "decide", session, id, decision, ...(permission?.requestKind === "question" && decision !== "deny" ? { answers } : {}) })) this.toast(t("queue.pending"));
+          } else if (!this.link?.send({ t: "decide", session, id, decision })) this.toast(t("queue.pending"));
         }
         break;
       case "perm-more": this.ui.permOpen.add(id); this.renderSession(true); break;

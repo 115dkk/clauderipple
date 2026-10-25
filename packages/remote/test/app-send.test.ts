@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSend, loadOutbox, outboxKey, tokenFingerprint, writeOutbox } from "../web/outbox.ts";
 import type { OutboxEntry } from "../web/outbox.ts";
+import type { QuestionDraft } from "../web/question-answers.ts";
 
 const ORIGIN = "https://phone.example";
 const TOKEN = "token-for-the-tests-0123456789";
@@ -50,9 +51,10 @@ class Socket {
     // Answer the host's request/response calls the app makes on connect, so their timers are cleared
     // and the test process is not held open by them (only the model list has a known answer here).
     const msg = JSON.parse(data) as { t?: string; reqId?: string; op?: Record<string, unknown> };
-    if (msg.t === "req" && msg.reqId) {
+    if ((msg.t === "req" || msg.t === "decide") && msg.reqId) {
       const reqId = msg.reqId;
-      void Promise.resolve().then(() => Socket.respond ? Socket.respond(msg.op ?? {}) : msg.op?.op === "models" ? [] : null).then(
+      const op = msg.t === "decide" ? { ...msg, op: "decide" } : msg.op ?? {};
+      void Promise.resolve().then(() => Socket.respond ? Socket.respond(op) : msg.op?.op === "models" ? [] : null).then(
         answer => this.deliver({ t: "res", reqId, ok: true, data: answer }),
         error => this.deliver({ t: "res", reqId, ok: false, error: String(error) }),
       );
@@ -133,6 +135,8 @@ interface AppBoundary {
     /** filled so the app does not ask the host for its model list (which leaves a request timer) */
     models: unknown[];
     expanded: Map<string, string | null>;
+    questionDrafts: Map<string, QuestionDraft>;
+    deciding: Set<string>;
     sheet: { kind: string; worker?: { sub: string; status: string }; expanded?: Map<string, string | null>; scroll?: number } | null;
   };
   link: { stop(): void } | null;
@@ -184,6 +188,52 @@ const entry = (over: Partial<OutboxEntry> = {}): OutboxEntry => ({
   clientMsgId: "a", text: "A 지시", at: 1_700_000_000_000, state: "pending", session: "s1", ...over,
 });
 const twoWaiting = (): OutboxEntry[] => [entry({ clientMsgId: "a" }), entry({ clientMsgId: "b", text: "B 지시", error: "no such session" })];
+
+test("question drafts are isolated by session and epoch even when request IDs repeat", async () => {
+  const running = await launch(new Storage());
+  const events = [{ seq: 1, at: 1, kind: "permission", id: "same", tool: "AskUserQuestion", title: "", summary: "", input: "", canAlways: false, requestKind: "question", questions: [{ question: "Which?", header: "", multiSelect: false, options: [{ label: "A", description: "" }, { label: "B", description: "" }] }] }];
+  const open = (session: string, epoch: string) => { running.app.go({ name: "session", id: session }); running.socket.deliver({ t: "events", session, epoch, events }); };
+  try {
+    open("a", "e1");
+    await running.app.act("question-option", { dataset: { id: "same", index: "0", option: "0" } });
+    open("b", "e1"); assert.equal(running.app.ui.questionDrafts.has("same"), false);
+    await running.app.act("question-option", { dataset: { id: "same", index: "0", option: "1" } });
+    running.app.go({ name: "session", id: "a" });
+    assert.deepEqual(running.app.ui.questionDrafts.get("same")?.selected["Which?"], ["A"]);
+    open("a", "e2"); assert.equal(running.app.ui.questionDrafts.has("same"), false);
+    await running.app.act("deny", { dataset: { id: "same" } });
+    const decision = running.socket.frames.map(frame => JSON.parse(frame) as { t: string; decision?: string; answers?: unknown }).find(frame => frame.t === "decide");
+    assert.equal(decision?.decision, "deny"); assert.equal(decision?.answers, undefined, "denial does not invent answers for unanswered questions");
+  } finally { running.app.link?.stop(); }
+});
+
+test("question navigation retains choices, refuses incomplete answers and preserves drafts after a refused submission", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    const questions = [{ question: "First?", header: "First", multiSelect: false, options: [{ label: "A", description: "preview A" }] }, { question: "Second?", header: "Second", multiSelect: true, options: [{ label: "X", description: "preview X" }, { label: "Y", description: "preview Y" }] }];
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [{ seq: 1, at: 1, kind: "permission", id: "q", tool: "AskUserQuestion", title: "Questions", summary: "", input: "", canAlways: false, requestKind: "question", questions }] });
+    const action = (name: string, index: string, option = "0") => running.app.act(name, { dataset: { id: "q", index, option } });
+    const decisions = () => running.socket.frames.map(frame => JSON.parse(frame) as { t: string; answers?: Record<string, string> }).filter(frame => frame.t === "decide");
+    await running.app.act("allow", { dataset: { id: "q" } }); assert.equal(decisions().length, 0);
+    await action("question-option", "0");
+    await action("question-jump", "1");
+    await action("question-option", "1", "0"); await action("question-option", "1", "1");
+    await action("question-jump", "0");
+    assert.deepEqual(running.app.ui.questionDrafts.get("q")?.selected, { "First?": ["A"], "Second?": ["X", "Y"] });
+    Socket.respond = op => { if (op.op === "decide") throw new Error("refused"); return null; };
+    await running.app.act("allow", { dataset: { id: "q" } });
+    assert.equal(running.app.ui.deciding.has("q"), false);
+    assert.deepEqual(decisions()[0]?.answers, { "First?": "A", "Second?": "X, Y" });
+    assert.deepEqual(running.app.ui.questionDrafts.get("q")?.selected["Second?"], ["X", "Y"]);
+    Socket.respond = () => null;
+    await Promise.all([running.app.act("allow", { dataset: { id: "q" } }), running.app.act("allow", { dataset: { id: "q" } })]);
+    assert.equal(decisions().length, 2, "the retry sends once, even with a second click while awaiting confirmation");
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [{ seq: 2, at: 2, kind: "permission_decided", id: "q", decision: "allow" }] });
+    await running.app.act("allow", { dataset: { id: "q" } });
+    assert.equal(decisions().length, 2, "an old button cannot decide a completed request again");
+  } finally { running.app.link?.stop(); }
+});
 
 test("a decided plan loads every blob chunk through the read-only detail path", async () => {
   const running = await launch(new Storage());
