@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
+import { EFFORTS, clockTime, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -538,12 +538,17 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 //
 // The capsule's second row, under the first and starting where the effort does (a CREST_CELLS
 // indent): every plan window as a small gauge — Claude's 5-hour, weekly and per-model weeklies,
-// then each ChatGPT account's. A thinner row than the first (a line of text or so); the reset is
-// in the hover tip, which shows in the first row's tip place (see whyDrawn). Widths alone decide,
-// never values: the bar is one width, the figure's slot fits "100%", and only the name takes what
-// it takes (a changing figure never moves a neighbour). Narrow, the GPT accounts go first (the
-// last one first), then the per-model windows; what is left not fitting means no second row, and
-// the first row keeps its limit fact as before.
+// then each ChatGPT account's. A thinner row than the first (a line of text or so). Beside each
+// figure sits when that window resets, short: the time left while it is close ("2시간 뒤"), else
+// the weekday and the local clock ("목 09:00") — the whole sentence stays in the hover tip, which
+// shows in the first row's tip place (see whyDrawn), and the compact form keeps it there only.
+// Widths alone decide, never values: the bar is one width, the figure's slot fits "100%", the
+// reset's slot fits the widest it can read, and only the name takes what it takes (a changing
+// value, or the clock crossing an hour or a day, never moves a neighbour). Narrow, the layouts are
+// tried best first (see LAYOUTS): the bar yields before the reset, since the figure already says
+// what its bar shows, and where the reset will not fit even without the bar, the bar is drawn
+// alone again. Then the GPT accounts go (the last one first) and the per-model windows; what is
+// left not fitting means no second row, and the first row keeps its limit fact as before.
 
 /** A limit window's bar, px: beside each window's name and figure, in the row's own line. */
 const BAR_W = 36
@@ -556,37 +561,102 @@ function figureCells(): number {
   return Math.ceil(textPx('100%') / CELL_PX)
 }
 
-/**
- * How much each window takes, widest first; the row takes the first that fits all its groups.
- * `gauge`: name, bar, figure. `figures`: name and figure. `compact`: a group's figures alone,
- * "1 / 88 / 2%" in its windows' order (the menu-bar and old footer idiom), each in its own tone, the
- * names and resets in the group's tip. At ~100 columns four providers fit only compact
- * (2026-10-15: Claude, GPT, Gemini and Go took ~207 cells as gauges against 96).
- */
-type LimitDensity = 'gauge' | 'figures' | 'compact'
-const DENSITIES: readonly LimitDensity[] = ['gauge', 'figures', 'compact']
+/** Short weekday names by `Date#getDay()`, Sunday first. */
+const WEEKDAYS = ['units.weekdaySun', 'units.weekdayMon', 'units.weekdayTue', 'units.weekdayWed', 'units.weekdayThu', 'units.weekdayFri', 'units.weekdaySat'] as const
 
-/** Cells one window takes at a density (compact: its number's slot and the separator after it). */
-function limitItemCells(item: LimitItem, density: LimitDensity, lang: Lang): number {
-  // A figure's slot and the " / " after it, in fractions of a cell: summed per group, then rounded up.
-  // Two digits: a window at 100% is spent and runs into the air after its group, which is wider.
-  if (density === 'compact') return textPx('00 / ') / CELL_PX
-  const name = Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX) + 1
-  return name + (density === 'gauge' ? Math.ceil(BAR_W / CELL_PX) + 1 : 0) + figureCells()
+/** A weekday's short name in the person's language: "Thu", "목". */
+function weekdayName(day: number, lang: Lang): string {
+  return t(lang, WEEKDAYS[((day % 7) + 7) % 7]!)
 }
 
-function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip: string, density: Exclude<LimitDensity, 'compact'>): DrawnFact {
+/** A reset this close reads as the time left; further off, as the weekday and the clock. */
+const RESET_NEAR_MS = 20 * 3_600_000
+
+/**
+ * The reset as the row shows it beside a figure: "2시간 뒤" while the window is close, else the
+ * weekday and the local time ("목 09:00"). The hover tip keeps the whole sentence (`resetsLabel`);
+ * this is its short form for a row of figures. Twenty hours is where the router's own status label
+ * (`limitLabel` in session.ts) stops naming the clock and names the day.
+ */
+export function resetShort(resetsAt: string | undefined, now: number, lang: Lang): string | undefined {
+  if (!resetsAt) return undefined
+  const at = Date.parse(resetsAt)
+  if (!Number.isFinite(at)) return undefined
+  const left = at - now
+  if (left <= 0) return t(lang, 'band.resetting')
+  if (left < RESET_NEAR_MS) {
+    const minutes = Math.max(1, Math.round(left / 60_000))
+    return t(lang, 'band.resetIn', { time: minutes < 60 ? t(lang, 'units.minutes', { n: minutes }) : t(lang, 'units.hours', { n: Math.round(minutes / 60) }) })
+  }
+  return t(lang, 'band.resetDay', { day: weekdayName(new Date(at).getDay(), lang), time: clockTime(at).slice(0, 5) })
+}
+
+/**
+ * Cells a window's reset takes, the air before it included: the widest it can read there, so what
+ * the row holds never depends on the clock — the time left while the window is close ("20시간 뒤"
+ * at most), else a weekday and the local clock ("목 09:00", the weekday's widest). Exact, not
+ * rounded up: a whole cell of slack after each of four resets would cost the row a window
+ * (2026-10-25, as the facts' and icons' slots went exact).
+ */
+function resetCells(lang: Lang): number {
+  const near = [t(lang, 'units.minutes', { n: 59 }), t(lang, 'units.hours', { n: 20 })].map(time => t(lang, 'band.resetIn', { time }))
+  const far = Array.from({ length: 7 }, (_, day) => t(lang, 'band.resetDay', { day: weekdayName(day, lang), time: '00:00' }))
+  return Math.max(...[...near, ...far].map(textPx)) / CELL_PX + FACT_GAP
+}
+
+/**
+ * How much each window takes, widest and richest first; the row takes the first layout that fits
+ * all its groups. `gauge`: name, bar, figure and reset. `figures`: name, figure and reset. A
+ * layout's `reset` off drops every window's reset; a window with no reset to show keeps no slot.
+ * `compact`: a group's figures alone, "1 / 88 / 2%" in its windows' order (the menu-bar and old
+ * footer idiom), each in its own tone, the names and resets in the group's tip. At ~100 columns
+ * four providers fit only compact (2026-10-15: Claude, GPT, Gemini and Go took ~207 cells as
+ * gauges against 96).
+ */
+type LimitDensity = 'gauge' | 'figures' | 'compact'
+type LimitLayout = { density: LimitDensity; reset: boolean }
+
+/**
+ * The layouts the row tries, best first. The reset ranks above the bar: the figure already says
+ * what its bar shows, and the reset is what the row is there to add (2026-10-25). A bar with no
+ * reset is kept as a step of its own, so a band too narrow for both still shows the gauges.
+ */
+const LAYOUTS: readonly LimitLayout[] = [
+  { density: 'gauge', reset: true },
+  { density: 'figures', reset: true },
+  { density: 'gauge', reset: false },
+  { density: 'figures', reset: false },
+  { density: 'compact', reset: false },
+]
+/** The last resort: a group's figures alone, the names and resets in its tip. */
+const COMPACT: LimitLayout = { density: 'compact', reset: false }
+
+/** Cells one window takes at a layout (compact: its number's slot and the separator after it). */
+function limitItemCells(item: LimitItem, layout: LimitLayout, lang: Lang): number {
+  // A figure's slot and the " / " after it, in fractions of a cell: summed per group, then rounded up.
+  // Two digits: a window at 100% is spent and runs into the air after its group, which is wider.
+  if (layout.density === 'compact') return textPx('00 / ') / CELL_PX
+  // The drawn gaps are fractions of a cell (FACT_GAP), and so are these.
+  const name = Math.ceil(textPx(limitItemName(item, lang)) / CELL_PX)
+  const bar = layout.density === 'gauge' ? FACT_GAP + Math.ceil(BAR_W / CELL_PX) : 0
+  const reset = layout.reset && item.resetsAt ? resetCells(lang) : 0
+  return name + FACT_GAP + bar + figureCells() + reset
+}
+
+function limitItemDrawn(el: Els, frame: Frame, item: LimitItem, key: string, tip: string, layout: LimitLayout): DrawnFact {
   const { Text } = el
   const tone = limitTone(item.percent)
   const name = limitItemName(item, frame.lang)
+  const reset = layout.reset ? resetShort(item.resetsAt, frame.now, frame.lang) : undefined
   return drawnFact(
     el,
     key,
-    limitItemCells(item, density, frame.lang),
+    limitItemCells(item, layout, frame.lang),
     [
       <Text key="limit-name" {...lookOf(frame).mute}>{name}</Text>,
-      density === 'gauge' ? pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H) : '',
+      layout.density === 'gauge' ? pic(el, key + '-bar', barArt(item.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), name, BAR_W, BAR_H) : '',
       <Text key="limit-value" {...figure(frame, tone)}>{Math.round(item.percent) + '%'}</Text>,
+      reset ? <Text key="limit-reset" {...lookOf(frame).mute}>{reset}</Text> : '',
     ],
     tip,
   )
@@ -600,7 +670,7 @@ function compactDrawn(el: Els, frame: Frame, group: LimitGroup, key: string, tip
     runs.push(<Text key={'n' + i} {...figure(frame, limitTone(item.percent))}>{String(Math.round(item.percent))}</Text>)
     runs.push(<Text key={'s' + i} {...lookOf(frame).mute}>{i < group.items.length - 1 ? ' / ' : '%'}</Text>)
   })
-  const cells = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, 'compact', lang), 0))
+  const cells = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, COMPACT, lang), 0))
   return drawnFact(el, key, cells, [<Text key="limit-figures">{runs}</Text>], tip)
 }
 
@@ -609,24 +679,25 @@ function saveWord(group: LimitGroup, save: boolean, lang: Lang): string {
   return save && (group.type === 'anthropic' || group.provider === 'claude') ? t(lang, 'band.save') : ''
 }
 
-/** Cells a group takes at a density: its head (the provider's dot and short name), its windows, save's word. */
-function limitGroupCells(group: LimitGroup, name: string, lang: Lang, density: LimitDensity, save = false): number {
-  const head = Math.ceil(textPx('•') / CELL_PX) + 1 + Math.ceil(textPx(name) / CELL_PX)
-  const items = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, density, lang), 0))
-  const gaps = density === 'compact' ? 0 : Math.max(0, group.items.length - 1)
+/** Cells a group takes at a layout: its head (the provider's dot and short name), its windows, save's word. */
+function limitGroupCells(group: LimitGroup, name: string, lang: Lang, layout: LimitLayout, save = false): number {
+  // The dot and the name are drawn at their own width, with the group's whole cell between them.
+  const head = textPx('•') / CELL_PX + 1 + textPx(name) / CELL_PX
+  const items = Math.ceil(group.items.reduce((n, item) => n + limitItemCells(item, layout, lang), 0))
+  const gaps = layout.density === 'compact' ? 0 : Math.max(0, group.items.length - 1)
   const word = saveWord(group, save, lang)
   return head + 1 + items + gaps + (word ? 1 + Math.ceil(textPx(word) / CELL_PX) : 0)
 }
 
-function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string, save: boolean, density: LimitDensity): { node: RenderNode; tips: { key: string; text: string }[] } {
+function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string, save: boolean, layout: LimitLayout): { node: RenderNode; tips: { key: string; text: string }[] } {
   const { Box, Text } = el
   const dot = providerColor(group.type ?? group.provider)
   const word = saveWord(group, save, frame.lang)
   const tipOf = (item: LimitItem) => limitItemTip(item, name, frame.lang, frame.now)
   // Compact: one figure run for the group, its tip naming every window in turn.
-  const items = density === 'compact'
+  const items = layout.density === 'compact'
     ? [compactDrawn(el, frame, group, 'limits-' + group.key, group.items.map(tipOf).join(' · '), frame.lang)]
-    : group.items.map((item, ii) => limitItemDrawn(el, frame, item, 'limits-' + group.key + '-' + ii, tipOf(item), density))
+    : group.items.map((item, ii) => limitItemDrawn(el, frame, item, 'limits-' + group.key + '-' + ii, tipOf(item), layout))
   return {
     node: (
       <Box key={'limits-' + group.key} flexDirection="row" alignItems="center" columnGap={1} flexShrink={0}>
@@ -658,13 +729,13 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   const numbered = (g: LimitGroup) => (accounts.get(g.provider) ?? 1) > 1
   // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
   const save = !!view.limit?.save
-  const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
-  // Every provider at the roomiest density that holds them all; past compact, windows and then
-  // groups give way (narrowLimitGroups), compact as the row is then.
-  const density = DENSITIES.find(d => width(d)(all) <= budget) ?? 'compact'
-  const groups = narrowLimitGroups(all, budget, width(density))
+  const width = (layout: LimitLayout) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, layout, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  // Every provider at the best layout that holds them all; past compact, windows and then groups
+  // give way (narrowLimitGroups), compact as the row is then.
+  const layout = LAYOUTS.find(l => width(l)(all) <= budget) ?? COMPACT
+  const groups = narrowLimitGroups(all, budget, width(layout))
   if (!groups) return null
-  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered(g)), save, density))
+  const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered(g)), save, layout))
   const children: RenderNode[] = []
   drawn.forEach((d, i) => {
     if (i > 0) children.push(rule(el, frame, 'limits-' + groups[i]!.key))

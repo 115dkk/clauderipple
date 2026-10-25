@@ -51,6 +51,8 @@ const EN = {
   'band.resetting': 'resetting',
   'band.resetsIn': 'resets in {time}',
   'band.resetsAt': 'resets {time}',
+  'band.resetIn': 'in {time}',
+  'band.resetDay': '{day} {time}',
   'band.router': 'Router',
   'band.routerAlt': 'Router: {value}',
   'band.resentCaption': 'RESENT · {status}',
@@ -548,6 +550,14 @@ const EN = {
   'units.days': '{n}d',
   'units.minSec': '{m}m {s}s',
   'units.hourMin': '{h}h {m}m',
+  // Weekdays for a reset days away, Sunday first.
+  'units.weekdaySun': 'Sun',
+  'units.weekdayMon': 'Mon',
+  'units.weekdayTue': 'Tue',
+  'units.weekdayWed': 'Wed',
+  'units.weekdayThu': 'Thu',
+  'units.weekdayFri': 'Fri',
+  'units.weekdaySat': 'Sat',
 } as const
 
 export type Key = keyof typeof EN
@@ -601,6 +611,8 @@ const KO: Record<Key, string> = {
   'band.resetting': '초기화 중',
   'band.resetsIn': '{time} 뒤 초기화',
   'band.resetsAt': '{time} 초기화',
+  'band.resetIn': '{time} 뒤',
+  'band.resetDay': '{day} {time}',
   'band.router': '리플',
   'band.routerAlt': '리플: {value}',
   'band.resentCaption': '재전송 · {status}',
@@ -1098,6 +1110,13 @@ const KO: Record<Key, string> = {
   'units.days': '{n}일',
   'units.minSec': '{m}분 {s}초',
   'units.hourMin': '{h}시간 {m}분',
+  'units.weekdaySun': '일',
+  'units.weekdayMon': '월',
+  'units.weekdayTue': '화',
+  'units.weekdayWed': '수',
+  'units.weekdayThu': '목',
+  'units.weekdayFri': '금',
+  'units.weekdaySat': '토',
 }
 
 const ZH: Record<Key, string> = {
@@ -1149,6 +1168,8 @@ const ZH: Record<Key, string> = {
   'band.resetting': '重置中',
   'band.resetsIn': '{time}后重置',
   'band.resetsAt': '{time} 重置',
+  'band.resetIn': '{time}后',
+  'band.resetDay': '{day} {time}',
   'band.router': '路由服务',
   'band.routerAlt': '路由服务：{value}',
   'band.resentCaption': '已重发 · {status}',
@@ -1646,6 +1667,13 @@ const ZH: Record<Key, string> = {
   'units.days': '{n}天',
   'units.minSec': '{m}分{s}秒',
   'units.hourMin': '{h}小时{m}分',
+  'units.weekdaySun': '周日',
+  'units.weekdayMon': '周一',
+  'units.weekdayTue': '周二',
+  'units.weekdayWed': '周三',
+  'units.weekdayThu': '周四',
+  'units.weekdayFri': '周五',
+  'units.weekdaySat': '周六',
 }
 
 const JA: Record<Key, string> = {
@@ -1697,6 +1725,8 @@ const JA: Record<Key, string> = {
   'band.resetting': 'リセット中',
   'band.resetsIn': '{time}後にリセット',
   'band.resetsAt': '{time}にリセット',
+  'band.resetIn': '{time}後',
+  'band.resetDay': '{day} {time}',
   'band.router': 'ルーター',
   'band.routerAlt': 'ルーター: {value}',
   'band.resentCaption': '再送 · {status}',
@@ -2194,6 +2224,13 @@ const JA: Record<Key, string> = {
   'units.days': '{n}日',
   'units.minSec': '{m}分{s}秒',
   'units.hourMin': '{h}時間{m}分',
+  'units.weekdaySun': '日',
+  'units.weekdayMon': '月',
+  'units.weekdayTue': '火',
+  'units.weekdayWed': '水',
+  'units.weekdayThu': '木',
+  'units.weekdayFri': '金',
+  'units.weekdaySat': '土',
 }
 
 const ES: Record<Key, string> = {
@@ -2245,6 +2282,8 @@ const ES: Record<Key, string> = {
   'band.resetting': 'restableciendo',
   'band.resetsIn': 'se restablece en {time}',
   'band.resetsAt': 'se restablece a las {time}',
+  'band.resetIn': 'en {time}',
+  'band.resetDay': '{day} {time}',
   'band.router': 'Router',
   'band.routerAlt': 'Router: {value}',
   'band.resentCaption': 'REENVIADO · {status}',
@@ -2742,6 +2781,13 @@ const ES: Record<Key, string> = {
   'units.days': '{n} d',
   'units.minSec': '{m} min {s} s',
   'units.hourMin': '{h} h {m} min',
+  'units.weekdaySun': 'dom',
+  'units.weekdayMon': 'lun',
+  'units.weekdayTue': 'mar',
+  'units.weekdayWed': 'mié',
+  'units.weekdayThu': 'jue',
+  'units.weekdayFri': 'vie',
+  'units.weekdaySat': 'sáb',
 }
 
 const PT: Record<Key, string> = {
@@ -2793,6 +2839,8 @@ const PT: Record<Key, string> = {
   'band.resetting': 'renovando',
   'band.resetsIn': 'renova em {time}',
   'band.resetsAt': 'renova às {time}',
+  'band.resetIn': 'em {time}',
+  'band.resetDay': '{day} {time}',
   'band.router': 'Roteador',
   'band.routerAlt': 'Roteador: {value}',
   'band.resentCaption': 'REENVIADO · {status}',
@@ -3290,6 +3338,13 @@ const PT: Record<Key, string> = {
   'units.days': '{n} d',
   'units.minSec': '{m} min {s} s',
   'units.hourMin': '{h} h {m} min',
+  'units.weekdaySun': 'dom',
+  'units.weekdayMon': 'seg',
+  'units.weekdayTue': 'ter',
+  'units.weekdayWed': 'qua',
+  'units.weekdayThu': 'qui',
+  'units.weekdayFri': 'sex',
+  'units.weekdaySat': 'sáb',
 }
 
 // Independent tables: a translator can replace any language without changing English.

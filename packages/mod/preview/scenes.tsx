@@ -58,6 +58,17 @@ const LIMITS: LimitItem[] = [
   { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: '2026-10-19T13:20:00' },
 ]
 
+/**
+ * The row the owner reported (2026-10-25): Claude's and GPT's 5-hour and weekly, each with when it
+ * resets — two close ("2시간 뒤", "45분 뒤") and two far (a weekday and clock).
+ */
+const RESETS: LimitItem[] = [
+  { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 28, resetsAt: '2026-10-12T15:40:00' },
+  { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 8, resetsAt: '2026-10-15T09:00:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 12, resetsAt: '2026-10-12T14:05:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 5, resetsAt: '2026-10-19T13:20:00' },
+]
+
 /** Every readable provider at once, for the general limits row: Claude, GPT, Gemini and OpenCode Go. */
 const LIMITS_ALL: LimitItem[] = [
   { provider: 'anthropic', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 1 },
@@ -308,6 +319,11 @@ const SCENES: Scene[] = [
   { name: 'band-limits-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-70', columns: 70, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
+  // When each window resets (2026-10-25, the owner's report): beside the figures while the band has
+  // the room, and gone on a narrow band with the figures kept.
+  { name: 'band-resets-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, extras: ['limits'], limits: RESETS }) },
+  { name: 'band-resets-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, extras: ['limits'], limits: RESETS }) },
+  { name: 'band-resets-70', columns: 70, draw: (el, f) => site(el, f, { ...DASH, extras: ['limits'], limits: RESETS }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
   // two real widths. Narrow, the scoped windows go first, then a later provider's group.
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },

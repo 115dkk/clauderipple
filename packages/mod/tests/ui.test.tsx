@@ -16,7 +16,7 @@ import { cardRows, renderAgents, talkOf, timeCells } from '../hooks/ui/agents'
 import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, editLines, runDiff, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
-import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
+import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter, resetShort } from '../hooks/ui/band'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
 import { pic } from '../hooks/ui/kit'
@@ -1474,6 +1474,59 @@ test('with the limits row drawn, save mode\'s word follows Claude\'s windows', a
   await spending.unmount()
 })
 
+
+// 2026-10-25: the row's reset reads short — the time left while close, the weekday and clock once far.
+test('a window\'s reset reads short in the limits row', () => {
+  // Local times, so the weekday and the clock do not depend on the machine's zone.
+  const now = new Date(2026, 9, 12, 13, 20).getTime()
+  const at = (ms: number) => new Date(now + ms).toISOString()
+  expect(resetShort(at(25 * 60_000), now, 'ko')).toBe('25분 뒤')
+  expect(resetShort(at(2 * 3_600_000), now, 'ko')).toBe('2시간 뒤')
+  expect(resetShort(at(25 * 60_000), now, 'en')).toBe('in 25m')
+  expect(resetShort(at(2 * 3_600_000), now, 'en')).toBe('in 2h')
+  expect(resetShort(at(19 * 3_600_000), now, 'ko')).toBe('19시간 뒤')
+  // Past twenty hours the weekday and the clock say more than a long count of hours — the line the
+  // router's own status label (`limitLabel` in session.ts) draws at the same place.
+  const far = new Date(2026, 9, 15, 9, 0).toISOString()
+  expect(resetShort(far, now, 'ko')).toBe('목 09:00')
+  expect(resetShort(far, now, 'en')).toBe('Thu 09:00')
+  expect(resetShort(far, now, 'zh')).toBe('周四 09:00')
+  expect(resetShort(far, now, 'ja')).toBe('木 09:00')
+  // A reset that has passed, no reset at all, and a time that is not one.
+  expect(resetShort(at(-60_000), now, 'ko')).toBe('초기화 중')
+  expect(resetShort(undefined, now, 'ko')).toBeUndefined()
+  expect(resetShort('not a time', now, 'ko')).toBeUndefined()
+})
+
+// 2026-10-25: the owner asked the row of figures to say when each window resets. Beside each
+// figure it reads short — the time left while close, the weekday and clock once far — and on a
+// narrow band the resets go while the percentages stay.
+test('the limits row says when each window resets, and a narrow band keeps the figures when it goes', async ($, on) => {
+  const now = Date.parse('2026-10-10T13:20:00')
+  const at = (ms: number) => new Date(now + ms).toISOString()
+  const limits: DashboardView['limits'] = [
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 28, resetsAt: at(2 * 3_600_000) },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 8, resetsAt: at(3 * 86_400_000) },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'five_hour', label: '', windowMinutes: 300, percent: 12, resetsAt: at(45 * 60_000) },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 5, resetsAt: at(5 * 86_400_000) },
+  ]
+  const view: DashboardView = { ...DASH, extras: ['limits'], limits }
+  const band = (columns: number): Frame => ({ ...frameOf('desktop', columns), lang: 'ko', now })
+  drawPane(on, 'resets-94', el => renderBand(el, band(94), view, BAND_ACTIONS))
+  drawPane(on, 'resets-70', el => renderBand(el, band(70), view, BAND_ACTIONS))
+  const wide = await mount($, 'resets-94', 'desktop', 94)
+  expect(await wide.find({ type: 'Text', text: /^2시간 뒤$/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: /^45분 뒤$/ })).toBeDefined()
+  // A window days away names the weekday and the local clock: 13 October 2026 is a Tuesday.
+  expect(await wide.find({ type: 'Text', text: /^화 13:20$/ })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: /^목 13:20$/ })).toBeDefined()
+  await wide.unmount()
+  const narrow = await mount($, 'resets-70', 'desktop', 70)
+  for (const figure of ['28%', '8%', '12%', '5%']) expect(await narrow.find({ type: 'Text', text: new RegExp('^' + figure + '$') }), figure).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /뒤$/ })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: /^\S+ \d\d:\d\d$/ })).toBeUndefined()
+  await narrow.unmount()
+})
 
 // ---- Tool runs (2026-10-20: a worker's commands read as a wall, each wrapped over lines) ------------
 
