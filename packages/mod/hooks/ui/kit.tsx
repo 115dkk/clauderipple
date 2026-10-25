@@ -25,7 +25,7 @@ import { filled } from './parts'
 import type { Els } from './parts'
 import type { Face } from './ripple'
 import type { Frame } from './view'
-import { CELL_PX, CLOSE_PX, CONTROL_PX, ROW_PX, SVG_MAX_PX, SWITCH_H, SWITCH_W, WELL_PX, labelPx } from './art'
+import { CELL_PX, CLOSE_PX, CONTROL_PX, CURRENT_PX, ROW_PX, SVG_MAX_PX, SWITCH_H, SWITCH_W, WELL_PX, labelPx } from './art'
 import type { Glyph, PillLook, Sea, Tone } from './art'
 import { lookOf } from './look'
 import { chOf } from './theme'
@@ -158,7 +158,7 @@ function extraHover(el: Els, frame: Frame, cells: number): RenderNode[] {
  * A capsule: a Box in the skin's edge and colour, the skin's backdrop (the deep's sea; flat has
  * none) painted behind it from its top left, and everything it holds in one positioned layer above
  * that. `rows` is about how tall it draws; the backdrop is taken taller and wider than that, and
- * the capsule clips it.
+ * the capsule clips it. A work current, where the skin paints one, is placed at its true bottom.
  */
 export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 'at'> & { at?: Sea['at'] }; rows: number; paddingX?: number; paddingY?: number; gap?: number; children: RenderNode[] }): RenderNode {
   const { Box } = el
@@ -170,9 +170,13 @@ export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 
   const visible = Math.round(c.rows * ROW_PX)
   const height = visible + 220
   const at = c.sea.at ?? { x: padX * CELL_PX + 12, y: padY * ROW_PX * 0.5 + 13 }
-  // A current drawn at the estimated SVG height crossed the limits' words when the host's
-  // row metrics differed. Seat the work indicator at the capsule's actual bottom instead.
-  const sea = look.art.sea(width, height, { ...c.sea, current: false, at, visible })
+  const sea = look.art.sea(width, height, { ...c.sea, at, visible })
+  // Work going on is a current along the capsule's true bottom, a picture of its own below the sea:
+  // the sea is drawn taller than the capsule, so a floor inside it sat at the picture's estimated
+  // height and crossed the limits' words when the host's rows measured differently (2026-10-25).
+  // The placed Box takes its height from the picture (as `press` and the cards' fade do): a `height`
+  // of 0.084 rows is no whole row to the host, and the Box it was given painted over the whole band.
+  const current = c.sea.current ? look.art.current(width) : ''
   return (
     <Box key={c.key} position="relative" flexDirection="column" paddingX={0} paddingY={0} overflow="hidden" width="100%" minWidth={0} {...look.capsule}>
       {sea ? (
@@ -184,9 +188,11 @@ export function capsule(el: Els, frame: Frame, c: { key: string; sea: Omit<Sea, 
         {lift(el)}
         {c.children}
       </Box>
-      {/* This is activity, not measured progress: a fixed line cannot jump backwards when
-          a new request or state update replaces the host tree and restarts SVG motion. */}
-      {c.sea.current ? <Box key={c.key + '-activity'} position="absolute" bottom={0} left={0} right={0} height={rowsOf(1.6)} backgroundColor="rgba(103,232,249,0.45)" /> : null}
+      {current ? (
+        <Box key={c.key + '-current'} position="absolute" bottom={0} left={0}>
+          {pic(el, c.key + '-current', current, 'ClaudeRipple', width, CURRENT_PX)}
+        </Box>
+      ) : null}
     </Box>
   )
 }

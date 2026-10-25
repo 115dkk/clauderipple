@@ -1210,23 +1210,59 @@ test('within a minute the band draws the same tree; a minute on, only the countd
   }
 })
 
-test('activity is a fixed line at the actual capsule bottom, not a restarting progress sweep over the limits', async ($, on) => {
-  for (const skin of SKINS) for (const active of [false, true]) for (const extra of [false, true]) {
-    const id = ['activity', skin, active, extra].join('-')
-    const view: DashboardView = { ...DASH, isWorking: active, ...(extra ? { effortMenu: true, delegationPin: 'Opus', extras: ['limits'], limits: [{ provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 }] } : {}) }
-    drawPane(on, id, el => renderBand(el, frameOf('desktop', 94, 12, skin), view, BAND_ACTIONS))
+test('while it works the current runs along the capsule\'s true bottom, in a picture of its own that a redraw keeps', async ($, on) => {
+  const working = (live: number, total: number, extra: Partial<DashboardView> = {}): DashboardView => ({ ...DASH, isWorking: true, agents: { live, total }, ...extra })
+  const busy = working(1, 1)
+  // The same band a moment on, with more requests out and every row it can add (the pin, the
+  // limits, the effort menu): nothing in the current depends on any of it.
+  const more = working(2, 3, { effortMenu: true, delegationPin: 'Opus', extras: ['limits'], limits: [{ provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 }] })
+  for (const skin of SKINS) {
+    drawPane(on, 'current-' + skin, el => renderBand(el, frameOf('desktop', 94, 12, skin), busy, BAND_ACTIONS))
+    drawPane(on, 'current-more-' + skin, el => renderBand(el, frameOf('desktop', 94, 12, skin), more, BAND_ACTIONS))
+    drawPane(on, 'current-idle-' + skin, el => renderBand(el, frameOf('desktop', 94, 12, skin), DASH, BAND_ACTIONS))
   }
-  for (const skin of SKINS) for (const active of [false, true]) for (const extra of [false, true]) {
-    const ui = await mount($, ['activity', skin, active, extra].join('-'), 'desktop', 94)
-    const line = await ui.find({ key: 'band-activity' })
-    if (active) {
-      expect(line?.props).toMatchObject({ position: 'absolute', bottom: 0, left: 0, right: 0, height: 0.084 })
-      // The line fills the actual capsule width at every update; there is no phase or percentage.
-      expect(line?.props.width).toBeUndefined()
+  /** The pictures that carry `part` of a drawing (the current's class, the sea's glows). */
+  const pictures = async (ui: { findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }, part: string) =>
+    (await ui.findAll({ type: 'Svg' })).map(picture => String(picture.props.source)).filter(source => source.includes(part))
+  for (const skin of SKINS) {
+    const ui = await mount($, 'current-' + skin, 'desktop', 94)
+    const later = await mount($, 'current-more-' + skin, 'desktop', 94)
+    const idle = await mount($, 'current-idle-' + skin, 'desktop', 94)
+    // Only the deep has water for a current to run in; a band at rest has none.
+    expect(await pictures(ui, 'class="cu"'), skin).toHaveLength(skin === 'deep' ? 1 : 0)
+    expect(await pictures(idle, 'class="cu"'), skin + ' at rest').toHaveLength(0)
+    const line = await ui.find({ key: 'band-current' })
+    if (skin === 'deep') {
+      // A separate placed node at the capsule's own bottom: no `top`, and no `height` of its own,
+      // which the host takes in whole rows and painted as a plate over the band.
+      expect(line?.props).toMatchObject({ position: 'absolute', bottom: 0, left: 0 })
       expect(line?.props.top).toBeUndefined()
+      expect(line?.props.height).toBeUndefined()
+      expect(line?.props.backgroundColor).toBeUndefined()
+      // The line is its picture's own 2 px, so the picture, not the Box, sizes it.
+      expect((await pictures(ui, 'class="cu"'))[0]).toMatch(/\sheight="2"/)
     } else expect(line).toBeUndefined()
-    for (const picture of await ui.findAll({ type: 'Svg' })) expect(String(picture.props.source).includes('class="cu"')).toBe(false)
+    // No wash over the band: nothing is painted in the colour of the plate that was there.
+    const plates: string[] = []
+    for (const mounted of [ui, later, idle]) walk(await mounted.drawn(), n => {
+      if (n.type === 'Box' && String(n.props?.backgroundColor ?? '').includes('103,232,249')) plates.push(String(n.props?.key ?? 'Box'))
+    })
+    expect(plates, skin).toEqual([])
+    // Not in the sea's picture: its height is only an estimate of the capsule's.
+    const seas = await pictures(ui, 'class="br"')
+    expect(seas, skin).toHaveLength(skin === 'deep' ? 1 : 0)
+    for (const source of seas) expect(source).not.toContain('class="cu"')
+    if (skin === 'deep') {
+      // Two frames that differ only in the requests out: the same key and the same document, so a
+      // host that keeps the picture keeps its motion; no negative delay to open it part way.
+      expect(await pictures(later, 'class="cu"')).toEqual(await pictures(ui, 'class="cu"'))
+      expect(await later.find({ key: 'band-current' })).toBeDefined()
+      expect(await later.find({ key: 'pic-band-current' })).toBeDefined()
+      expect((await pictures(ui, 'class="cu"'))[0]).not.toContain('animation-delay')
+    }
     await ui.unmount()
+    await later.unmount()
+    await idle.unmount()
   }
 })
 
