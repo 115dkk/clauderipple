@@ -94,7 +94,7 @@ export function flatPictures(appearance: Appearance): Paint {
     // A ghost button is the page's tint with a hairline; the one thing to press is the accent's fill.
     pill: (text, look, _tone, glyph) => {
       const gw = glyph ? 18 : 0
-      const cells = Math.ceil((labelPx(text, 12) + 26 + gw) / CELL_PX)
+      const cells = (labelPx(text, 12) + 20 + gw) / CELL_PX
       const w = cells * CELL_PX
       const h = CONTROL_PX
       const ink = look === 'primary' ? '#fff' : INK

@@ -391,11 +391,21 @@ function bandSea(mood: BandMood): Omit<Sea, 'at'> {
 /** A fact's hover group: pointing at it shows its tip in the reason's place. */
 const tipScope = (key: string) => 'ripple-tip-' + key
 
-/** `press`: the fact is a button, so its tip starts past it and leaves its light in sight. */
-type DrawnFact = { key: string; cells: number; node: RenderNode; tip?: string; press?: () => void }
+/**
+ * `press`: the fact is a button, so its tip starts past it and leaves its light in sight. `counted`:
+ * what the row's budget takes for it when its slot is drawn tight to the value shown, the widest
+ * value's slot, so what the band drops never depends on a value (the route takes the difference).
+ */
+type DrawnFact = { key: string; cells: number; counted?: number; node: RenderNode; tip?: string; press?: () => void }
+const countedCells = (f: DrawnFact): number => f.counted ?? f.cells
 
 /** The air either side of a fact that is a button, in cells, inside its light as a control's is. */
 const PRESS_PAD = 0.5
+/**
+ * Cells between a fact's picture and its words. A whole cell, and slots rounded up to whole cells,
+ * read as loose once the app's type widened a cell (2026-10-25); slots are now exact.
+ */
+const FACT_GAP = 0.5
 
 /**
  * A fact's Box. `lit`: the fact is a button, lit under the pointer as the controls are, so it reads
@@ -410,7 +420,7 @@ function drawnFact(el: Els, key: string, cells: number, children: RenderNode[], 
     cells,
     tip,
     node: (
-      <Box key={'fact-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={1} width={cells} flexShrink={0} {...hover}>
+      <Box key={'fact-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={FACT_GAP} width={cells} flexShrink={0} {...hover}>
         {children}
       </Box>
     ),
@@ -430,11 +440,12 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
   const idx = effortIndex(level)
   const word = mode === 'deciding' ? t(frame.lang, 'band.deciding') : level ? effortName(level, frame.lang) : '—'
   const look = mode === 'deciding' ? 'deciding' : mode === 'auto' ? 'auto' : mode === 'manual' ? 'manual' : 'quiet'
-  // The word's slot is sized for the widest word (bold Hangul runs ~15% wide of the estimate).
-  const wordPx = Math.max(...effortWords(frame.lang, true).map(w => textPx(w) * 1.15))
-  const cells = Math.ceil((METER_W + CELL_PX + wordPx) / CELL_PX + PRESS_PAD * 2)
+  // The word's slot is the word shown, taken a little wide for bold: a slot for the widest word left
+  // "높음" in room for "매우 높음" (2026-10-25). The budget still counts the widest.
+  const slot = (w: string) => (METER_W + FACT_GAP * CELL_PX + textPx(w) * 1.06) / CELL_PX + PRESS_PAD * 2
+  const cells = slot(word)
   const tip = effortFact(frame, view, actions.toggleEffortMenu).card?.join(' · ')
-  return drawnFact(
+  return withCounted(Math.max(...effortWords(frame.lang, true).map(slot)), drawnFact(
     el,
     'effort',
     cells,
@@ -447,8 +458,10 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
     ],
     tip,
     frame,
-  )
+  ))
 }
+
+const withCounted = (counted: number, f: DrawnFact): DrawnFact => ({ ...f, counted })
 
 /**
  * The context ring and its share. With the Context pane to open it is a button (the app dropped the
@@ -465,11 +478,15 @@ function contextDrawn(el: Els, frame: Frame, view: DashboardView, onPress?: () =
   const tip = onPress
     ? t(frame.lang, 'band.contextOpen', { tokens: compactNumber(ctx.tokens), window: compactNumber(ctx.window) })
     : contextFact(frame, view)?.card?.join(' · ') || undefined
-  const cells = Math.ceil((16 + CELL_PX + textPx('100%')) / CELL_PX + (onPress ? PRESS_PAD * 2 : 0))
+  // Drawn to the share shown (its digits are tabular, so only a new digit count moves what follows),
+  // counted at "100%".
+  const slot = (shown: string) => (16 + FACT_GAP * CELL_PX + textPx(shown)) / CELL_PX + (onPress ? PRESS_PAD * 2 : 0)
+  const cells = slot(Math.round(ctx.percent) + '%')
+  const counted = slot('100%')
   const ring = pic(el, 'ring', lookOf(frame).art.ring(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16)
   const value = <Text key="ctx-value" {...figure(frame, tone)}>{Math.round(ctx.percent) + '%'}</Text>
-  if (!onPress) return drawnFact(el, 'context', cells, [ring, value], tip)
-  return { ...drawnFact(el, 'context', cells, [ring, value, press(el, 'context', cells * CELL_PX, onPress)], tip, frame), press: onPress }
+  if (!onPress) return withCounted(counted, drawnFact(el, 'context', cells, [ring, value], tip))
+  return { ...drawnFact(el, 'context', cells, [ring, value, press(el, 'context', cells * CELL_PX, onPress)], tip, frame), counted, press: onPress }
 }
 
 function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
@@ -484,7 +501,7 @@ function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   const tone: Tone | 'soft' = shown === 0 ? 'soft' : drowsy ? 'amber' : held ? 'violet' : 'soft'
   const text = cache ? minutesLeft(left, frame.lang) : '—'
   const words = [t(frame.lang, 'units.minutes', { n: 60 }), t(frame.lang, 'band.cold'), '—']
-  const cells = Math.ceil((16 + CELL_PX + Math.max(...words.map(textPx))) / CELL_PX)
+  const cells = (16 + FACT_GAP * CELL_PX + Math.max(...words.map(textPx))) / CELL_PX
   const tip = cacheFact(frame, view)?.card?.join(' · ')
   return drawnFact(el, 'cache', cells, [
     pic(el, 'clock', k.art.clock(cache ? (shown * 60_000) / cache.ttlMs : 0, tone), t(frame.lang, 'band.cache'), 16, 16),
@@ -501,7 +518,7 @@ function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   // to "g…" beside the route, and the window's name and reset stay in the tip (2026-10-14). Save's
   // word takes room only while save mode is on: reserved always, it cost the limit its place on a
   // band near 95 columns (2026-10-14).
-  const cells = Math.ceil((16 + CELL_PX + textPx('100%') + (limit.save ? CELL_PX + textPx(save) : 0)) / CELL_PX)
+  const cells = (16 + FACT_GAP * CELL_PX + textPx('100%') + (limit.save ? FACT_GAP * CELL_PX + textPx(save) : 0)) / CELL_PX
   return drawnFact(el, 'limit', cells, [
     pic(el, 'limit', lookOf(frame).art.gauge(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
     <Text key="limit-value" {...figure(frame, limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
@@ -932,9 +949,9 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   let controlCells = counted(words)
   let route = view.hide.includes('route') ? 0 : ROUTE_ROOM
   let ruled = true
-  const span = (facts: DrawnFact[]) => facts.reduce((n, f) => n + f.cells + DRAWN_GAP, 0)
+  const span = (facts: DrawnFact[]) => facts.reduce((n, f) => n + countedCells(f) + DRAWN_GAP, 0)
   const rules = (facts: DrawnFact[]) => (ruled ? (facts.length ? RULE_CELLS + DRAWN_GAP : 0) + (route ? RULE_CELLS + DRAWN_GAP : 0) : 0)
-  const need = (facts: DrawnFact[]) => CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP + rules(facts) + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
+  const need = (facts: DrawnFact[]) => CREST_CELLS + DRAWN_GAP + countedCells(effort) + DRAWN_GAP + rules(facts) + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
   let facts = optional
   // Narrow, things go in this order until the row fits: the icons' words (clear, compact,
   // settings, agents, keep-warm), the rules, then the route draws in to its least, then the mode

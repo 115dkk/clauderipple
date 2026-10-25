@@ -341,9 +341,11 @@ export const GLYPH: Record<Glyph, string> = {
 export function pillArt(label: string, look: PillLook, tone: Tone = 'violet', glyph?: Glyph): { source: string; cells: number } {
   const t = TONE[tone]
   const size = 12
-  const pad = 13
+  // Exact, not whole cells, and 10 px of air a side: rounded up and at 13 px the Handoff pill read
+  // as padded once the app's type widened a cell (2026-10-25). The press is laid over its Box.
+  const pad = 10
   const gw = glyph ? 12 + 6 : 0
-  const cells = Math.ceil((labelPx(label, size) + pad * 2 + gw) / CELL_PX)
+  const cells = (labelPx(label, size) + pad * 2 + gw) / CELL_PX
   const w = cells * CELL_PX
   const h = 26
   const ink = look === 'primary' ? t.on : LABEL
