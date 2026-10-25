@@ -4,7 +4,7 @@ import { reduce } from "../web/timeline.ts";
 import { item, type UI } from "../web/views.ts";
 import type { SessionEvent } from "../src/protocol.ts";
 
-const ui = (): UI => ({ now: 1, link: { state: "open", attempt: 0, nextAt: null, lastRx: 1, downSince: null }, host: null, home: undefined, sessions: [], draft: { cwd: null, model: null, effort: null }, models: [], sheet: null, expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null });
+const ui = (): UI => ({ now: 1, link: { state: "open", attempt: 0, nextAt: null, lastRx: 1, downSince: null }, host: null, home: undefined, sessions: [], draft: { cwd: null, model: null, effort: null }, models: [], sheet: null, expanded: new Map(), workersOpen: false, permOpen: new Set(), toast: null, pins: [], folded: [], query: "", homeLimit: 60 });
 
 for (const decision of ["allow", "deny", "expired"] as const) test(`a ${decision} plan can be reviewed repeatedly without presenting approval controls`, () => {
   const text = "# Exact plan\n\nFirst line\n\nLast line";

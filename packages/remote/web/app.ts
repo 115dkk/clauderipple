@@ -42,6 +42,15 @@ const store = {
 };
 
 /**
+ * A list of names this device stored (pins, folded sections). Anything that is not a list of
+ * strings is treated as nothing stored, so one damaged value cannot hide the whole list.
+ */
+function storedKeys(key: string, fallback: string[]): string[] {
+  const raw = store.get<unknown>(key, fallback);
+  return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : fallback;
+}
+
+/**
  * localStorage as it is, for the outbox. Unlike `store` above it does not turn a refused read into
  * "nothing stored": the outbox has to tell an empty queue from a value it could not read, or it
  * would write over the person's words (B05/B16). Throw here; the outbox module reports it.
@@ -163,6 +172,9 @@ export class App {
       now: Date.now(), link, host: null, home: undefined, sessions: [], models: [], sheet: null,
       draft: store.get("rr.draft", { cwd: null, model: null, effort: null }),
       expanded: new Map(), workersOpen: false, permOpen: new Set(), questionDrafts: new Map(), deciding: new Set(), toast: null,
+      // Pins and folds belong to this device, so they live beside the draft and the typed drafts.
+      pins: storedKeys("rr.pins", []), folded: storedKeys("rr.folded", [V.ARCHIVE_KEY]),
+      query: "", homeLimit: V.HOME_PAGE,
       push: null, pushLater: store.get<boolean>("rr.pushLater", false),
     };
   }
@@ -684,7 +696,7 @@ export class App {
     if (this.screen.name === "home") {
       setHTML($("#top"), V.homeTop(this.ui));
       setHTML($("#pre"), "");
-      setHTML($("#main"), V.homeMain(this.ui));
+      this.renderHomeMain();
       setHTML($("#dock-extra"), V.chips(this.ui));
       this.renderComposer(t("composer.new"), "send");
     } else {
@@ -694,13 +706,36 @@ export class App {
     this.renderToast();
   }
 
+  /**
+   * The home's scrolling region. A rebuild keeps the scroll position, and keeps the caret in the
+   * search field: the list changes under a person who is typing, and a lost caret would move their
+   * next letter to the wrong place.
+   */
+  private renderHomeMain(): void {
+    const main = $("#main");
+    const input = document.getElementById("home-search") as HTMLInputElement | null;
+    const typing = input !== null && document.activeElement === input;
+    const caret = typing ? input.selectionStart : null;
+    const y = main.scrollTop;
+    setHTML(main, V.homeMain(this.ui));
+    main.scrollTop = y;
+    if (!typing) return;
+    const again = document.getElementById("home-search") as HTMLInputElement | null;
+    again?.focus({ preventScroll: true });
+    if (again && caret !== null) again.setSelectionRange(caret, caret);
+  }
+
+  /** Only the list changed (a fold, another page, a search letter): the field above it keeps its caret. */
+  private renderHomeList(): void {
+    setHTML($("#home-list"), V.homeList(this.ui));
+  }
+
   /** Only what changes every second: the link pill, banners, countdowns, "working for". */
   renderChrome(): void {
     if (this.screen.name === "pair") return;
     if (this.screen.name === "home") {
       setHTML($("#top"), V.homeTop(this.ui));
-      const main = $("#main");
-      if (main) { const y = main.scrollTop; setHTML(main, V.homeMain(this.ui)); main.scrollTop = y; }
+      this.renderHomeMain();
       return;
     }
     this.renderSession(true);
@@ -753,8 +788,10 @@ export class App {
   renderSheet(preservePosition = true): void {
     const frame = this.ui.sheet?.kind === "worker" ? this.ui.sheet : null;
     if (frame && preservePosition) this.rememberWorkerPosition();
-    const el = $("#sheet");
-    setHTML(el, V.sheet(this.ui));
+    const html = V.sheet(this.ui);
+    // A session that left the list takes its own menu with it, rather than reopening it later.
+    if (!html && this.ui.sheet?.kind === "session") this.ui.sheet = null;
+    setHTML($("#sheet"), html);
     const body = document.getElementById("worker-body");
     if (body && frame) body.scrollTop = frame.scroll;
   }
@@ -889,6 +926,13 @@ export class App {
       const el = ev.target as HTMLElement;
       if (el.id === "input") { this.fitInput(); store.set(`rr.typed.${this.renderedScreen}`, (el as HTMLTextAreaElement).value); }
       if (el.dataset.questionFree === "true") this.editQuestion(el.dataset.id ?? "", Number(el.dataset.index), (draft, question) => freeAnswer(draft, question, (el as HTMLTextAreaElement).value), false);
+      // The home search redraws only the list below the field, so the field keeps its caret and a
+      // new search starts from its first page.
+      if (el.id === "home-search" && this.screen.name === "home") {
+        this.ui.query = (el as HTMLInputElement).value;
+        this.ui.homeLimit = V.HOME_PAGE;
+        this.renderHomeList();
+      }
       if (el.id === "folder-filter" && this.ui.sheet?.kind === "folder") {
         this.ui.sheet.filter = (el as HTMLInputElement).value;
         const pos = (el as HTMLInputElement).selectionStart;
@@ -1042,6 +1086,47 @@ export class App {
       }
       case "home": this.go({ name: "home" }); break;
       case "open": this.go({ name: "session", id }); break;
+      case "fold": {
+        // Section names are the handles, so a fold survives a relaunch and a language change.
+        const key = el.dataset.key ?? "";
+        if (!key) break;
+        const folded = this.ui.folded;
+        this.ui.folded = folded.includes(key) ? folded.filter(name => name !== key) : [...folded, key];
+        store.set("rr.folded", this.ui.folded);
+        this.renderHomeList();
+        break;
+      }
+      case "home-more": this.ui.homeLimit += V.HOME_PAGE; this.renderHomeList(); break;
+      case "row-menu": {
+        if (!this.ui.sessions.some(s => s.id === id)) break;
+        this.ui.sheet = { kind: "session", id };
+        this.renderSheet();
+        break;
+      }
+      case "pin-toggle": {
+        // A pin is this device's own note about the list; nothing is sent to the computer.
+        if (!this.ui.sessions.some(s => s.id === id)) break;
+        const pins = this.ui.pins;
+        this.ui.pins = pins.includes(id) ? pins.filter(pin => pin !== id) : [...pins, id];
+        store.set("rr.pins", this.ui.pins);
+        this.ui.sheet = null;
+        this.render();
+        break;
+      }
+      case "archive-toggle": {
+        const target = this.ui.sessions.find(s => s.id === id);
+        if (!target) break;
+        if (!this.link?.send({ t: "archive", session: id, archived: !target.archived })) { this.toast(t("home.needsHost")); break; }
+        this.ui.sheet = null;
+        this.renderSheet();
+        break;
+      }
+      case "unread": {
+        if (!this.link?.send({ t: "unread", session: id })) { this.toast(t("home.needsHost")); break; }
+        this.ui.sheet = null;
+        this.renderSheet();
+        break;
+      }
       case "toggle-tasks": this.tasksOpen = !this.tasksOpen; this.renderSession(true); break;
       case "plan-toggle": this.planOpen = !this.planOpen; this.renderSession(true); break;
       case "question-jump":
