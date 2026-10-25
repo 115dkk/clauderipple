@@ -349,12 +349,12 @@ test("an id two providers offer is owned by the rule that says which deal was me
   assert.equal(except(config, "chatgpt").find((entry) => entry.id === "deepseek-v4.1-flash")?.provider, "openrouter");
 });
 
-test("a Grok form's check keeps what is ticked now; only a new provider's first listing ticks everything", () => {
+test("a model listing keeps what is ticked now; only a new provider's first listing ticks everything", () => {
   const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../ui/app.js"), "utf8");
-  const start = source.indexOf("function grokTickedAfterCheck");
+  const start = source.indexOf("function tickedAfterListing");
   const end = source.indexOf("}", start) + 1;
-  assert.ok(start > 0, "app.js no longer contains grokTickedAfterCheck");
-  const ticked = new Function(`${source.slice(start, end)}; return grokTickedAfterCheck;`)() as (first: boolean, tickedIds: string[], listedIds: string[]) => Set<string>;
+  assert.ok(start > 0, "app.js no longer contains tickedAfterListing");
+  const ticked = new Function(`${source.slice(start, end)}; return tickedAfterListing;`)() as (first: boolean, tickedIds: string[], listedIds: string[]) => Set<string>;
   const listing = ["grok-4.7", "grok-4.7-fast", "grok-4.6", "grok-4.5"];
   assert.deepEqual([...ticked(true, [], listing)], listing, "a new provider starts with every model");
   // The user unticked two models; a re-check — of a new or a saved provider — leaves them unticked.
@@ -373,7 +373,7 @@ const mergeBlock = dashboardBlock('function modChanges(', '/** Take the router')
 
 type Model = { id: string; name?: string; contextWindow?: number };
 type SavedProvider = {
-  type: string; url?: string; models: Model[]; headers?: Record<string, string>;
+  type: string; auth?: string; apiKey?: string; url?: string; models: Model[]; headers?: Record<string, string>;
   caps?: Record<string, unknown>; credentials?: { id: string; headers: Record<string, string> }[];
 };
 type SavedRoute = { provider: string; model: string; effort?: string; fallbacks?: { provider: string; model: string }[]; contextWindow?: number };
@@ -446,6 +446,7 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
     let currentConfig = clone(h.initial), selectedProviderName, providerDetailTab, slotsLoaded, providersLoaded, clientsLoaded;
     const t = key => key, hint = text => el('small', {text}), selectOption = (value, text) => el('option', {value, text});
     const CHATGPT_MODELS = [], presetById = () => undefined;
+    const claudeModels = [{ id: 'one' }, { id: 'two' }], startGoogleLogin = async () => false;
     ${dashboardBlock('function modelsOf(', 'function presetById(')}
     ${dashboardBlock('function isKeyProvider(', '/** A key\'s header set:')}
     ${dashboardBlock('function effortSelect(', 'function routeFromTarget(')}
@@ -461,10 +462,12 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
     const loadProviders = async () => {}, offerPickerOn = async () => {}, startMeasurement = () => {};
     const confirm = () => true, closeProviderDetail = () => {}, renderProviderWorkspace = () => {};
     ${dashboardBlock('async function removeProvider(', 'function providerTabs(')}
+    ${dashboardBlock('function anthropicSourceText(', 'function openAnthropicProviderForm(')}
+    ${dashboardBlock('function openAnthropicProviderForm(', 'function openProviderForm(')}
     ${dashboardBlock('function openProviderForm(', '// ---- ClaudeRipple mod')}
-    return { open: () => openProviderForm({name:'p', provider:h.initial.providers.p}), remove: () => removeProvider('p', h.initial.providers.p) };
+    return { open: options => openProviderForm(options || {name:'p', provider:h.initial.providers.p}), remove: () => removeProvider('p', h.initial.providers.p) };
   `);
-  const ui = make(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { open(): void; remove(): Promise<void> };
+  const ui = make(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { open(options?: { name?: string; kind?: string; provider?: SavedProvider }): void; remove(): Promise<void> };
   const button = (text: string) => { const node = h.root?.find(node => node.tag === 'button' && node.attrs.text === text); assert.ok(node, text); return node; };
   return { h, open: ui.open, remove: ui.remove, button, save: () => button('common.save').emit('click') };
 }
@@ -529,6 +532,65 @@ test('late compatible and ChatGPT model listings respect checkboxes changed whil
   }
 });
 
+test('saving a Google or Grok provider preserves a picker-only window instead of its catalogue one', async () => {
+  for (const type of ['google', 'grok']) {
+    const fixture = saveFixture();
+    fixture.providers.p = { type, ...(type === 'google' ? { auth: 'api-key' } : {}), models: [{ id: 'one', contextWindow: 100000 }] };
+    fixture.cli.extraModels = [{ model: 'one', name: 'one', contextWindow: 345678 }];
+    const ui = providerSaveHarness(fixture); ui.open();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await ui.save();
+    assert.equal(ui.h.writes[0]!.cli.extraModels[0]!.contextWindow, 345678, type);
+  }
+});
+
+test('late Claude and Google model listings respect checkboxes changed while they were in flight', async () => {
+  for (const type of ['anthropic', 'google']) {
+    const fixture = saveFixture();
+    fixture.providers.p = type === 'anthropic'
+      ? { type, auth: 'claude-code', models: [{ id: 'one' }, { id: 'two' }] }
+      : { type, auth: 'api-key', apiKey: 'stored', models: [{ id: 'one' }, { id: 'two' }] };
+    const pending = deferred<ProbeResult>(), ui = providerSaveHarness(fixture, pending.promise); ui.open();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const checkbox = ui.h.root!.find(node => node.type === 'checkbox' && node.dataset.model === 'one')!;
+    checkbox.checked = false; await checkbox.emit('change');
+    pending.resolve({ ok: true, models: [{ id: 'one' }, { id: 'two' }, { id: 'new' }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await ui.save();
+    assert.deepEqual(ui.h.writes[0]!.providers.p!.models.map(model => model.id), ['two'], type);
+  }
+});
+
+test('a new Claude provider auto-ticks its first listing only while the user has not edited it', async () => {
+  for (const edited of [false, true]) {
+    const fixture = saveFixture(); delete fixture.providers.p;
+    const pending = deferred<ProbeResult>(), ui = providerSaveHarness(fixture, pending.promise);
+    ui.open({ kind: 'anthropic' });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    if (edited) {
+      const checkbox = ui.h.root!.find(node => node.type === 'checkbox' && node.dataset.model === 'one')!;
+      checkbox.checked = false; await checkbox.emit('change');
+    }
+    pending.resolve({ ok: true, models: [{ id: 'one' }, { id: 'two' }, { id: 'new' }] });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await ui.button('providers.add').emit('click');
+    const saved = Object.values(ui.h.writes[0]!.providers)[0]!;
+    assert.deepEqual(saved.models.map(model => model.id), edited ? ['two'] : ['one', 'two', 'new'], edited ? 'the user edit wins' : 'an untouched first listing fills in');
+  }
+});
+
+test('a new Grok provider has no default model list to edit before its first listing', async () => {
+  const fixture = saveFixture(); delete fixture.providers.p;
+  const pending = deferred<ProbeResult>(), ui = providerSaveHarness(fixture, pending.promise);
+  ui.open({ kind: 'grok' });
+  assert.equal(ui.h.root!.find(node => node.type === 'checkbox' && node.dataset.model !== undefined), undefined, 'nothing to untick before the catalogue arrives');
+  pending.resolve({ ok: true, models: [{ id: 'grok-4.7' }] });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  await ui.button('providers.add').emit('click');
+  const saved = Object.values(ui.h.writes[0]!.providers)[0]!;
+  assert.deepEqual(saved.models.map(model => model.id), ['grok-4.7']);
+});
+
 test('removing a provider keeps shared picker models owned by a different provider', async () => {
   const fixture = saveFixture();
   fixture.providers.q = { type: 'openai-compatible', models: [{ id: 'one' }] };
@@ -544,28 +606,33 @@ async function pickerWindowHarness(catalogWindows: Record<string, number>) {
   config.providers.p = { type: 'chatgpt', models: [{ id: 'gpt-6.1-sol', contextWindow: 272000 }] };
   config.providers.q = { type: 'openai-compatible', models: [{ id: 'other', contextWindow: 800000 }] };
   config.cli.extraModels = [{ model: 'gpt-6.1-sol', contextWindow: 272000 }, { model: 'other', contextWindow: 700000 }];
-  const h = { config, catalogWindows, requests: [] as string[], box: new SaveNode('div'), card: new SaveNode('div') };
+  const h = { config, catalogWindows, requests: [] as string[], box: new SaveNode('div'), card: new SaveNode('div'), rows: new SaveNode('div') };
   const ui = new Function('h', 'el', `
     let currentConfig, pickerContextWindows = {catalogWindows:{}}, clientsLoaded, status = {};
+    let pickerModelsDrawnFor = { key: null }, modelSlotsDrawnFor = { key: null };
     const t = key => key;
     const CHATGPT_MODELS = [], CSS = {escape: value => value};
-    const $ = selector => selector === '#client-picker-models-card' ? h.card : selector === '#client-picker-models' ? h.box
+    const MODEL_SLOTS = ['smallFast', 'subagent', 'main'];
+    const $ = selector => selector === '#client-picker-models-card' ? h.card : selector === '#client-picker-models' ? h.box : selector === '#client-model-slots' ? h.rows
       : h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === /data-model="([^"]+)"/.exec(selector)?.[1]);
     const $all = () => h.box.children.flatMap(row => row.children[0].children.filter(node => node.type === 'checkbox' && node.checked));
     const hint = text => el('small', {text}), saveClientPickerModels = () => {};
+    const cell = (label, value, sub, extraClass) => el('div', {class: 'cell', label, sub, extraClass}, [value]);
+    const allKnownModelIds = config => new Set(groupedModels(config).flatMap(group => group.models.map(model => model.id)));
     ${dashboardBlock('function modelsOf(', 'function presetById(')}
     ${dashboardBlock('function discoveredContextWindow(', 'let currentConfig =')}
+    ${dashboardBlock('function providerCannotSearch(', 'async function saveWebSearch(')}
     ${dashboardBlock('function renderClientPickerModels(', '// Claude Code picks these')}
     ${dashboardBlock('function clientPickerSelections(', 'async function saveClientPickerModels(')}
     const loadCatalogs = async () => {}, renderClients = () => renderClientPickerModels(true);
     const api = async url => { h.requests.push(url); return url === '/api/config' ? h.config : {windows:h.catalogWindows,catalogWindows:h.catalogWindows}; };
     const toast = message => { throw new Error(message); };
     ${dashboardBlock('async function loadClients(', 'async function loadProviders(')}
-    return {load:loadClients, selections:clientPickerSelections};
-  `)(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { load(): Promise<void>; selections(): Entry[] };
+    return {load:loadClients, selections:clientPickerSelections, setStatus: value => { status = value; }, render: () => { renderClientPickerModels(true); renderModelSlots(); }};
+  `)(h, (tag: string, attrs?: Record<string, unknown>, children?: SaveNode[]) => new SaveNode(tag, attrs, children)) as { load(): Promise<void>; selections(): Entry[]; setStatus(value: unknown): void; render(): void };
   await ui.load();
   const field = (model: string) => h.box.find(node => node.attrs.class === 'model-window' && node.dataset.model === model)!;
-  return { h, field, selections: ui.selections };
+  return { h, field, selections: ui.selections, load: ui.load, render: ui.render, setStatus: ui.setStatus };
 }
 
 test('the picker loads the resolved Codex window, makes it read-only and never saves its display as an override', async () => {
@@ -595,6 +662,70 @@ test('before a Codex window has been read the picker retains its stored editable
   assert.equal(ui.h.box.find(node => node.attrs.text === 'slots.windowCodex'), undefined);
   field.value = '300000';
   assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 300000);
+});
+
+test('a repeated status refresh leaves a window being typed and the slot selects in place', async () => {
+  const ui = await pickerWindowHarness({});
+  ui.render();
+  const typing = ui.field('other');
+  typing.value = '999999'; // typed, not yet committed by a change event
+  const slot = ui.h.rows.children[0]!.children[0]!;
+  ui.render();
+  assert.equal(ui.field('other'), typing, 'the window input node is the one being typed in');
+  assert.equal(typing.value, '999999');
+  assert.equal(ui.selections().find(entry => entry.id === 'other')?.contextWindow, 999999);
+  assert.equal(ui.h.rows.children[0]!.children[0], slot, 'the slot select is not rebuilt');
+  // A genuinely new catalogue still redraws, so the guard cannot freeze the screen.
+  ui.h.config = structuredClone(ui.h.config);
+  ui.h.config.cli.extraModels = [{ model: 'gpt-6.1-sol', contextWindow: 272000 }];
+  await ui.load();
+  assert.equal(ui.h.box.find(node => node.type === 'checkbox' && node.dataset.model === 'other')!.checked, false);
+});
+
+test('a changed search capability still redraws the slot rows', async () => {
+  const ui = await pickerWindowHarness({});
+  ui.render();
+  const before = ui.h.rows.children[0]!.children[0]!;
+  ui.setStatus({ providers: { q: { webSearch: false } } });
+  ui.render();
+  const after = ui.h.rows.children[0]!.children[0]!;
+  assert.notEqual(after, before, 'new capability data reaches the controls');
+  assert.ok(after.children.some(option => option.textContent.includes('slots.noWebSearch')));
+});
+
+// The render keys deliberately carry no interface language: the selector reloads the page, which
+// re-runs every module and redraws with the new `t`. This pins that path — an in-place language swap
+// would leave the guards comparing language-independent keys and stale labels on screen.
+test('the interface language selector reloads the page so redrawn labels use the new language', () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('(function setupLanguage() {');
+  const end = source.indexOf('})();', start) + '})();'.length;
+  assert.ok(start > 0 && end > start, 'app.js no longer contains the language selector');
+  let reloads = 0;
+  const stored: Record<string, string> = {};
+  let change: (() => void) | undefined;
+  const options: { value: string; textContent: string; selected: boolean }[] = [];
+  const select = {
+    value: '',
+    append(option: { value: string; textContent: string; selected: boolean }) { options.push(option); },
+    addEventListener(name: string, listener: () => void) { if (name === 'change') change = listener; },
+  };
+  new Function('$all', 'document', 'location', 'localStorage', 'LANGUAGES', 'CURRENT_LANG', `
+    ${source.slice(start, end)}
+  `)(
+    () => [select],
+    { createElement: () => ({ value: '', textContent: '', selected: false }) },
+    { reload: () => { reloads += 1; } },
+    { setItem: (key: string, value: string) => { stored[key] = value; } },
+    [['en', 'English'], ['ko', '한국어']],
+    'en',
+  );
+  assert.deepEqual(options.map(option => option.value), ['en', 'ko']);
+  assert.equal(options[0]!.selected, true);
+  select.value = 'ko';
+  change!();
+  assert.deepEqual(stored, { clauderipple_lang: 'ko' });
+  assert.equal(reloads, 1, 'a language change restarts the page instead of redrawing in place');
 });
 
 type SlotItem = { id: string; route: { provider: string; model: string } | null; effort: string };

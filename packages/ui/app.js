@@ -889,14 +889,31 @@ function renderClients() {
   ));
   $("#client-claude-code-rows").replaceChildren(...(mapped.length ? mapped : [el("div", { class: "cell-note", text: t("slots.noChanges") })]));
 }
+// The five-second status poll re-runs the Clients screen. Rebuilding the model controls then would
+// replace a window field being typed in — losing the value and the focus — though the poll changes
+// nothing they are drawn from. Each render remembers what it drew and repeats only for different
+// data; the slot rows also read each provider's measured search ability, so that is part of their key.
+let pickerModelsDrawnFor = { key: null };
+let modelSlotsDrawnFor = { key: null };
 function renderClientPickerModels(enabled) {
   const card = $("#client-picker-models-card");
   card.hidden = !enabled;
   if (!enabled) return;
   const box = $("#client-picker-models");
   const checked = new Set(((currentConfig.cli && currentConfig.cli.extraModels) || []).map((item) => item.model));
+  const groups = groupedModels(currentConfig);
+  const key = JSON.stringify([
+    [...checked].sort(),
+    groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
+      model.id, labelOf(model), discoveredContextWindow(group.name, model.id) ?? null,
+      savedContextWindow(model.id) ?? null, pickerContextWindows.catalogWindows[model.id] ?? null,
+    ])]),
+  ]);
+  // Typing in a window changes none of this, and the catalogue arrives once with the screen, so a
+  // repeat poll — or a save elsewhere on this screen — has nothing new to draw.
+  if (key === pickerModelsDrawnFor.key && box.childElementCount) return;
   box.replaceChildren();
-  for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+  for (const group of groups) for (const model of group.models) {
     const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
     input.dataset.model = model.id;
     input.dataset.provider = group.name;
@@ -933,6 +950,7 @@ function renderClientPickerModels(enabled) {
     ]));
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
+  pickerModelsDrawnFor = { key };
 }
 // Claude Code picks these before a request exists, so routing cannot reach them: a search, a title
 // or a subagent goes wherever the CLI already decided. Left empty, Claude answers them — which is
@@ -968,10 +986,23 @@ function renderModelSlots() {
   // With a web search backend set, the search is intercepted before routing and never reaches
   // `smallFast`, so the "no web search here" label there would be false.
   const searchIntercepted = Boolean(currentConfig.webSearch);
+  const groups = groupedModels(currentConfig);
+  const key = JSON.stringify([
+    MODEL_SLOTS.map((slot) => chosen[slot] || ""),
+    searchIntercepted ? 1 : 0,
+    currentConfig.webSearch ? [currentConfig.webSearch.provider, currentConfig.webSearch.model] : null,
+    groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
+      model.id, labelOf(model), providerCannotSearch(group.name, model.id),
+      Boolean(currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic"),
+    ])]),
+  ]);
+  // A provider's search ability is the only thing here the status poll can change; an unchanged key
+  // means the selects already show this pass. Replacing them would take the focus off one mid-use.
+  if (key === modelSlotsDrawnFor.key && rows.childElementCount) return;
   const nodes = MODEL_SLOTS.map((slot) => {
     const select = el("select", {});
     select.appendChild(el("option", { value: "", text: t("slots.slotDefault") }));
-    for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+    for (const group of groups) for (const model of group.models) {
       const option = el("option", { value: model.id, text: `${labelOf(model)} · ${providerLabel(group.name, group.provider)}` });
       if (chosen[slot] === model.id) option.selected = true;
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
@@ -994,6 +1025,7 @@ function renderModelSlots() {
   });
   nodes.push(renderWebSearchSlot());
   rows.replaceChildren(...nodes);
+  modelSlotsDrawnFor = { key };
 }
 
 // The backend `cfg.webSearch` names answers the search instead of the `smallFast` slot. Only the
@@ -3235,6 +3267,10 @@ function openAnthropicProviderForm(options) {
   const sourceLine = el("div", { class: "small" });
   let foundModels = modelsOf(existing).length ? modelsOf(existing) : claudeModels.map((model) => ({ id: model.id, name: labelOf(model) }));
   let selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+  // What the checklist started with: a new provider's list is drawn from the fallback catalogue, and
+  // a first live listing may fill in the rest only while the user has left that set as it was.
+  const initialSelection = new Set(selected);
+  let listed = false;
   const modelArea = el("div", { class: "form-field" });
   function renderModels() {
     const modelsBox = modelChecklist(foundModels, selected);
@@ -3267,9 +3303,16 @@ function openAnthropicProviderForm(options) {
       if (Array.isArray(response.models) && response.models.length) {
         // Anthropic's own list, so a release shows up here without a ClaudeRipple update. A saved
         // model the list no longer carries stays visible and ticked rather than dropped on save.
-        const listed = new Set(response.models.map((model) => model.id));
-        foundModels = [...response.models, ...modelsOf(existing).filter((model) => !listed.has(model.id))];
-        selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+        // What is ticked now wins: this listing arrives after the form opened, so it must not re-tick
+        // a model the user just unchecked. Only a new provider's first listing — one whose selection
+        // still matches the fallback set the form opened with — starts with all of them.
+        const ticked = modelArea.querySelector(".model-picker").selected().map((model) => model.id);
+        const untouched = ticked.length === initialSelection.size && ticked.every((id) => initialSelection.has(id));
+        const keep = tickedAfterListing(!existing && !listed && untouched, ticked, response.models.map((model) => model.id));
+        listed = true;
+        const named = new Set(response.models.map((model) => model.id));
+        foundModels = [...response.models, ...modelsOf(existing).filter((model) => !named.has(model.id))];
+        selected = keep;
         renderModels();
       }
     } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
@@ -3311,11 +3354,11 @@ function openAnthropicProviderForm(options) {
   if (auth.value === "claude-code") void runProbe();
 }
 /**
- * What a Grok form's check leaves ticked. A handful of models, so a new provider's first listing
- * starts with all of them ticked. Every later check — and every check of a saved provider — keeps
+ * What a model list's check leaves ticked. A caller may start a new provider's first listing with
+ * everything ticked (Grok, Claude). Every later check — and every check of a saved provider — keeps
  * what is ticked at that moment, so a model the user unticked stays unticked.
  */
-function grokTickedAfterCheck(firstListing, tickedIds, listedIds) {
+function tickedAfterListing(firstListing, tickedIds, listedIds) {
   return new Set(firstListing ? listedIds : tickedIds);
 }
 
@@ -3353,7 +3396,7 @@ function openGrokProviderForm(options) {
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
         const ticked = modelArea.querySelector(".model-picker").selected();
-        const keep = grokTickedAfterCheck(!existing && !listed, ticked.map((model) => model.id), response.models.map((model) => model.id));
+        const keep = tickedAfterListing(!existing && !listed, ticked.map((model) => model.id), response.models.map((model) => model.id));
         listed = true;
         foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
         renderModels(keep);
@@ -3401,7 +3444,7 @@ function openGrokProviderForm(options) {
     };
     applyProviderLabel(next.providers[providerName], providerName, typedName);
     const existingSelections = pickerSelectionsExcept(next, providerName);
-    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
+    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections, true);
     saveButton.disabled = true;
     try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
@@ -3460,8 +3503,10 @@ function openGoogleProviderForm(options) {
       if (Array.isArray(response.models) && response.models.length) {
         const ticked = modelArea.querySelector(".model-picker").selected();
         // The catalogue lists dozens of Gemini variants, so a new provider starts with none ticked
-        // rather than all of them; saved and typed picks stay ticked and visible.
-        const keep = new Set([...currentChecked, ...ticked.map((model) => model.id)]);
+        // rather than all of them; saved and typed picks stay ticked and visible. The box as it is
+        // now is the answer: merging the saved set back in re-ticked a model the user unchecked
+        // while the listing was still in flight.
+        const keep = new Set(ticked.map((model) => model.id));
         foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
         renderModels(keep, t("providers.modelsFoundMany"));
       }
@@ -3513,7 +3558,7 @@ function openGoogleProviderForm(options) {
     // Same rule as the other provider forms: read after the provider is updated, so an unticked
     // model is already undeclared and falls out of the picker on its own.
     const existingSelections = pickerSelectionsExcept(next, providerName);
-    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
+    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections, true);
     saveButton.disabled = true;
     try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
