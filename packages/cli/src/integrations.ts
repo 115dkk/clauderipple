@@ -4,8 +4,7 @@
 // they are found by.
 //
 // They are shared by every install on the account, so each goes only when it is this home's: the
-// proxy when it records this home (or, from an older version, points at exactly this home's proxy
-// port), the Codex provider when its block records this home (an unmarked block only when its port
+// proxy only when it records this home, the Codex provider when its block records this home (an unmarked block only when its port
 // is this installation's ingress and its service definition was this home's at uninstall start —
 // see `legacyCodexIngressPort`), the CA by its fingerprint, worker files this home's manifest names
 // and no other home keeps, and the status mod / agent-title hook / model slots only where this
@@ -167,8 +166,8 @@ export function removeClientIntegrations(
           notes.push("left the Claude Desktop proxy: another installation owns it");
           return "preserved-other";
         }
-      } else if (ourProxy === undefined || current.egressProxyUrl !== ourProxy) {
-        // An older version recorded no home: only the exact proxy URL this home serves identifies it.
+      } else {
+        // A shared port is not evidence of which installation wrote an unmarked entry.
         notes.push("left the Claude Desktop proxy: installation ownership is unknown");
         return "preserved-unknown";
       }

@@ -329,14 +329,14 @@ export function currentAppProxy(): { appliedId: string | null; egressProxyUrl: s
 }
 
 /**
- * Whose applied Config Library entry this is. An older version recorded no installation home, so
- * an entry with our marker is that home's only when it points at exactly that home's proxy URL;
- * anything else is unknown and left alone (D3, 2026-10-25).
+ * Whose applied Config Library entry this is. A URL and a product marker identify neither the
+ * installation that wrote it nor its home: two installations can use the same port. Legacy entries
+ * without a home remain unknown, including on apply, rather than silently acquiring a new owner.
  */
 export function appProxyOwner(current: ReturnType<typeof currentAppProxy>, home: string, proxyUrl?: string): "ours" | "other" | "unknown" {
   if (!current.ours) return "other";
   if (current.installationHome !== undefined) return sameHome(current.installationHome, home) ? "ours" : "other";
-  return proxyUrl !== undefined && current.egressProxyUrl === proxyUrl ? "ours" : "unknown";
+  return "unknown";
 }
 
 /** Writes our Config Library entry and applies it. Remembers what was applied before so `off` can restore it. */

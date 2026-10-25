@@ -395,7 +395,7 @@ test("Codex ownership uses the recorded home, not the proxy or ingress number", 
 
 // ---- legacy forms from 0.12.14 -------------------------------------------------------------
 
-test("a Desktop proxy entry without a recorded home is ours only at exactly this home's proxy", () => {
+test("a same-port legacy Desktop proxy is never adopted or deleted without installation evidence", () => {
   const ctx = scratch();
   process.env.CLAUDE_APP_SUPPORT = path.join(path.dirname(ctx.settings), "Claude-3p");
   const dir = path.join(process.env.CLAUDE_APP_SUPPORT, "configLibrary");
@@ -405,11 +405,14 @@ test("a Desktop proxy entry without a recorded home is ours only at exactly this
   fs.writeFileSync(path.join(dir, "_meta.json"), JSON.stringify({ appliedId: "legacy", clauderipple: { ourId: "legacy" } }, null, 2));
   // Another URL is not evidence of which installation applied it.
   assert.throws(() => applyAppProxy("http://127.0.0.1:19991", ctx.A), /unknown/);
-  // The same URL identifies it: applying adopts it and records this home from now on.
-  applyAppProxy("http://127.0.0.1:18791", ctx.A);
-  assert.equal(currentAppProxy().installationHome, homeKey(ctx.A));
-  assert.equal(removeAppProxy("http://127.0.0.1:18791", ctx.B), false, "another installation may not take it");
-  assert.equal(removeAppProxy("http://127.0.0.1:18791", ctx.A), true);
+  const raw = fs.readFileSync(path.join(dir, "_meta.json"), "utf8");
+  assert.equal(removeAppProxy("http://127.0.0.1:18791", ctx.B), false);
+  assert.throws(() => applyAppProxy("http://127.0.0.1:18791", ctx.B), /unknown/);
+  assert.equal(removeClientIntegrations(ctx.B, () => "absent", { agentDir: ctx.agents, defaultHome: ctx.A, port: 18791 }), false);
+  assert.equal(fs.readFileSync(path.join(dir, "_meta.json"), "utf8"), raw);
+  assert.equal(fs.existsSync(path.join(dir, "legacy.json")), true);
+  // Even the matching installation needs an explicit home record, not merely a matching URL.
+  assert.throws(() => applyAppProxy("http://127.0.0.1:18791", ctx.A), /unknown/);
 });
 
 test("an unmarked Codex block goes on uninstall only with this home's service and ingress", () => {
