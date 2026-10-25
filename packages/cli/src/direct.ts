@@ -80,7 +80,7 @@ export function directOn(home: string): DirectResult {
     // Validate the whole transition before changing either client or the restoration snapshot.
     for (const [slot, name] of Object.entries(MODEL_SLOT_ENV)) {
       const value = env[name];
-      if (value === undefined) continue;
+      if (value === undefined || value.startsWith("claude-")) continue;
       if (mine.slots?.[slot] !== value || claimedElsewhere(record.store, home, c => c.slots?.[slot], value)) {
         notes.push(`left ${name} (ownership unknown or shared)`);
         blocked = true;
