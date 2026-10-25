@@ -345,7 +345,13 @@ async function syncSettings($: EngineInterface, admin: string): Promise<void> {
   // Claude Code writes `/autocompact` to settings.json itself, so this can change without a
   // settings revision: the band reads it on every poll.
   const at = snapshot.compactAt ?? null
-  if (at !== await read($, compactAt)) await update($, compactAt, () => at)
+  if (at !== await read($, compactAt)) {
+    await update($, compactAt, () => at)
+    // The share is counted against this window: a count of the old one is another context's.
+    contextRun += 1
+    fullMark = null
+    await update($, contextFull, () => null)
+  }
   let sync = await read($, settingsSync)
   // Session atoms survive reloads. Old pending paths/drafts cannot prove user intent
   // under this format; discard them rather than granting an old overwrite a new version.
@@ -455,21 +461,62 @@ async function toggleContext($: EngineInterface): Promise<void> {
   if ((await $.ui.panes()).some(p => p.id === CONTEXT_PANE)) await $.ui.close({ id: CONTEXT_PANE })
   else await $.ui.open({ id: CONTEXT_PANE, title: t(language, 'commands.contextTitle'), focus: true, closeOnEscape: true, holdToasts: true, rows: 30 })
 }
+/** What the precise count was taken in: the same tokens in another chat, model or window are a different share. */
+type FullMark = { basis: number | null; window: number | null; model: string; at: number | null; generation: number; context: number; run: number }
+let fullMark: FullMark | null = null
+/** Bumped whenever this chat's context is replaced or its model/window changes; a count from before is dropped. */
+let contextRun = 0
+/** Bumped when this chat's context is replaced by a compaction; clear/resume/fork move `generation`. */
+let contextEpoch = 0
+function countsHere(mark: FullMark, basis: number | null, model: string, at: number | null): boolean {
+  return mark.basis === basis && mark.model === model && mark.at === at && mark.generation === generation && mark.context === contextEpoch && mark.run === contextRun
+}
 /**
  * The token-count API's count of the context (`full`, one request per tool and memory file), kept
  * against the last response's tokens when it was asked for: the next step makes it stale, and the
- * pane (and the band, contextShare) shows the local estimate again.
+ * pane (and the band, contextShare) shows the local estimate again. Its tokens alone do not say
+ * which model, window or conversation counted them (2026-10-25: a model switch left 20% standing
+ * where the new window read 4%), so `fullMark` holds that state beside it. A slow answer is
+ * published only in the state it was asked for: a clear, compaction or model/window switch while
+ * it runs drops it instead of writing over the newer count (2026-10-25).
  */
 async function countContext($: EngineInterface): Promise<void> {
   if ((await read($, contextFull))?.busy) return
   const basis = (await read($, context))?.basis ?? null
+  const at = await read($, compactAt)
+  const model = await $.session.model()
+  const gen = generation
+  const epoch = contextEpoch
+  const run = ++contextRun
   await update($, contextFull, () => ({ basis, busy: true }))
   try {
-    const breakdown = (await $.session.usage({ breakdown: 'full' })).context.breakdown
+    const usage = await $.session.usage({ breakdown: 'full' })
+    const breakdown = usage.context.breakdown
+    const window = usage.context.window ?? null
+    // The answer must still describe this chat, model and request: a clear, a compaction or a
+    // switch while it ran makes it another context's count, and it is dropped.
+    const now = await $.session.usage().catch(error => { void report($, 'context check', error); return null })
+    const nowModel = await $.session.model()
+    const nowAt = await read($, compactAt)
+    const nowBasis = (await read($, context))?.basis ?? null
+    // Read the scope again after every await: a clear may have moved it while this ran.
+    const live = run === contextRun && gen === generation && epoch === contextEpoch && model === nowModel && at === nowAt && basis === nowBasis && now !== null && now.context.window === window
+    if (!live) {
+      await update($, contextFull, current => run === contextRun && current?.busy ? null : current)
+      return
+    }
+    fullMark = { basis, window, model, at, generation: gen, context: epoch, run }
     const none = t(await read($, lang), 'context.none')
-    await update($, contextFull, () => (breakdown ? { basis, breakdown } : { basis, error: none }))
+    const result = breakdown ? { basis, breakdown } : { basis, error: none }
+    await update($, contextFull, current => run === contextRun && gen === generation && epoch === contextEpoch ? result : current)
   } catch (error) {
-    await update($, contextFull, () => ({ basis, error: reason(error) }))
+    if (run !== contextRun || gen !== generation || epoch !== contextEpoch) {
+      await update($, contextFull, current => run === contextRun && current?.busy ? null : current)
+      return
+    }
+    fullMark = { basis, window: null, model, at, generation: gen, context: epoch, run }
+    const failure = { basis, error: reason(error) }
+    await update($, contextFull, current => run === contextRun && gen === generation && epoch === contextEpoch ? failure : current)
     await report($, 'context count', error)
   }
 }
@@ -1197,12 +1244,30 @@ let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null
 async function contextShare($: EngineInterface, c: SessionContextUsage): Promise<{ percent: number; tokens: number; window: number; basis: number } | null> {
   if (c.tokens === undefined) return null
   const at = await read($, compactAt)
+  const model = await $.session.model()
   const full = await read($, contextFull)
-  let b = full?.breakdown && full.basis === c.tokens ? full.breakdown : null
+  // The count stands only where it was taken: same response, model, window and chat. A stale one
+  // is discarded here as well, so the pane cannot draw it from the atom after this poll.
+  const fresh = full?.breakdown && fullMark && countsHere(fullMark, c.tokens, model, at) && fullMark.window === c.window ? full : null
+  if (full?.breakdown && !full.busy && !fresh) {
+    fullMark = null
+    await update($, contextFull, () => null)
+  }
+  let b = fresh?.breakdown ?? null
   if (!b) {
-    const key = [c.tokens, c.window, at, await $.session.model()].join('|')
-    if (shareMemo?.key !== key) shareMemo = { key, breakdown: (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null }
-    b = shareMemo.breakdown
+    const gen = generation
+    const epoch = contextEpoch
+    const key = [c.tokens, c.window, at, model, gen, epoch].join('|')
+    if (shareMemo?.key !== key) {
+      let summary: SessionContextBreakdown | null = null
+      try { summary = (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null }
+      catch (error) { await report($, 'context summary', error) }
+      // A clear or compaction while the summary ran outranks it: publish only for the state it was asked in.
+      const modelNow = await $.session.model()
+      const atNow = await read($, compactAt)
+      if (gen === generation && epoch === contextEpoch && model === modelNow && at === atNow) shareMemo = { key, breakdown: summary }
+    }
+    b = shareMemo?.key === key ? shareMemo.breakdown : null
   }
   if (b && b.rawMaxTokens > 0) return { tokens: b.totalTokens, percent: b.percentage, window: b.rawMaxTokens, basis: c.tokens }
   const window = contextWindow(c.window, at)
@@ -1550,6 +1615,10 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   if (changedModel) {
     await update($, modelIs, () => e.model)
     await update($, appEffort, () => e.effort ?? null)
+    // A precise count belongs to the model it counted.
+    contextRun += 1
+    fullMark = null
+    await update($, contextFull, () => null)
     if (previousModel !== null) {
       await update($, cache, () => null)
       await update($, lastRealReplyAt, () => null)
@@ -1660,6 +1729,10 @@ export const register: Register = on => {
       if (['clear', 'resume', 'fork'].includes(e.source)) {
         generation++
         judgeSequence++
+        // A count that started in the old chat must not land in this one.
+        contextRun += 1
+        fullMark = null
+        await update($, contextFull, () => null)
         await loadSettings($)
         await update($, busy, () => false)
         await update($, appEffort, () => null)
@@ -1927,7 +2000,15 @@ export const register: Register = on => {
     // one, a subagent's own and the ahead-of-time precompute do not.
     const counted = async (result: SessionCompactResult): Promise<SessionCompactResult> => {
       try {
-        if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) await update($, compactions, n => n + 1)
+        if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) {
+          await update($, compactions, n => n + 1)
+          // The count was of the context this compaction replaced: make it stale for a count already
+          // running too, which the epoch and run catch (2026-10-25).
+          contextEpoch += 1
+          contextRun += 1
+          fullMark = null
+          await update($, contextFull, () => null)
+        }
       } catch (error) { await report($, 'session.compact count', error) }
       return result
     }
@@ -2106,11 +2187,14 @@ export const register: Register = on => {
       // until then.
       const live = await read($, context)
       const full = await read($, contextFull)
-      const fresh = full?.breakdown && full.basis === (live?.basis ?? null) ? full : null
+      // The count's own window is the one it draws; another window clears it in contextShare, and
+      // a model or chat change is caught here before that poll (2026-10-25).
+      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await read($, compactAt))
+      const fresh = full?.breakdown && same ? full : null
       // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
       const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null
       const cwd = await $.session.cwd().catch(() => undefined)
-      const error = full && !full.busy && full.basis === (live?.basis ?? null) ? full.error : undefined
+      const error = full && !full.busy && same ? full.error : undefined
       return renderContext($.ui.resolve(e), frame, {
         breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, ...(error ? { error } : {}),
         open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) },

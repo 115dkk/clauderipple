@@ -37,7 +37,7 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specifi
 // The user naming the workers a test spawns by name (worker.ts userNamed).
 const NAMED: SessionMessage[] = [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number; context?: { model: string; window: number; tokens: number; raw?: number }; deferUsage?: (kind: 'full' | 'summary' | 'none') => Promise<void> | undefined } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
@@ -121,8 +121,18 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('session.model', () => ({ value: model }))
   on('session.messages', ($, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages(e.agentId) : options.messages ?? MESSAGES }))
   // `engineWindow`: the window the session's own breakdown measures against, as /context gives it.
-  const breakdown = (tokens: number, raw: number) => ({ categories: [], totalTokens: tokens, maxTokens: raw, rawMaxTokens: raw, autocompactSource: 'clientdata' as const, percentage: Math.round(tokens / raw * 100), gridRows: [], model: model, memoryFiles: [], mcpTools: [], agents: [], isAutoCompactEnabled: true, apiUsage: null })
-  on('session.usage', ($, e) => ({ value: { startedAt: NOW, context: { percent, tokens: options.tokens ?? 40000, window: options.window ?? 200000, ...(e.breakdown && options.engineWindow ? { breakdown: breakdown(options.tokens ?? 40000, options.engineWindow) } : {}) }, rateLimits: options.limits ?? [] } }))
+  // `context`: the same, movable by a test, so a model or window switch leaves the tokens alone.
+  const breakdown = (tokens: number, raw: number, modelId = model) => ({ categories: [], totalTokens: tokens, maxTokens: raw, rawMaxTokens: raw, autocompactSource: 'clientdata' as const, percentage: Math.round(tokens / raw * 100), gridRows: [], model: modelId, memoryFiles: [], mcpTools: [], agents: [], isAutoCompactEnabled: true, apiUsage: null })
+  on('session.usage', async ($, e) => {
+    const c = options.context
+    const tokens = c?.tokens ?? options.tokens ?? 40000
+    const window = c?.window ?? options.window ?? 200000
+    const raw = c?.raw ?? c?.window ?? options.engineWindow
+    const reply = { value: { startedAt: NOW, context: { percent: c ? Math.round(tokens / window * 100) : percent, tokens, window, ...(e.breakdown && raw ? { breakdown: breakdown(tokens, raw, c?.model) } : {}) }, rateLimits: options.limits ?? [] } }
+    const wait = options.deferUsage?.(e.breakdown ?? 'none')
+    if (wait) await wait
+    return reply
+  })
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
@@ -182,6 +192,14 @@ function agentWrites(on: On) {
 function numberedSpawn(on: On, name: string): void {
   let n = 0
   on('agent.spawn', ($, e) => { n += 1; return { model: e.model ?? 'sonnet', agentId: name + n } })
+}
+/** A session whose model and window a test can move while its tokens stay put, as a model switch leaves them. */
+function movableContext() {
+  return { model: 'claude-opus-5-5', window: 160_000, tokens: 32_000 }
+}
+/** The Context pane, as the band opens it, for a precise count's label. */
+function contextPane($: Engine) {
+  return $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-context', surface: 'terminal', props: { title: 'Context', isFocused: true, bodyColumns: 80, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
 }
 function stepStub(on: On, usage: ModelUsage | null = USAGE) {
   const sent: TurnStepInput[] = []
@@ -448,6 +466,34 @@ test('offline quick changes stay local, show router notice and retry on next pol
   expect(b.router().settings).toMatchObject({ bias: 1, ceiling: 'high' })
   expect(b.settingsRequests.filter(r => r.method === 'PUT').map(r => r.revision)).toEqual([2])
   await ui.unmount()
+})
+
+test('a router that stops answering is said in the band, not hidden behind the last route', async ($, on) => {
+  const b = boundaries(on)
+  const route = { at: '2026-10-25T00:00:00.000Z', source: 'deepseek-v4.1-flash', target: 'deepseek-v4.1-flash', provider: 'deepseek', status: 200, ok: true, ms: 1000, session: 'session-test' }
+  let down = false
+  const lines: unknown[] = []
+  on('state.set', { plugin: 'ripple', key: 'line' }, async ($, e, next) => { const result = await next(e); lines.push(e.value); return result })
+  // A URL handler must come before http()'s catch-all: that one answers this path itself.
+  on('http.fetch', { url: /\/api\/requests/ }, () => down
+    ? { value: { ok: false, status: 503, headers: {}, text: '' } }
+    : { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ requests: [route] }) } })
+  http(on)
+  await start($)
+  await b.clock.advance(3000)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /deepseek-v4\.1-flash/ })).toBeDefined()
+  // The route is the last record; the notice is the router's state now, and one must not stand for the other.
+  down = true
+  await b.clock.advance(3000)
+  expect(lines, 'routerDown line').toContain('ClaudeRipple: router not answering')
+  expect(await ui.find({ type: 'Text', text: /router not answering/ }), 'terminal notice').toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /deepseek-v4\.1-flash/ }), 'terminal stale route').toBeUndefined()
+  await ui.unmount()
+  const desktop = await band($, 'desktop')
+  expect(await desktop.find({ type: 'Text', text: /router not answering/ }), 'desktop notice').toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: /deepseek-v4\.1-flash/ }), 'desktop stale route').toBeUndefined()
+  await desktop.unmount()
 })
 
 function expectLanguage(boundary: ReturnType<typeof boundaries>, language: Lang): void {
@@ -1679,6 +1725,132 @@ test('the band shows the session\'s own compaction window, as the Context pane d
   expect(await ui.find({ type: 'Text', text: '50%' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '40%' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a precise context count does not outlive a model or window switch', async ($, on) => {
+  const ctx = movableContext()
+  const b = boundaries(on, { extras: ['context'] }, { context: ctx })
+  http(on)
+  stepStub(on)
+  await start($)
+  await step($, ctx.model)
+  await b.clock.advance(15_000)
+  const pane = await contextPane($)
+  await pane.press({ key: 'context-refresh' })
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeDefined()
+  await pane.unmount()
+  // The same tokens now sit in an 800k window: 4%, not the old count's 20%.
+  ctx.model = 'claude-opus-6-0'
+  ctx.window = 800_000
+  b.setModel(ctx.model)
+  await step($, ctx.model)
+  await b.clock.advance(15_000)
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: '4%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '20%' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a precise context count does not outlive a cleared chat', async ($, on) => {
+  const ctx = movableContext()
+  const b = boundaries(on, { extras: ['context'] }, { context: ctx })
+  http(on)
+  await start($)
+  await b.clock.advance(15_000)
+  let pane = await contextPane($)
+  await pane.press({ key: 'context-refresh' })
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeDefined()
+  await pane.unmount()
+  // /clear keeps the same tokens and window here, so only the session it counted can say it is old.
+  await $.classic.SessionStart({ source: 'clear' })
+  await b.clock.advance(15_000)
+  pane = await contextPane($)
+  expect(await pane.find({ type: 'Text', text: /Local estimate/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeUndefined()
+})
+
+test('a precise context count does not outlive a compaction', async ($, on) => {
+  const ctx = movableContext()
+  const b = boundaries(on, { compactModel: 'session', extras: ['context'] }, { context: ctx })
+  http(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  await b.clock.advance(15_000)
+  let pane = await contextPane($)
+  await pane.press({ key: 'context-refresh' })
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeDefined()
+  await pane.unmount()
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await b.clock.advance(15_000)
+  pane = await contextPane($)
+  expect(await pane.find({ type: 'Text', text: /Local estimate/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeUndefined()
+})
+
+test('a precise count that answers after a clear, a resume, a model switch or a compaction is discarded', async ($, on) => {
+  const ctx = movableContext()
+  let hold = false
+  let release: (() => void) | null = null
+  let rejectFull: ((error: Error) => void) | null = null
+  const b = boundaries(on, { compactModel: 'session', extras: ['context'] }, { context: ctx, deferUsage: kind => {
+    if (!hold || kind !== 'full') return undefined
+    return new Promise<void>((resolve, reject) => { release = resolve; rejectFull = reject })
+  } })
+  http(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  stepStub(on)
+  await start($)
+  await step($, ctx.model)
+  await b.clock.advance(15_000)
+  const pane = await contextPane($)
+  const trip = async (change: () => Promise<unknown>, outcome: 'ok' | 'error' = 'ok') => {
+    hold = true
+    const pressed = pane.press({ key: 'context-refresh' })
+    await b.clock.settle()
+    expect(release, 'full count started').not.toBeNull()
+    hold = false
+    await change()
+    if (outcome === 'error') rejectFull!(new Error('token count unavailable'))
+    else release!()
+    release = null
+    rejectFull = null
+    await pressed
+    await b.clock.settle()
+    expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ }), 'old count').toBeUndefined()
+    expect(await pane.find({ type: 'Text', text: /Precise count failed/ }), 'old error').toBeUndefined()
+    expect(await pane.find({ type: 'Text', text: /Counting/ }), 'stale busy').toBeUndefined()
+  }
+  await trip(() => $.classic.SessionStart({ source: 'clear' }))
+  await trip(() => $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 120, prompt_cache_likely_expired: false, model: 'claude-opus-5-5' }))
+  await trip(async () => { ctx.model = 'claude-opus-6-0'; b.setModel(ctx.model); await step($, ctx.model) })
+  // A compaction while the count runs, whose answer then fails: neither the count nor its error lands.
+  await trip(() => $.session.compact({ trigger: 'manual', messages: MESSAGES }), 'error')
+})
+
+test('a summary that answers after a clear is not published', async ($, on) => {
+  const ctx = { model: 'claude-opus-5-5', window: 200_000, tokens: 32_000, raw: 160_000 }
+  let hold = false
+  let release: (() => void) | null = null
+  const b = boundaries(on, { extras: ['context'] }, { context: ctx, deferUsage: kind => {
+    if (!hold || kind !== 'summary') return undefined
+    return new Promise<void>(resolve => { release = resolve })
+  } })
+  http(on)
+  const writes: ({ percent: number } | null)[] = []
+  on('state.set', { plugin: 'ripple', key: 'context' }, async ($, e, next) => { const result = await next(e); writes.push(e.value as { percent: number } | null); return result })
+  await start($)
+  await b.clock.advance(15_000)
+  expect(writes.at(-1)?.percent).toBe(20)
+  // A different token count asks for a fresh summary: 25% of its 160k window, where the 200k estimate is 20%.
+  ctx.tokens = 40_000
+  hold = true
+  await b.clock.advance(15_000)
+  expect(release, 'summary started').not.toBeNull()
+  await $.classic.SessionStart({ source: 'clear' })
+  hold = false
+  release!()
+  await b.clock.settle()
+  expect(writes.at(-1)?.percent).toBe(20)
 })
 
 test('failed Haiku compaction falls back; precompute skips; subagent stays with engine', async ($, on) => {
