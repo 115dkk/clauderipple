@@ -938,18 +938,13 @@ test('an open conversation is headed by a chevron back and its title, which stay
   // The card under the head names no title again: the head has it.
   expect(await top.findAll({ type: 'Text', text: 'Port the request log renderer' })).toHaveLength(1)
   await top.press({ key: 'back' })
+  // Scrolled, no copy of the head is redrawn at the window's top: the engine pins no row, and the
+  // copy trailed the words, landed mid-pane and flickered (2026-10-25).
   const down = await mount($, 'float-down', 'desktop', 64)
-  const float = await down.find({ key: 'float-head' })
-  expect(float?.props.top).toBe(12)
-  expect(float?.props.left).toBe(0)
-  expect(float?.props.right).toBe(0)
-  // On a plate of the pane's own surface, so the words under it do not show through.
-  expect(await down.find({ key: 'pic-float-plate' })).toBeDefined()
-  // The desktop drops a picture whose alt is blank (2026-10-24: this plate and the prompt's grey card
-  // were never drawn, and the words showed through the head): every picture here says something.
+  expect(await down.find({ key: 'float-head' })).toBeUndefined()
+  expect(await down.findAll({ key: 'open-head' })).toHaveLength(1)
   for (const svg of await down.findAll({ type: 'Svg' })) expect(String(svg.props.alt ?? '').trim(), String(svg.props.source).slice(0, 80)).not.toBe('')
-  await down.press({ key: 'back-float' })
-  expect(calls).toEqual(['back', 'back'])
+  expect(calls).toEqual(['back'])
 })
 
 test('a long prompt folds to its first lines under a fade, and Show more unfolds it', async ($, on) => {

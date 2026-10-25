@@ -839,28 +839,6 @@ function pageHead(el: Els, frame: Frame, key: string, pressKey: string, title: s
 }
 
 /**
- * The head again, at the window's top once the page scrolls (the engine asks again with the new
- * offset on each scroll, so a box placed at that row stays put): on the pane's own surface, so the
- * words scrolling under it do not show through. A pill floating over the words hid them (2026-10-24).
- */
-function floatingHead(el: Els, frame: Frame, offset: number, title: string, onBack: () => void, end?: RenderNode): RenderNode {
-  const { Box } = el
-  const width = Math.max(40, frame.columns) * CELL_PX + 48
-  const height = 3 * ROW_PX
-  return (
-    <Box key="float-head" position="absolute" top={offset} left={0} right={0} flexDirection="column" overflow="hidden">
-      <Box key="float-plate" position="absolute" top={0} left={0}>
-        {pic(el, 'float-plate', plateArt(width, height, frame.appearance, 'page'), '', width, height)}
-      </Box>
-      <Box key="float-layer" position="relative" flexDirection="column" paddingY={0.5} width="100%" minWidth={0}>
-        {lift(el)}
-        {pageHead(el, frame, 'float-row', 'back-float', title, onBack, end)}
-      </Box>
-    </Box>
-  )
-}
-
-/**
  * A tool call's row in an unfolded run: its name, its input, on one line however long the input
  * (cut with an ellipsis at the pane's edge; a wrapped command was most of the wall of 2026-10-20).
  * No mark on a call that answered, as in the Claude app; a failed one keeps its red ✕ and the one
@@ -1029,13 +1007,13 @@ function openDrawn(el: Els, frame: Frame, view: AgentsView, actions: AgentsActio
     children: [card(el, frame, agent)],
   })
   const end = (): RenderNode => timeBox(el, frame, agent, view.now)
-  const offset = frame.offset ?? 0
+  // The head scrolls with the page. The engine has no pinned row: a copy redrawn at the window's
+  // top on each scroll trailed the words, landed mid-pane and flickered (2026-10-25).
   return (
     <Box position="relative" flexDirection="column" rowGap={1} width="100%" minWidth={0}>
       {pageHead(el, frame, 'open-head', 'back', title, actions.back, end())}
       {stats}
       {talkDrawn(el, frame, view, agent, talk, actions)}
-      {offset > 0 ? floatingHead(el, frame, offset, title, actions.back, end()) : null}
     </Box>
   )
 }
