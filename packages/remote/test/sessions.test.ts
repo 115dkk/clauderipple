@@ -134,6 +134,97 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
 
+test("an async SDK launch stays active until its own terminal notification, with stopped separate from failure", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "assistant", message: { id: "launch", model: "sol", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"async-agent"}' }] } });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "running");
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>async-agent</task-id><tool-use-id>agent</tool-use-id><status>killed</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.taskHistory?.[0]?.state === "stopped");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 0);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+});
+
+test("SDK Stop inventory exposes pending PR/CI subscriptions, monitors and scheduled wakeups in the session snapshot", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const hooks = query.options.hooks as { Stop: { hooks: ((input: Record<string, unknown>) => Promise<unknown>)[] }[] };
+  await hooks.Stop[0]!.hooks[0]!({ background_tasks: [{ id: "ci", type: "pr_ci_subscription", status: "pending", description: "PR #3 CI subscription" }, { id: "monitor", type: "monitor", status: "running", description: "Build watch" }], session_crons: [{ id: "scheduled", schedule: "0 9 * * *", prompt: "Check CI", recurring: true }] });
+  const summary = f.sessions.summaryOf(id)!;
+  assert.equal(summary.backgroundKnown, true);
+  assert.equal(summary.tasks, 3);
+  assert.equal(summary.taskList?.find(task => task.id === "ci")?.kind, "subscription");
+  assert.equal(summary.taskList?.find(task => task.id === "scheduled")?.schedule, "0 9 * * *");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 3, "a main result does not discard waiting subscriptions");
+  assert.ok(f.sessions.log(id).readAfter(0).events.some(event => event.kind === "background"));
+});
+
+test("SDK task snapshots normalize confirmed tools, survive turn completion and rebuild after restart", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const tool = (call: string, name: string, input: Record<string, unknown>, text: string) => {
+    query.emit({ type: "assistant", message: { id: call, model: "sol", content: [{ type: "tool_use", id: call, name, input }] } });
+    query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: call, content: text }] } });
+  };
+  tool("create", "TaskCreate", { subject: "First\nexact subject" }, "Task #1 created successfully: First");
+  tool("start", "TaskUpdate", { taskId: "1", status: "in_progress" }, "Updated task #1 status");
+  await waitFor(() => f.sessions.summaryOf(id)?.plan?.[0]?.status === "in_progress");
+  tool("done", "TaskUpdate", { taskId: "1", status: "completed" }, "Updated task #1 status");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const expected = [{ id: "1", text: "First\nexact subject", status: "completed" }];
+  assert.deepEqual(f.sessions.summaryOf(id)?.plan, expected);
+  f.sessions.stop(id); await nextTick();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  assert.deepEqual(recovered.summaryOf(id)?.plan, expected);
+});
+
+test("nested SDK workers publish launch, progress and terminal status only in their parent's log", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const launch = (parent: string | null, worker: string) => query.emit({ type: "assistant", parent_tool_use_id: parent, message: { id: `launch-${worker}`, model: "sol", content: [{ type: "tool_use", id: worker, name: "Agent", input: { description: worker, prompt: `${worker} exact instruction\nsecond line` } }] } });
+  launch(null, "parent"); launch("parent", "child"); launch("child", "grandchild");
+  query.emit({ type: "assistant", parent_tool_use_id: "grandchild", message: { id: "answer", model: "sol", content: [{ type: "text", text: "Exact answer" }] } });
+  const finish = (parent: string | null, tool: string, failed = false) => query.emit({ type: "user", parent_tool_use_id: parent, message: { content: [{ type: "tool_result", tool_use_id: tool, is_error: failed, content: "result" }] } });
+  finish("child", "grandchild", true); finish("parent", "child"); finish(null, "parent");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const main = reduce(f.sessions.log(id).readAfter(0, 1 << 20).events);
+  const parent = reduce(f.sessions.subLog(id, "sub-parent")!.readAfter(0, 1 << 20).events);
+  const child = reduce(f.sessions.subLog(id, "sub-child")!.readAfter(0, 1 << 20).events);
+  const workerStates = (view: ReturnType<typeof reduce>) => view.items.filter(i => i.type === "subagent").map(i => [i.sub, i.status, i.model, i.steps]);
+  assert.deepEqual(workerStates(main), [["sub-parent", "done", "sol", 1]]);
+  assert.deepEqual(workerStates(parent), [["sub-child", "done", "sol", 1]]);
+  assert.deepEqual(workerStates(child), [["sub-grandchild", "failed", "sol", 1]]);
+  assert.equal(parent.items.find(i => i.type === "assistant")?.tools[0]?.input, JSON.stringify({ description: "child", prompt: "child exact instruction\nsecond line" }, null, 2));
+  assert.equal(f.sessions.subLog(id, "sub-grandchild")!.readAfter(0).events.find(e => e.kind === "assistant")?.text, "Exact answer");
+  const exact = "긴 중첩 지시문\n".repeat(INLINE_CAP);
+  const log = f.sessions.subLog(id, "sub-parent")!;
+  log.append({ kind: "assistant", msg: "large", model: "sol", text: "", tools: [{ id: "large-child", name: "Agent", summary: "large", input: JSON.stringify({ prompt: exact }) }] });
+  const large = log.tail().events.find(e => e.kind === "assistant" && e.msg === "large");
+  const input = large?.kind === "assistant" ? large.tools[0]?.input : undefined;
+  assert.ok(input && typeof input !== "string");
+  assert.equal(JSON.parse(f.sessions.blob(id, input.blob)!).prompt, exact, "nested launch blobs are available through the same session-scoped transport");
+});
+
 test("a CLI without a login is told what to do, and the raw text stays in the host's log", async t => {
   for (const how of ["result", "throw"] as const) {
     const lines: string[] = [];

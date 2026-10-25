@@ -119,8 +119,9 @@ export type EventBody = MessageImages & (
   | { kind: "assistant"; msg: string; model: string; text: Text; tools: ToolCall[] }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */
-  | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
+  | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | ({ kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean } & PermissionContent)
+  | { kind: "background"; tasks: BackgroundTask[]; known: boolean }
   | { kind: "mode"; mode: PermissionMode }
   | { kind: "permission_decided"; id: string; decision: "allow" | "allow_always" | "deny" | "expired"; reason?: string; ruleStatus?: RuleStatus }
   | ({ kind: "settings"; reqId: string } & SettingsResult)
@@ -220,8 +221,12 @@ export interface SessionSummary {
   turnStartedAt?: number | null;
   /** What those background tasks are, oldest first; absent on older hosts. */
   taskList?: BackgroundTask[];
-  /** The Code tab's task list for the running turn (its update_plan tool), in order; empty when the
-   * turn has none or the session is not working. Absent on older hosts. */
+  taskHistory?: BackgroundTask[];
+  /** False/absent means transcript observations only, not a complete inventory of PR/CI subscriptions. */
+  backgroundKnown?: boolean;
+  activityAt?: number | null;
+  /** Confirmed tasks from update_plan, TodoWrite and TaskCreate/Update/List, in order.
+   * Session-scoped tasks survive turn completion; Code's per-turn plan clears on a new human turn. */
   plan?: PlanStep[];
   /** The main turn is idle but background work (subagents, shells) still runs: the app's dark blink. */
   background?: boolean;
@@ -248,8 +253,12 @@ export interface SessionSummary {
   epoch: string;
 }
 
-export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null; /** an agent's own log for `op: "sub"`; absent on older hosts */ sub?: string }
-export interface PlanStep { text: string; status: "pending" | "in_progress" | "completed" }
+export interface BackgroundTask {
+  id: string; kind: "agent" | "shell" | "monitor" | "schedule" | "subscription" | "other"; label: string; startedAt: number | null;
+  sub?: string; state?: "running" | "done" | "failed" | "stopped" | "unknown";
+  command?: string; schedule?: string; nextAt?: number; endedAt?: number; category?: string;
+}
+export interface PlanStep { id?: string; text: string; status: "pending" | "in_progress" | "completed" }
 
 /** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
 export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** Why it failed or is waiting; only queueHeld requires explicit resume. */ error?: string }

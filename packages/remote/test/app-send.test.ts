@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createSend, loadOutbox, outboxKey, tokenFingerprint, writeOutbox } from "../web/outbox.ts";
 import type { OutboxEntry } from "../web/outbox.ts";
+import type { QuestionDraft } from "../web/question-answers.ts";
 
 const ORIGIN = "https://phone.example";
 const TOKEN = "token-for-the-tests-0123456789";
@@ -36,6 +37,7 @@ class Storage {
 /** The one socket the app opens; `frames` are the JSON text it actually sent. */
 class Socket {
   static latest: Socket | null = null;
+  static respond: ((op: Record<string, unknown>) => unknown | Promise<unknown>) | null = null;
   readyState = 0;
   frames: string[] = [];
   url: string;
@@ -48,11 +50,14 @@ class Socket {
     this.frames.push(data);
     // Answer the host's request/response calls the app makes on connect, so their timers are cleared
     // and the test process is not held open by them (only the model list has a known answer here).
-    const msg = JSON.parse(data) as { t?: string; reqId?: string; op?: { op?: string } };
-    if (msg.t === "req" && msg.reqId) {
+    const msg = JSON.parse(data) as { t?: string; reqId?: string; op?: Record<string, unknown> };
+    if ((msg.t === "req" || msg.t === "decide") && msg.reqId) {
       const reqId = msg.reqId;
-      const answer = msg.op?.op === "models" ? [] : null;
-      queueMicrotask(() => this.deliver({ t: "res", reqId, ok: true, data: answer }));
+      const op = msg.t === "decide" ? { ...msg, op: "decide" } : msg.op ?? {};
+      void Promise.resolve().then(() => Socket.respond ? Socket.respond(op) : msg.op?.op === "models" ? [] : null).then(
+        answer => this.deliver({ t: "res", reqId, ok: true, data: answer }),
+        error => this.deliver({ t: "res", reqId, ok: false, error: String(error) }),
+      );
     }
   }
   open(): void { this.readyState = 1; this.onopen?.(); }
@@ -65,10 +70,11 @@ interface Element {
   innerHTML: string;
   value: string;
   hidden: boolean;
+  scrollTop: number;
 }
 
 /** The slice of the browser the app touches while rendering, plus the elements a test reads back. */
-function install(storage: Storage): { sheet(): Element } {
+function install(storage: Storage): { sheet(): Element; body(): Element & { scrollTop: number } } {
   const elements = new Map<string, Element>();
   const el = (key: string): Element => {
     const found = elements.get(key);
@@ -96,6 +102,7 @@ function install(storage: Storage): { sheet(): Element } {
     documentElement: { lang: "", dataset: {} as Record<string, string> },
     visibilityState: "visible",
     querySelector: (sel: string) => el(sel),
+    querySelectorAll: () => [],
     getElementById: (id: string) => el(`#${id}`),
     createElement: (tag: string) => tag === "template" ? { innerHTML: "", content: { firstElementChild: el("template-child") } } : el(`<${tag}>`),
     addEventListener: () => undefined,
@@ -112,7 +119,7 @@ function install(storage: Storage): { sheet(): Element } {
   // cleared by link.stop() at the end of each test.
   define("setInterval", () => 0);
   define("clearInterval", () => undefined);
-  return { sheet: () => el("#sheet") };
+  return { sheet: () => el("#sheet"), body: () => el("#worker-body") };
 }
 
 /** The app as its own public surface describes it. The import is untyped on purpose: app.ts is
@@ -127,6 +134,10 @@ interface AppBoundary {
     draft: { cwd: string | null; model: string | null; effort: "high" | null };
     /** filled so the app does not ask the host for its model list (which leaves a request timer) */
     models: unknown[];
+    expanded: Map<string, string | null>;
+    questionDrafts: Map<string, QuestionDraft>;
+    deciding: Set<string>;
+    sheet: { kind: string; worker?: { sub: string; status: string }; expanded?: Map<string, string | null>; scroll?: number } | null;
   };
   link: { stop(): void } | null;
 }
@@ -138,12 +149,14 @@ interface Running {
   socket: Socket;
   storage: Storage;
   sheet: () => Element;
+  body: () => Element;
   key: string;
 }
 
 /** Start the app the way the browser does: token in storage, home screen, socket open, host ready. */
 async function launch(storage: Storage, entries: OutboxEntry[] = []): Promise<Running> {
   const elements = install(storage);
+  Socket.respond = null;
   const key = outboxKey({ kind: "direct", origin: ORIGIN, fingerprint: await tokenFingerprint(TOKEN) });
   if (entries.length) writeOutbox(storage, key, entries);
   storage.setItem("rr.token", JSON.stringify(TOKEN));
@@ -163,7 +176,7 @@ async function launch(storage: Storage, entries: OutboxEntry[] = []): Promise<Ru
   assert.ok(socket, "the app opened its socket");
   socket.open();
   socket.deliver({ t: "ready", host: { name: "Mac", version: "t", routerOk: true }, sessions: [] });
-  return { app, socket, storage, sheet: elements.sheet, key };
+  return { app, socket, storage, sheet: elements.sheet, body: elements.body, key };
 }
 
 const parsed = (frames: readonly string[]): { t?: string; clientMsgId?: string }[] =>
@@ -175,6 +188,134 @@ const entry = (over: Partial<OutboxEntry> = {}): OutboxEntry => ({
   clientMsgId: "a", text: "A 지시", at: 1_700_000_000_000, state: "pending", session: "s1", ...over,
 });
 const twoWaiting = (): OutboxEntry[] => [entry({ clientMsgId: "a" }), entry({ clientMsgId: "b", text: "B 지시", error: "no such session" })];
+
+test("question drafts are isolated by session and epoch even when request IDs repeat", async () => {
+  const running = await launch(new Storage());
+  const events = [{ seq: 1, at: 1, kind: "permission", id: "same", tool: "AskUserQuestion", title: "", summary: "", input: "", canAlways: false, requestKind: "question", questions: [{ question: "Which?", header: "", multiSelect: false, options: [{ label: "A", description: "" }, { label: "B", description: "" }] }] }];
+  const open = (session: string, epoch: string) => { running.app.go({ name: "session", id: session }); running.socket.deliver({ t: "events", session, epoch, events }); };
+  try {
+    open("a", "e1");
+    await running.app.act("question-option", { dataset: { id: "same", index: "0", option: "0" } });
+    open("b", "e1"); assert.equal(running.app.ui.questionDrafts.has("same"), false);
+    await running.app.act("question-option", { dataset: { id: "same", index: "0", option: "1" } });
+    running.app.go({ name: "session", id: "a" });
+    assert.deepEqual(running.app.ui.questionDrafts.get("same")?.selected["Which?"], ["A"]);
+    open("a", "e2"); assert.equal(running.app.ui.questionDrafts.has("same"), false);
+    await running.app.act("deny", { dataset: { id: "same" } });
+    const decision = running.socket.frames.map(frame => JSON.parse(frame) as { t: string; decision?: string; answers?: unknown }).find(frame => frame.t === "decide");
+    assert.equal(decision?.decision, "deny"); assert.equal(decision?.answers, undefined, "denial does not invent answers for unanswered questions");
+  } finally { running.app.link?.stop(); }
+});
+
+test("question navigation retains choices, refuses incomplete answers and preserves drafts after a refused submission", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    const questions = [{ question: "First?", header: "First", multiSelect: false, options: [{ label: "A", description: "preview A" }] }, { question: "Second?", header: "Second", multiSelect: true, options: [{ label: "X", description: "preview X" }, { label: "Y", description: "preview Y" }] }];
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [{ seq: 1, at: 1, kind: "permission", id: "q", tool: "AskUserQuestion", title: "Questions", summary: "", input: "", canAlways: false, requestKind: "question", questions }] });
+    const action = (name: string, index: string, option = "0") => running.app.act(name, { dataset: { id: "q", index, option } });
+    const decisions = () => running.socket.frames.map(frame => JSON.parse(frame) as { t: string; answers?: Record<string, string> }).filter(frame => frame.t === "decide");
+    await running.app.act("allow", { dataset: { id: "q" } }); assert.equal(decisions().length, 0);
+    await action("question-option", "0");
+    await action("question-jump", "1");
+    await action("question-option", "1", "0"); await action("question-option", "1", "1");
+    await action("question-jump", "0");
+    assert.deepEqual(running.app.ui.questionDrafts.get("q")?.selected, { "First?": ["A"], "Second?": ["X", "Y"] });
+    Socket.respond = op => { if (op.op === "decide") throw new Error("refused"); return null; };
+    await running.app.act("allow", { dataset: { id: "q" } });
+    assert.equal(running.app.ui.deciding.has("q"), false);
+    assert.deepEqual(decisions()[0]?.answers, { "First?": "A", "Second?": "X, Y" });
+    assert.deepEqual(running.app.ui.questionDrafts.get("q")?.selected["Second?"], ["X", "Y"]);
+    Socket.respond = () => null;
+    await Promise.all([running.app.act("allow", { dataset: { id: "q" } }), running.app.act("allow", { dataset: { id: "q" } })]);
+    assert.equal(decisions().length, 2, "the retry sends once, even with a second click while awaiting confirmation");
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [{ seq: 2, at: 2, kind: "permission_decided", id: "q", decision: "allow" }] });
+    await running.app.act("allow", { dataset: { id: "q" } });
+    assert.equal(decisions().length, 2, "an old button cannot decide a completed request again");
+  } finally { running.app.link?.stop(); }
+});
+
+test("a decided plan loads every blob chunk through the read-only detail path", async () => {
+  const running = await launch(new Storage());
+  const ops: Record<string, unknown>[] = [];
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [{ seq: 1, at: 1, kind: "permission", id: "plan", tool: "ExitPlanMode", title: "Plan", summary: "", input: { blob: "plan-blob", bytes: 10, preview: "preview" }, canAlways: false, requestKind: "plan" }, { seq: 2, at: 2, kind: "permission_decided", id: "plan", decision: "allow" }] });
+    Socket.respond = op => { ops.push(op); return op.offset === 0 ? { text: "First\n", next: 6 } : { text: "Last", next: null }; };
+    const before = running.socket.frames.length;
+    await running.app.act("tool", { dataset: { id: "plan" } });
+    assert.equal(running.app.ui.expanded.get("plan"), "First\nLast");
+    assert.deepEqual(ops.map(op => [op.op, op.offset]), [["blob", 0], ["blob", 6]]);
+    assert.ok(parsed(running.socket.frames.slice(before)).every(frame => frame.t === "req"), "reviewing never sends another decision");
+  } finally { running.app.link?.stop(); }
+});
+
+test("worker navigation loads every page and returns through parent frames with instructions, status and position intact", async () => {
+  const running = await launch(new Storage());
+  const event = (seq: number, body: Record<string, unknown>) => ({ seq, at: seq, ...body });
+  const worker = (seq: number, name: string, status = "done") => event(seq, { kind: "subagent", toolUseId: name, sub: `sub-${name}`, description: name, model: "sol", status, steps: 1 });
+  const call = (seq: number, name: string) => event(seq, { kind: "assistant", msg: name, model: "sol", text: "", tools: [{ id: name, name: "Agent", summary: name, input: JSON.stringify({ prompt: `${name} exact instruction\nsecond line` }) }] });
+  const requests: Record<string, unknown>[] = [];
+  Socket.respond = op => {
+    requests.push(op);
+    if (op.op !== "sub") return null;
+    if (op.sub === "sub-parent") return op.afterSeq === 0
+      ? { events: [call(1, "child"), worker(2, "child", "failed")], more: true }
+      : { events: [event(3, { kind: "assistant", msg: "late", model: "sol", text: "Last page answer", tools: [] })], more: false };
+    if (op.sub === "sub-child") return { events: [call(1, "grandchild"), worker(2, "grandchild")], more: false };
+    return { events: [event(1, { kind: "assistant", msg: "final", model: "sol", text: "Grandchild answer", tools: [] })], more: false };
+  };
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    running.socket.deliver({ t: "events", session: "s1", epoch: "e", events: [call(1, "parent"), worker(2, "parent")] });
+    await running.app.act("sub", { dataset: { id: "sub-parent" } });
+    assert.ok(running.sheet().innerHTML.includes("parent exact instruction\nsecond line"));
+    assert.ok(running.sheet().innerHTML.includes("Last page answer"), "the last page is reachable");
+    await running.app.act("tool-group", { dataset: { id: "gschild" } });
+    const parent = running.app.ui.sheet;
+    assert.ok(parent?.expanded?.has("gschild"));
+    running.body().dataset.sub = "sub-parent";
+    running.body().scrollTop = 237;
+    await running.app.act("sub", { dataset: { id: "sub-child" } });
+    assert.ok(running.sheet().innerHTML.includes("child exact instruction\nsecond line"));
+    assert.equal(running.app.ui.sheet?.worker?.status, "failed");
+    running.body().dataset.sub = "sub-child";
+    running.body().scrollTop = 91;
+    await running.app.act("sub", { dataset: { id: "sub-grandchild" } });
+    assert.ok(running.sheet().innerHTML.includes("Grandchild answer"));
+    await running.app.act("worker-back", { dataset: {} });
+    assert.equal(running.app.ui.sheet?.worker?.sub, "sub-child");
+    assert.equal(running.app.ui.sheet?.worker?.status, "failed");
+    assert.equal(running.body().scrollTop, 91);
+    await running.app.act("worker-back", { dataset: {} });
+    assert.equal(running.app.ui.sheet, parent, "the same frame retains all its UI state");
+    assert.equal(running.body().scrollTop, 237);
+    assert.ok(parent?.expanded?.has("gschild"));
+    assert.deepEqual(requests.filter(op => op.op === "sub").map(op => [op.sub, op.afterSeq]), [["sub-parent", 0], ["sub-parent", 2], ["sub-child", 0], ["sub-grandchild", 0]]);
+    await running.app.act("close-sheet", { dataset: {} });
+    assert.equal(running.app.ui.sheet, null);
+  } finally { running.app.link?.stop(); }
+});
+
+test("a failed worker read offers retry; late results cannot reopen a closed worker or another session", async () => {
+  const running = await launch(new Storage());
+  try {
+    running.app.go({ name: "session", id: "s1" });
+    Socket.respond = () => { throw new Error("read failed"); };
+    await running.app.act("sub", { dataset: { id: "sub-missing" } });
+    assert.ok(running.sheet().innerHTML.includes("read failed"));
+    assert.ok(running.sheet().innerHTML.includes('data-act="worker-retry"'));
+    const pending = Promise.withResolvers<unknown>();
+    Socket.respond = () => pending.promise;
+    const retry = running.app.act("worker-retry", { dataset: {} });
+    await running.app.act("close-sheet", { dataset: {} });
+    running.app.go({ name: "session", id: "s2" });
+    pending.resolve({ events: [], more: false });
+    await retry;
+    assert.equal(running.app.ui.sheet, null);
+    assert.ok(!running.sheet().innerHTML.includes('id="worker-body"'));
+  } finally { running.app.link?.stop(); }
+});
 
 test("a retry sends the message the person picked, and nothing else waiting beside it", async () => {
   const running = await launch(new Storage(), twoWaiting());

@@ -7,6 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { TaskPlan } from "./task-plan.ts";
+import { BackgroundActivity } from "./background-activity.ts";
+import { toolInput } from "./tool-details.ts";
 import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
@@ -88,7 +91,7 @@ interface Live {
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
   current: { msg: string; text: string; images?: ImagePart[]; files?: SessionFile[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
   /** Task/Agent tool ids → their subagent while it runs */
-  subs: Map<string, { description: string; model: string | null; steps: number }>;
+  subs: Map<string, { description: string; model: string | null; steps: number; parent?: string }>;
   turnStart: number;
   restartAfterTurn: boolean;
   retried: boolean;
@@ -943,16 +946,18 @@ export class Sessions {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
     const state = process ? this.bridgeState(process) : r.desktopBridge ? "stopped" : r.state;
-    // The transcript keeps tasks whose end was never recorded; only a process the registry calls
-    // busy can have any running, so an idle one reports none.
+    // Main-turn idleness does not finish background work. Keep transcript observations separate
+    // from a complete engine inventory, which only the SDK Stop hook can confirm here.
     const working = process?.status === "busy" || process?.status === "shell";
-    const taskList = working ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : [];
+    const activity = r.desktopBridge ? null : this.taskState(r.id).activity;
+    const taskList = r.desktopBridge ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : activity?.active ?? [];
+    const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
-    const plan = working ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : [];
+    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
     // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
     const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, plan, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -991,6 +996,11 @@ export class Sessions {
   blob(id: string, blob: string): string | null {
     const data = this.log(id).blob(blob);
     if (data !== null) return data;
+    for (const [key, log] of this.logs) {
+      if (!key.startsWith(`${id}/sub-`)) continue;
+      const workerData = log.blob(blob);
+      if (workerData !== null) return workerData;
+    }
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     return this.desktop?.workerBlob(desktopId, blob) ?? this.sendQueue.editingBlob(id, blob);
   }
@@ -1015,12 +1025,44 @@ export class Sessions {
     this.saveListState();
   }
 
+  private taskPlans = new Map<string, { log: EventLog; cursor: number; tracker: TaskPlan; activity: BackgroundActivity }>();
+
+  /** Replay only new durable events; a replaced epoch starts from its own list, not a previous session. */
+  private taskState(id: string): { log: EventLog; cursor: number; tracker: TaskPlan; activity: BackgroundActivity } {
+    let state = this.taskPlans.get(id);
+    if (this.shuttingDown && state) return state;
+    const log = this.log(id);
+    if (!state || state.log !== log) {
+      state = { log, cursor: 0, tracker: new TaskPlan(), activity: new BackgroundActivity() };
+      this.taskPlans.set(id, state);
+    }
+    const load = (text: import("./protocol.ts").Text): string => {
+      if (typeof text === "string") return text;
+      const value = log.blob(text.blob);
+      if (value === null) throw new Error("Task input blob is missing");
+      return value;
+    };
+    while (state.cursor < log.lastSeq) {
+      const page = log.readAfter(state.cursor);
+      for (const event of page.events) { state.tracker.accept(event, load); state.activity.accept(event, load); }
+      state.cursor = page.events.at(-1)?.seq ?? log.lastSeq;
+      if (!page.more) break;
+    }
+    return state;
+  }
+
   /** `touch` false: the host noticing a session is no longer live is not the session being used (a restart moved every old one to "now"). */
   private append(id: string, body: EventBody, touch = true): SessionEvent {
+    const previous = this.taskPlans.get(id);
+    const beforePlan = (previous?.tracker.version ?? 0) + (previous?.activity.version ?? 0);
     const event = this.log(id).append(body);
     const r = this.records.get(id);
+    const taskEvent = body.kind === "assistant" || body.kind === "tool_result" || body.kind === "user" || body.kind === "subagent" || body.kind === "background";
+    const current = r && !r.desktopBridge && taskEvent ? this.taskState(id) : null;
+    const planChanged = current && current.tracker.version + current.activity.version !== beforePlan;
     if (r && touch) r.updatedAt = this.now();
     this.opts.onEvent(id, event);
+    if (planChanged) this.opts.onSessions();
     return event;
   }
 
@@ -2015,6 +2057,13 @@ export class Sessions {
       model: m.model,
       ...(m.effort ? { effort: m.effort } : {}),
       includePartialMessages: true,
+      hooks: { Stop: [{ hooks: [async (input: Record<string, unknown>) => {
+        if (this.shuttingDown || this.live.get(r.id) !== live || input.agent_id || !Array.isArray(input.background_tasks) && !Array.isArray(input.session_crons)) return {};
+        const activity = this.taskState(r.id).activity;
+        activity.inventory(input, this.now());
+        this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
+        return {};
+      }] }] },
       settingSources: ["user", "project", "local"],
       permissionMode: r.permissionMode ?? "auto",
       ...((r.bypassAllowed ?? r.permissionMode === "bypassPermissions") ? { allowDangerouslySkipPermissions: true } : {}),
@@ -2154,6 +2203,18 @@ export class Sessions {
         const message = msg.message as { content?: unknown } | undefined;
         const blocks = Array.isArray(message?.content) ? (message!.content as { type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[]) : [];
         const converted = messageContent(message?.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
+        if (!parent && typeof converted.text === "string" && converted.text.startsWith("<task-notification>")) {
+          const activity = this.taskState(r.id).activity;
+          activity.notice(converted.text, this.now());
+          this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
+          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1];
+          const status = /<status>([^<]+)<\/status>/.exec(converted.text)?.[1];
+          if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
+            this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
+            live.subs.delete(tool);
+          }
+          return;
+        }
         // SDK user echoes normally already have a phone event; retain attachment-bearing echoes only.
         if (converted.images.length || converted.files.length) {
           const body: EventBody = { kind: "user", ...converted, clientMsgId: typeof msg.uuid === "string" ? msg.uuid : randomUUID() };
@@ -2163,12 +2224,14 @@ export class Sessions {
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
           const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }) };
-          if (parent) { this.subLog(r.id, `sub-${parent}`)?.append(body); continue; }
-          this.append(r.id, body);
+          if (parent) this.subLog(r.id, `sub-${parent}`)?.append(body);
+          else this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);
-          if (sub) {
+          const resultText = typeof body.text === "string" ? body.text : "";
+          const launch = !b.is_error && (toolInput(resultText)?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(resultText));
+          if (sub && !launch) {
+            this.workerEvent(r, live, b.tool_use_id, b.is_error ? "failed" : "done");
             live.subs.delete(b.tool_use_id);
-            this.append(r.id, { kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: sub.description, model: sub.model, status: b.is_error ? "failed" : "done", steps: sub.steps });
           }
         }
         return;
@@ -2314,16 +2377,29 @@ export class Sessions {
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => log.image(data)) }));
     converted.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
+    for (const tool of tools) {
+      if (tool.name !== "Agent" && tool.name !== "Task") continue;
+      const block = message.content?.find(block => block.id === tool.id);
+      live.subs.set(tool.id, { description: tool.summary, model: typeof block?.input?.model === "string" ? block.input.model : null, steps: 0, parent });
+      this.workerEvent(r, live, tool.id, "running");
+    }
     const sub = live.subs.get(parent);
     if (!sub) return;
     sub.steps++;
-    // A named worker is spawned without a `model` argument, so its row had no model until it
-    // finished; its first answer says which model ran it.
     if (message.model && sub.model !== message.model) {
       const first = sub.model === null;
       sub.model = message.model;
-      if (first) this.append(r.id, { kind: "subagent", toolUseId: parent, sub: `sub-${parent}`, description: sub.description, model: sub.model, status: "running", steps: sub.steps });
+      if (first) this.workerEvent(r, live, parent, "running");
     }
+  }
+
+  /** A worker's lifecycle belongs to the conversation that launched it, never the main timeline by default. */
+  private workerEvent(r: SessionRecord, live: Live, toolUseId: string, status: "running" | "done" | "failed" | "stopped"): void {
+    const sub = live.subs.get(toolUseId);
+    if (!sub) return;
+    const body: EventBody = { kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: sub.description, model: sub.model, status, steps: sub.steps };
+    if (sub.parent) this.subLog(r.id, `sub-${sub.parent}`)?.append(body);
+    else this.append(r.id, body);
   }
 
   private flush(id: string, live: Live): void {

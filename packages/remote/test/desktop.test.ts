@@ -37,8 +37,8 @@ test("background task list carries the launch description, command fallback and 
   tasks.accept(line({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", id: "b", input: { command: "npm test", run_in_background: true } }] } }));
   tasks.accept(line({ type: "user", toolUseResult: { backgroundTaskId: "s1" }, message: { content: [{ type: "tool_result", tool_use_id: "b", content: "started" }] } }));
   assert.deepEqual(tasks.list, [
-    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z"), sub: "sub-a" },
-    { id: "s1", kind: "shell", label: "npm test", startedAt: null },
+    { id: "w1", kind: "agent", label: "Review diff", startedAt: Date.parse("2026-10-13T01:00:00.000Z"), state: "running", sub: "sub-a" },
+    { id: "s1", kind: "shell", label: "npm test", command: "npm test", startedAt: null, state: "running" },
   ]);
 });
 
@@ -55,7 +55,7 @@ test("the turn's task list follows update_plan as the app applies it, and the ne
   plan({ advance: true });
   assert.deepEqual(tasks.plan, [], "an advance with no list changes nothing");
   plan({ scope: "first_task", items: [{ content: " Read the code ", status: "in_progress" }, { content: "", status: "pending" }, { content: "Fix it", status: "bogus" }, { content: "Test it", status: "pending" }] });
-  assert.deepEqual(tasks.plan, [{ text: "Read the code", status: "in_progress" }, { text: "Fix it", status: "pending" }, { text: "Test it", status: "pending" }]);
+  assert.deepEqual(tasks.plan, [{ text: " Read the code ", status: "in_progress" }, { text: "Fix it", status: "pending" }, { text: "Test it", status: "pending" }]);
   plan({ advance: true });
   assert.equal(statuses(), "cip");
   plan({ done: [2, 9], start: 3 }, true);
@@ -65,7 +65,7 @@ test("the turn's task list follows update_plan as the app applies it, and the ne
   plan({ advance: "true" });
   assert.equal(statuses(), "ccc");
   plan({ items: Array.from({ length: 15 }, (_, i) => ({ content: `step ${i}`, status: "pending" })), scope: "continuation" });
-  assert.equal(tasks.plan.length, 12);
+  assert.equal(tasks.plan.length, 15);
   tasks.accept(line({ type: "user", timestamp: "2026-10-23T01:00:00.000Z", origin: { kind: "human" }, message: { content: "next" } }));
   assert.deepEqual(tasks.plan, []);
 });
@@ -485,7 +485,7 @@ test("a Mac session's worker status follows its result, its notification, a queu
   assert.deepEqual(run([toolUse("a"), launch("a")]), [["a", "running"]], "an async launch is not an end");
   assert.deepEqual(run([toolUse("a"), launch("a"), notice("a", "completed")]), [["a", "running"], ["a", "done"]]);
   assert.deepEqual(run([toolUse("b"), launch("b"), notice("b", "completed", true)]), [["b", "running"], ["b", "done"]], "a queued notification ends it");
-  assert.deepEqual(run([toolUse("c"), launch("c"), notice("c", "killed")]), [["c", "running"], ["c", "failed"]]);
+  assert.deepEqual(run([toolUse("c"), launch("c"), notice("c", "killed")]), [["c", "running"], ["c", "stopped"]]);
   const sync = (tid: string, error = false) => line({ type: "user", toolUseResult: { agentId: "w" }, message: { content: [{ type: "tool_result", tool_use_id: tid, is_error: error, content: "answer" }] } });
   assert.deepEqual(run([toolUse("d"), sync("d")]), [["d", "running"], ["d", "done"]], "a synchronous worker ends at its result");
   assert.deepEqual(run([toolUse("e"), sync("e", true)]), [["e", "running"], ["e", "failed"]]);
@@ -537,12 +537,35 @@ test("a Mac session's worker log is readable and grows with its transcript", t =
   assert.equal(f.desktop.subLog(id, "sub-toolu_missing"), null, "an unknown worker has no log");
 });
 
-test("sidechain and nested records never open their own worker", () => {
+test("sidechain records open children only inside their own worker conversation", () => {
   const nested = line({ isSidechain: true, type: "assistant", message: { model: "sol", content: [{ type: "tool_use", id: "nested", name: "Agent", input: { description: "nested" } }] } });
   const resolve = () => ({ model: "sol", steps: 1, description: "", ended: false });
   // The parent pass skips sidechain records entirely.
   assert.deepEqual(transcriptEvents(nested, "/x", summarize).bodies, []);
-  // A subagent's own transcript reads sidechain records, but none of its Agent calls becomes a worker.
+  // Its own conversation exposes the child, retaining the launch call beside the lifecycle event.
   const own = transcriptEvents(nested, "/x", summarize, undefined, { allowSidechain: true, state: new Map(), resolve });
-  assert.deepEqual(own.bodies.map(b => b.kind), ["assistant"]);
+  assert.deepEqual(own.bodies.map(b => b.kind), ["subagent", "assistant"]);
+});
+
+test("desktop workers expose children and grandchildren without leaking them into the main conversation", t => {
+  const f = fixture(t);
+  const launch = (tool: string, prompt: string) => assistantTurn("sol", "tool_use", [{ type: "tool_use", id: tool, name: "Agent", input: { description: tool, prompt } }]);
+  const result = (tool: string, failed = false) => line({ type: "user", isSidechain: true, message: { content: [{ type: "tool_result", tool_use_id: tool, is_error: failed, content: "result" }] } });
+  subagent(f.project, "parent", { toolUseId: "parent" }, [launch("child", "Child instruction\nnot a summary")]);
+  subagent(f.project, "child", { toolUseId: "child" }, [launch("grandchild", "Grandchild instruction"), result("grandchild", true)]);
+  subagent(f.project, "grandchild", { toolUseId: "grandchild" }, [assistantTurn("sol", "end_turn", [{ type: "text", text: "Grandchild answer" }])]);
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user) + line({ type: "assistant", message: { content: [{ type: "tool_use", id: "parent", name: "Agent", input: { prompt: "Parent instruction" } }] } }));
+  const main = reduce(f.desktop.log(id).readAfter(0, 1 << 20).events);
+  assert.deepEqual(main.items.filter(i => i.type === "subagent").map(i => i.sub), ["sub-parent"]);
+  const parent = f.desktop.subLog(id, "sub-parent")!;
+  const parentView = reduce(parent.readAfter(0, 1 << 20).events);
+  assert.deepEqual(parentView.items.filter(i => i.type === "subagent").map(i => [i.sub, i.status]), [["sub-child", "running"]]);
+  const childView = reduce(f.desktop.subLog(id, "sub-child")!.readAfter(0, 1 << 20).events);
+  assert.deepEqual(childView.items.filter(i => i.type === "subagent").map(i => [i.sub, i.status]), [["sub-grandchild", "failed"]]);
+  assert.equal(f.desktop.subLog(id, "sub-grandchild")!.readAfter(0).events.find(e => e.kind === "assistant")?.text, "Grandchild answer");
+  fs.appendFileSync(path.join(f.project, id, "subagents", "agent-child.jsonl"), assistantTurn("sol", "end_turn", [{ type: "text", text: "Child done" }]));
+  const refreshed = f.desktop.subLog(id, "sub-parent")!;
+  assert.notEqual(refreshed, parent, "child progress invalidates a cached parent even when its own file is unchanged");
+  assert.equal(reduce(refreshed.readAfter(0, 1 << 20).events).items.find(i => i.type === "subagent")?.status, "done");
+  assert.equal(f.desktop.subLog(id, "sub-../../outside"), null);
 });

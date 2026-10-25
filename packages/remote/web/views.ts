@@ -7,11 +7,24 @@ import type { PushAvail } from "./pushstate.ts";
 import { clock, duration, esc, folderName, icon, relTime, shortPath, toolIcon } from "./dom.ts";
 import { t, lang } from "./i18n.ts";
 import { activitySummary } from "../src/tool-details.ts";
+import { activityOverview, activityStateKey } from "./activity.ts";
+import { emptyQuestionDraft, questionAnswers, questionsComplete, type QuestionDraft } from "./question-answers.ts";
 import type { Key } from "./i18n.ts";
 import { markdown } from "./md.ts";
 import { ripple, stateRing } from "./mascot.ts";
 import { sidebarSections, sidebarState } from "./sidebar.ts";
-import type { TimelineItem, SessionView, ToolView } from "./timeline.ts";
+import type { TimelineItem, SessionView, ToolView, WorkerItem } from "./timeline.ts";
+
+export interface WorkerSheet {
+  kind: "worker";
+  worker: WorkerItem;
+  items: TimelineItem[];
+  loading: boolean;
+  error: string;
+  depth: number;
+  scroll: number;
+  expanded: Map<string, string | null>;
+}
 
 export interface Draft { cwd: string | null; model: string | null; effort: Effort | null }
 
@@ -19,6 +32,7 @@ export interface Draft { cwd: string | null; model: string | null; effort: Effor
 function isDrivePath(p: string): boolean { return /^[A-Za-z]:[\\/]$/.test(p); }
 
 export type Sheet =
+  | WorkerSheet
   | { kind: "folder"; recent: FolderEntry[]; browse: BrowseResult | null; filter: string; loading: boolean; /** What is typed in the path field, before it is opened; absent follows the folder on screen. */ pathDraft?: string }
   | { kind: "model"; groups: ProviderGroup[]; recent: string[]; model: string | null; effort: Effort | null; forSession: string | null }
   /** Unsent messages kept from earlier connections: what is preserved, what this computer already
@@ -56,6 +70,8 @@ export interface UI {
   expanded: Map<string, string | null>;
   workersOpen: boolean;
   permOpen: Set<string>;
+  questionDrafts?: Map<string, QuestionDraft>;
+  deciding?: Set<string>;
   toast: string | null;
   /** whether notifications can work here, and are on; null until known */
   push?: PushAvail | null;
@@ -274,13 +290,18 @@ export function item(it: TimelineItem, ui: UI): string {
       return `<div class="msg-asst">${withCaret}${images(it.images)}${tools}</div>`;
     }
     case "subagent": {
-      const st = it.status === "running" ? t("sub.running") : it.status === "done" ? t("sub.done") : t("sub.failed");
-      return `<button class="sub" data-act="sub" data-id="${esc(it.sub)}">${stateRing(it.status === "running" ? "running" : it.status === "done" ? "idle" : "error", 28)}<div class="body"><div class="k">${esc(t("sub.worker"))}${it.model ? `<span class="model">${esc(it.model)}</span>` : ""}<span>· ${esc(st)} · ${esc(t("sub.steps", { n: it.steps }))}</span></div><div class="d">${esc(it.description)}</div></div>${icon.chevron(18)}</button>`;
+      const st = t(`sub.${it.status}`);
+      return `<button class="sub" data-act="sub" data-id="${esc(it.sub)}">${stateRing(it.status === "running" ? "running" : it.status === "done" ? "idle" : it.status === "stopped" ? "stopped" : "error", 28)}<div class="body"><div class="k">${esc(t("sub.worker"))}${it.model ? `<span class="model">${esc(it.model)}</span>` : ""}<span>· ${esc(st)} · ${esc(t("sub.steps", { n: it.steps }))}</span></div><div class="d">${esc(it.description)}</div></div>${icon.chevron(18)}</button>`;
     }
     case "permission": {
       if (it.decision === null) return `<div class="perm-done open">${icon.shield(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(t("state.waiting"))}</span></div>`;
       const label = it.decision === "allow" ? t("perm.allowed") : it.decision === "allow_always" ? t("perm.allowedAlways") : it.decision === "deny" ? t("perm.denied") : t("perm.expired");
       const cls = it.decision === "allow_always" ? "allow" : it.decision;
+      if (it.requestKind === "plan") {
+        const open = ui.expanded.has(it.id);
+        const body = ui.expanded.get(it.id) ?? textOf(it.input);
+        return `<div><div class="perm-done ${cls}"><button class="tool" data-act="tool" data-id="${esc(it.id)}" aria-expanded="${open}"><span class="nm">${esc(it.title || it.tool)}</span><span>${esc(label)}</span>${icon.chevron(16)}</button></div>${open ? `<div class="msg-asst">${markdown(body)}${it.decision === "expired" && it.reason ? `<div class="foot">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</div>` : ""}</div>` : ""}</div>`;
+      }
       const why = it.decision === "expired" && it.reason ? `<span class="why">${esc(t(`perm.reason.${it.reason}` as Key, { host: hostName(ui) }))}</span>` : "";
       return `<div class="perm-done ${cls}">${it.decision === "allow" || it.decision === "allow_always" ? icon.check(16) : icon.x(16)}<span class="nm">${esc(it.tool)}</span><span class="sm">${esc(it.summary)}</span><span>${esc(label)}</span></div>${why ? `<div class="foot">${why}</div>` : ""}`;
     }
@@ -300,10 +321,20 @@ export function item(it: TimelineItem, ui: UI): string {
 export function permCard(view: SessionView, ui: UI): string {
   const p = view.open[0];
   if (!p) return "";
+  if (p.requestKind === "question") return questionCard(p, ui);
   const open = ui.permOpen.has(p.id);
   const what = textOf(p.input) || p.summary;
   const long = what.split("\n").length > 5 || what.length > 280;
   return `<div class="perm" role="alertdialog" aria-label="${esc(t("perm.title", { tool: p.tool }))}"><div class="hd">${icon.shield(16)}<span>${esc(p.tool)}</span>${view.open.length > 1 ? `<span class="of">${esc(t("perm.of", { i: 1, n: view.open.length }))}</span>` : ""}</div><div class="q">${esc(p.title || t("perm.title", { tool: p.tool }))}</div><div class="what${open ? " open" : ""}">${esc(what)}</div>${long && !open ? `<button class="more" data-act="perm-more" data-id="${esc(p.id)}">${esc(t("perm.showAll"))}</button>` : ""}<div class="act"><button class="deny" data-act="deny" data-id="${esc(p.id)}">${esc(t("perm.deny"))}</button><button class="allow" data-act="allow" data-id="${esc(p.id)}">${icon.check(20)}${esc(t("perm.allow"))}</button></div>${p.canAlways ? `<button class="always" data-act="always" data-id="${esc(p.id)}">${esc(t("perm.always"))}</button>` : ""}</div>`;
+}
+
+function questionCard(p: Extract<TimelineItem, { type: "permission" }>, ui: UI): string {
+  const questions = p.questions ?? [], draft = ui.questionDrafts?.get(p.id) ?? emptyQuestionDraft();
+  const index = Math.max(0, Math.min(draft.current, questions.length - 1));
+  const question = questions[index], answers = questionAnswers(questions, draft), busy = ui.deciding?.has(p.id) ?? false;
+  const tabs = questions.length > 1 ? `<div class="act">${questions.map((q, i) => `<button class="btn ghost" data-act="question-jump" data-id="${esc(p.id)}" data-index="${i}" aria-current="${i === index ? "step" : "false"}" ${busy ? "disabled" : ""}>${esc(q.header || q.question)}<br><span id="question-preview-${esc(p.id)}-${i}">${esc(answers[q.question] || t("perm.unanswered"))}</span></button>`).join("")}</div>` : "";
+  const choices = question ? `<div class="q">${esc(question.question)}</div><div class="list"${question.multiSelect ? "" : ' role="radiogroup"'}>${question.options.map((option, i) => `<button class="opt" data-act="question-option" data-id="${esc(p.id)}" data-index="${index}" data-option="${i}" role="${question.multiSelect ? "checkbox" : "radio"}" aria-checked="${draft.selected[question.question]?.includes(option.label) ?? false}" ${busy ? "disabled" : ""}><div class="body"><div class="t1">${esc(option.label)}</div><div class="t2" style="white-space:pre-wrap">${esc(option.description)}</div></div></button>`).join("")}</div><textarea id="question-free-${esc(p.id)}-${index}" data-question-free="true" data-id="${esc(p.id)}" data-index="${index}" rows="2" placeholder="${esc(t("perm.customAnswer"))}" aria-label="${esc(t("perm.customAnswer"))}" ${busy ? "disabled" : ""}>${esc(draft.free[question.question] ?? "")}</textarea>` : "";
+  return `<div class="perm" role="group" aria-label="${esc(p.title || p.tool)}"><div class="hd">${esc(p.title || p.tool)} <span>${esc(t("perm.of", { i: question ? index + 1 : 0, n: questions.length }))}</span></div>${tabs}${choices}<div class="act"><button class="deny" data-act="deny" data-id="${esc(p.id)}" ${busy ? "disabled" : ""}>${esc(t("perm.deny"))}</button><button class="allow" data-act="allow" data-id="${esc(p.id)}" ${busy || !questionsComplete(questions, draft) ? "disabled" : ""}>${esc(busy ? t("queue.sending") : t("perm.submitAnswers"))}</button></div></div>`;
 }
 
 export function workingLine(view: SessionView, ui: UI, s?: SessionSummary): string {
@@ -314,14 +345,29 @@ export function workingLine(view: SessionView, ui: UI, s?: SessionSummary): stri
   return `<div class="working">${stateRing("running", 16)}<span>${esc(t("running.for", { t: duration(ui.now - since) }))}</span></div>`;
 }
 
+/** The same confirmed task snapshot used by mobile, including completed tasks after the turn. */
+export function plan(s: SessionSummary | undefined, open: boolean): string {
+  const steps = s?.plan ?? [];
+  if (!steps.length) return "";
+  const done = steps.filter(step => step.status === "completed").length;
+  const current = steps.find(step => step.status === "in_progress") ?? steps.find(step => step.status === "pending");
+  const rows = open ? `<div class="tasks-list" role="list" aria-label="${esc(t("plan.title"))}">${steps.map(step => `<div class="task" role="listitem"><span>${esc(t(`plan.${step.status}`))}</span><span style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(step.text)}</span></div>`).join("")}</div>` : "";
+  return `${rows}<button class="tasks-chip" data-act="plan-toggle" aria-expanded="${open}">${esc(t("plan.title"))} ${done}/${steps.length}${current ? ` · ${esc(current.text)}` : ""}${open ? icon.down(14) : icon.chevron(14)}</button>`;
+}
+
 /** The background-task chip; with a task list from the host it opens to show what is running. */
-export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean): string {
-  if (!s?.tasks) return "";
-  const list = s.taskList ?? [];
-  const chip = esc(t("tasks.running", { n: s.tasks }));
-  if (!list.length) return `<div class="tasks-chip" role="status">${chip}</div>`;
-  const rows = open ? `<div class="tasks-list">${list.map(task => `<div class="task">${task.kind === "shell" ? icon.terminal(16) : icon.model(16)}<span>${esc(task.label)}</span>${task.startedAt === null ? "" : `<time>${esc(duration(ui.now - task.startedAt))}</time>`}</div>`).join("")}</div>` : "";
-  return `${rows}<button class="tasks-chip" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
+export function tasks(ui: UI, s: SessionSummary | undefined, open: boolean, items: TimelineItem[] = [], seen: ReadonlySet<string> = new Set()): string {
+  const { active, recent, counts } = activityOverview(items, s?.taskList, s?.taskHistory);
+  counts.unknown += Math.max(0, (s?.tasks ?? 0) - (s?.taskList?.length ?? 0));
+  if (!active.length && !recent.length && !counts.unknown && s?.backgroundKnown) return "";
+  const unread = recent.filter(task => task.state === "failed" && !seen.has(task.sub ?? task.id)).length;
+  const note = !s?.backgroundKnown ? `<div class="foot">${esc(t("tasks.visibility"))}</div>` : "";
+  const rows = open ? `<div class="tasks-list">${[...active, ...recent].map(task => {
+    const state = t(activityStateKey(task));
+    return `<button class="tool" data-act="task-read" data-id="${esc(task.sub ?? task.id)}"${task.sub ? ` data-sub="${esc(task.sub)}"` : ""}><span class="nm">${esc(t(`tasks.kind.${task.kind}`))} · ${esc(state)}</span><span style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(task.label)}${task.command && task.command !== task.label ? `<br>${esc(task.command)}` : ""}${task.schedule ? `<br>${esc(task.schedule)}` : ""}${task.nextAt === undefined ? "" : `<br>${esc(clock(task.nextAt))}`}</span></button>`;
+  }).join("")}${note}${s?.activityAt == null ? "" : `<div class="foot">${esc(t("band.updated", { time: clock(s.activityAt) }))}</div>`}</div>` : "";
+  const chip = `${esc(t("tasks.summary", counts))}${unread ? ` · ${esc(t("tasks.unread", { n: unread }))}` : ""}${!s?.backgroundKnown ? ` · ${esc(t("tasks.unknown"))}` : ""}`;
+  return `${rows}<button class="tasks-chip${unread ? " bad" : ""}" data-act="toggle-tasks" aria-expanded="${open}">${chip}${open ? icon.down(14) : icon.chevron(14)}</button>`;
 }
 
 // ---- sheets ------------------------------------------------------------------------------------
@@ -330,6 +376,14 @@ export function sheet(ui: UI): string {
   const s = ui.sheet;
   if (!s) return "";
   const head = (title: string): string => `<div class="grab"></div><div class="sh"><b>${esc(title)}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div>`;
+  if (s.kind === "worker") {
+    const worker = s.worker;
+    const facts = [worker.model, t(`sub.${worker.status}`), t("sub.steps", { n: worker.steps })].filter(Boolean).join(" · ");
+    const back = s.depth > 1 ? `<button class="icon-btn" data-act="worker-back" aria-label="${esc(t("a11y.back"))}">${icon.back(20)}</button>` : "";
+    const body = s.items.map(child => item(child, { ...ui, expanded: s.expanded })).join("");
+    const error = s.error ? `<div class="foot bad" role="alert">${esc(s.error)}</div><button class="btn ghost" data-act="worker-retry">${esc(t("conn.retryNow"))}</button>` : "";
+    return `<div class="scrim" data-act="close-sheet"></div><div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(worker.description || t("sub.worker"))}"><div class="grab"></div><div class="sh">${back}<b>${esc(worker.description || t("sub.worker"))}</b><button class="icon-btn" data-act="close-sheet" aria-label="${esc(t("a11y.close"))}">${icon.x(20)}</button></div><div class="sbody" id="worker-body" data-sub="${esc(worker.sub)}"><div class="foot">${esc(facts)}</div>${error}<div class="tl">${body}</div>${s.loading ? `<div role="status" class="foot">${esc(t("tool.loading"))}</div>` : ""}</div></div>`;
+  }
   if (s.kind === "folder") {
     const f = s.filter.trim().toLowerCase();
     const recent = s.recent.filter((r) => !f || r.name.toLowerCase().includes(f) || r.path.toLowerCase().includes(f)).slice(0, 6);

@@ -1,6 +1,7 @@
 // Events → what the timeline shows. Pure, so the same reduction runs in tests and in the app.
 import type { PermissionContent, RuleStatus, Effort, Figures, ImagePart, SessionFile, SessionEvent, SessionState, Text, ToolCall } from "../src/protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpReply } from "../src/wrap-up.ts";
+import { stringField, toolInput } from "../src/tool-details.ts";
 
 export interface ToolView extends ToolCall { result?: { ok: boolean; text: Text; images?: ImagePart[]; files?: SessionFile[] } }
 
@@ -8,7 +9,7 @@ export type Item =
   | { type: "user"; key: string; ver: string; text: string; images?: ImagePart[]; files?: SessionFile[]; at: number; queued?: "pending" | "sending"; /** the host refused it, in the host's own words: it will not go out by itself */ error?: string }
   | { type: "assistant"; key: string; ver: string; text: Text; images?: ImagePart[]; files?: SessionFile[]; streaming: boolean; tools: ToolView[]; model: string; at: number }
   | { type: "thinking"; key: string; ver: string; text: Text; streaming: boolean; msg: string; at: number }
-  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
+  | { type: "subagent"; key: string; ver: string; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | (PermissionContent & { type: "permission"; key: string; ver: string; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean; decision: null | "allow" | "allow_always" | "deny" | "expired"; ruleStatus?: RuleStatus; reason?: string; at: number })
   | { type: "result"; key: string; ver: string; ok: boolean; error?: string; ms: number; model: string; effort: Effort | null }
   | { type: "notice"; key: string; ver: string; code: string; text?: string }
@@ -290,6 +291,26 @@ export function timelineItems(view: Pick<SessionView, "items" | "state">): Timel
     last.ver += "running";
   }
   return result;
+}
+
+export type WorkerItem = Extract<ActivityRow, { type: "subagent" }>;
+
+/** Resolve within the conversation that launched the worker, retaining the full launch input. */
+export function workerFor(items: readonly TimelineItem[], sub: string, label: string, status: WorkerItem["status"] = "running"): WorkerItem {
+  for (const item of items) {
+    if (item.type === "subagent" && item.sub === sub) return item.status === "running" && status !== "running" ? { ...item, status } : item;
+    if (item.type === "toolGroup") for (const row of item.rows) if (row.type === "subagent" && row.sub === sub) return row.status === "running" && status !== "running" ? { ...row, status } : row;
+  }
+  return { type: "subagent", key: `s${sub}`, ver: "0", toolUseId: sub, sub, description: label, model: null, status, steps: 0 };
+}
+
+/** Labels are not instructions; a later follow-up must not replace the worker's actual launch prompt. */
+export function workerPrompt(input: string): string { return stringField(toolInput(input), "prompt"); }
+export function workerConversationItems(events: readonly SessionEvent[], prompt: string): TimelineItem[] {
+  const items = timelineItems(reduce(events));
+  const first = items.find(item => item.type === "user" || item.type === "assistant" || item.type === "toolGroup");
+  if (first?.type === "user" || !prompt.trim()) return items;
+  return [{ type: "user", key: "worker-prompt", ver: prompt, text: prompt, at: 0 }, ...items];
 }
 
 /** Merge a page into a sorted event list without duplicates (pages may overlap after a reconnect). */
