@@ -45,11 +45,17 @@ export function sameHome(a: string, b: string): boolean {
  * created, while one elsewhere (a source checkout, another home) says nothing (D3, 2026-10-25).
  */
 export function insideHome(candidate: string, home: string): boolean {
-  const within = normalizeHome(candidate);
-  const base = normalizeHome(home);
-  if (within === base) return true;
-  const separator = base.includes("\\") || /^[a-z]:/i.test(base) ? "\\" : "/";
-  return within.startsWith(base + separator);
+  const windows = home.includes("\\") || /^[A-Za-z]:[\\/]/.test(home);
+  const resolve = windows ? path.win32.resolve : path.resolve;
+  const within = windows ? resolve(candidate).toLowerCase() : resolve(candidate);
+  // The home may itself be reached through a symlink (/tmp -> /private/tmp), and the candidate need
+  // not exist, so both spellings of the home are compared.
+  for (const base of new Set([resolve(home), normalizeHome(home)].map((value) => (windows ? value.toLowerCase() : value)))) {
+    if (within === base) return true;
+    const separator = windows || base.includes("\\") ? "\\" : "/";
+    if (within.startsWith(base + separator)) return true;
+  }
+  return false;
 }
 
 /** The ownership a definition's recorded home implies. `null` means it recorded none. */
