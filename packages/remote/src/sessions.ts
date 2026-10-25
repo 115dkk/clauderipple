@@ -14,7 +14,7 @@ import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_WAITING, DesktopBlockedError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -69,7 +69,8 @@ interface SessionRecord {
   createdBy: string;
   contextWindow: number | null;
   /** Missing on older host records; desktop continuations are explicitly excluded. */
-  desktopHandoff?: "pending" | "attempted" | "failed" | "excluded";
+  desktopHandoff?: "pending" | "opening" | "attempted" | "failed" | "excluded";
+  desktopHandoffRetryAt?: number;
   desktopHandoffAttempts?: number;
   desktopHandoffError?: string;
   desktopBridge?: boolean;
@@ -441,6 +442,8 @@ export class Sessions {
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     this.settings = new SessionSettings(path.join(opts.dir, "settings-operations.json"));
     this.sendQueue = SendQueue.open(opts.dir);
+    this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", DESKTOP_WAITING);
+    this.sendQueue.retryFailures(DESKTOP_BLOCKED, DESKTOP_WAITING);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
@@ -478,6 +481,12 @@ export class Sessions {
       if (this.records.has(p.session)) this.append(p.session, { kind: "permission_decided", id: p.id, decision: "expired", reason: "host_restarted" });
     }
     for (const r of this.records.values()) {
+      // A host exit during the launcher call did not confirm delivery to Desktop.
+      if (r.desktopHandoff === "opening") {
+        r.desktopHandoff = (r.desktopHandoffAttempts ?? 0) < 3 ? "pending" : "failed";
+        this.save();
+        if (r.desktopHandoff === "failed") this.append(r.id, { kind: "notice", code: "desktop_handoff_failed" }, false);
+      }
       if (r.state === "running" || r.state === "starting" || r.state === "waiting") {
         this.append(r.id, { kind: "notice", code: "host_restarted", text: "호스트가 다시 시작되어 이 턴이 중단되었습니다" }, false);
         this.setState(r, "stopped", undefined, false);
@@ -517,6 +526,7 @@ export class Sessions {
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
+      if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed" && this.now() >= (r.desktopHandoffRetryAt ?? 0)) this.handoff(r);
       if (!this.desktop) continue;
       const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
       // The Claude app worker has Remote Control on for a conversation the host is still driving
@@ -858,7 +868,7 @@ export class Sessions {
   private continueDesktop(id: string, clientMsgId: string, bridgeMode = false): SessionRecord {
     if (!this.desktop) throw new Error("no such session");
     const { summary: s, open } = this.desktop.continuation(id);
-    if (open && !bridgeMode) throw new Error(DESKTOP_BLOCKED);
+    if (open && !bridgeMode) throw new DesktopBlockedError();
     const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
     // The app's registry records the folder the conversation runs in now; the transcript's first
     // line keeps the one it started in (a conversation moved folders, issue #82).
@@ -1070,6 +1080,7 @@ export class Sessions {
     const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
     if (!item) throw new Error("That message is no longer queued.");
     this.sendQueue.resume(id);
+    if (this.handingOff.has(id)) { this.opts.onSessions(); return id; }
     return this.dispatchQueued(id, item, false);
   }
 
@@ -1099,7 +1110,7 @@ export class Sessions {
       const r = this.records.get(id);
       if (r && !r.desktopBridge) { void this.drainQueue(id); continue; }
       const process = this.desktop?.liveProcess(r?.sdkSessionId ?? id);
-      if (process?.status === "idle") void this.drainQueue(id, true);
+      if (!process || process.status === "idle") void this.drainQueue(id, process?.status === "idle");
     }
   }
 
@@ -1125,9 +1136,18 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.handingOff.has(id) || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    const process = this.desktop?.liveProcess(desktopId);
+    if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
+      if (this.sendQueue.wait(id, head.id, DESKTOP_WAITING)) this.opts.onSessions();
+      return;
+    }
+    // Registry idle can precede the accepted bridge turn actually starting.
+    const sent = process?.bridgeSessionId ? this.bridgeRunning.get(process.bridgeSessionId) : undefined;
+    if (sent !== undefined && this.now() - sent < 9000) return;
     if (!registryIdle) {
       const summary = this.has(id) ? this.summaryOf(id) : undefined;
       if (!summary || BUSY.has(summary.state)) return;
@@ -1164,14 +1184,15 @@ export class Sessions {
     let before = 0;
     try { before = this.log(id).lastSeq; } catch { /* the send below creates it */ }
     try {
-      const sent = await this.send(id, item.id, item.text, attachments, "steer");
+      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true);
       this.sendQueue.remove(id, item.id);
       // Only a message sent from here waits for its own turn; one sent now rides the running turn.
       if (fromQueue) this.sendQueue.sent(id, before, this.now());
       this.opts.onSessions();
       return sent;
     } catch (error) {
-      this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
+      if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, DESKTOP_WAITING);
+      else this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
       this.opts.onSessions();
       throw error;
     }
@@ -1229,6 +1250,7 @@ export class Sessions {
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
+    if (this.opts.handoff) this.append(r.id, { kind: "notice", code: "desktop_handoff" });
     if (req.text.trim()) await this.send(r.id, req.clientMsgId, req.text);
     else this.setState(r, "idle");
     this.opts.onSessions();
@@ -1238,8 +1260,13 @@ export class Sessions {
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live.
    * The receipt is written pending before the input reaches the SDK and completed once the SDK
    * has accepted it; a resend of a completed id returns without running again, and a resend that
-   * finds a pending receipt from before a host restart throws OutcomeUnknownError. */
+   * finds a pending receipt from before a host restart throws OutcomeUnknownError.
+   * During Desktop handoff, ACK means durable queue ownership; its send receipt starts only at dispatch. */
   send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
+    return this.deliver(id, clientMsgId, text, attachments, behavior);
+  }
+
+  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false): string | Promise<string> {
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
     const key = `send:${id}:${clientMsgId}`;
     const fingerprint = sendFingerprint(text, attachments);
@@ -1256,6 +1283,7 @@ export class Sessions {
       throw new OutcomeUnknownError();
     }
     if (this.seen(id, clientMsgId)) return id;
+    if (!queued && this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
     // Delegated turns own their own receipts; this wrapper only forwards them.
     if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
       const s = this.list().find(s => s.id === id);
@@ -1267,6 +1295,12 @@ export class Sessions {
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
     if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
+    // A Desktop handoff may finish before its RC transport exists. Acknowledge durable queue
+    // ownership, not an in-memory transfer that would later fail despite the phone's ACK.
+    if (!queued && this.handingOff.has(id) && this.records.get(id)?.desktopHandoff === "opening") {
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
     this.receipts.begin(key, id, fingerprint);
     try {
       return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
@@ -1304,7 +1338,7 @@ export class Sessions {
         this.bridgeSends.set(key, sending);
         return sending;
       }
-      if (process || this.desktop.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+      if (process || this.desktop.isOpen(desktopId)) throw new DesktopBlockedError();
       if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
@@ -1779,7 +1813,7 @@ export class Sessions {
     if (!this.bridges.has(id) && bridgeId) { this.log(id); this.ensureBridge(id, bridgeId); }
     const connection = this.bridges.get(id);
     if (connection) {
-      if (connection.failed) throw new Error(DESKTOP_BLOCKED);
+      if (connection.failed) throw new DesktopBlockedError();
       try { await this.bridge.interrupt(connection.bridgeId); }
       catch (error) { this.bridgeFailure(id, error); throw error; }
       this.append(id, { kind: "notice", code: "interrupted" });
@@ -1834,7 +1868,7 @@ export class Sessions {
       this.ensureBridge(id, bridgeId);
       return bridgeId;
     }
-    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new DesktopBlockedError();
     return null;
   }
 
@@ -1967,7 +2001,7 @@ export class Sessions {
   // ---- the query ----------------------------------------------------------------------------
 
   private start(r: SessionRecord): Live {
-    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new Error(DESKTOP_BLOCKED);
+    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new DesktopBlockedError();
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};
@@ -2193,12 +2227,21 @@ export class Sessions {
     return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
   }
 
-  private handoff(r: SessionRecord, live: Live): void {
+  private handoff(r: SessionRecord, live = this.live.get(r.id)): void {
     const runner = this.opts.handoff;
-    if (!runner || !r.sdkSessionId || r.desktopBridge || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
+    if (!runner || !r.sdkSessionId || r.desktopBridge || this.archived.has(r.id) || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
     if (r.desktopHandoff !== "pending" && r.desktopHandoff !== "failed") return;
+    // An app worker already owns it, even when RC is off: do not open another writer.
+    if (this.desktop?.isOpen(r.sdkSessionId)) {
+      if (live) this.stop(r.id, live);
+      r.desktopHandoff = "attempted";
+      delete r.desktopHandoffRetryAt;
+      delete r.desktopHandoffError;
+      this.save();
+      return;
+    }
     if ((r.desktopHandoffAttempts ?? 0) >= 3) return;
-    r.desktopHandoff = "attempted";
+    r.desktopHandoff = "opening";
     r.desktopHandoffAttempts = (r.desktopHandoffAttempts ?? 0) + 1;
     this.save();
     const transfer = { messages: [] as SdkUserMessage[] };
@@ -2210,20 +2253,28 @@ export class Sessions {
         this.stop(r.id, live);
         // close() and iterator completion alone do not prove the writer has stopped.
         // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.
-        await live.query.processExited;
+        await live?.query.processExited;
         if (this.shuttingDown || r.desktopBridge) return;
         const result = await runner({ sessionId: r.sdkSessionId!, title: r.title, cwd: r.cwd });
+        if (this.shuttingDown) return;
+        r.desktopHandoff = "attempted";
         delete r.desktopHandoffError;
+        delete r.desktopHandoffRetryAt;
         this.save();
+        this.append(r.id, { kind: "notice", code: "desktop_handoff_requested" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] ${result}`);
       } catch (error) {
+        if (this.shuttingDown) return;
         r.desktopHandoff = "failed";
         r.desktopHandoffError = error instanceof Error ? error.message : String(error);
+        r.desktopHandoffRetryAt = this.now() + 30_000;
         this.save();
+        this.append(r.id, { kind: "notice", code: r.desktopHandoffAttempts! < 3 ? "desktop_handoff_retry" : "desktop_handoff_failed" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] failed: ${r.desktopHandoffError} (attempt ${r.desktopHandoffAttempts}/3)`);
       } finally {
         this.handingOff.delete(r.id);
         if (transfer.messages.length && !this.shuttingDown) await this.resumeAfterHandoff(r, transfer.messages);
+        if (!this.shuttingDown) void this.drainQueue(r.id);
       }
     });
   }
