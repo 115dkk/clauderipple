@@ -655,9 +655,10 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
       expect(why, surface).toBeDefined()
       expect(why?.text).toContain('ui/')
     } else expect(why, surface).toBeUndefined()
-    // The API's own counts: 1200 + 38000 + 800 in, 95% of it from the cache, 5100 out, 12 tools.
-    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'in 40k · cache 95% · out 5.1k · tools 12' }), surface).toBeDefined()
-    else for (const value of ['40k', '95%', '5.1k', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
+    // The Claude app's count: the last prompt (1200 + 38000 + 800) plus the reply (5100), the cache's
+    // 95% share, and 12 tools.
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'tools 12 · tokens 45k · cache 95%' }), surface).toBeDefined()
+    else for (const value of ['45k', '95%', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
     // Two agents finished: nothing hides behind "more".
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeUndefined()
     const empty = await mount($, 'agents-empty', surface, 64)
@@ -684,7 +685,12 @@ test('the Agents pane draws forty agents at once, and a record missing its title
   for (const { id, columns } of cases) {
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
       const ui = await mount($, 'forty-' + id, surface, columns)
-      for (const i of [0, 30, 31, 39]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
+      // The card is one clipped title line: on the desktop its row is the sure mark that a record
+      // was drawn, on the text surfaces the title itself.
+      const desktop = surface === 'desktop' || surface === 'vscode'
+      for (const i of [0, 30, 31, 39]) {
+        expect(await ui.find(desktop ? { key: 'row-w' + i } : { type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
+      }
       const pictures = await ui.findAll({ type: 'Svg' })
       if (surface === 'terminal' || surface === 'mobile') expect(pictures).toHaveLength(0)
       else {
@@ -697,8 +703,10 @@ test('the Agents pane draws forty agents at once, and a record missing its title
       }
       await ui.unmount()
       const one = await mount($, 'bare-' + id, surface, columns)
-      expect(await one.find({ type: 'Text', text: 'Port the request log renderer' }), surface + ' ' + id).toBeDefined()
-      expect(await one.find({ type: 'Text', text: 'bare' }), surface + ' ' + id).toBeDefined()
+      // One clipped title line: the desktop answers by its row, the text surfaces by the title.
+      const rich = surface === 'desktop' || surface === 'vscode'
+      expect(await one.find(rich ? { key: 'row-a1' } : { type: 'Text', text: 'Port the request log renderer' }), surface + ' ' + id).toBeDefined()
+      expect(await one.find(rich ? { key: 'row-bare' } : { type: 'Text', text: 'bare' }), surface + ' ' + id).toBeDefined()
       await one.unmount()
     }
   }
@@ -744,8 +752,10 @@ test('the Agents pane draws forty mixed real-world records on every surface, ski
     const id = ['mixed', skin, appearance].join('-')
     for (const surface of ['desktop', 'terminal', 'vscode', 'mobile'] as const) {
       const ui = await mount($, id, surface, 40)
-      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 0' }), id + ' ' + surface).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 39' }), id + ' ' + surface).toBeDefined()
+      // The card's title is one clipped line, so the desktop answers by its row and the text
+      // surfaces by the title itself.
+      const desktop = surface === 'desktop' || surface === 'vscode'
+      for (const i of [0, 39]) expect(await ui.find(desktop ? { key: 'row-mixed-' + i } : { type: 'Text', text: '에이전트 표시 오류 수정 ' + i }), id + ' ' + surface + ' ' + i).toBeDefined()
       await ui.unmount()
     }
   }
@@ -1634,9 +1644,9 @@ test('a running row and card draw the same tree a tick on and across 59s → 1m 
       }
     }
   }
-  // The open card's numbers rows are there from the start, a dash for each figure not yet reported.
+  // The open card's second row is there from the start, a dash for each figure not yet reported.
   const fresh = await mount($, 'still-fresh', 'desktop', 68)
-  expect(await fresh.findAll({ type: 'Text', text: /^–$/ })).toHaveLength(3)
+  expect(await fresh.findAll({ type: 'Text', text: /^–$/ })).toHaveLength(2)
   expect(await fresh.find({ type: 'Text', text: /^0$/ })).toBeDefined()
   for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
     for (const columns of STILL_COLUMNS) {
@@ -1649,7 +1659,7 @@ test('a running row and card draw the same tree a tick on and across 59s → 1m 
   }
 })
 
-test('a narrow card keeps its model on one line without the vendor path, and its numbers in two fixed rows', async ($, on) => {
+test('a narrow card keeps its model on one line without the vendor path, and the same two body rows as a wide one', async ($, on) => {
   const why = 'session model · General / Standard'
   const agent: AgentRec = { ...STILL_AGENT, pick: { ...STILL_AGENT.pick!, why, by: 'session' } }
   // The card heads an open conversation; the title is the page's head row there.
@@ -1660,15 +1670,19 @@ test('a narrow card keeps its model on one line without the vendor path, and its
   for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
     // No vendor path, and no pick line.
     expect(await ui.find({ type: 'Text', text: /deepseek-ai\// }), side + ' vendor').toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /^deepseek-v/ }), side + ' model').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^deep/ }), side + ' model').toBeDefined()
     expect(await ui.find({ type: 'Text', text: /표준/ }), side + ' level').toBeUndefined()
     expect(await ui.find({ type: 'Text', text: why }), side + ' why').toBeUndefined()
   }
-  // Narrow: the name is cut to fit beside the effort; the numbers take two rows; the time ends the head.
-  expect((await narrow.find({ type: 'Text', text: /^deepseek-v/ }))!.text.endsWith('…'), 'cut model').toBe(true)
-  expect(await narrow.find({ key: 'nums-1' }), 'narrow nums-1').toBeDefined()
-  expect(await wide.find({ key: 'nums-1' }), 'wide nums-1').toBeUndefined()
-  for (const ui of [narrow, wide]) expect(await ui.find({ key: 'open-head-end' }), 'time in the head').toBeDefined()
+  // Narrow: the name is cut to fit beside the effort; the body is the model's row and the numbers'
+  // row at either width (one fixed row each), so the card's height never changes with the pane.
+  expect((await narrow.find({ type: 'Text', text: /^deep/ }))!.text.endsWith('…'), 'cut model').toBe(true)
+  for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
+    expect(await ui.find({ key: 'model-row' }), side + ' model row').toBeDefined()
+    expect(await ui.find({ key: 'nums' }), side + ' numbers row').toBeDefined()
+    expect(await ui.find({ key: 'nums-1' }), side + ' no second numbers row').toBeUndefined()
+    expect(await ui.find({ key: 'open-head-end' }), side + ' time in the head').toBeDefined()
+  }
   expect(await narrow.find({ type: 'Text', text: '3분 12초' }), 'time').toBeDefined()
   // The time never takes a row of its own, and a long title is cut to the head's one line beside it.
   for (const ui of [narrow, wide]) expect(await ui.find({ key: 'time-row' })).toBeUndefined()

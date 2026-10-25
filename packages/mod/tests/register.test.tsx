@@ -2046,8 +2046,8 @@ test('known agents show waiting after an eight-second tool and finish with cost'
   await tool
   await complete($, 'worker-1')
   expect(await ui.find({ type: 'Text', text: 'Rename variable' })).toBeDefined()
-  // The API's own counts (100 + 40000 cached in, 10 out), not the weighted cost.
-  expect(await ui.find({ type: 'Text', text: 'in 40k · cache 100% · out 10 · tools 1' })).toBeDefined()
+  // The Claude app's count: one step's prompt (100 + 40000 cached) plus its output (10), not the weighted cost.
+  expect(await ui.find({ type: 'Text', text: 'tools 1 · tokens 40k · cache 100%' })).toBeDefined()
 })
 
 test('an agent keeps the API\'s token counts, its tools and the effort it was sent at; its card opens its conversation and goes back', async ($, on) => {
@@ -2075,13 +2075,15 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   const input: ToolCallInput = { tool: 'Bash', command: 'npm test', agentId: 'worker-1', tool_use_id: 'tool-a' }
   await $.tool.call(input)
   const rec = written.find(a => a.id === 'worker-1')
-  expect(rec?.usage).toEqual({ input: 600, cached: 18_000, cacheWrite: 1400, output: 100 })
+  // The last step's counts, not a sum of both steps' prompts; the output totals every step.
+  expect(rec?.usage).toEqual({ input: 300, cached: 9000, cacheWrite: 700, output: 50 })
+  expect(rec?.outputTotal).toBe(100)
   expect(rec?.tools).toBe(1)
   expect(rec?.effort).toBe('low')
   expect(rec?.answeredBy).toBe('deepseek-v4.1-flash@low')
   expect(rec?.provider).toBe('deepseek')
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
-  expect(await ui.find({ type: 'Text', text: /in 20k · cache 90% · out 100 · tools 1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /tools 1 · tokens 10k · cache 90%/ })).toBeDefined()
   expect(reads).toEqual([])
   await ui.press({ key: 'open-worker-1' })
   expect(reads).toContain('worker-1')

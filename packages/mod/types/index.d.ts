@@ -296,8 +296,13 @@ export type AgentRec = {
   effort?: string | number
   /** The model that answered its last step, by the id the API reported (TurnUsage `model`). */
   answeredBy?: string
-  /** Its steps' token counts as the API reported them, summed; the shape of StatusRequest's usage. */
+  /**
+   * Its last step's token counts as the API reported them, in the shape of StatusRequest's usage:
+   * every step re-sends the whole conversation, so only the last prompt says how big it is.
+   */
   usage?: { input: number; cached: number; cacheWrite: number; output: number }
+  /** Every step's output tokens added up; the token figure adds this to the last step's prompt. */
+  outputTotal?: number
   /** Tool calls it started. */
   tools?: number
 }

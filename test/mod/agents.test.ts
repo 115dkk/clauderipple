@@ -95,6 +95,52 @@ test('48 mixed workers including 31 Workflow workers keep their rows, Korean tit
   }
 })
 
+test('a card is one title line over two body rows at every width, its state on the time instead of a dot', () => {
+  const agent: AgentRec = { ...base, description: '긴 제목 '.repeat(200), usage: { input: 1000, cached: 30_000, cacheWrite: 0, output: 200 }, outputTotal: 5200, tools: 23 }
+  const widths = [20, 33, 44, 68, 140]
+  const heights = widths.map(columns => cardRows({ ...frame, columns }, agent))
+  assert.equal(new Set(heights).size, 1, heights.join(','))
+  for (const columns of widths) {
+    const tree = renderAgents(el, { ...frame, columns }, { agents: [agent], now: frame.now, showDone: false }, actions)
+    const all = nodes(tree)
+    // The title row lost its state dot; the body is exactly the model's row and the numbers' row.
+    assert.equal(all.some(n => n.props.key === 'mark'), false, 'state dot at ' + columns)
+    assert.equal(all.filter(n => n.props.key === 'model-row').length, 1)
+    assert.equal(all.filter(n => n.props.key === 'nums').length, 1)
+    assert.equal(all.filter(n => String(n.props.key).startsWith('nums-')).length, 0)
+    // The title is one clipped line: its one Text ends with the ellipsis, never a second line.
+    const titleBox = all.find(n => n.props.key === 'title')!
+    const titleText = titleBox.children.find((c): c is Tree => typeof c !== 'string')!
+    assert.equal(titleText.children.length, 1)
+    assert.ok(String(titleText.children[0]).endsWith('…'), String(titleText.children[0]))
+    // Neither the effort's bars nor the cache's ring is drawn any more.
+    assert.equal(all.some(n => n.type === 'Svg' && ['추론 강도', '캐시'].includes(String(n.props.alt))), false)
+    // The Claude app's count: the last prompt (1000 + 30000) plus every step's output (5200).
+    const text = textOf(tree)
+    assert.ok(text.includes('토큰') && text.includes('36k'), text)
+    assert.ok(text.includes('캐시') && text.includes('97%'), text)
+    assert.ok(text.includes('도구') && text.includes('23'), text)
+  }
+})
+
+test('the time\'s colour carries running, waiting, done and failed once the title dot is gone', () => {
+  const colour = (state: AgentRec['state']): unknown => nodes(renderAgents(el, frame, {
+    agents: [{ ...base, state, endedAt: state === 'running' || state === 'waiting' ? undefined : frame.now - 1 }], now: frame.now, showDone: false,
+  }, actions)).find(n => n.props.key === 'elapsed')?.props.color
+  assert.notEqual(colour('running'), colour('done'))
+  assert.notEqual(colour('waiting'), colour('running'))
+  assert.notEqual(colour('failed'), colour('done'))
+})
+
+test('the list head is one total: every agent\'s tokens added up', () => {
+  const six: AgentRec = { ...base, usage: { input: 100_000, cached: 500_000, cacheWrite: 0, output: 0 }, outputTotal: 0 }
+  const tree = renderAgents(el, frame, { agents: [{ ...six, id: 'x' }, { ...six, id: 'y' }], now: frame.now, showDone: false }, actions)
+  const text = textOf(tree)
+  assert.ok(text.includes('전체 에이전트'))
+  assert.ok(text.includes('600k'), text)
+  assert.ok(text.includes('1.2M'), text)
+})
+
 test('background tasks sit with the agents, running with running and ended with ended, on either surface', () => {
   const tasks = [
     { id: 'b-dev', kind: 'shell' as const, title: '개발 서버 실행', command: 'npm run dev', state: 'running' as const, startedAt: 2 },
