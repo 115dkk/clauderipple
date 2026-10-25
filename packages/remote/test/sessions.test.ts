@@ -245,7 +245,8 @@ test("an effort restart carries every accepted input, whether still in the inbox
     const receipts = MessageReceipts.open(path.join(f.dir, "receipts.json"));
     for (const key of ["second", "third"]) {
       assert.equal(receipts.status(`send:${id}:${key}`), "completed");
-      assert.equal(await f.sessions.send(id, key, "resend"), id);
+      // A retry repeats the same words: an id names one message.
+      assert.equal(await f.sessions.send(id, key, key === "second" ? "second input" : "third input"), id);
     }
     await nextTick();
     assert.equal(second.users.length, 2, "completed receipts cover the carried input, not a dropped message");
@@ -318,7 +319,7 @@ for (const controlFails of [false, true]) test(`sends during interrupt are rejec
     assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-stop`), null);
     assert.equal(f.sessions.log(id).lastSeq, before, "rejection must not record a user event or poison the seen index");
   }
-  assert.equal(await f.sessions.send(id, "create-1", "already accepted"), id, "completed retries remain idempotent during Stop");
+  assert.equal(await f.sessions.send(id, "create-1", "ping"), id, "completed retries remain idempotent during Stop");
   await nextTick();
   assert.deepEqual(first.users.map(user => user.message.content), ["ping"]);
   if (controlFails) first.interruptReply.reject(new Error("control failed"));
@@ -1195,4 +1196,28 @@ test("send-now puts a queued message into the running turn; the queue survives a
   f.sessions.removeQueued(id, "later-1");
   await waitFor(() => f.permissions.pending(id).length >= 1);
   for (const p of f.permissions.pending(id)) f.sessions.decide(id, p.id, "deny");
+});
+
+test("one message id keeps one content: a reused id with other words is refused, the same words are acknowledged", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const first = f.sessions.send(id, "same-id", "first words");
+  await Promise.resolve(first);
+  await waitFor(() => f.sessions.log(id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "same-id"));
+  // A retry of the same message is answered without running again.
+  assert.equal(f.sessions.send(id, "same-id", "first words"), id);
+  // Different words under that id are a new message wearing a used id: say so instead of a false success.
+  assert.throws(() => f.sessions.send(id, "same-id", "other words"), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+  const users = () => f.sessions.log(id).readAfter(0).events.filter(e => e.kind === "user" && e.clientMsgId === "same-id");
+  assert.equal(users().length, 1, "the refused reuse never becomes a second message");
+  // An attachment change is a content change too.
+  assert.throws(() => f.sessions.send(id, "same-id", "first words", [{ blob: "b", name: "photo.png", mediaType: "image/png" }]), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+});
+
+test("a new session keeps one idempotent create per content", async t => {
+  const f = fixture(t);
+  const first = await f.create("create-content");
+  assert.equal(await f.create("create-content"), first);
+  await assert.rejects(f.create("create-content", "claude-other"), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
 });
