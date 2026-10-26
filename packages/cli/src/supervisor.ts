@@ -9,7 +9,7 @@ import * as launchd from "./launchd.ts";
 import * as schtasks from "./schtasks.ts";
 import * as systemd from "./systemd.ts";
 import type { AgentRemove, AgentRestart, AgentStart, AgentStop, Ownership } from "./ownership.ts";
-import { type RouterIdentity, adminUrl, routerIdentity } from "./router-state.ts";
+import { type RouterIdentity, adminUrl, awaitIdentity, routerIdentity } from "./router-state.ts";
 import { runtime } from "./runtime.ts";
 import { windowsPowerShellEnv } from "./windows-powershell.ts";
 
@@ -266,6 +266,9 @@ export function stopWindowsRouter(ops: WindowsRouterOps, waitMs = 120_000): Stop
   return waitForTask(ops) ? "stopped" : "identity-unknown";
 }
 
+/** How long a replacement router is given to answer before its identity stands as unknown. */
+const SUCCESSOR_BUDGET_MS = 15_000;
+
 export function restartWindowsRouter(ops: WindowsRouterOps, opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}): RestartResult {
   const owner = ops.owner();
   if (owner.state === "other") return "other-installation";
@@ -289,9 +292,10 @@ export function restartWindowsRouter(ops: WindowsRouterOps, opts: { waitMs?: num
   if (again.state === "unknown") return "ownership-unknown";
   const replacement = ops.targetPid();
   if (replacement !== null) {
-    const who = ops.identity(replacement);
-    if (who === "other") return "other-installation";
-    return replacement !== targetPid && who === "ours" ? "drained" : "identity-unknown";
+    // The launcher has only just started it: wait for the admin port's answer (see awaitIdentity).
+    const answer = awaitIdentity(ops.identity, replacement, () => ops.targetPid(), { budgetMs: SUCCESSOR_BUDGET_MS, now: ops.now, sleep: ops.sleep });
+    if (answer.state === "other") return "other-installation";
+    return answer.pid !== targetPid && answer.state === "ours" ? "drained" : "identity-unknown";
   }
   if (!waitForTask(ops)) return "identity-unknown";
   return restartResult(ops.start());

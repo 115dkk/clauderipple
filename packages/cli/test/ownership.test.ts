@@ -400,6 +400,43 @@ test("Windows stop and restart act only on the instance under this task's own la
   assert.deepEqual(restarting.calls, ["start"]);
 });
 
+test("a Windows restart waits for its replacement to answer before judging it", () => {
+  // The same race launchd hit on 2026-10-26: the launcher's new process needs a moment before its
+  // admin port answers, and a single probe there read "absent".
+  const TARGET = 5150;
+  let clock = 0;
+  const scenario = (answers: Array<"ours" | "other" | "absent">, successors: number[]) => {
+    const pending = [...answers];
+    const queued = [...successors];
+    const asked: Array<number | null> = [];
+    let drained = false;
+    const ops: import("../src/supervisor.ts").WindowsRouterOps = {
+      owner: () => ({ state: "ours", home: winB }),
+      targetPid: () => (drained ? (queued.length > 1 ? queued.shift()! : queued[0]!) : TARGET),
+      identity: (expectedPid) => {
+        asked.push(expectedPid);
+        if (expectedPid === TARGET) return drained ? "absent" : "ours";
+        return pending.length > 1 ? pending.shift()! : pending[0]!;
+      },
+      running: () => true,
+      shutdown: () => ((drained = true), true),
+      stopTask: () => "stopped",
+      start: () => "started",
+      now: () => clock,
+      sleep: (ms) => { clock += ms; },
+    };
+    return { result: restartWindowsRouter(ops), asked };
+  };
+
+  assert.equal(scenario(["absent", "absent", "ours"], [6161]).result, "drained");
+  assert.equal(scenario(["absent"], [6161]).result, "identity-unknown");
+  assert.equal(scenario(["other", "ours"], [6161]).result, "other-installation");
+  // The supervisor started it again while we waited: the pid running then is the pid judged.
+  const restarted = scenario(["absent", "ours"], [6161, 6262]);
+  assert.equal(restarted.result, "drained");
+  assert.ok(restarted.asked.includes(6262));
+});
+
 test("a Windows pid is ambiguous when two homes share one runtime, so control never uses it", () => {
   const shared = "C:\\shared\\router\\src\\index.js";
   const definition = () => taskOf(winB);

@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { homeDir } from "../../router/src/config.ts";
 import { type AgentRemove, type AgentRestart, type AgentStart, type AgentStop, type Ownership, ownerOf, unitEnvironment } from "./ownership.ts";
-import { type RouterIdentity, routerIdentity } from "./router-state.ts";
+import { type IdentityWait, type RouterIdentity, awaitIdentity, routerIdentity } from "./router-state.ts";
 import { withServiceFile } from "./service-definition.ts";
 
 /** Whose router answers this installation's admin port. Injected in tests that must not probe. */
@@ -216,7 +216,7 @@ export function stopAgent(home: string = homeDir(), opts: Record<string, never> 
  * systemd sends the SIGTERM, waits for the process to exit (up to TimeoutStopSec) and then starts
  * a new one, so the drain is never cut the way `launchctl kickstart -k` cut it.
  */
-export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}, run: Systemctl = realSystemctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentRestart {
+export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; onProgress?: (msg: string) => void; identityWait?: IdentityWait } = {}, run: Systemctl = realSystemctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentRestart {
   return withServiceFile(unitPath(), run, guard => {
     run = guard.run;
     const owner = unitOwnership(home);
@@ -239,8 +239,10 @@ export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; 
     if (again.state !== "ours") return "ownership-unknown";
     const successor = agentPid(run);
     if (successor === null) return "identity-unknown";
-    const who = identity(successor);
-    return who === "ours" ? "drained" : who === "other" ? "other-installation" : "identity-unknown";
+    // The successor has only just started and may not answer yet: wait for its answer instead of
+    // reporting the restart as unverifiable (the launchd defect of 2026-10-26, same code path).
+    const answer = awaitIdentity(identity, successor, () => agentPid(run), opts.identityWait);
+    return answer.state === "ours" ? "drained" : answer.state === "other" ? "other-installation" : "identity-unknown";
   });
 }
 

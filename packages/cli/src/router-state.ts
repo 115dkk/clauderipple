@@ -33,6 +33,9 @@ export type ListenPids = (port: number) => number[] | null;
 /** The identity of whatever answered, plus the pid it claimed. */
 export type RouterProbe = { state: RouterIdentity; pid: number | null };
 
+/** How long "absent" is waited out. Injected in tests so no test sleeps through a budget. */
+export type IdentityWait = { budgetMs?: number; pollMs?: number; now?: () => number; sleep?: (ms: number) => void };
+
 /** This installation's admin API, from its own config. */
 export function adminUrl(home: string = homeDir()): string {
   const cfg = new ConfigStore(path.join(home, "config.json")).get();
@@ -141,4 +144,39 @@ export function probeRouter(home: string = homeDir(), opts: { probe?: StatusProb
 /** Convenience for callers that only need the state. */
 export function routerIdentity(home: string = homeDir(), opts: { probe?: StatusProbe; timeoutMs?: number; expectedPid?: number | null; listenPids?: ListenPids } = {}): RouterIdentity {
   return probeRouter(home, opts).state;
+}
+
+/** How long a just-started process is given to answer before its "absent" stands. */
+const IDENTITY_BUDGET_MS = 15_000;
+
+/**
+ * The identity of a process the supervisor has just (re)started, waited for.
+ *
+ * A relaunched router needs a moment before it opens its admin port, and a probe in that gap sees
+ * "absent". One probe there made `clauderipple restart` report a healthy restart as "! not
+ * restarted: the running instance could not be verified as this installation's" (2026-10-26 10:29:
+ * pid 31308 drained, launchd started 37683, which later answered with this installation's id). So
+ * "absent" is retried until the budget ends, while "ours" and "other" answer at once. `reread` is
+ * asked between rounds because a supervisor can start the process again: the pid running then is
+ * the pid judged, and it is the one returned. Waiting never turns an answer into "ours" — when
+ * nothing answers within the budget the "absent" stands and the caller still refuses.
+ */
+export function awaitIdentity(
+  identity: (expectedPid: number | null) => RouterIdentity,
+  pid: number | null,
+  reread: () => number | null = () => pid,
+  wait: IdentityWait = {},
+): RouterProbe {
+  const now = wait.now ?? Date.now;
+  const sleep = wait.sleep ?? ((ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  const deadline = now() + (wait.budgetMs ?? IDENTITY_BUDGET_MS);
+  let current = pid;
+  let state = identity(current);
+  while (state === "absent" && now() < deadline) {
+    sleep(wait.pollMs ?? 250);
+    const next = reread();
+    if (next !== null) current = next;
+    state = identity(current);
+  }
+  return { state, pid: current };
 }

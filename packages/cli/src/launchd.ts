@@ -9,7 +9,7 @@ import path from "node:path";
 import { homeDir } from "../../router/src/config.ts";
 import { BUNDLE_ID, launcherPath } from "./bundle.ts";
 import { type AgentRemove, type AgentRestart, type AgentStart, type AgentStop, type Ownership, ownerOf, plistEnvironment } from "./ownership.ts";
-import { type RouterIdentity, routerIdentity } from "./router-state.ts";
+import { type IdentityWait, type RouterIdentity, awaitIdentity, routerIdentity } from "./router-state.ts";
 import { withServiceFile } from "./service-definition.ts";
 
 /** Whose router answers this installation's admin port. Injected in tests that must not probe. */
@@ -346,7 +346,7 @@ function waitForPid(run: Launchctl, budgetMs: number, pollMs = 250): boolean {
  * launchd's KeepAlive relaunch it. Falls back to kickstart only if there is no pid or the
  * process ignores SIGTERM for longer than the drain budget.
  */
-export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; onProgress?: (msg: string) => void } = {}, run: Launchctl = launchctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentRestart {
+export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; onProgress?: (msg: string) => void; identityWait?: IdentityWait } = {}, run: Launchctl = launchctl, identity: IdentityCheck = (expectedPid) => routerIdentity(home, { expectedPid })): AgentRestart {
   return withServiceFile(plistPath(), run, guard => {
     run = guard.run;
     const owner = agentOwnership(home);
@@ -359,8 +359,10 @@ export function restartAgent(home: string = homeDir(), opts: { waitMs?: number; 
       const current = agentPid(run);
       if (current !== null) {
         if (current === pid) return "failed";
-        const who = identity(current);
-        return who === "ours" ? "drained" : who === "other" ? "other-installation" : "identity-unknown";
+        // The relaunched process has not opened its admin port yet: wait for its answer instead of
+        // reporting a healthy restart as unverifiable (2026-10-26).
+        const answer = awaitIdentity(identity, current, () => agentPid(run), opts.identityWait);
+        return answer.state === "ours" ? "drained" : answer.state === "other" ? "other-installation" : "identity-unknown";
       }
       return kickstart({}, run) && waitForPid(run, START_BUDGET_MS) ? "kickstarted" : "failed";
     };

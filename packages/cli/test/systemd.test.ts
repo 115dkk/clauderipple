@@ -132,6 +132,23 @@ test("an unreadable unit is unknown, so install refuses to replace it", { skip: 
     }
   }));
 
+test("the replacement is waited for before its identity is judged", { skip: onWindows }, () =>
+  // The same race as launchd's 2026-10-26 report: `systemctl restart` returns before the new
+  // MainPID has opened its admin port, so a single probe answered "absent".
+  withFakeSystemd(WORKING_SYSTEMCTL, () => {
+    installAgent({ program: process.execPath, args: ["/tmp/router.ts"], home: "/tmp/home" });
+    assert.equal(startAgent("/tmp/home"), "started");
+    const restartWith = (answers: Array<"ours" | "other" | "absent">, budgetMs: number) => {
+      const pending = [...answers];
+      let clock = 0;
+      return restartAgent("/tmp/home", { identityWait: { budgetMs, pollMs: 10, now: () => clock, sleep: (ms) => { clock += ms; } } }, undefined, () => (pending.length > 1 ? pending.shift()! : pending[0]!));
+    };
+    // "ours" before the drain, then the successor is still starting, then it answers.
+    assert.equal(restartWith(["ours", "absent", "absent", "ours"], 1_000), "drained");
+    assert.equal(restartWith(["ours", "absent"], 20), "identity-unknown");
+    assert.equal(restartWith(["ours", "other", "ours"], 1_000), "other-installation");
+  }));
+
 test("Linux finds the Desktop-cached CLI and the Config Library under XDG_CONFIG_HOME", { skip: notLinux }, () =>
   withFakeSystemd(WORKING_SYSTEMCTL, ({ root }) => {
     const config = path.join(root, "config");
