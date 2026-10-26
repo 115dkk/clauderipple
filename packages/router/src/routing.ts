@@ -260,8 +260,11 @@ export function isAutoModeClassifier(body: unknown): boolean {
  * and "yes" sends it on to the second stage. CLI 2.1.310 builds it as `max_tokens: 64 + n` with
  * `stop_sequences: ["</block>"]`. The second stage is `8192 + n` with no stop, the server's fast mode
  * (whose "yes" blocks outright) `256 + n` with no stop, and the severity score stops at `</severity>`.
- * `n` is the same on both stages, so the bound never takes in a second stage, and any other shape
- * goes with the rest. Call only on a body `isAutoModeClassifier` accepted.
+ * `n` is the thinking allowance, 2048 when the classifier model rejects disabled thinking and 0
+ * otherwise, so a first stage is at most 2112 and a second stage at least 8192. A larger allowance in
+ * a later release would send first stages with the rest, which only costs time; the bound never sends
+ * a second stage to the first-stage target. Any other shape goes with the rest too. Call only on a
+ * body `isAutoModeClassifier` accepted.
  */
 export function isClassifierStage1(body: unknown): boolean {
   const request = body as { stop_sequences?: unknown; max_tokens?: unknown } | null;
