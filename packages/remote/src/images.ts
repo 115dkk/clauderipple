@@ -69,6 +69,9 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
     // Observed with CLI 2.1.304: C:\\Users\\pbj → C--Users-pbj, under %TEMP%\\claude.
     // Authorize only the exact host-owned scope. Reparse points in its ancestors and ACLs
     // writable by another ordinary user fail closed; uid/mode bits cannot prove this on NTFS.
+    // The owner may be this user, SYSTEM or Administrators, the same principals the rules below
+    // trust: an elevated administrator's new folders belong to Administrators, not the user
+    // (GitHub's Windows runners run that way).
     try {
       // GitHub runners expose TEMP through an 8.3 alias. Use the native long form for ACL and
       // identity checks, while returning the spelling the CLI used in its image references.
@@ -82,7 +85,7 @@ export function claudeSessionTemp(scope: SessionFileScope): string[] {
       if (chain.some(dir => !fs.lstatSync(dir).isDirectory() || fs.lstatSync(dir).isSymbolicLink())) return [];
       const before = chain.map(dir => fs.lstatSync(dir, { bigint: true }));
       const quoted = chain.map(dir => `'${dir.replace(/'/g, "''")}'`).join(",");
-      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach($dir in @(${quoted})) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 1 }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } } }`;
+      const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach($dir in @(${quoted})) { $acl=Get-Acl -LiteralPath $dir; if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 }; foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) { if($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 852310) -ne 0 -and $rule.IdentityReference.Value -notin @($sid,'S-1-5-18','S-1-5-32-544')) { exit 1 } } }`;
       const env = windowsPowerShellEnv();
       execFileSync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env, stdio: "ignore", timeout: 5000, windowsHide: true });
       if (chain.some((dir, i) => {
