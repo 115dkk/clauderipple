@@ -466,6 +466,25 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
   provider header to overwrite the caller's by name covers one of the two at
   best. An un-routed request keeps its headers — that one really is going to
   Anthropic. Enforced by `packages/router/test/proxy-headers.test.ts`.
+  - **Anthropic-only blocks inside `messages` (issue #92, 2026-10-26).** CLI 2.1.308+
+    carries SessionStart hook context and deferred-tool deltas in mid-conversation
+    messages with `role: "system"` (and `"developer"`), and their content holds block
+    types only Anthropic defines: `tool_addition` (whose `tool.definition` is a whole
+    tool definition, `eager_input_streaming` included) and `tool_removal` (whose
+    `tool.type` is `tool_reference`). Anthropic reads them; a vendor's Anthropic skin
+    validates the content union and answers 400 `Invalid Anthropic Messages API
+    request` for the whole request, so from the first turn with a SessionStart hook or
+    a deferred MCP tool every request failed on OpenRouter (deepseek-v4.1-flash,
+    kimi-k3.1-pro). `sanitizeForCompatible` folds such a message to `user` with its
+    text byte-for-byte and does not merge it into a neighbouring user turn — a merge
+    rewrites bytes the vendor may have cached — lifts each `tool_addition` definition
+    into the same rules the declared `tools` get (server-tool filter, `defer_loading`,
+    `scrubSchema`, `tool_choice`, the withdrawal note) with `eager_input_streaming`
+    dropped, appends lifted tools after the caller's list in the order the messages
+    named them so the cached tool prefix does not move, and drops a `tool_removal`
+    block while leaving `tools` alone. A message left with no content goes whole. The
+    log line counts what happened: `system_role×N`, `tool_addition×N`,
+    `tool_removal×N`. Tests: `packages/router/test/compat.test.ts`.
 - **ChatGPT subscription (Codex backend):** needs a translation layer,
   Anthropic Messages ⇄ OpenAI Responses, plus OAuth (PKCE) login against
   `chatgpt.com/backend-api/codex`. The upstream endpoint is unofficial and may
@@ -1732,6 +1751,7 @@ plan unless marked otherwise.
 | A Workflow script sent eight agents with `[[ripple: gemini-3-8-flash@high]]` as the prompt's first line (and `subagent_type`, which `agent()` does not take — its option is `agentType`); all eight ran on the session's Opus. CLI 2.1.308 frames a workflow agent's prompt: a relayed user request, then a `[Workflow harness — computed task] … follows:` header line, then the script's text indented — so no user message started with the marker (2026-10-22) | A text block that starts with that header is read from the line after it: the script's first line is the prompt's top, as a spawned subagent's is (`routing.ts`, `WORKFLOW_TASK`). Only a block that *starts* with the header counts — the harness indents everything inside, so a header quoted lower down is prose. |
 | A closed lid was held awake on battery overnight (2026-10-24, owner-reported, `pmset -g log` + router.log): the lid closed and the Mac slept at 00:59 ("Clamshell Sleep"), but in two maintenance dark wakes (01:09 and 09:51) model calls ran — the mod's cache keep-warm pings (4-token turns on idle sessions) and a Claude app scheduled task — and `working` mode counted them as work: "sleep disabled (working: 1 model call running)" turned a ~45 s dark wake into 72 min (01:09–02:21) and 35 min (09:51–10:26) awake, 6 of the night's 10 battery points | A hold is never **started** in a dark wake: ioreg's IOPMrootDomain `System Capabilities` (read with the clamshell flags, no extra process) without Graphics (2) means the Mac is asleep to its user, and `decideAwake` answers "asleep: …" (logged once). A hold already taken is kept whatever the reading, and mode `on` is unaffected. Measured: 15 in a full wake; a held lid-closed Mac (2026-10-23 18:22–19:32) logged no transition to DarkWake. Tests: `awake.test.ts`. |
 | A new worker could not be spawned in a session that was open when it was added: the router wrote `zai-org-glm-5-3-flash.md` at 10:51:45, the MAMBO session (idle since 10:47) got its next message 26 s later, and the Agent tool answered "not found" at 10:52 and 11:12; after a `/clear` the mod rewrote `ripple:auto` to the worker and the CLI refused that too (11:24). The ClaudeRipple session, in use at the time, listed it by 10:55 (2026-10-23). CLI 2.1.308 polls `~/.claude/agents` every 2 s in use and 30 s after a minute idle; going back to 2 s rebuilds the watcher from the directory as it then is, and the catch-up compares only skills and commands, so a write in the last 30 s of idling is never read, and `/clear` keeps the process's list | Every sync that writes or removes a generated agent touches the generated files again `RETOUCH_AFTER_MS` (45 s) later (`agents.ts` `retouchLater`): any agent file's change makes a session reread all of them, and 45 s is past the idle poll. A session that already missed one is fixed the same way, by touching any file in `~/.claude/agents`. Tests: `agents.test.ts`. |
+| A routed request's `messages` array carried Anthropic-only shapes — a mid-conversation `role: "system"` message and `tool_addition`/`tool_removal` content blocks — and the compat layer cleaned only the top-level fields, so the vendor's Anthropic skin answered 400 `Invalid Anthropic Messages API request` on every turn once a SessionStart hook or a deferred MCP tool was in play (issue #92, CLI 2.1.308+, 2026-10-26) | A compat layer validates the **whole body** it forwards, `messages` included, not just the fields the CLI adds at the top level: a role an Anthropic-shaped vendor does not accept in `messages` is folded to `user` with the text untouched, a content block type only Anthropic defines is either converted into something the wire already has (a deferred tool's definition joins `tools`) or dropped, and a message left with no content goes whole. The request log counts each fold (`system_role×N`, `tool_addition×N`, `tool_removal×N`) so a vendor's next refusal can be read against what was sent. Same rule as the tool-schema row: what is forwarded must be valid for the wire it is forwarded to, not merely for the client that produced it. |
 
 ### Router-owned automatic updates (2026-10-21)
 
