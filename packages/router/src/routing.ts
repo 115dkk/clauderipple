@@ -255,6 +255,10 @@ export function unroutableReason(model: unknown, body: unknown, cfg: Config): st
 
   const aliased = marker ? cfg.aliases[marker.name] : undefined;
   const effective = (aliased ?? (marker ? marker.name : base)).split("@")[0]!;
+  // A Claude request still passes through, marker or not: the delegation markers ([[ripple:
+  // standard]], [[ripple: opus@high]]) sit on Claude workers and are no model of ours. Only a marker
+  // naming a model two providers declare is refused, since passing it on would run it on Claude (#94).
+  if (base.startsWith("claude-") && !(marker && rawDeclaredBy(effective, cfg).length > 1)) return null;
   if (effective.startsWith("claude-") && !qualifiedModel(effective, cfg)) return null;
   const qualified = qualifiedModel(effective, cfg);
   if (qualified) {

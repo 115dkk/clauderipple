@@ -52,6 +52,12 @@ test("ambiguous bare ids refuse with usable qualified names, including markers o
   }
 });
 
+test("a Claude request whose marker is a delegation word or an unknown name still passes through", () => {
+  for (const marker of ["[[ripple: standard]]", "[[ripple: light]]", "[[ripple: opus@high]]", "[[ripple: hard backend]]", "[[ripple: nowhere-model]]"]) {
+    assert.equal(unroutableReason("claude-opus-5-5", prompt(`${marker}\ntask`), cfg), null, marker);
+  }
+});
+
 test("a colon is literal unless the named configured provider declares the remaining model", () => {
   for (const model of ["qwen3:8b", "unknown:gemini-4-argon", "local:missing"]) {
     assert.equal(qualifiedModel(model, cfg), null);
