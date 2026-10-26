@@ -115,7 +115,8 @@ environment variable did not change the actual native classifier requests.
 #### A separate first-stage target (CLI 2.1.310, 2026-10-24)
 
 The two stages, as the 2.1.310 binary builds them (`classifierStage` `xml_s1` /
-`xml_s2`; `n` is one thinking allowance added to both):
+`xml_s2`; `n` is the thinking allowance added to every stage, 2048 when the
+classifier model rejects disabled thinking and 0 otherwise):
 
 - Stage 1: `max_tokens: 64 + n`, `stop_sequences: ["</block>"]`, the last user
   text ending in an instruction to err on the side of blocking. `<block>no` allows
@@ -144,7 +145,11 @@ fallback model is empty in the external build, so nothing retries it. GPT-6 Luna
 So the setting can be split by stage, and which model answers each side is the
 operator's choice. A first stage is the exact shape above: one stop sequence,
 `</block>`, and `max_tokens < 8192`. Every other classifier request (stage 2, fast
-mode, the severity score, any shape not recognised) is "the rest".
+mode, the severity score, any shape not recognised) is "the rest". The bound lies
+between the largest first stage 2.1.310 sends (2112) and the smallest second stage
+(8192). If a later release grew the allowance past it, its first stages would go
+with the rest, which costs time; the opposite mistake would hand a full verdict to
+the quick target.
 
 | Setting | First stage | The rest |
 |---|---|---|
@@ -179,12 +184,16 @@ names it, so no other Claude request moves to it. It signs in as the observed
 Claude Code login, and every request it answers counts against that subscription.
 
 The dashboard's Clients page has an "Auto mode classifier" section with one row per
-side, each a provider and model or Claude Code's own choice, plus an effort. The
+side, each a provider and model or Claude Code's own choice, plus an effort. An
+empty effort saves none, and the request keeps the effort Claude Code gave it. The
 rows and the config are translated only by `classifierRowsOf` and
 `classifierSettingOf` in `packages/ui/app.js`; one model on both rows is saved
 without `stage1`. A Claude `accountPool` provider without a model list is offered
 with the Claude catalogue, and the models the engine refuses for stage 2 are
-labelled in the second row.
+labelled in the second row. A choice is read when it is made and saves run one at
+a time, so the last choice is the one stored. Removing a provider clears each row
+that named it on its own: that row goes back to Claude Code's choice and the other
+row stays.
 
 Why splitting the stages does not loosen the check by itself:
 

@@ -461,6 +461,7 @@ function providerSaveHarness(initial = saveFixture(), probe: Promise<ProbeResult
     const latestConfig = async () => clone(h.latest), configRequest = async next => { h.writes.push(clone(next)); };
     const loadProviders = async () => {}, offerPickerOn = async () => {}, startMeasurement = () => {};
     const confirm = () => true, closeProviderDetail = () => {}, renderProviderWorkspace = () => {};
+    ${dashboardBlock('/** The two rows a setting shows', '// Claude Code refuses these')}
     ${dashboardBlock('function providerUsages(', 'function providerTabs(')}
     ${dashboardBlock('function anthropicSourceText(', 'function openAnthropicProviderForm(')}
     ${dashboardBlock('function openAnthropicProviderForm(', 'function openProviderForm(')}
@@ -623,6 +624,26 @@ test('removing a provider clears the fallbacks, web search and classifier that n
   assert.equal(routes.two!.fallbacks, undefined, 'an empty fallback list is not written back');
   assert.equal(saved.webSearch, undefined);
   assert.equal(saved.autoModeClassifier, undefined);
+});
+
+// The classifier names a provider on each of its two stages. Each stage that named the removed
+// provider goes back to Claude Code's own choice; the other stays as it was.
+test('removing a provider used only by the classifier\'s first stage keeps the rest\'s target', async () => {
+  const fixture = saveFixture() as SavedConfig & { autoModeClassifier?: unknown };
+  fixture.providers.q = { type: 'openai-compatible', models: [{ id: 'one' }] };
+  fixture.autoModeClassifier = { provider: 'q', model: 'one', effort: 'high', stage1: { provider: 'p', model: 'two' } };
+  const ui = providerSaveHarness(fixture);
+  assert.equal(ui.usages(fixture).classifier, true, 'the first stage counts as a use before the confirm');
+  await ui.remove();
+  assert.deepEqual((ui.h.writes[0] as unknown as Record<string, unknown>).autoModeClassifier, { provider: 'q', model: 'one', effort: 'high', stage1: 'native' });
+});
+
+test('removing the classifier\'s main provider keeps a first stage on another provider', async () => {
+  const fixture = saveFixture() as SavedConfig & { autoModeClassifier?: unknown };
+  fixture.providers.q = { type: 'openai-compatible', models: [{ id: 'one' }] };
+  fixture.autoModeClassifier = { provider: 'p', model: 'one', effort: 'high', stage1: { provider: 'q', model: 'one' } };
+  const ui = providerSaveHarness(fixture); await ui.remove();
+  assert.deepEqual((ui.h.writes[0] as unknown as Record<string, unknown>).autoModeClassifier, { stage1: { provider: 'q', model: 'one' } });
 });
 
 test('what a removal would also clean up is counted before the confirm', () => {
