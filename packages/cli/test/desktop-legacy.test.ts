@@ -15,7 +15,8 @@ import { removeClientIntegrations } from "../src/integrations.ts";
 import { plistPath, renderPlist } from "../src/launchd.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-legacy-"));
+  // Real path: macOS's TMPDIR is under /var, a link to /private/var, and the recorded home is resolved.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cr-desktop-legacy-")));
   const before = { ...process.env };
   const home = path.join(root, ".clauderipple");
   const other = path.join(root, "other");
