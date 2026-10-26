@@ -42,7 +42,7 @@ import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
-import { resolve } from "./routing.ts";
+import { declaredBy, resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
 import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
@@ -497,14 +497,12 @@ export function effortLevels(cfg: Config): { providers: Record<string, { default
 /** One routed model's ladder, from the provider that declares it — what the picker's effort menu
  * should offer for it. Undefined when no provider declares the id: the menu is then left alone. */
 export function effortLevelsForModel(cfg: Config, modelId: string): string[] | undefined {
-  const catalog = effortLevels(cfg).providers;
-  for (const [name, provider] of Object.entries(cfg.providers)) {
-    if (provider.type === "anthropic") continue;
-    const own = catalog[name];
-    if (own?.models?.[modelId]) return own.models[modelId];
-    if (own && provider.models?.some((model) => model.id === modelId)) return own.default;
-  }
-  return undefined;
+  const base = modelId.split("@")[0]!;
+  const target = resolve(base, {}, cfg) ?? resolve(cfg.aliases[base] ?? base, {}, cfg);
+  if (!target) return undefined;
+  const own = effortLevels(cfg).providers[target.provider];
+  const id = cfg.providers[target.provider]?.models?.find(m => m.id === target.model || m.id.replace(/-\d{8}$/, "") === target.model.replace(/-\d{8}$/, ""))?.id ?? target.model;
+  return own?.models?.[id] ?? own?.default;
 }
 
 // Only for when Anthropic's own list cannot be had (no sign-in yet, offline): the live list is
@@ -785,7 +783,7 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
       ...(Object.keys(modelsOut).length ? { models: modelsOut } : {}),
     };
   }));
-  const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
+  const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: declaredBy(m.id, cfg).length > 1 ? `${provider}:${m.id}` : m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
   const zen = Object.values(cfg.providers).find(p => {
     if (!p.models?.some(m => isJudgeOnlyModel(m.id))) return false;
     if ("preset" in p && p.preset === "opencode-zen") return true;
@@ -1873,6 +1871,7 @@ async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string
       model, provider: resolved?.provider ?? null,
       contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null,
     };
+    if (!resolved && declaredBy(base, cfg).length > 1) return;
     const value = route?.contextWindow ?? live ?? fallback;
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
     windows[id] = Math.floor(value);
@@ -1880,8 +1879,11 @@ async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string
   };
   for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow, true);
   for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
-  for (const provider of Object.values(cfg.providers)) {
-    for (const model of ("models" in provider && provider.models) || []) put(model.id, model.contextWindow);
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    for (const model of ("models" in provider && provider.models) || []) {
+      put(model.id, model.contextWindow);
+      if (declaredBy(model.id, cfg).length > 1) put(`${name}:${model.id}`, model.contextWindow);
+    }
   }
   for (const id of Object.keys(cfg.routes)) put(id);
   for (const id of Object.keys(cfg.aliases)) put(id);

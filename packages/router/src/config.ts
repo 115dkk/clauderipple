@@ -307,7 +307,8 @@ function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-
  */
 export function providerFor(provider: Provider, model: string | undefined): Provider {
   if (!model || !("models" in provider) || !provider.models) return provider;
-  const entry = provider.models.find((m) => m.id === model);
+  const entry = provider.models.find((m) => m.id === model)
+    ?? provider.models.find((m) => m.id.replace(/-\d{8}$/, "") === model.replace(/-\d{8}$/, ""));
   if (!entry || (entry.wire === undefined && entry.url === undefined && entry.authHeader === undefined)) return provider;
 
   const url = entry.url ?? ("url" in provider ? provider.url : undefined);

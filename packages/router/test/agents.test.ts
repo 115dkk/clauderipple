@@ -181,15 +181,41 @@ test("a file marked in its description, as before 2026-10-24, is still ours: ado
   assert.equal(fs.existsSync(file), false, "uninstall removes the old form too");
 });
 
-test("(d) a model two providers declare generates nothing", () => {
-  const dir = tmp();
+test("(d) duplicate declarations keep the first worker and add a qualified worker per provider", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const manifest = path.join(dir, "generated-agents.json");
-  syncAgentFiles(cfgWith({ a: p(["shared-model"]), b: p(["shared-model"]) }), dir, undefined, { manifestPath: manifest });
+  const a: Provider = { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "shared-model" }, { id: "single-model" }], caps: { effortLevels: ["high"] } };
+  syncAgentFiles(cfgWith({ a }), dir, undefined, { manifestPath: manifest });
+  const single = fs.readFileSync(path.join(dir, "single-model.md"));
+  const before = fs.statSync(path.join(dir, "single-model.md")).mtimeMs;
+  const cfg = cfgWith({ a, b: p(["shared-model"]) });
+  syncAgentFiles(cfg, dir, undefined, { manifestPath: manifest });
 
-  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith(".md")), [], "no file generated");
-  // Nothing was ever owned, so there is nothing to record; an empty manifest is not written.
-  const owned = fs.existsSync(manifest) ? (JSON.parse(fs.readFileSync(manifest, "utf8")) as { agents: string[] }).agents : [];
-  assert.deepEqual(owned, []);
+  assert.match(fs.readFileSync(path.join(dir, "shared-model.md"), "utf8"), /\nmodel: a:shared-model@high\n/);
+  assert.match(fs.readFileSync(path.join(dir, "shared-model-b.md"), "utf8"), /\nmodel: b:shared-model\n/);
+  assert.deepEqual(fs.readFileSync(path.join(dir, "single-model.md")), single, "single model stays byte-identical");
+  assert.equal(fs.statSync(path.join(dir, "single-model.md")).mtimeMs, before, "single model is not rewritten");
+  assert.deepEqual(JSON.parse(fs.readFileSync(manifest, "utf8")).agents, ["shared-model", "shared-model-b", "single-model"]);
+  assert.deepEqual(generatedAgents(cfg, dir, manifest), [
+    { name: "shared-model", model: "shared-model", provider: "a" },
+    { name: "shared-model-b", model: "shared-model", provider: "b" },
+    { name: "single-model", model: "single-model", provider: "a" },
+  ]);
+  assert.deepEqual(agentAliases(dir), { "shared-model": "a:shared-model", "shared-model-b": "b:shared-model", "single-model": "single-model" });
+});
+
+test("duplicate workers keep manual-file and sanitised-name collision priority", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, "manifest.json");
+  const hand = "---\nname: shared-model-b\nmodel: personal\n---\nhand body\n";
+  fs.writeFileSync(path.join(dir, "shared-model-b.md"), hand);
+  const warnings: string[] = [];
+  const cfg = cfgWith({ a: p(["shared-model", "shared-model-b"]), b: p(["shared-model"]) });
+  syncAgentFiles(cfg, dir, { warn: s => warnings.push(s) }, { manifestPath: manifest });
+  assert.equal(fs.readFileSync(path.join(dir, "shared-model-b.md"), "utf8"), hand);
+  assert.match(fs.readFileSync(path.join(dir, "shared-model.md"), "utf8"), /\nmodel: a:shared-model\n/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(manifest, "utf8")).agents, ["shared-model"]);
+  assert.equal(warnings.length, 1, "a duplicate suffix collision is warned, not overwritten");
 });
 
 test("(e) agentAliases drops @effort, and an explicit alias wins over the derived one", () => {

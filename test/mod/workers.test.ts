@@ -416,6 +416,41 @@ test('quota/off never chooses the blocked provider: the ladder moves up, then no
   assert.equal(pick(pinnedModel).target, undefined)
 })
 
+test('duplicate Gemini workers keep their own provider and skip only the exhausted source', async () => {
+  const { ladderOptionsFrom, candidateUsable } = await import('../../packages/mod/hooks/workers.ts')
+  const id = 'gemini-4-argon'
+  const providers = { 'google-gemini': { usable: false, reason: 'quota_exhausted' }, 'opencode-go': { usable: true } }
+  const settings = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { standard: [
+    { target: { agent: id }, effort: 'high' }, { target: { agent: id + '-opencode-go' }, effort: 'high' },
+  ] } } } })
+  const workers: WorkerCandidate[] = [
+    { target: { agent: id }, model: 'google-gemini:' + id, provider: 'google-gemini' },
+    { target: { agent: id + '-opencode-go' }, model: 'opencode-go:' + id, provider: 'opencode-go' },
+  ]
+  const result = ladderPick(verdict, settings.rules.general, settings, workers, true, 'en', [], providers)
+  assert.deepEqual(result.target, { agent: id + '-opencode-go' })
+  assert.equal(result.position, 2)
+  assert.equal(result.skipped?.length, 1)
+  const out = { 'google-gemini': { usable: true, models: { [id]: { reason: 'quota_exhausted' } } }, 'opencode-go': { usable: true } }
+  assert.equal(candidateUsable(workers[0]!, settings, true, out), false)
+  assert.equal(candidateUsable(workers[1]!, settings, true, out), true)
+  assert.equal(spawnModel(result.target!, 'high', 'opencode-go:' + id + '@medium'), 'opencode-go:' + id + '@high')
+  const catalogue = routerModelOptions({ providers: { 'google-gemini': { models: [{ id }] }, 'opencode-go': { models: [{ id }] } } })
+  assert.deepEqual(catalogue.map(m => [m.value, m.provider]), [['google-gemini:' + id, 'google-gemini'], ['opencode-go:' + id, 'opencode-go']])
+  const options = ladderOptionsFrom({ providers: Object.entries(providers).map(([name, state]) => ({ name, ...state })), agents: workers.map(w => ({ name: w.target.agent, model: id, provider: w.provider, efforts: ['high'] })) }, 0)
+  assert.equal(options.choices.find(c => c.target.agent === id + '-opencode-go')?.provider, 'opencode-go')
+  assert.equal(options.choices.some(c => c.target.agent === id), false)
+  assert.deepEqual(readMarker('[[ripple: opencode-go:gemini-4-argon@high]]'), { name: 'opencode-go:gemini-4-argon', level: 'high' })
+  const sources = workers.map(w => ({ model: w.model, provider: w.provider }))
+  for (const source of sources) {
+    const rivals = rivalProviders(source.model, sources)
+    assert.deepEqual(rivals, ['google-gemini', 'opencode-go'])
+    assert.equal(userNamed(source.model, [{ role: 'user', text: '오픈코드로 해' }], [], { ...source, providers: rivals }), false)
+    assert.equal(userNamed(source.model, [{ role: 'user', text: '아르곤을 오픈코드로 돌려' }], [], { ...source, providers: rivals }), source.provider === 'opencode-go')
+  }
+  assert.deepEqual(delegationPin({ role: 'user', text: '앞으로 아르곤을 오픈코드로 위임 고정' }, sources, sources), { model: 'opencode-go:' + id, provider: 'opencode-go' })
+})
+
 test('spawn suffix and takeover retain named-worker and fork boundaries', () => {
   assert.equal(spawnModel({ agent: 'sol' }, 'max', 'gpt-6.1-sol@medium'), 'gpt-6.1-sol@max')
   assert.equal(spawnModel({ agent: 'general-purpose', model: 'sonnet' }, 'high'), 'sonnet')

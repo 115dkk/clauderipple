@@ -1,6 +1,6 @@
 import type { Billing, Domain, Effort, LadderChoice, LadderOptions, ModelScore, ProviderAvailability, RouterModel, Rule, Rung, Settings, TierTarget, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { CLAUDE_WORKERS, EFFORTS, candidateKey, isAllowed } from './settings'
-import { MARKER } from './worker'
+import { MARKER, providerModelId } from './worker'
 import { t } from './i18n'
 import type { Lang } from './i18n'
 import { claudeChoices, rungAbove, rungOf, tickedChoices } from './ladder'
@@ -132,7 +132,9 @@ export function routerModelOptions(config: unknown): RouterModel[] {
       if (typeof id === 'string' && id) out.push({ value: id, label: `${id} · ${provider}`, provider, ...(typeof name === 'string' && name.trim() ? { name } : {}) })
     }
   }
-  return out
+  const counts = new Map<string, number>()
+  for (const model of out) counts.set(model.value, (counts.get(model.value) ?? 0) + 1)
+  return out.map(model => counts.get(model.value)! > 1 ? { ...model, value: `${model.provider}:${model.value}` } : model)
 }
 export function zenJev(config: unknown): { authorization?: string; model: string } {
   const provider = record(record(record(config).providers)['opencode-zen'])
@@ -221,7 +223,7 @@ export function liveProviders(providers: NonNullable<LadderOptions['providers']>
 }
 /** A model out while its provider answers others (a spent quota group), by its id without `@effort`. */
 function modelOut(candidate: WorkerCandidate, providers: NonNullable<LadderOptions['providers']>): boolean {
-  return !!providers[candidate.provider]?.models?.[baseModel(candidate.model)]
+  return !!providers[candidate.provider]?.models?.[providerModelId(candidate.model, candidate.provider)]
 }
 export function candidateUsable(candidate: WorkerCandidate, settings: Settings, chatgpt: boolean, providers: NonNullable<LadderOptions['providers']> = {}): boolean {
   const live = providers[candidate.provider]
@@ -229,7 +231,7 @@ export function candidateUsable(candidate: WorkerCandidate, settings: Settings, 
   return settings.providers[candidate.provider] !== false && (live ? live.usable : candidate.provider !== 'chatgpt' || chatgpt)
 }
 function unavailableReason(provider: string, providers: NonNullable<LadderOptions['providers']>, lang: Lang, model?: string): string {
-  const reason = model ? providers[provider]?.models?.[baseModel(model)]?.reason : providers[provider]?.reason
+  const reason = model ? providers[provider]?.models?.[providerModelId(model, provider)]?.reason : providers[provider]?.reason
   if (!reason && provider === 'chatgpt') return t(lang, 'toasts.providerQuota')
   const labels: Record<string, string> = lang === 'ko'
     ? { insufficient_balance: '잔액 부족', billing_exhausted: '결제 한도 소진', quota_exhausted: '사용량 한도 소진' }

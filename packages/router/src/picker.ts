@@ -88,13 +88,11 @@ export function providerModelWindow(cfg: Config, model: string): number | undefi
   const live = chatgptModelWindow(cfg, model);
   if (live) return live;
   const base = model.split("@")[0]!;
-  const ids = new Set([base, cfg.aliases[base] ?? base]);
-  for (const provider of Object.values(cfg.providers)) {
-    for (const entry of ("models" in provider && provider.models) || []) {
-      if (ids.has(entry.id) && typeof entry.contextWindow === "number" && entry.contextWindow > 0) return entry.contextWindow;
-    }
-  }
-  return undefined;
+  const target = resolve(base, {}, cfg) ?? resolve(cfg.aliases[base] ?? base, {}, cfg);
+  if (!target) return undefined;
+  const undated = target.model.replace(/-\d{8}$/, "");
+  const entry = cfg.providers[target.provider]?.models?.find(m => m.id === target.model || m.id.replace(/-\d{8}$/, "") === undated);
+  return entry?.contextWindow;
 }
 
 export type PickerModelEntry = { id: string; name: string };

@@ -965,7 +965,7 @@ export class Proxy {
       // "the model vanished" (2026-09-20: an agent file named `deepseek` resolved, through a missing
       // alias, to a model no provider declared — thirty of them came back 404). A native `claude-*`
       // id is deliberately unrouted and must keep passing through (§5).
-      if (!resolved && isApiHost && isMessages && json && typeof model === "string" && !model.startsWith("claude-")) {
+      if (!resolved && isApiHost && isMessages && json && typeof model === "string") {
         const reason = unroutableReason(model, json, cfg);
         if (reason) {
           const payload = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: `ClaudeRipple: ${reason}` } });
