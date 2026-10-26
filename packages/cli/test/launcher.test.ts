@@ -64,9 +64,13 @@ for (const platform of ["darwin", "linux"] as const) {
     assert.equal(installLauncher({ ...opts, home: b }).ok, false);
     assert.equal(fs.readFileSync(file, "utf8"), legacy);
     assert.equal(installLauncher(opts).ok, true);
-    const alias = path.join(path.dirname(b), "alias");
-    fs.symlinkSync(a, alias, "dir");
-    assert.equal(installLauncher({ ...opts, home: alias }).ok, true);
+    // A linked home is the same installation where homes are POSIX paths, which `normalizeHome`
+    // resolves. On a Windows host the simulated homes are Windows paths, compared as text.
+    if (process.platform !== "win32") {
+      const alias = path.join(path.dirname(b), "alias");
+      fs.symlinkSync(a, alias, "dir");
+      assert.equal(installLauncher({ ...opts, home: alias }).ok, true);
+    }
     fs.writeFileSync(file, platform === "linux" ? "[Desktop Entry]\nX-ClaudeRipple-Launcher=1\nExec=other\n" : "#!/bin/sh\nexec other\n");
     const unknown = fs.readFileSync(file, "utf8");
     assert.equal(uninstallLauncher(opts).ok, false);
