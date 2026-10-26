@@ -1755,7 +1755,7 @@ export class Proxy {
     query: WebSearchQuery,
     settings: NonNullable<Config["webSearch"]>,
     record: { source?: string; target?: string; provider?: string; purpose?: RequestRecord["purpose"] },
-    finish: (status: string, bytes: number, note?: string, failed?: boolean) => void,
+    finish: (status: string, bytes: number, note?: string, failed?: boolean, extra?: { usage?: RequestUsage }) => void,
     markAttempted: () => void,
   ): Promise<boolean> {
     const configured = this.deps.config().providers[settings.provider];
@@ -1805,16 +1805,21 @@ export class Proxy {
 
     const model = typeof json.model === "string" ? json.model : "unknown";
     let blocks;
+    let usage: RequestUsage | undefined;
     try {
       markAttempted();
       const outcome = await backend.search(query);
       blocks = webSearchBlocks(query, outcome).blocks;
+      usage = outcome.usage;
     } catch (e) {
       this.deps.log.warn(`web search via ${settings.provider}: ${(e as Error).message}`);
       return false;
     }
 
-    record.target = `${settings.provider}/${settings.model}`;
+    // The row is the model that searched, not the provider that billed for it: `target` is the id
+    // the search ran on, and `purpose` keeps it out of that model's own turns on the model table
+    // (a provider-named target read as a model of its own, 2026-10-26).
+    record.target = settings.model;
     record.provider = settings.provider;
     record.purpose = "web-search";
     const wantStream = json.stream === true;
@@ -1823,7 +1828,7 @@ export class Proxy {
       ? { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" }
       : { "content-type": "application/json" };
     res.writeHead(200, headers).end(payload);
-    finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false);
+    finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false, usage ? { usage } : undefined);
     return true;
   }
 

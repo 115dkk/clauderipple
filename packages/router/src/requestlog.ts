@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
-import { UsageHistory, addConversations, emptyConversations, finishConversations, recordConversations, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
+import { UsageHistory, addConversations, emptyConversations, finishConversations, modelRowOf, recordConversations, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_CARRY = 64 * 1024;
@@ -73,6 +73,17 @@ function isRecord(value: unknown): value is RequestRecord {
     typeof r.target === "string" && typeof r.provider === "string" && typeof r.stream === "boolean";
 }
 
+/**
+ * A record as a reader should see it. A web search recorded before the flag existed names its
+ * model in `target` as `"<provider>/<model>"`; readers show it under the model id and with the
+ * flag, exactly like a record the current code writes. Everything else is returned untouched.
+ */
+function normalized(record: RequestRecord): RequestRecord {
+  const row = modelRowOf(record);
+  if (!row.purpose) return record;
+  return { ...record, purpose: "web-search", target: row.model };
+}
+
 /** Bounded request history, persisted as JSONL so a router restart preserves recent entries. */
 export class RequestLog {
   private readonly file: string;
@@ -131,7 +142,7 @@ export class RequestLog {
       if (filter.provider && record.provider !== filter.provider) continue;
       if (kind && !kind.includes(record.kind)) continue;
       if (filter.session && record.session !== filter.session) continue;
-      out.push(record);
+      out.push(normalized(record));
     }
     return out;
   }
@@ -142,7 +153,7 @@ export class RequestLog {
     const conversations = emptyConversations();
     const providerConversations = new Map<string, ReturnType<typeof emptyConversations>>();
     const providers = new Map<string, BucketTotals>();
-    const models = new Map<string, { totals: BucketTotals; provider: string; model: string }>();
+    const models = new Map<string, { totals: BucketTotals; provider: string; model: string; purpose?: "web-search" }>();
     for (const record of this.records) {
       const at = Date.parse(record.at);
       if (!Number.isFinite(at) || at < sinceMs) continue;
@@ -152,11 +163,13 @@ export class RequestLog {
       addConversations(perProvider, accounting);
       providerConversations.set(record.provider, perProvider);
       const provider = providers.get(record.provider) ?? providers.set(record.provider, emptyTotals()).get(record.provider)!;
-      const key = `${record.provider}\u0000${record.target}`;
-      const model = models.get(key) ?? models.set(key, { totals: emptyTotals(), provider: record.provider, model: record.target }).get(key)!;
+      // A web search is a row of its own: same rule as the persisted hourly history.
+      const row = modelRowOf(record);
+      const key = `${record.provider}\u0000${row.purpose ?? ""}\u0000${row.model}`;
+      const model = models.get(key) ?? models.set(key, { totals: emptyTotals(), provider: record.provider, model: row.model, ...(row.purpose ? { purpose: row.purpose } : {}) }).get(key)!;
       for (const bucket of [total, provider, model.totals]) addTotals(bucket, recordTotals(record));
     }
-    const modelsList = [...models.values()].map(({ totals, provider, model }) => ({ ...finishTotals(totals), provider, model }));
+    const modelsList = [...models.values()].map(({ totals, provider, model, purpose }) => ({ ...finishTotals(totals), provider, model, ...(purpose ? { purpose } : {}) }));
     sortByVolume(modelsList);
     return {
       total: { ...finishTotals(total), ...finishConversations(conversations) },

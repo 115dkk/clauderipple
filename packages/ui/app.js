@@ -5197,6 +5197,8 @@ function modelUsageRow(entry) {
   const total = totalInputOf(entry);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: entry.model, title: entry.model }),
+    // A WebSearch side request is counted apart from the model's own turns; the router marks it.
+    entry.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
     el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: providerLabel(entry.provider) }),
   ]);
   // The labels show only where a narrow window drops the header row.
@@ -5221,7 +5223,7 @@ function totalInputOf(usage) {
 function requestDetail(record) {
   const details = [
     [t("logs.detail.id"), record.id],
-    [t("logs.detail.kind"), record.kind],
+    [t("logs.detail.kind"), record.purpose === "web-search" ? `${record.kind} · ${t("logs.webSearch")}` : record.kind],
     [t("logs.detail.stop"), record.stopReason || t("logs.none")],
     [t("logs.detail.uncached"), record.usage ? formatNumber(record.usage.input) : t("logs.none")],
     [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
@@ -5239,6 +5241,7 @@ function requestRow(record) {
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
+    record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
     el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: providerLabel(record.provider) }),
   ].filter(Boolean));
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,

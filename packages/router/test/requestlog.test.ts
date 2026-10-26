@@ -92,6 +92,40 @@ test("RequestLog computes success, usage, cache and latency summaries", () => {
   }
 });
 
+test("a web search is its own model row, and a record from before the flag reads the same way", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-websearch-"));
+  try {
+    const log = new RequestLog(path.join(dir, "requests.jsonl"));
+    // The router's shape now: the flag, the model id the search ran on, and the tokens it read.
+    log.add(record("search", { at: "2026-10-26T10:00:00.000Z", provider: "chatgpt", target: "gpt-6-luna", purpose: "web-search", note: "web search via chatgpt", usage: { input: 60, cached: 40, output: 10 } }));
+    // The old shape: no flag, "<provider>/<model>" in target, and no tokens at all.
+    log.add(record("old-search", { at: "2026-10-26T10:01:00.000Z", provider: "chatgpt", target: "chatgpt/gpt-6-luna", note: "web search via chatgpt" }));
+    // The same model's own turn and a vendor-namespaced model id under a provider of that name.
+    log.add(record("turn", { at: "2026-10-26T10:02:00.000Z", provider: "chatgpt", target: "gpt-6-luna", usage: { input: 1000, cached: 0, output: 50 } }));
+    log.add(record("vendor", { at: "2026-10-26T10:03:00.000Z", provider: "zai-org", target: "zai-org/glm-5.3-flash", usage: { input: 10, cached: 0, output: 1 } }));
+
+    // Readers see the old search as the current code writes one.
+    const old = log.list(10).find((entry) => entry.id === "old-search")!;
+    assert.equal(old.purpose, "web-search");
+    assert.equal(old.target, "gpt-6-luna");
+
+    const rows = log.summary(Date.parse("2026-10-26T00:00:00.000Z")).models;
+    const rowOf = (model: string, purpose?: "web-search") => rows.find((entry) => entry.model === model && entry.purpose === purpose);
+    assert.deepEqual(
+      { count: rowOf("gpt-6-luna", "web-search")?.count, input: rowOf("gpt-6-luna", "web-search")?.input, cached: rowOf("gpt-6-luna", "web-search")?.cached, output: rowOf("gpt-6-luna", "web-search")?.output },
+      { count: 2, input: 60, cached: 40, output: 10 },
+    );
+    // The model's own turn stays a row of its own.
+    assert.equal(rowOf("gpt-6-luna")?.count, 1);
+    assert.equal(rowOf("gpt-6-luna")?.input, 1000);
+    // A vendor-namespaced id is a model row, not a search row.
+    assert.equal(rowOf("zai-org/glm-5.3-flash")?.count, 1);
+    assert.equal(rowOf("zai-org/glm-5.3-flash")?.purpose, undefined);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a resent request is counted, but neither as a success nor as a failure", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-request-resent-"));
   try {

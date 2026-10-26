@@ -17,7 +17,7 @@ export type SummaryBucket = {
   avgMs: number;
 };
 
-export type ModelUsageBucket = SummaryBucket & { provider: string; model: string };
+export type ModelUsageBucket = SummaryBucket & { provider: string; model: string; purpose?: "web-search" };
 
 /** The part of a bucket that is summed across records and hours; `ms` is the sum of durations. */
 export type BucketTotals = {
@@ -55,8 +55,43 @@ export type UsageSummary = {
   earliest: string | null;
 };
 
-/** One persisted line: a partial bucket for (hour, provider, model). Lines are additive. */
-type HourBucket = BucketTotals & { h: number; p: string; m: string; conversations?: ConversationTotals };
+/**
+ * One persisted line: a partial bucket for (hour, provider, model). Lines are additive.
+ * `purpose` splits a model's web searches out of its own turns; lines from before it existed keep
+ * the old shape (see `modelRowOf`).
+ */
+type HourBucket = BucketTotals & { h: number; p: string; m: string; purpose?: "web-search"; conversations?: ConversationTotals };
+
+/** What the dashboard's model table reads a record as. */
+export type ModelRow = { model: string; purpose?: "web-search" };
+
+function accounted(usage: { input: number; cached: number; cacheWrite?: number; output: number } | undefined): boolean {
+  return usage !== undefined && usage.input + usage.cached + (usage.cacheWrite ?? 0) + usage.output > 0;
+}
+
+/**
+ * The row a request belongs to on the model table.
+ *
+ * A `WebSearch` side request is not a turn of the model: it is counted as its own row, named by the
+ * model id the router actually searched with. Before 2026-10-26 the search path left that id as
+ * `"<provider>/<model>"` in `target` and recorded no tokens at all, so the same rule recognises both
+ * shapes: a record with the flag, and one whose target is exactly its provider's name, a slash, and
+ * the rest — with nothing accounted. A real routed turn nearly always reports tokens, and a
+ * vendor-namespaced model id (`zai-org/glm-5.3-flash`) only looks like this when the provider is
+ * named after its own vendor and it read no tokens at all. The dashboard must not split such a row.
+ */
+export function modelRowOf(record: {
+  provider: string;
+  target: string;
+  purpose?: RequestRecord["purpose"];
+  usage?: { input: number; cached: number; cacheWrite?: number; output: number };
+}): ModelRow {
+  const prefix = `${record.provider}/`;
+  const rest = record.target.startsWith(prefix) && record.target.length > prefix.length ? record.target.slice(prefix.length) : null;
+  if (record.purpose === "web-search") return { model: rest ?? record.target, purpose: "web-search" };
+  if (rest !== null && !accounted(record.usage)) return { model: rest, purpose: "web-search" };
+  return { model: record.target };
+}
 
 export function emptyConversations(): ConversationTotals {
   return { turns: Object.create(null) as Record<string, ConversationTurn>, ungroupedTokens: 0, ungroupedRequests: 0 };
@@ -150,12 +185,12 @@ export function finishTotals(totals: BucketTotals): SummaryBucket {
   };
 }
 
-function bucketKey(h: number, provider: string, model: string): string {
-  return `${h}\u0000${provider}\u0000${model}`;
+function bucketKey(h: number, provider: string, model: string, purpose?: "web-search"): string {
+  return `${h}\u0000${provider}\u0000${purpose ?? ""}\u0000${model}`;
 }
 
-function modelKey(provider: string, model: string): string {
-  return `${provider}\u0000${model}`;
+function modelKey(provider: string, model: string, purpose?: "web-search"): string {
+  return `${provider}\u0000${purpose ?? ""}\u0000${model}`;
 }
 
 /** Models with the most tokens read first (input + cached + cacheWrite), then the busiest. */
@@ -180,6 +215,7 @@ function isHourBucket(value: unknown): value is HourBucket {
   const b = value as Partial<HourBucket>;
   return typeof b.h === "number" && Number.isFinite(b.h) && Number.isInteger(b.h) &&
     typeof b.p === "string" && typeof b.m === "string" &&
+    (b.purpose === undefined || b.purpose === "web-search") &&
     (b.conversations === undefined || isConversationTotals(b.conversations)) &&
     ["count", "ok", "failed", "input", "cached", "cacheWrite", "output", "ms"].every((key) => {
       const n = (b as unknown as Record<string, unknown>)[key];
@@ -192,6 +228,7 @@ function toLine(bucket: HourBucket): string {
     h: bucket.h,
     p: bucket.p,
     m: bucket.m,
+    ...(bucket.purpose ? { purpose: bucket.purpose } : {}),
     count: bucket.count,
     ok: bucket.ok,
     failed: bucket.failed,
@@ -246,7 +283,13 @@ export class UsageHistory {
     const hour = hourOf(record);
     if (hour === null) return;
     this.observe(hour);
-    const bucket: HourBucket = { h: hour, p: record.provider, m: record.target, ...recordTotals(record), conversations: recordConversations(record) };
+    // The bucket carries the normalized row, so a web search is written with its own model id and
+    // flag rather than the old "<provider>/<model>" shape.
+    const row = modelRowOf(record);
+    const bucket: HourBucket = {
+      h: hour, p: record.provider, m: row.model, ...(row.purpose ? { purpose: row.purpose } : {}),
+      ...recordTotals(record), conversations: recordConversations(record),
+    };
     if (this.openHour !== null && hour < this.openHour) {
       this.append([bucket]);
       this.merge(this.buckets, bucket);
@@ -266,7 +309,7 @@ export class UsageHistory {
     const providerConversations = new Map<string, ConversationTotals>();
     const total = emptyTotals();
     const providers = new Map<string, BucketTotals>();
-    const models = new Map<string, { totals: BucketTotals; provider: string; model: string }>();
+    const models = new Map<string, { totals: BucketTotals; provider: string; model: string; purpose?: "web-search" }>();
     for (const bucket of [...this.buckets.values(), ...this.open.values()]) {
       if (bucket.h < fromHour || bucket.h * HOUR_MS >= toMs) continue;
       addTotals(total, bucket);
@@ -277,11 +320,15 @@ export class UsageHistory {
       providerConversations.set(bucket.p, perProvider);
       const provider = providers.get(bucket.p) ?? providers.set(bucket.p, emptyTotals()).get(bucket.p)!;
       addTotals(provider, bucket);
-      const key = modelKey(bucket.p, bucket.m);
-      const model = models.get(key) ?? (models.set(key, { totals: emptyTotals(), provider: bucket.p, model: bucket.m }).get(key)!);
+      const row = modelRowOf({
+        provider: bucket.p, target: bucket.m, ...(bucket.purpose ? { purpose: bucket.purpose } : {}),
+        usage: { input: bucket.input, cached: bucket.cached, cacheWrite: bucket.cacheWrite, output: bucket.output },
+      });
+      const key = modelKey(bucket.p, row.model, row.purpose);
+      const model = models.get(key) ?? (models.set(key, { totals: emptyTotals(), provider: bucket.p, model: row.model, ...(row.purpose ? { purpose: row.purpose } : {}) }).get(key)!);
       addTotals(model.totals, bucket);
     }
-    const modelList = [...models.values()].map(({ totals, provider, model }) => ({ ...finishTotals(totals), provider, model }));
+    const modelList = [...models.values()].map(({ totals, provider, model, purpose }) => ({ ...finishTotals(totals), provider, model, ...(purpose ? { purpose } : {}) }));
     sortByVolume(modelList);
     return {
       total: { ...finishTotals(total), ...finishConversations(conversations) },
@@ -296,7 +343,7 @@ export class UsageHistory {
   }
 
   private merge(target: Map<string, HourBucket>, bucket: HourBucket): void {
-    const key = bucketKey(bucket.h, bucket.p, bucket.m);
+    const key = bucketKey(bucket.h, bucket.p, bucket.m, bucket.purpose);
     const existing = target.get(key);
     if (existing) {
       const conversations = conversationsOf(existing);
