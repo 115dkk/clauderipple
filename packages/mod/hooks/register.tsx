@@ -1217,7 +1217,8 @@ async function runCompact($: EngineInterface, note = ''): Promise<void> {
   const wait: Tidy = { text, note, turnId: null }
   tidy = wait
   try {
-    const sent = await $.prompt.submit({ text })
+    // In the person's words, not under "the ripple plugin sent a message": it is their Compact press.
+    const sent = await $.prompt.submit({ text, asUser: true })
     if ('drop' in sent) throw new Error(sent.drop)
   } catch (error) {
     // A press made while this one was in flight has taken the wait over: its outcome is not this one's.
