@@ -8,6 +8,7 @@ import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promi
 import { PermissionQueue } from "../src/permissions.ts";
 import { MessageReceipts } from "../src/receipts.ts";
 import { reduce } from "../web/timeline.ts";
+import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
@@ -15,6 +16,7 @@ import { BridgeClient, CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
+import { claudeAppData } from "./app-data.ts";
 
 const router = {
   status: async () => ({ ok: true, proxyEnv: { HTTPS_PROXY: "http://127.0.0.1:1" } }),
@@ -22,7 +24,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}) {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}, sdkId = "sdk-1") {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -35,7 +37,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
         let turn = 0;
         for await (const user of params.prompt) {
           users.push(user);
-          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: "sdk-1" };
+          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: sdkId };
           const id = `m${turn}`;
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id } } };
           if (script.thinking) {
@@ -109,7 +111,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -118,7 +120,7 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   const fake = scriptedQuery(script);
   const events: { session: string; event: SessionEvent }[] = [];
   const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, ...extra,
-    onEvent: (session, event) => events.push({ session, event }), onSessions: () => {},
+    onEvent: (session, event) => events.push({ session, event }), onSessions: extra.onSessions ?? (() => {}),
   });
   const instances = [sessions];
   t.after(async () => {
@@ -132,6 +134,97 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
     sessions.create({ clientMsgId, cwd, model, effort, text: "ping" });
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
+
+test("an async SDK launch stays active until its own terminal notification, with stopped separate from failure", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "assistant", message: { id: "launch", model: "sol", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"async-agent"}' }] } });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "running");
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>async-agent</task-id><tool-use-id>agent</tool-use-id><status>killed</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.taskHistory?.[0]?.state === "stopped");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 0);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+});
+
+test("SDK Stop inventory exposes pending PR/CI subscriptions, monitors and scheduled wakeups in the session snapshot", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const hooks = query.options.hooks as { Stop: { hooks: ((input: Record<string, unknown>) => Promise<unknown>)[] }[] };
+  await hooks.Stop[0]!.hooks[0]!({ background_tasks: [{ id: "ci", type: "pr_ci_subscription", status: "pending", description: "PR #3 CI subscription" }, { id: "monitor", type: "monitor", status: "running", description: "Build watch" }], session_crons: [{ id: "scheduled", schedule: "0 9 * * *", prompt: "Check CI", recurring: true }] });
+  const summary = f.sessions.summaryOf(id)!;
+  assert.equal(summary.backgroundKnown, true);
+  assert.equal(summary.tasks, 3);
+  assert.equal(summary.taskList?.find(task => task.id === "ci")?.kind, "subscription");
+  assert.equal(summary.taskList?.find(task => task.id === "scheduled")?.schedule, "0 9 * * *");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 3, "a main result does not discard waiting subscriptions");
+  assert.ok(f.sessions.log(id).readAfter(0).events.some(event => event.kind === "background"));
+});
+
+test("SDK task snapshots normalize confirmed tools, survive turn completion and rebuild after restart", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const tool = (call: string, name: string, input: Record<string, unknown>, text: string) => {
+    query.emit({ type: "assistant", message: { id: call, model: "sol", content: [{ type: "tool_use", id: call, name, input }] } });
+    query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: call, content: text }] } });
+  };
+  tool("create", "TaskCreate", { subject: "First\nexact subject" }, "Task #1 created successfully: First");
+  tool("start", "TaskUpdate", { taskId: "1", status: "in_progress" }, "Updated task #1 status");
+  await waitFor(() => f.sessions.summaryOf(id)?.plan?.[0]?.status === "in_progress");
+  tool("done", "TaskUpdate", { taskId: "1", status: "completed" }, "Updated task #1 status");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const expected = [{ id: "1", text: "First\nexact subject", status: "completed" }];
+  assert.deepEqual(f.sessions.summaryOf(id)?.plan, expected);
+  f.sessions.stop(id); await nextTick();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  assert.deepEqual(recovered.summaryOf(id)?.plan, expected);
+});
+
+test("nested SDK workers publish launch, progress and terminal status only in their parent's log", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  const launch = (parent: string | null, worker: string) => query.emit({ type: "assistant", parent_tool_use_id: parent, message: { id: `launch-${worker}`, model: "sol", content: [{ type: "tool_use", id: worker, name: "Agent", input: { description: worker, prompt: `${worker} exact instruction\nsecond line` } }] } });
+  launch(null, "parent"); launch("parent", "child"); launch("child", "grandchild");
+  query.emit({ type: "assistant", parent_tool_use_id: "grandchild", message: { id: "answer", model: "sol", content: [{ type: "text", text: "Exact answer" }] } });
+  const finish = (parent: string | null, tool: string, failed = false) => query.emit({ type: "user", parent_tool_use_id: parent, message: { content: [{ type: "tool_result", tool_use_id: tool, is_error: failed, content: "result" }] } });
+  finish("child", "grandchild", true); finish("parent", "child"); finish(null, "parent");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const main = reduce(f.sessions.log(id).readAfter(0, 1 << 20).events);
+  const parent = reduce(f.sessions.subLog(id, "sub-parent")!.readAfter(0, 1 << 20).events);
+  const child = reduce(f.sessions.subLog(id, "sub-child")!.readAfter(0, 1 << 20).events);
+  const workerStates = (view: ReturnType<typeof reduce>) => view.items.filter(i => i.type === "subagent").map(i => [i.sub, i.status, i.model, i.steps]);
+  assert.deepEqual(workerStates(main), [["sub-parent", "done", "sol", 1]]);
+  assert.deepEqual(workerStates(parent), [["sub-child", "done", "sol", 1]]);
+  assert.deepEqual(workerStates(child), [["sub-grandchild", "failed", "sol", 1]]);
+  assert.equal(parent.items.find(i => i.type === "assistant")?.tools[0]?.input, JSON.stringify({ description: "child", prompt: "child exact instruction\nsecond line" }, null, 2));
+  assert.equal(f.sessions.subLog(id, "sub-grandchild")!.readAfter(0).events.find(e => e.kind === "assistant")?.text, "Exact answer");
+  const exact = "긴 중첩 지시문\n".repeat(INLINE_CAP);
+  const log = f.sessions.subLog(id, "sub-parent")!;
+  log.append({ kind: "assistant", msg: "large", model: "sol", text: "", tools: [{ id: "large-child", name: "Agent", summary: "large", input: JSON.stringify({ prompt: exact }) }] });
+  const large = log.tail().events.find(e => e.kind === "assistant" && e.msg === "large");
+  const input = large?.kind === "assistant" ? large.tools[0]?.input : undefined;
+  assert.ok(input && typeof input !== "string");
+  assert.equal(JSON.parse(f.sessions.blob(id, input.blob)!).prompt, exact, "nested launch blobs are available through the same session-scoped transport");
+});
 
 test("a CLI without a login is told what to do, and the raw text stays in the host's log", async t => {
   for (const how of ["result", "throw"] as const) {
@@ -244,7 +337,8 @@ test("an effort restart carries every accepted input, whether still in the inbox
     const receipts = MessageReceipts.open(path.join(f.dir, "receipts.json"));
     for (const key of ["second", "third"]) {
       assert.equal(receipts.status(`send:${id}:${key}`), "completed");
-      assert.equal(await f.sessions.send(id, key, "resend"), id);
+      // A retry repeats the same words: an id names one message.
+      assert.equal(await f.sessions.send(id, key, key === "second" ? "second input" : "third input"), id);
     }
     await nextTick();
     assert.equal(second.users.length, 2, "completed receipts cover the carried input, not a dropped message");
@@ -300,6 +394,45 @@ test("steer keeps the running query; interrupt closes it and withdraws unstarted
   await waitFor(() => f.fake.users.length === 2);
   assert.equal(f.fake.users[1]!.message.content, 'replace');
   assert.equal(f.fake.options.length, 2);
+});
+
+for (const controlFails of [false, true]) test(`sends during interrupt are rejected without receipts and retry once after control ${controlFails ? "failure" : "success"}`, async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await nextTick();
+  const first = boundary.queries[0]!;
+  assert.deepEqual(first.users.map(user => user.message.content), ["ping"]);
+  const interrupted = f.sessions.interrupt(id);
+  const outcome = controlFails ? assert.rejects(interrupted, /control failed/) : interrupted;
+  const before = f.sessions.log(id).lastSeq;
+  for (let retry = 0; retry < 2; retry++) {
+    assert.throws(() => f.sessions.send(id, "during-stop", "must not disappear"), /interrupt/i);
+    assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-stop`), null);
+    assert.equal(f.sessions.log(id).lastSeq, before, "rejection must not record a user event or poison the seen index");
+  }
+  assert.equal(await f.sessions.send(id, "create-1", "ping"), id, "completed retries remain idempotent during Stop");
+  await nextTick();
+  assert.deepEqual(first.users.map(user => user.message.content), ["ping"]);
+  if (controlFails) first.interruptReply.reject(new Error("control failed"));
+  else first.interruptReply.resolve();
+  await outcome;
+  assert.equal(first.closed, true);
+  assert.equal(f.sessions.summaryOf(id)?.state, "idle");
+  const sends = await Promise.all([
+    f.sessions.send(id, "during-stop", "must not disappear"),
+    f.sessions.send(id, "during-stop", "must not disappear"),
+  ]);
+  assert.deepEqual(sends, [id, id]);
+  await nextTick();
+  assert.equal(boundary.queries.length, 2);
+  assert.deepEqual(boundary.queries[1]!.users.map(user => user.message.content), ["must not disappear"]);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-stop`), "completed");
+  assert.equal(f.sessions.log(id).tail().events.filter(event => event.kind === "user" && event.clientMsgId === "during-stop").length, 1);
+  f.sessions.shutdown();
+  const { recovered, fake } = reopen(t, f);
+  assert.equal(await recovered.send(id, "during-stop", "must not disappear"), id);
+  assert.equal(fake.options.length, 0, "the accepted retry also deduplicates after restart");
 });
 
 test("phone images reach SDK blocks and files are written under cwd", async t => {
@@ -373,18 +506,35 @@ test("SDK main and worker file deliveries share the session boundary and never d
   assert.ok(main.some(event => event.kind === "result" && event.ok));
 });
 
-test("clear and new create an empty fresh session with identical settings", async t => {
+test("clear and new preserve the title in a fresh empty session, retries and restart snapshots", async t => {
   const f = fixture(t);
   const id = await f.sessions.create({ clientMsgId: 'original', cwd: f.cwd, model: 'routed', effort: 'high', permissionMode: 'plan', text: 'ping' });
   await waitFor(() => f.sessions.summaryOf(id)?.state === 'idle');
+  const freshIds: string[] = [];
   for (const command of ['/clear', '/new']) {
     const fresh = await f.sessions.send(id, command, command);
+    freshIds.push(fresh);
     assert.notEqual(fresh, id);
     const s = f.sessions.summaryOf(fresh)!;
     assert.deepEqual([s.cwd, s.model, s.effort, s.permissionMode, s.state], [f.cwd, 'routed', 'high', 'plan', 'idle']);
+    assert.equal(s.title, 'ping');
+    assert.equal(s.attention, null);
     assert.equal(f.sessions.log(fresh).before(Number.MAX_SAFE_INTEGER).events.some(e => e.kind === 'user'), false);
     assert.equal(await f.sessions.send(id, command, command), fresh);
   }
+  assert.equal(f.fake.options.length, 1, 'clear creates metadata, not a new running query');
+  const snapshot = f.sessions.list();
+  f.sessions.shutdown();
+  const { recovered, fake } = reopen(t, f);
+  recovered.recover();
+  assert.deepEqual(recovered.list(), snapshot, 'reconnection after restart retains titles and fresh ids');
+  const fresh = await recovered.send(id, '/clear', '/clear');
+  assert.equal(fresh, freshIds[0]);
+  assert.equal(recovered.list().length, 3, 'a replayed clear does not create another session');
+  await recovered.send(fresh, 'after-clear', 'A new context');
+  await waitFor(() => fake.options.length === 1);
+  assert.equal(fake.options[0]?.title, 'ping', 'the original title reaches the SDK, not just the list');
+  assert.equal(fake.options[0]?.resume, undefined, 'clear does not resume the old conversation');
 });
 
 test("creation carries permission mode, enables bypass explicitly, and defaults to auto", async t => {
@@ -768,6 +918,7 @@ test("desktop handoff failures persist and retry only at a later idle, at most t
   assert.equal(saved().desktopHandoffAttempts, 3);
   assert.match(logs[0]!, /failed: timeout/);
   assert.match(logs[2]!, /attempt 3\/3/);
+  assert.ok(recovered.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_failed"));
 });
 
 test("handoff closes an idle SDK writer and waits for real process exit before invoking the runner", async t => {
@@ -795,7 +946,7 @@ test("handoff closes an idle SDK writer and waits for real process exit before i
   assert.equal(calls, 1);
 });
 
-for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "fails visibly when the app is not reachable"}, never a second SDK writer`, async t => {
+for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "waits durably for the app bridge"}, never a second SDK writer`, async t => {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-app-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -819,17 +970,43 @@ for (const reachable of [true, false]) test(`input accepted during handoff ${rea
   first.emit({ type: "system", subtype: "init", session_id: sdkId });
   first.emit({ type: "result", subtype: "success" });
   await waitFor(() => called);
-  await f.sessions.send(id, "during-app-handoff", "accepted during handoff");
+  const photo = Buffer.from("photo accepted during handoff").toString("base64");
+  const attachments = [{ blob: f.sessions.log(id).image(photo), name: "photo.png", mediaType: "image/png" }];
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments);
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments, "interrupt");
+  assert.equal(await f.sessions.sendQueued(id, "during-app-handoff"), id, "send-now cannot bypass the writer-exit barrier");
+  assert.deepEqual(f.sessions.summaryOf(id)?.queue?.map(item => item.id), ["during-app-handoff"]);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-app-handoff`), null, "queued acceptance does not pretend the input reached a worker");
   registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(reachable ? { bridgeSessionId: "bridge" } : {}) });
   finish.resolve();
-  await waitFor(() => reachable ? posts.length === 1 : f.sessions.summaryOf(id)?.state === "error");
+  await waitFor(() => reachable ? posts.length === 1 : !!f.sessions.summaryOf(id)?.queue?.[0]?.error);
   assert.equal(first.closed, true);
   assert.equal(boundary.queries.length, 1);
+  let active = f.sessions;
   if (reachable) {
     assert.match(posts[0]!, /accepted during handoff/);
     assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
     assert.equal(f.sessions.list().length, 1);
-  } else assert.ok(f.sessions.log(id).tail().events.some(event => event.kind === "result" && event.ok === false));
+  } else {
+    assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
+    assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "accepted during handoff");
+    f.sessions.shutdown();
+    fs.rmSync(path.join(f.dir, "sessions", id, "blobs"), { recursive: true, force: true });
+    active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
+      desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient, onEvent() {}, onSessions() {}, log() {} });
+    f.instances.push(active);
+    active.recover();
+    assert.equal(await active.send(id, "during-app-handoff", "accepted during handoff", attachments), id, "a resend after restart still belongs to the saved queue");
+    registry.get(sdkId)!.bridgeSessionId = "bridge";
+    active.pollQueued();
+    await waitFor(() => posts.length === 1);
+    assert.equal(active.summaryOf(id)?.queue, undefined);
+  }
+  await active.send(id, "during-app-handoff", "accepted during handoff", attachments);
+  await active.pollDesktop();
+  assert.ok(posts[0]!.includes(photo), "queue-owned photo bytes survive the Desktop log rebase");
+  assert.equal(posts.length, 1, "the original phone id completes exactly once");
+  assert.equal(boundary.queries.length, 1);
 });
 
 test("a successful later handoff clears the durable failure and is not attempted again", async t => {
@@ -849,6 +1026,58 @@ test("a successful later handoff clears the durable failure and is not attempted
   assert.equal(calls, 2);
 });
 
+test("handoff does not reopen a conversation already owned by Desktop with RC off", async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-existing-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const registry = new Map<string, DesktopProcess>();
+  let calls = 0;
+  const f = fixture(t, { permission: true }, { desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "",
+    handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  registry.set("sdk-1", { sessionId: "sdk-1", pid: 42, status: "idle" });
+  f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await f.sessions.pollDesktop();
+  assert.equal(calls, 0);
+  assert.equal(f.fake.spies.close, 1, "the idle SDK stops rather than remaining a second writer");
+  assert.throws(() => f.sessions.send(id, "blocked-after-adoption", "do not start another writer"), /Remote Control/);
+});
+
+for (const status of ["pending", "opening"]) test(`a ${status} Desktop handoff recovers and retries without a new phone turn`, async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  f.sessions.shutdown();
+  const file = path.join(f.dir, "sessions.json");
+  const records: { desktopHandoff: string; desktopHandoffAttempts: number }[] = JSON.parse(fs.readFileSync(file, "utf8"));
+  records[0]!.desktopHandoff = status;
+  records[0]!.desktopHandoffAttempts = status === "opening" ? 1 : 0;
+  fs.writeFileSync(file, JSON.stringify(records));
+  let now = Date.now(), calls = 0;
+  const requests: string[] = [];
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: () => { throw new Error("must not spawn another SDK writer"); }, now: () => now,
+    handoff: async request => { requests.push(request.sessionId); if (++calls === 1) throw new Error("temporary launcher failure"); return "opened"; }, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  recovered.recover();
+  await recovered.pollDesktop();
+  await nextTick(); await nextTick();
+  assert.equal(calls, 1);
+  assert.ok(recovered.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_retry"));
+  await recovered.pollDesktop();
+  assert.equal(calls, 1, "retry has a delay, not a tight poll loop");
+  now += 30_000;
+  await recovered.pollDesktop();
+  await nextTick(); await nextTick();
+  assert.equal(calls, 2);
+  assert.deepEqual(requests, ["sdk-1", "sdk-1"], "the same transcript is handed over, never a fork");
+  assert.ok(recovered.log(id).tail().events.some(e => e.kind === "notice" && e.code === "desktop_handoff_requested"));
+  assert.equal(recovered.log(id).tail().events.filter(e => e.kind === "user").length, 1);
+  now += 60_000;
+  await recovered.pollDesktop();
+  assert.equal(calls, 2, "a confirmed launcher request is not repeated");
+});
+
 test("attention: a permission request is set, survives `seen`, and clears when the approval is answered", async t => {
   const f = fixture(t, { permission: true });
   const id = await f.create();
@@ -863,6 +1092,25 @@ test("attention: a permission request is set, survives `seen`, and clears when t
   assert.notEqual(f.sessions.summaryOf(id)?.attention?.reason, "permission");
 });
 
+test("real host transitions classify identically in home sections and switcher glyphs", async t => {
+  const f = fixture(t, { permission: true });
+  const id = await f.create();
+  const state = () => {
+    const snapshot = f.sessions.list().find(s => s.id === id)!;
+    return [sessionGroup(snapshot), sidebarState(snapshot)];
+  };
+  assert.deepEqual(state(), ["working", "running"]);
+  await waitFor(() => f.permissions.pending(id).length === 1);
+  assert.deepEqual(state(), ["input", "waiting"]);
+  f.sessions.markSeen(id);
+  assert.deepEqual(state(), ["input", "waiting"], "looking does not answer an approval");
+  await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.deepEqual(state(), ["review", "unread"]);
+  f.sessions.markSeen(id);
+  assert.deepEqual(state(), ["done", "read"]);
+});
+
 test("attention: a finished turn is marked unseen, cleared by seen, and restorable", async t => {
   const f = fixture(t);
   const id = await f.create();
@@ -872,6 +1120,46 @@ test("attention: a finished turn is marked unseen, cleared by seen, and restorab
   assert.equal(f.sessions.summaryOf(id)?.attention, null);
   assert.equal(f.sessions.markUnread(id).reason, "finished");
   assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "finished");
+});
+
+test("a session read on the phone loses the app's unread dot until newer activity, and that survives a restart", async t => {
+  let now = 3_000_000;
+  const cliId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const app = claudeAppData(t, cliId);
+  const sends: number[] = [];
+  const f = fixture(t, {}, { queryFn: scriptedQuery({}, cliId).queryFn, now: () => now, desktopSidebar: { root: app.root }, onSessions: () => sends.push(now) });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const listed = (instance = f.sessions) => instance.list().find(s => s.id === id);
+  const listState = () => JSON.parse(fs.readFileSync(path.join(f.dir, "list-state.json"), "utf8")) as { readAt: Record<string, number> };
+  assert.equal(listed()?.unread, true, "the app lists the session as unread and nobody read it yet");
+  // A look after the last activity clears the dot and records the activity it covered, not a later clock.
+  const before = sends.length;
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(listed()?.unread, false);
+  assert.equal(listState().readAt[id], 3_000_000);
+  assert.ok(sends.length > before, "clearing the dot resends the list");
+  // A presence ping that finds nothing new neither rewrites the file nor resends the list.
+  const recorded = listState().readAt[id], resent = sends.length;
+  now += 1000;
+  assert.equal(f.sessions.markSeen(id), false);
+  assert.equal(listState().readAt[id], recorded);
+  assert.equal(sends.length, resent);
+  // A restart keeps what the phone read.
+  const restored = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: scriptedQuery({}, cliId).queryFn, now: () => now,
+    desktopSidebar: { root: app.root }, onEvent() {}, onSessions() {}, log() {} });
+  f.instances.push(restored);
+  assert.equal(listed(restored)?.unread, false, "the read record is durable");
+  // Newer activity in the app is unread again (the sidebar snapshot is cached for 3 s).
+  app.row(3_001_000); now += 3001;
+  assert.equal(listed(restored)?.unread, true);
+  assert.equal(listed()?.unread, true);
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(listed()?.unread, false);
+  // Mark unread forgets the record, so the app's unread set can show the dot again.
+  f.sessions.markUnread(id);
+  assert.equal(listed()?.unread, true);
+  assert.equal(Object.hasOwn(listState().readAt, id), false);
 });
 
 test("nextAttention maps a state change to the right reason", () => {
@@ -1119,4 +1407,28 @@ test("send-now puts a queued message into the running turn; the queue survives a
   f.sessions.removeQueued(id, "later-1");
   await waitFor(() => f.permissions.pending(id).length >= 1);
   for (const p of f.permissions.pending(id)) f.sessions.decide(id, p.id, "deny");
+});
+
+test("one message id keeps one content: a reused id with other words is refused, the same words are acknowledged", async t => {
+  const f = fixture(t);
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const first = f.sessions.send(id, "same-id", "first words");
+  await Promise.resolve(first);
+  await waitFor(() => f.sessions.log(id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "same-id"));
+  // A retry of the same message is answered without running again.
+  assert.equal(f.sessions.send(id, "same-id", "first words"), id);
+  // Different words under that id are a new message wearing a used id: say so instead of a false success.
+  assert.throws(() => f.sessions.send(id, "same-id", "other words"), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+  const users = () => f.sessions.log(id).readAfter(0).events.filter(e => e.kind === "user" && e.clientMsgId === "same-id");
+  assert.equal(users().length, 1, "the refused reuse never becomes a second message");
+  // An attachment change is a content change too.
+  assert.throws(() => f.sessions.send(id, "same-id", "first words", [{ blob: "b", name: "photo.png", mediaType: "image/png" }]), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+});
+
+test("a new session keeps one idempotent create per content", async t => {
+  const f = fixture(t);
+  const first = await f.create("create-content");
+  assert.equal(await f.create("create-content"), first);
+  await assert.rejects(f.create("create-content", "claude-other"), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
 });

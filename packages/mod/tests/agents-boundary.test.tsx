@@ -50,6 +50,42 @@ test('agents fallback survives an unavailable settings boundary and recovers on 
   expect(closed).toBe(2)
 })
 
+test('a desktop conversation does not subscribe to the one-second clock that replaces its hovered run button', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  let selected: string | null = 'worker-0'
+  let ticksRead = 0
+  let calls = 1
+  on('state.get', { plugin: 'ripple', key: 'lang' }, () => ({ value: { value: 'ko', version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'settings' }, () => ({ value: { value: SETTINGS, version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'agents' }, () => ({ value: { value: RECORDS, version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'agentOpen' }, () => ({ value: { value: selected, version: 0 } }))
+  on('state.get', { plugin: 'ripple', key: 'agentsTick' }, () => { ticksRead++; return { value: { value: 0, version: 0 } } })
+  on('session.messages', () => ({ value: [{ role: 'assistant', text: 'On it.', toolUses: Array.from({ length: calls }, (_, i) => ({ tool_use_id: 'c' + i, tool: 'Bash', input: { command: 'pwd' }, text: 'ok' })) }] }))
+  on('session.cwd', () => ({ value: '/workspace' }))
+  on('env.get', () => ({ value: '/home/test' }))
+  on('ui.log', () => ({ value: undefined }))
+  for (const surface of ['desktop', 'vscode', 'terminal', 'mobile'] as const) {
+    selected = 'worker-0'
+    ticksRead = 0
+    const ui = await $.ui.mount({ plugin: 'ripple', surface, component: 'Pane', requestId: 'ripple-agents', props: PROPS })
+    expect(await ui.find({ key: 'run-c0' }) ?? await ui.find({ key: 'tool-c0' })).toBeDefined()
+    expect(ticksRead, surface + ' open clock subscriptions').toBe(surface === 'desktop' || surface === 'vscode' ? 0 : 1)
+    await ui.unmount()
+    selected = null
+    ticksRead = 0
+    const list = await $.ui.mount({ plugin: 'ripple', surface, component: 'Pane', requestId: 'ripple-agents', props: PROPS })
+    expect(ticksRead, surface + ' list clock subscriptions').toBe(1)
+    await list.unmount()
+  }
+  // Real data updates still read and draw the current run, with the same actionable id.
+  selected = 'worker-0'
+  calls = 2
+  const fresh = await $.ui.mount({ plugin: 'ripple', surface: 'desktop', component: 'Pane', requestId: 'ripple-agents', props: PROPS })
+  expect(await fresh.find({ type: 'Text', text: '실행됨 명령 2개' })).toBeDefined()
+  await fresh.press({ key: 'run-c0' })
+  expect(await fresh.find({ key: 'tool-c1' })).toBeDefined()
+})
+
 test('48 workers with long fallback reasons and an unfolded short-call conversation validate on every surface', async ($, on) => {
   const fallback: NonNullable<AgentRec['pick']> = { domain: 'general', level: 'standard', effort: 'high', by: 'session', why: '', target: { agent: 'general-purpose' }, rule: 'general', ms: 0, fallbackReason: '사용 한도를 초과했습니다. '.repeat(1000) }
   const records = RECORDS.map(a => ({ ...a, pick: fallback }))
@@ -61,7 +97,7 @@ test('48 workers with long fallback reasons and an unfolded short-call conversat
     expect(await list.find({ type: 'Text', text: '검토 47' }) ?? await list.find({ key: 'row-worker-47' }), surface + ' last list card').toBeDefined()
     expect((await list.findAll({ type: 'Button' })).length < 2000).toBe(true)
     for (const svg of await list.findAll({ type: 'Svg' })) {
-      expect(Number(svg.props.width) <= 4096 && Number(svg.props.height) <= 4096).toBe(true)
+      expect(Number(svg.props.width) <= 4096 && Number(svg.props.height ?? 0) <= 4096).toBe(true)
       expect(String(svg.props.source).length <= 131_072).toBe(true)
     }
     await list.unmount()

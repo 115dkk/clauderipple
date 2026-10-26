@@ -4,6 +4,7 @@ import type { Engine } from 'claude-code/testing'
 import type { AgentSpawnInput, ModelCompleteRequest, ModelUsage, On, SessionMessage, ToolCallInput, TurnStepInput } from 'claude-code'
 import { MOD_SETTINGS_SCHEMA_VERSION, DEFAULTS, normalizeModes, normalizeSettings } from '../hooks/settings'
 import { QUICK_PROMPT } from '../hooks/handoff'
+import { t } from '../hooks/i18n'
 import type { Lang } from '../hooks/i18n'
 import type { AgentRec, BgTask, ModSettingsSnapshot, Settings } from '../types'
 
@@ -37,7 +38,7 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specifi
 // The user naming the workers a test spawns by name (worker.ts userNamed).
 const NAMED: SessionMessage[] = [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number; context?: { model: string; window: number; tokens: number; raw?: number }; deferUsage?: (kind: 'full' | 'summary' | 'none') => Promise<void> | undefined } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
@@ -121,8 +122,18 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('session.model', () => ({ value: model }))
   on('session.messages', ($, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages(e.agentId) : options.messages ?? MESSAGES }))
   // `engineWindow`: the window the session's own breakdown measures against, as /context gives it.
-  const breakdown = (tokens: number, raw: number) => ({ categories: [], totalTokens: tokens, maxTokens: raw, rawMaxTokens: raw, autocompactSource: 'clientdata' as const, percentage: Math.round(tokens / raw * 100), gridRows: [], model: model, memoryFiles: [], mcpTools: [], agents: [], isAutoCompactEnabled: true, apiUsage: null })
-  on('session.usage', ($, e) => ({ value: { startedAt: NOW, context: { percent, tokens: options.tokens ?? 40000, window: options.window ?? 200000, ...(e.breakdown && options.engineWindow ? { breakdown: breakdown(options.tokens ?? 40000, options.engineWindow) } : {}) }, rateLimits: options.limits ?? [] } }))
+  // `context`: the same, movable by a test, so a model or window switch leaves the tokens alone.
+  const breakdown = (tokens: number, raw: number, modelId = model) => ({ categories: [], totalTokens: tokens, maxTokens: raw, rawMaxTokens: raw, autocompactSource: 'clientdata' as const, percentage: Math.round(tokens / raw * 100), gridRows: [], model: modelId, memoryFiles: [], mcpTools: [], agents: [], isAutoCompactEnabled: true, apiUsage: null })
+  on('session.usage', async ($, e) => {
+    const c = options.context
+    const tokens = c?.tokens ?? options.tokens ?? 40000
+    const window = c?.window ?? options.window ?? 200000
+    const raw = c?.raw ?? c?.window ?? options.engineWindow
+    const reply = { value: { startedAt: NOW, context: { percent: c ? Math.round(tokens / window * 100) : percent, tokens, window, ...(e.breakdown && raw ? { breakdown: breakdown(tokens, raw, c?.model) } : {}) }, rateLimits: options.limits ?? [] } }
+    const wait = options.deferUsage?.(e.breakdown ?? 'none')
+    if (wait) await wait
+    return reply
+  })
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
@@ -134,6 +145,7 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   const contexts: (readonly string[])[] = []
   on('prompt.submit', ($, e) => { submitted.push(e.text); contexts.push(e.context ?? []); return { text: e.text } })
   on('turn.complete', () => ({ text: '' }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.fill', ($, e) => { filled.push(e.text); return { isFilled: true } })
   return { files, failWorkerLog: (value: 'read' | 'write' | null) => { logFailure = value }, registered, clock, saved, storeWrites, storeReads, settingsRequests, router: () => router, remote: (value: ModSettingsSnapshot) => { router = value }, offline: (value: boolean) => { offline = value }, conflict: (value: Settings) => { conflict = value }, alwaysConflict: (value: boolean) => { alwaysConflict = value }, toasts, logs, panes, submitted, contexts, filled, processes, language: () => resolvedLanguage, setLanguage: (value: unknown) => { hostLanguage = value }, setModel: (id: string) => { model = id }, setPercent: (value: number) => { percent = value } }
@@ -161,6 +173,35 @@ function spawnStub(on: On) {
   const sent: AgentSpawnInput[] = []
   on('agent.spawn', ($, e) => { sent.push(e); return { model: e.model ?? 'sonnet', agentId: 'worker-1' } })
   return sent
+}
+/** The records and counts the mod last wrote into its session atoms. */
+function agentWrites(on: On) {
+  let records: AgentRec[] = []
+  let counts: { live: number; total: number } | null = null
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => {
+    const result = await next(e)
+    records = e.value as AgentRec[]
+    return result
+  })
+  on('state.set', { plugin: 'ripple', key: 'agentCounts' }, async ($, e, next) => {
+    const result = await next(e)
+    counts = e.value as { live: number; total: number }
+    return result
+  })
+  return { records: () => records, counts: () => counts }
+}
+/** A spawn that names each worker in turn: `<name>1`, `<name>2`, … */
+function numberedSpawn(on: On, name: string): void {
+  let n = 0
+  on('agent.spawn', ($, e) => { n += 1; return { model: e.model ?? 'sonnet', agentId: name + n } })
+}
+/** A session whose model and window a test can move while its tokens stay put, as a model switch leaves them. */
+function movableContext() {
+  return { model: 'claude-opus-5-5', window: 160_000, tokens: 32_000 }
+}
+/** The Context pane, as the band opens it, for a precise count's label. */
+function contextPane($: Engine) {
+  return $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-context', surface: 'terminal', props: { title: 'Context', isFocused: true, bodyColumns: 80, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
 }
 function stepStub(on: On, usage: ModelUsage | null = USAGE) {
   const sent: TurnStepInput[] = []
@@ -429,6 +470,34 @@ test('offline quick changes stay local, show router notice and retry on next pol
   await ui.unmount()
 })
 
+test('a router that stops answering is said in the band, not hidden behind the last route', async ($, on) => {
+  const b = boundaries(on)
+  const route = { at: '2026-10-25T00:00:00.000Z', source: 'deepseek-v4.1-flash', target: 'deepseek-v4.1-flash', provider: 'deepseek', status: 200, ok: true, ms: 1000, session: 'session-test' }
+  let down = false
+  const lines: unknown[] = []
+  on('state.set', { plugin: 'ripple', key: 'line' }, async ($, e, next) => { const result = await next(e); lines.push(e.value); return result })
+  // A URL handler must come before http()'s catch-all: that one answers this path itself.
+  on('http.fetch', { url: /\/api\/requests/ }, () => down
+    ? { value: { ok: false, status: 503, headers: {}, text: '' } }
+    : { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ requests: [route] }) } })
+  http(on)
+  await start($)
+  await b.clock.advance(3000)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: /deepseek-v4\.1-flash/ })).toBeDefined()
+  // The route is the last record; the notice is the router's state now, and one must not stand for the other.
+  down = true
+  await b.clock.advance(3000)
+  expect(lines, 'routerDown line').toContain('ClaudeRipple: router not answering')
+  expect(await ui.find({ type: 'Text', text: /router not answering/ }), 'terminal notice').toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /deepseek-v4\.1-flash/ }), 'terminal stale route').toBeUndefined()
+  await ui.unmount()
+  const desktop = await band($, 'desktop')
+  expect(await desktop.find({ type: 'Text', text: /router not answering/ }), 'desktop notice').toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: /deepseek-v4\.1-flash/ }), 'desktop stale route').toBeUndefined()
+  await desktop.unmount()
+})
+
 function expectLanguage(boundary: ReturnType<typeof boundaries>, language: Lang): void {
   expect(boundary.language()).toBe(language)
 }
@@ -584,6 +653,7 @@ for (const failure of ['read', 'write'] as const) test(`worker log ${failure} fa
   b.failWorkerLog(failure)
   await start($)
   expect((await $.agent.spawn(SPAWN)).agentId).toBe('worker-1')
+  expect(sent.length).toBe(1)
   expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@medium' })
   expect(b.logs.some(log => log.includes('worker pick log') && log.includes(`worker log ${failure} denied`))).toBe(true)
   expect(b.files.get(path)).toBe(previous)
@@ -626,7 +696,7 @@ for (const prefix of ['ripple:', '']) for (const [tier, level, kind, rung, agent
   await start($)
   await $.agent.spawn({ ...SPAWN, subagentType: prefix + 'auto', prompt: `[[ripple: ${tier}]]\n${SPAWN.prompt}` })
   expect(judges.length).toBe(0)
-  expect(sent[0]).toMatchObject({ subagentType: agent, model, prompt: SPAWN.prompt })
+  expect(sent[0]).toMatchObject({ subagentType: agent === 'general-purpose' ? 'ripple:auto' : agent, model, prompt: SPAWN.prompt })
   expect(JSON.parse(b.logs.find(log => log.startsWith('ClaudeRipple worker pick: '))!.slice('ClaudeRipple worker pick: '.length))).toMatchObject({ level, kind, rung, by: 'session', effort })
   expect(JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)).toMatchObject({ tier, by: 'session' })
   // Named workers carry effort in their model suffix; Claude's own agent gets it on turn.step.
@@ -683,6 +753,87 @@ test('a worker that ends before its spawn is recorded is listed as ended, not ru
   expect(written.find(a => a.id === 'worker-1')).toMatchObject({ state: 'failed', endedAt: NOW })
   const rows = b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!.trim().split('\n').map(line => JSON.parse(line))
   expect(rows.find(row => row.type === 'outcome')).toMatchObject({ pick: rows.find(row => row.type === 'pick').id, agent: 'worker-1', reason: 'error', ms: 72 })
+})
+
+// 2026-10-25: a flat slice(-40) over every record dropped the oldest running worker the moment 41
+// ran at once: its card, the band's live count and every later step's tokens and effort vanished.
+test('workers all stay listed past forty, counted, and still take their steps during long tools', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  stepStub(on)
+  on('tool.call', async () => { await b.clock.sleep(30000); return { result: 'ok' } })
+  numberedSpawn(on, 'run-')
+  const seen = agentWrites(on)
+  await start($)
+  for (let i = 1; i <= 41; i++) await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Worker ' + i })
+  expect(seen.records().map(a => a.id)).toEqual(Array.from({ length: 41 }, (_, i) => 'run-' + (i + 1)))
+  expect(seen.records().every(a => a.state === 'running')).toBe(true)
+  expect(seen.counts()).toEqual({ live: 41, total: 41 })
+  // The oldest keeps its card and its numbers: a step is still added to it.
+  await step($, 'claude-opus-5-5', 'high', 'run-1')
+  expect(seen.records().find(a => a.id === 'run-1')).toMatchObject({ effort: 'high' })
+  expect(seen.records().find(a => a.id === 'run-1')?.usage).toEqual({ input: 100, cached: 40000, cacheWrite: 0, output: 10 })
+  // A worker executing a long tool stays running: it must not be the one dropped past forty.
+  const waiting = $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'run-2', tool_use_id: 'tool-wait' })
+  await b.clock.settle()
+  await b.clock.advance(15000)
+  expect(seen.records().find(a => a.id === 'run-2')?.state).toBe('running')
+  // A forty-second worker joins them; long-running tools still count as live.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Worker 42' })
+  expect(seen.records()).toHaveLength(42)
+  expect(seen.records().some(a => a.id === 'run-2' && a.state === 'running')).toBe(true)
+  expect(seen.counts()).toEqual({ live: 42, total: 42 })
+  await b.clock.advance(15000)
+  await waiting
+  // The band and the pane both count them from that list.
+  const bandUi = await band($)
+  expect(String((await bandUi.find({ key: 'agents' }))?.props.label)).toContain('42')
+  await bandUi.unmount()
+  const pane = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  expect(await pane.find({ type: 'Text', text: /42 running/ })).toBeDefined()
+})
+
+test('only finished workers are capped, at the newest forty; running ones and the order stay', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  judgeStub(on)
+  numberedSpawn(on, 'task-')
+  const seen = agentWrites(on)
+  await start($)
+  for (let i = 1; i <= 45; i++) await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Task ' + i })
+  for (let i = 1; i <= 45; i++) { await b.clock.advance(1000); await complete($, 'task-' + i) }
+  expect(seen.records().map(a => a.id)).toEqual(Array.from({ length: 40 }, (_, i) => 'task-' + (i + 6)))
+  expect(seen.records().every(a => a.state === 'done')).toBe(true)
+  // Two workers run beside them: the finished cap never touches a running record.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Live one' })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Live two' })
+  expect(seen.records().map(a => a.id)).toEqual([...Array.from({ length: 40 }, (_, i) => 'task-' + (i + 6)), 'task-46', 'task-47'])
+  // One ending adds to the finished side and drops the oldest finished record, not a live one.
+  await b.clock.advance(1000)
+  await complete($, 'task-46')
+  expect(seen.records()).toHaveLength(41)
+  expect(seen.records().filter(a => a.state === 'done').map(a => a.id)).toEqual(Array.from({ length: 40 }, (_, i) => 'task-' + (i + 7)))
+  expect(seen.records().some(a => a.id === 'task-47' && a.state === 'running')).toBe(true)
+  expect(seen.counts()).toEqual({ live: 1, total: 41 })
+})
+
+test('a worker spawned again under the same id is one record, updated in place', async ($, on) => {
+  boundaries(on)
+  http(on)
+  judgeStub(on)
+  let n = 0
+  on('agent.spawn', ($, e) => { n += 1; return { model: e.model ?? 'sonnet', agentId: n === 2 ? 'worker-2' : 'worker-1' } })
+  const seen = agentWrites(on)
+  await start($)
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'First run' })
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Second worker' })
+  await complete($, 'worker-1')
+  expect(seen.records().find(a => a.id === 'worker-1')?.state).toBe('done')
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore', description: 'Runs again' })
+  expect(seen.records().map(a => a.id)).toEqual(['worker-2', 'worker-1'])
+  expect(seen.records().find(a => a.id === 'worker-1')).toMatchObject({ description: 'Runs again', state: 'running' })
+  expect(seen.records().find(a => a.id === 'worker-1')?.endedAt).toBeUndefined()
 })
 
 test('a background command and a watch are listed from their calls and ended by notice, stop and Stop', async ($, on) => {
@@ -821,6 +972,35 @@ test('a failed first limits read is tried again at the next tick, not a minute l
   expect(reads).toBeGreaterThan(1)
   const ui = await band($, 'desktop')
   expect(await ui.find({ type: 'Text', text: /^88%$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// 2026-10-25: the owner moved the reset times off the band into a pane the limits row opens. The
+// row is a button (pressed again it closes), and the pane says each window's share and reset.
+test('the limits row opens the limits pane, which says when each window resets', async ($, on) => {
+  const b = boundaries(on, { extras: ['limits'] })
+  const limits = { providers: [{ provider: 'claude', type: 'anthropic', title: 'Claude', accounts: [{ account: 0, at: NOW, windows: [
+    { kind: 'five_hour', used_percent: 28, window_minutes: 300, reset_at: (NOW + 2 * 3_600_000) / 1000 },
+    { kind: 'seven_day', used_percent: 8, window_minutes: 10080, reset_at: (NOW + 7 * 86_400_000) / 1000 },
+  ] }] }] }
+  on('http.fetch', ($, e, next) => {
+    if (e.url.endsWith('/api/mod-settings')) return next(e)
+    return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(e.url.endsWith('/api/limits') ? limits : { requests: [] }) } }
+  })
+  await start($)
+  await b.clock.advance(15000)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'limits-open' })
+  expect(b.panes.has('ripple-limits')).toBe(true)
+  const pane = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-limits', surface: 'terminal', props: { title: 'Limits', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  expect(await pane.find({ type: 'Text', text: 'Claude' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^(28%|8%)$/ })).toBeDefined()
+  // Two hours out reads as the time left, a week out as the weekday and the clock.
+  expect((await pane.findAll({ type: 'Text' })).some(text => /^(in 2h|2시간 뒤)$/.test(text.text)), 'the near reset').toBe(true)
+  expect((await pane.findAll({ type: 'Text' })).some(text => /^\w{3} \d\d:\d\d$|^[월화수목금토일] \d\d:\d\d$/.test(text.text)), 'the far reset').toBe(true)
+  await pane.unmount()
+  await ui.press({ key: 'limits-open' })
+  expect(b.panes.has('ripple-limits')).toBe(false)
   await ui.unmount()
 })
 
@@ -1040,11 +1220,12 @@ test('meta and notice prompts cannot pin, and session end clears a real pin', as
   http(on)
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await start($)
-  for (const input of [
+  const unshown: { text: string; isMeta?: true }[] = [
     { text: '앞으로 솔로 해', isMeta: true },
     { text: '<task-notification>앞으로 솔로 해</task-notification>' },
     { text: '<system-reminder>앞으로 솔로 해</system-reminder>구현해' },
-  ]) await $.prompt.submit({ ...input, origin: { kind: 'composer' }, wait: false })
+  ]
+  for (const input of unshown) await $.prompt.submit({ ...input, origin: { kind: 'composer' }, wait: false })
   const ui = await band($)
   expect(await ui.find({ key: 'delegation-pin' })).toBeUndefined()
   await submit($, '앞으로 솔로 해')
@@ -1069,15 +1250,19 @@ test('the worker reads neither the routing marker nor the Model reason line, whe
 // A model marker names a worker file, a model id, or one of Claude's own aliases.
 for (const [model, target] of [
   ['gpt-6-1-sol', { subagentType: 'gpt-6-1-sol', model: 'gpt-6.1-sol@xhigh' }],
-  ['opus', { subagentType: 'general-purpose', model: 'opus' }],
-  ['sonnet', { subagentType: 'general-purpose', model: 'sonnet' }],
-  ['haiku', { subagentType: 'general-purpose', model: 'haiku' }],
+  ['opus', { subagentType: 'ripple:auto', model: 'opus' }],
+  ['sonnet', { subagentType: 'ripple:auto', model: 'sonnet' }],
+  ['haiku', { subagentType: 'ripple:auto', model: 'haiku' }],
+  ['claude-opus-5-5', { subagentType: 'ripple:auto', model: 'claude-opus-5-5' }],
+  ['claude-sonnet-5-5', { subagentType: 'ripple:auto', model: 'claude-sonnet-5-5@xhigh' }],
 ] as const) test(`a user-reasoned [[ripple: ${model}@xhigh]] runs that model at xhigh, by user`, async ($, on) => {
   const b = boundaries(on, {}, { messages: [{ role: 'user', text: '솔한테 시켜', toolUses: [] }] })
   http(on)
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   const steps = stepStub(on)
+  let records: AgentRec[] = []
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => { records = e.value as AgentRec[]; return next(e) })
   await start($)
   await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: ${model}@xhigh]]\nModel reason: user "솔한테 시켜"\nReview this.` })
   expect(judges.length).toBe(0)
@@ -1086,9 +1271,17 @@ for (const [model, target] of [
   expect(row).toMatchObject({ by: 'user', namedModel: model, source: 'user', effort: 'xhigh' })
   expect(row).not.toHaveProperty('judge')
   // Claude's own agent gets its effort on turn.step; a routed worker's is in the model suffix.
-  if (target.subagentType === 'general-purpose') {
+  if (target.subagentType === 'ripple:auto') {
+    // Resolve the exact definition selected by the outgoing spawn, not just the requested model.
+    const definition = b.registered.find(spec => 'ripple:' + spec.name === sent[0]?.subagentType)
+    expect(definition).toBeDefined()
+    expect(definition?.disallowedTools).toContain('Agent')
     await step($, 'claude-opus-5-5', 'low', 'worker-1')
     expect(steps[0]?.effort).toBe('xhigh')
+    const rec = records.find(a => a.id === 'worker-1')
+    expect(rec?.type).toBe('ripple:auto')
+    expect(rec?.provider).toBe('anthropic')
+    expect(rec?.effort).toBe('xhigh')
   }
 })
 
@@ -1138,7 +1331,8 @@ test("a Workflow's ripple:auto whose marker names a worker runs on that worker's
   const judges = judgeStub(on)
   const sent = spawnStub(on)
   await start($)
-  const WORKFLOW = { ...SPAWN, workflow: true } as AgentSpawnInput
+  // A workflow agent's spawn carries the run it belongs to (AgentSpawnInput.workflow).
+  const WORKFLOW: AgentSpawnInput = { ...SPAWN, workflow: { runId: 'workflow-test', agentIndex: 0 } }
   await $.agent.spawn({ ...WORKFLOW, prompt: "[[ripple: gpt-6-1-sol@medium]]\nWrite the review." })
   // The engine keeps a workflow agent's type and description; its model is what can change.
   expect(sent[0]).toMatchObject({ subagentType: "ripple:auto", prompt: "Write the review.", model: "gpt-6.1-sol@medium", description: "Rename variable" })
@@ -1179,7 +1373,7 @@ test('the default tier uses the standard rung, and a missing worker moves one ru
   const sent = spawnStub(on)
   await start($)
   await $.agent.spawn(SPAWN)
-  expect(sent[0]).toMatchObject({ subagentType: 'general-purpose', model: 'sonnet' })
+  expect(sent[0]).toMatchObject({ subagentType: 'ripple:auto', model: 'sonnet' })
   expect(judges.length).toBe(0)
   const debug = await $.command.run({ command: 'ripple', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 140 }, args: 'debug' })
   expect(debug.text).toContain('"effort": "high"')
@@ -1199,6 +1393,38 @@ test('a written rule assigns the model like a user ask, needing no quote', async
   const row = JSON.parse(b.files.get('/home/test/.clauderipple/logs/worker-picks.jsonl')!)
   expect(row).toMatchObject({ by: 'rule', source: 'rule', namedModel: 'gpt-6-astra', reason: 'memory/translation.md — 번역 초안은 아스트라' })
   expect(row).not.toHaveProperty('judge')
+})
+
+test('an empty or shapeless rule reason is refused; a file and a rule run', async ($, on) => {
+  boundaries(on)
+  http(on)
+  const sent = spawnStub(on)
+  await start($)
+  for (const rule of ['', 'CLAUDE.md', 'rules/workers.md —', 'translate first']) {
+    const refused = await $.agent.spawn({ ...SPAWN, prompt: `[[ripple: gpt-6-astra@high]]\nModel reason: rule ${rule}\nReview.` })
+    expect(refused.deny).toContain('No reason was given for the model gpt-6-astra')
+  }
+  expect(sent.length).toBe(0)
+  await $.agent.spawn({ ...SPAWN, prompt: '[[ripple: gpt-6-astra@high]]\nModel reason: rule CLAUDE.md — always use Astra\nReview.' })
+  expect(sent.length).toBe(1)
+  expect(sent[0]).toMatchObject({ subagentType: 'gpt-6-astra', model: 'gpt-6-astra@high', prompt: 'Review.' })
+})
+
+test('a managed spawn is refused when its worker policy cannot be read; an engine spawn still runs once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const sent = spawnStub(on)
+  b.files.set('/home/test/.clauderipple/generated-agents.json', '{ not json')
+  await start($)
+  const managed = await $.agent.spawn(SPAWN)
+  expect(managed.deny).toContain('ClaudeRipple:')
+  expect(sent.length).toBe(0)
+  expect(b.logs.some(log => log.includes('agent.spawn prepare'))).toBe(true)
+  // A native agent is the engine's: the same broken catalogue does not stop it, and its own
+  // post-execution record failing must not run it a second time.
+  await $.agent.spawn({ ...SPAWN, subagentType: 'Explore' })
+  expect(sent.length).toBe(1)
+  expect(sent[0]?.subagentType).toBe('Explore')
 })
 
 test('the logged reason keeps only its first 200 characters', async ($, on) => {
@@ -1554,6 +1780,123 @@ test('the compaction model is the chosen one, with an @effort split off for the 
   expect(out.messages?.[0]?.text.includes('Continuation record')).toBe(true)
 })
 
+// 2026-10-25: the band's Compact asks the chat to tidy up first, as a prompt of its own, and only
+// the turn that prompt became compacts — never another prompt's end.
+const TIDY = t('en', 'alerts.tidyPrompt')
+
+function compacts(on: On) {
+  const args: string[] = []
+  on('command.run', { command: 'compact' }, ($, e) => { args.push(e.args); return { text: 'Compacted.' } })
+  return args
+}
+
+/** The band's Compact pressed on the desktop, its note sent with Enter, and the band left mounted. */
+async function pressCompact($: Engine, note: string) {
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: note })
+  return ui
+}
+
+test('a Compact press tidies up first, and only its own turn\'s answer compacts', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  expect(b.submitted).toEqual([TIDY])
+  expect(notes).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'Tidying up…' })).toBeDefined()
+  // A prompt queued before it ends first: nothing is compacted and the card still says tidying.
+  await $.turn.start({ text: 'the prompt queued before it', turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: 'done', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'Tidying up…' })).toBeDefined()
+  // The tidy prompt's own turn, answered, compacts with the note the card carried.
+  await $.turn.start({ text: TIDY, turnId: 'turn-3' })
+  await $.turn.complete({ turnId: 'turn-3', answer: 'Everything is written down.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  expect(await ui.find({ type: 'Text', text: 'Compacted' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a tidy turn that is stopped compacts nothing and says the chat was left alone', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: '', reason: 'aborted', durationMs: 10, isAborted: true })
+  await b.clock.advance(10)
+  expect(notes).toEqual([])
+  expect(b.toasts.some(text => text.includes('the tidy-up did not finish'))).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /did not finish, so the chat was not compacted/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the tidy switch is on by default, kept, and off compacts at once', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await band($, 'desktop')
+  await ui.press({ key: 'compact' })
+  expect(JSON.stringify(await ui.drawn())).toContain('Tidy up first: On')
+  await ui.press({ key: 'tidy' })
+  expect(JSON.stringify(await ui.drawn())).toContain('Tidy up first: Off')
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([])
+  expect(notes).toEqual(['Keep the router decision.'])
+  // The last choice is the next card's too.
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  expect(JSON.stringify(await ui.drawn())).toContain('Tidy up first: Off')
+  await ui.unmount()
+})
+
+test('a Compact pressed again while the tidy turn runs sends one prompt', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  // The card let go, the band is back: a second press waits on the tidy turn already running.
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([TIDY])
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  await ui.unmount()
+})
+
+// 2026-10-25: a tidy prompt that never became a turn (the person dropped it from the queue, the
+// engine let it go) used to leave the wait standing, and the Compact button dead until the mod
+// reloaded. Pressing again now gives that wait up and sends the prompt again.
+test('a Compact pressed again before the tidy prompt becomes a turn sends it again', async ($, on) => {
+  const b = boundaries(on)
+  http(on)
+  const notes = compacts(on)
+  await start($)
+  const ui = await pressCompact($, 'Keep the router decision.')
+  expect(b.submitted).toEqual([TIDY])
+  await ui.press({ key: 'dismiss' })
+  await ui.press({ key: 'compact' })
+  await ui.input({ key: 'note', text: 'Keep the router decision.' })
+  expect(b.submitted).toEqual([TIDY, TIDY])
+  // The prompt sent again is the one that becomes a turn, and its answer compacts once.
+  await $.turn.start({ text: TIDY, turnId: 'turn-2' })
+  await $.turn.complete({ turnId: 'turn-2', answer: 'Done.', reason: 'answer', durationMs: 10, isAborted: false })
+  await b.clock.advance(10)
+  expect(notes).toEqual(['Keep the router decision.'])
+  await ui.unmount()
+})
+
 test('the band measures context against the compaction window, not the whole model window', async ($, on) => {
   // 40k of a 1M model is 4%; with Claude Code compacting at 400k it is 10%, and that is the share.
   const b = boundaries(on, { extras: ['context'] }, { window: 1_000_000, tokens: 40_000, compactAt: 400_000 })
@@ -1575,6 +1918,132 @@ test('the band shows the session\'s own compaction window, as the Context pane d
   expect(await ui.find({ type: 'Text', text: '50%' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '40%' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a precise context count does not outlive a model or window switch', async ($, on) => {
+  const ctx = movableContext()
+  const b = boundaries(on, { extras: ['context'] }, { context: ctx })
+  http(on)
+  stepStub(on)
+  await start($)
+  await step($, ctx.model)
+  await b.clock.advance(15_000)
+  const pane = await contextPane($)
+  await pane.press({ key: 'context-refresh' })
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeDefined()
+  await pane.unmount()
+  // The same tokens now sit in an 800k window: 4%, not the old count's 20%.
+  ctx.model = 'claude-opus-6-0'
+  ctx.window = 800_000
+  b.setModel(ctx.model)
+  await step($, ctx.model)
+  await b.clock.advance(15_000)
+  const ui = await band($, 'desktop')
+  expect(await ui.find({ type: 'Text', text: '4%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '20%' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a precise context count does not outlive a cleared chat', async ($, on) => {
+  const ctx = movableContext()
+  const b = boundaries(on, { extras: ['context'] }, { context: ctx })
+  http(on)
+  await start($)
+  await b.clock.advance(15_000)
+  let pane = await contextPane($)
+  await pane.press({ key: 'context-refresh' })
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeDefined()
+  await pane.unmount()
+  // /clear keeps the same tokens and window here, so only the session it counted can say it is old.
+  await $.classic.SessionStart({ source: 'clear' })
+  await b.clock.advance(15_000)
+  pane = await contextPane($)
+  expect(await pane.find({ type: 'Text', text: /Local estimate/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeUndefined()
+})
+
+test('a precise context count does not outlive a compaction', async ($, on) => {
+  const ctx = movableContext()
+  const b = boundaries(on, { compactModel: 'session', extras: ['context'] }, { context: ctx })
+  http(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  await start($)
+  await b.clock.advance(15_000)
+  let pane = await contextPane($)
+  await pane.press({ key: 'context-refresh' })
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeDefined()
+  await pane.unmount()
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES })
+  await b.clock.advance(15_000)
+  pane = await contextPane($)
+  expect(await pane.find({ type: 'Text', text: /Local estimate/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ })).toBeUndefined()
+})
+
+test('a precise count that answers after a clear, a resume, a model switch or a compaction is discarded', async ($, on) => {
+  const ctx = movableContext()
+  let hold = false
+  let release: (() => void) | null = null
+  let rejectFull: ((error: Error) => void) | null = null
+  const b = boundaries(on, { compactModel: 'session', extras: ['context'] }, { context: ctx, deferUsage: kind => {
+    if (!hold || kind !== 'full') return undefined
+    return new Promise<void>((resolve, reject) => { release = resolve; rejectFull = reject })
+  } })
+  http(on)
+  on('session.compact', () => ({ messages: MESSAGES }))
+  stepStub(on)
+  await start($)
+  await step($, ctx.model)
+  await b.clock.advance(15_000)
+  const pane = await contextPane($)
+  const trip = async (change: () => Promise<unknown>, outcome: 'ok' | 'error' = 'ok') => {
+    hold = true
+    const pressed = pane.press({ key: 'context-refresh' })
+    await b.clock.settle()
+    expect(release, 'full count started').not.toBeNull()
+    hold = false
+    await change()
+    if (outcome === 'error') rejectFull!(new Error('token count unavailable'))
+    else release!()
+    release = null
+    rejectFull = null
+    await pressed
+    await b.clock.settle()
+    expect(await pane.find({ type: 'Text', text: /Counted by the token-count API/ }), 'old count').toBeUndefined()
+    expect(await pane.find({ type: 'Text', text: /Precise count failed/ }), 'old error').toBeUndefined()
+    expect(await pane.find({ type: 'Text', text: /Counting/ }), 'stale busy').toBeUndefined()
+  }
+  await trip(() => $.classic.SessionStart({ source: 'clear' }))
+  await trip(() => $.classic.SessionStart({ source: 'resume', seconds_since_last_response: 120, prompt_cache_likely_expired: false, model: 'claude-opus-5-5' }))
+  await trip(async () => { ctx.model = 'claude-opus-6-0'; b.setModel(ctx.model); await step($, ctx.model) })
+  // A compaction while the count runs, whose answer then fails: neither the count nor its error lands.
+  await trip(() => $.session.compact({ trigger: 'manual', messages: MESSAGES }), 'error')
+})
+
+test('a summary that answers after a clear is not published', async ($, on) => {
+  const ctx = { model: 'claude-opus-5-5', window: 200_000, tokens: 32_000, raw: 160_000 }
+  let hold = false
+  let release: (() => void) | null = null
+  const b = boundaries(on, { extras: ['context'] }, { context: ctx, deferUsage: kind => {
+    if (!hold || kind !== 'summary') return undefined
+    return new Promise<void>(resolve => { release = resolve })
+  } })
+  http(on)
+  const writes: ({ percent: number } | null)[] = []
+  on('state.set', { plugin: 'ripple', key: 'context' }, async ($, e, next) => { const result = await next(e); writes.push(e.value as { percent: number } | null); return result })
+  await start($)
+  await b.clock.advance(15_000)
+  expect(writes.at(-1)?.percent).toBe(20)
+  // A different token count asks for a fresh summary: 25% of its 160k window, where the 200k estimate is 20%.
+  ctx.tokens = 40_000
+  hold = true
+  await b.clock.advance(15_000)
+  expect(release, 'summary started').not.toBeNull()
+  await $.classic.SessionStart({ source: 'clear' })
+  hold = false
+  release!()
+  await b.clock.settle()
+  expect(writes.at(-1)?.percent).toBe(20)
 })
 
 test('failed Haiku compaction falls back; precompute skips; subagent stays with engine', async ($, on) => {
@@ -1868,6 +2337,19 @@ test('host survey wins; minimal layout renders through SessionMode', async ($, o
   expect(await footer.find({ type: 'Text', text: 'host drawing' })).toBeDefined()
 })
 
+test('a desktop survey draws over the band instead of blanking it', async ($, on) => {
+  boundaries(on)
+  http(on)
+  await start($)
+  const plain = await band($, 'desktop')
+  expect(await plain.find({ key: 'compact' }), 'band without a survey').toBeDefined()
+  await plain.unmount()
+  const survey = await band($, 'desktop', true)
+  expect(await survey.find({ type: 'Text', text: 'host drawing' }), 'host survey').toBeDefined()
+  expect(await survey.find({ key: 'compact' }), 'band under the survey').toBeDefined()
+  await survey.unmount()
+})
+
 test('log queries by session and reopening follows engine panes, not stale atoms', async ($, on) => {
   const b = boundaries(on)
   const urls = http(on)
@@ -1937,7 +2419,7 @@ test('an unsure Jev still decides: no Haiku call, no alert, key only to TypeSafe
   expect(await (await band($)).find({ type: 'Text', text: /not answering/ })).toBeUndefined()
 })
 
-test('Jev times out at three seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
+test('Jev times out at five seconds without blocking the person prompt, and says so only the second time running', async ($, on) => {
   const b = boundaries(on, { judge: 'jev' }, { key: 'test-secret' })
   const judges = judgeStub(on, '{"effort":"medium","why":"fallback"}')
   on('http.fetch', async ($, e, next) => {
@@ -1948,7 +2430,9 @@ test('Jev times out at three seconds without blocking the person prompt, and say
   await start($)
   const pending = submit($)
   await b.clock.settle()
-  await b.clock.advance(3000)
+  // The judge's own timeout rose from three seconds to five on 2026-10-22 (register.tsx judge);
+  // advancing the old three would leave the race pending and hang the prompt.
+  await b.clock.advance(5000)
   const out = await pending
   expect(out.text).toContain('Implement')
   expect(judges.length).toBe(1)
@@ -1956,7 +2440,7 @@ test('Jev times out at three seconds without blocking the person prompt, and say
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(false)
   const again = submit($, 'Refactor the parser across three files and verify.')
   await b.clock.settle()
-  await b.clock.advance(3000)
+  await b.clock.advance(5000)
   await again
   expect(b.toasts.some(t => t.includes('timed out'))).toBe(true)
 })
@@ -2026,7 +2510,18 @@ test('Jev Test displays latency and a missing-key result', async ($, on) => {
   await ui.unmount()
 })
 
-test('known agents show waiting after an eight-second tool and finish with cost', async ($, on) => {
+test('reload restores the retired waiting classification to running without losing its tool', async ($, on) => {
+  boundaries(on)
+  http(on)
+  let legacy = true
+  let records: AgentRec[] = []
+  on('state.get', { plugin: 'ripple', key: 'agents' }, ($, e, next) => legacy ? { value: { value: [{ id: 'old', state: 'waiting', startedAt: NOW - 30_000, cost: 0, now: 'Bash npm test', toolSince: NOW - 30_000 }], version: 0 } } : next(e))
+  on('state.set', { plugin: 'ripple', key: 'agents' }, async ($, e, next) => { legacy = false; records = e.value as AgentRec[]; return next(e) })
+  await start($)
+  expect(records[0]).toMatchObject({ id: 'old', state: 'running', now: 'Bash npm test', toolSince: NOW - 30_000 })
+})
+
+test('known agents stay running through a long tool and finish with cost', async ($, on) => {
   const b = boundaries(on)
   http(on)
   judgeStub(on)
@@ -2041,13 +2536,19 @@ test('known agents show waiting after an eight-second tool and finish with cost'
   await b.clock.settle()
   await b.clock.advance(15000)
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
-  expect(await ui.find({ type: 'Text', text: /waiting/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /waiting/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Bash npm test · 15s/ })).toBeDefined()
+  const desktop = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'desktop', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
+  const age = await desktop.find({ type: 'Text', text: '15s' })
+  expect(age?.props.color).toBe('#f2f0eb')
+  await desktop.unmount()
   await b.clock.advance(15000)
   await tool
   await complete($, 'worker-1')
   expect(await ui.find({ type: 'Text', text: 'Rename variable' })).toBeDefined()
-  // The API's own counts (100 + 40000 cached in, 10 out), not the weighted cost.
-  expect(await ui.find({ type: 'Text', text: 'in 40k · cache 100% · out 10 · tools 1' })).toBeDefined()
+  // The Claude app's count: one step's prompt (100 + 40000 cached) plus its output (10), not the weighted cost.
+  // The cached share is rounded down, so 40000/40100 reads 99%, never a whole 100.
+  expect(await ui.find({ type: 'Text', text: 'tokens 40k · cache 99% · tools 1' })).toBeDefined()
 })
 
 test('an agent keeps the API\'s token counts, its tools and the effort it was sent at; its card opens its conversation and goes back', async ($, on) => {
@@ -2075,13 +2576,15 @@ test('an agent keeps the API\'s token counts, its tools and the effort it was se
   const input: ToolCallInput = { tool: 'Bash', command: 'npm test', agentId: 'worker-1', tool_use_id: 'tool-a' }
   await $.tool.call(input)
   const rec = written.find(a => a.id === 'worker-1')
-  expect(rec?.usage).toEqual({ input: 600, cached: 18_000, cacheWrite: 1400, output: 100 })
+  // The last step's counts, not a sum of both steps' prompts; the output totals every step.
+  expect(rec?.usage).toEqual({ input: 300, cached: 9000, cacheWrite: 700, output: 50 })
+  expect(rec?.outputTotal).toBe(100)
   expect(rec?.tools).toBe(1)
   expect(rec?.effort).toBe('low')
   expect(rec?.answeredBy).toBe('deepseek-v4.1-flash@low')
   expect(rec?.provider).toBe('deepseek')
   const ui = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-agents', surface: 'terminal', props: { title: 'Agents', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
-  expect(await ui.find({ type: 'Text', text: /in 20k · cache 90% · out 100 · tools 1/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /tokens 10k · cache 90% · tools 1/ })).toBeDefined()
   expect(reads).toEqual([])
   await ui.press({ key: 'open-worker-1' })
   expect(reads).toContain('worker-1')

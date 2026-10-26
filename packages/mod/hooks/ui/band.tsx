@@ -32,7 +32,7 @@ import type { Lang } from '../i18n'
 import type { RenderChildren, RenderNode } from 'claude-code'
 
 import type { Effort, LimitItem } from '../../types'
-import { AGENTS_W, CELL_PX, DEPTH, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
+import { AGENTS_W, CELL_PX, DEPTH, countedWidth, ICON_PX, METER_H, METER_W, MUTE, ROW_PX, SUB, TONE, barArt, textPx } from './art'
 import { lookOf } from './look'
 import type { Word } from './look'
 import type { Sea, Tone } from './art'
@@ -43,7 +43,7 @@ import type { Els } from './parts'
 import type { Face } from './ripple'
 import { cacheTone, chOf, clip, contextTone, displayWidth, limitTone, providerColor, textTone } from './theme'
 import type { BandActions, DashboardView, Frame, LimitGroup } from './view'
-import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
+import { EFFORTS, compactNumber, effortIndex, effortLabel, effortName, isRich, limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, limitName, minutesLeft, modelName, narrowLimitGroups, resetsLabel, seconds } from './view'
 
 /** Growing ripples: low → max. */
 const RIPPLE_CHAR = ['·', '∘', '○', '◎', '◉']
@@ -253,15 +253,15 @@ export function limitFact(frame: Frame, view: DashboardView): Fact | null {
   return { key: 'limit', width, value, tail, card: [t(frame.lang, 'band.limitAlt', { window: limitName(limit.kind, frame.lang), value: Math.round(limit.percent) + '%', reset: resets ? ', ' + resets : '' })] }
 }
 
-/** The last route in `room` cells, or the router's notice; null when there is neither or no room. */
+/** The router's notice when it has one, else the last route, in `room` cells; null when there is neither or no room. */
 export function routeFact(frame: Frame, view: DashboardView, room: number, onPress: () => void): Fact | null {
   const rich = isRich(frame)
   if (view.hide.includes('route') || room < (rich ? RICH_ROUTE_MIN : ROUTE_MIN)) return null
+  // The notice is the router's state now; a route is a record of an earlier request, and it must
+  // not stand for a router that has stopped answering (2026-10-25).
+  if (view.notice) return { key: 'route', width: room, ...(rich ? { grow: true as const } : {}), value: { text: clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), room), dim: true } }
   const r = view.route
-  if (!r) {
-    if (!view.notice) return null
-    return { key: 'route', width: room, ...(rich ? { grow: true as const } : {}), value: { text: clip(view.notice.replace(/^ClaudeRipple:\s*/, ''), room), dim: true } }
-  }
+  if (!r) return null
   const glyph: Run = r.resent ? { text: '↻', dim: true } : r.ok ? { text: rich ? '→' : '↳', dim: true } : { text: '✕', color: BAD }
   // The desktop says what the figure is ("hit 100%"); a bare percentage beside a model name read as anything.
   const hit = r.cachePct !== undefined ? (rich ? t(frame.lang, 'band.hit', { percent: r.cachePct }) : r.cachePct + '%') : ''
@@ -353,7 +353,8 @@ function factsFor(frame: Frame, view: DashboardView, actions: BandActions, room:
 // Pointing at a fact shows what it means in the reason's place.
 // With the `limits` extra on and any window known, a second row under the first (starting where
 // the effort does) gauges every plan window — Claude's, then each ChatGPT account's — and the
-// first row's limit fact steps aside for the route.
+// first row's limit fact steps aside for the route. The row is a button: pressed, it opens the
+// limits pane, where each window's share and when it resets are spelled out.
 
 /** 리플이 in the band, px: the mini drawing (ripple.ts), a little taller than a line of text. */
 export const BAND_RIPPLE = 24
@@ -391,11 +392,21 @@ function bandSea(mood: BandMood): Omit<Sea, 'at'> {
 /** A fact's hover group: pointing at it shows its tip in the reason's place. */
 const tipScope = (key: string) => 'ripple-tip-' + key
 
-/** `press`: the fact is a button, so its tip starts past it and leaves its light in sight. */
-type DrawnFact = { key: string; cells: number; node: RenderNode; tip?: string; press?: () => void }
+/**
+ * `press`: the fact is a button, so its tip starts past it and leaves its light in sight. `counted`:
+ * what the row's budget takes for it when its slot is drawn tight to the value shown, the widest
+ * value's slot, so what the band drops never depends on a value (the route takes the difference).
+ */
+type DrawnFact = { key: string; cells: number; counted?: number; node: RenderNode; tip?: string; press?: () => void }
+const countedCells = (f: DrawnFact): number => f.counted ?? f.cells
 
 /** The air either side of a fact that is a button, in cells, inside its light as a control's is. */
 const PRESS_PAD = 0.5
+/**
+ * Cells between a fact's picture and its words. A whole cell, and slots rounded up to whole cells,
+ * read as loose once the app's type widened a cell (2026-10-25); slots are now exact.
+ */
+const FACT_GAP = 0.5
 
 /**
  * A fact's Box. `lit`: the fact is a button, lit under the pointer as the controls are, so it reads
@@ -410,7 +421,7 @@ function drawnFact(el: Els, key: string, cells: number, children: RenderNode[], 
     cells,
     tip,
     node: (
-      <Box key={'fact-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={1} width={cells} flexShrink={0} {...hover}>
+      <Box key={'fact-' + key} position="relative" flexDirection="row" alignItems="center" columnGap={FACT_GAP} width={cells} flexShrink={0} {...hover}>
         {children}
       </Box>
     ),
@@ -430,11 +441,12 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
   const idx = effortIndex(level)
   const word = mode === 'deciding' ? t(frame.lang, 'band.deciding') : level ? effortName(level, frame.lang) : '—'
   const look = mode === 'deciding' ? 'deciding' : mode === 'auto' ? 'auto' : mode === 'manual' ? 'manual' : 'quiet'
-  // The word's slot is sized for the widest word (bold Hangul runs ~15% wide of the estimate).
-  const wordPx = Math.max(...effortWords(frame.lang, true).map(w => textPx(w) * 1.15))
-  const cells = Math.ceil((METER_W + CELL_PX + wordPx) / CELL_PX + PRESS_PAD * 2)
+  // The word's slot is the word shown, taken a little wide for bold: a slot for the widest word left
+  // "높음" in room for "매우 높음" (2026-10-25). The budget still counts the widest.
+  const slot = (w: string) => (METER_W + FACT_GAP * CELL_PX + textPx(w) * 1.06) / CELL_PX + PRESS_PAD * 2
+  const cells = slot(word)
   const tip = effortFact(frame, view, actions.toggleEffortMenu).card?.join(' · ')
-  return drawnFact(
+  return withCounted(Math.max(...effortWords(frame.lang, true).map(slot)), drawnFact(
     el,
     'effort',
     cells,
@@ -447,8 +459,10 @@ function effortDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandAc
     ],
     tip,
     frame,
-  )
+  ))
 }
+
+const withCounted = (counted: number, f: DrawnFact): DrawnFact => ({ ...f, counted })
 
 /**
  * The context ring and its share. With the Context pane to open it is a button (the app dropped the
@@ -465,11 +479,15 @@ function contextDrawn(el: Els, frame: Frame, view: DashboardView, onPress?: () =
   const tip = onPress
     ? t(frame.lang, 'band.contextOpen', { tokens: compactNumber(ctx.tokens), window: compactNumber(ctx.window) })
     : contextFact(frame, view)?.card?.join(' · ') || undefined
-  const cells = Math.ceil((16 + CELL_PX + textPx('100%')) / CELL_PX + (onPress ? PRESS_PAD * 2 : 0))
+  // Drawn to the share shown (its digits are tabular, so only a new digit count moves what follows),
+  // counted at "100%".
+  const slot = (shown: string) => (16 + FACT_GAP * CELL_PX + textPx(shown)) / CELL_PX + (onPress ? PRESS_PAD * 2 : 0)
+  const cells = slot(Math.round(ctx.percent) + '%')
+  const counted = slot('100%')
   const ring = pic(el, 'ring', lookOf(frame).art.ring(ctx.percent, tone === 'ink' ? 'ink' : tone === 'warn' ? 'amber' : 'red'), t(frame.lang, 'band.context'), 16, 16)
   const value = <Text key="ctx-value" {...figure(frame, tone)}>{Math.round(ctx.percent) + '%'}</Text>
-  if (!onPress) return drawnFact(el, 'context', cells, [ring, value], tip)
-  return { ...drawnFact(el, 'context', cells, [ring, value, press(el, 'context', cells * CELL_PX, onPress)], tip, frame), press: onPress }
+  if (!onPress) return withCounted(counted, drawnFact(el, 'context', cells, [ring, value], tip))
+  return { ...drawnFact(el, 'context', cells, [ring, value, press(el, 'context', cells * CELL_PX, onPress)], tip, frame), counted, press: onPress }
 }
 
 function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null {
@@ -484,7 +502,7 @@ function cacheDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   const tone: Tone | 'soft' = shown === 0 ? 'soft' : drowsy ? 'amber' : held ? 'violet' : 'soft'
   const text = cache ? minutesLeft(left, frame.lang) : '—'
   const words = [t(frame.lang, 'units.minutes', { n: 60 }), t(frame.lang, 'band.cold'), '—']
-  const cells = Math.ceil((16 + CELL_PX + Math.max(...words.map(textPx))) / CELL_PX)
+  const cells = (16 + FACT_GAP * CELL_PX + Math.max(...words.map(textPx))) / CELL_PX
   const tip = cacheFact(frame, view)?.card?.join(' · ')
   return drawnFact(el, 'cache', cells, [
     pic(el, 'clock', k.art.clock(cache ? (shown * 60_000) / cache.ttlMs : 0, tone), t(frame.lang, 'band.cache'), 16, 16),
@@ -501,7 +519,7 @@ function limitDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | nul
   // to "g…" beside the route, and the window's name and reset stay in the tip (2026-10-14). Save's
   // word takes room only while save mode is on: reserved always, it cost the limit its place on a
   // band near 95 columns (2026-10-14).
-  const cells = Math.ceil((16 + CELL_PX + textPx('100%') + (limit.save ? CELL_PX + textPx(save) : 0)) / CELL_PX)
+  const cells = (16 + FACT_GAP * CELL_PX + textPx('100%') + (limit.save ? FACT_GAP * CELL_PX + textPx(save) : 0)) / CELL_PX
   return drawnFact(el, 'limit', cells, [
     pic(el, 'limit', lookOf(frame).art.gauge(limit.kind), t(frame.lang, 'band.limit'), 16, 16),
     <Text key="limit-value" {...figure(frame, limitTone(limit.percent))}>{Math.round(limit.percent) + '%'}</Text>,
@@ -521,8 +539,9 @@ function modeDrawn(el: Els, frame: Frame, view: DashboardView): DrawnFact | null
 //
 // The capsule's second row, under the first and starting where the effort does (a CREST_CELLS
 // indent): every plan window as a small gauge — Claude's 5-hour, weekly and per-model weeklies,
-// then each ChatGPT account's. A thinner row than the first (a line of text or so); the reset is
-// in the hover tip, which shows in the first row's tip place (see whyDrawn). Widths alone decide,
+// then each ChatGPT account's. A thinner row than the first (a line of text or so), and a button:
+// pressed, it opens the limits pane, where each window's share and when it resets are readable
+// (2026-10-25: the row has no room to add the reset beside every figure). Widths alone decide,
 // never values: the bar is one width, the figure's slot fits "100%", and only the name takes what
 // it takes (a changing figure never moves a neighbour). Narrow, the GPT accounts go first (the
 // last one first), then the per-model windows; what is left not fitting means no second row, and
@@ -629,16 +648,16 @@ function limitGroupDrawn(el: Els, frame: Frame, group: LimitGroup, name: string,
  * accounts (the last one first), then a later provider's whole group — Claude's own group stays to
  * the last. A provider with several accounts numbers them ("GPT 1", "GPT 2"); the number is the
  * account's, not its place in this row, so it holds even when only one of them fits.
+ * `onPress`: the row is a button (the limits pane); pressed it says so in the tip place, and each
+ * window's own tip (its name and reset) gives way to that one.
  */
-function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: number): { node: RenderNode; tips: { key: string; text: string }[] } | null {
+function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: number, onPress?: () => void): { node: RenderNode; tips: { key: string; text: string }[] } | null {
   const { Box } = el
   const items = view.limits ?? []
   if (!items.length || !view.extras.includes('limits')) return null
   const all = limitGroups(items)
   // Numbering follows the whole set of accounts a provider has, decided before any narrowing.
-  const accounts = new Map<string, number>()
-  for (const g of all) accounts.set(g.provider, (accounts.get(g.provider) ?? 0) + 1)
-  const numbered = (g: LimitGroup) => (accounts.get(g.provider) ?? 1) > 1
+  const numbered = limitGroupNumbered(all)
   // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
   const save = !!view.limit?.save
   const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
@@ -653,13 +672,24 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
     if (i > 0) children.push(rule(el, frame, 'limits-' + groups[i]!.key))
     children.push(d.node)
   })
+  // The press is laid over the row exactly as it draws — a box of the row's own width, so a press
+  // anywhere on the figures takes it — and lit under the pointer as a control is. It takes no width
+  // of its own: what the row holds is decided by its figures alone.
   return {
     node: (
-      <Box key="band-limits" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} paddingLeft={CREST_CELLS} paddingTop={0.5}>
-        {children}
+      <Box key="band-limits" flexDirection="row" alignItems="center" paddingLeft={CREST_CELLS} paddingTop={0.5}>
+        <Box key="limits-row" position="relative" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} flexShrink={0} {...(onPress ? { hover: { scope: tipScope('limits-open') } } : {})}>
+          {/* A bordered host Box adds 8 px above and below unless paddingY is set. Keep the
+              light out of flow as well: even its two border pixels must not grow this text row. */}
+          {onPress ? <Box key="limits-light" position="absolute" top={0} bottom={0} left={0} right={0} paddingY={0} {...hoverLight(frame, tipScope('limits-open'))} /> : null}
+          {children}
+          {onPress ? press(el, 'limits-open', width(density)(groups) * CELL_PX, onPress) : null}
+        </Box>
       </Box>
     ),
-    tips: drawn.flatMap(d => d.tips),
+    tips: onPress
+      ? [{ key: 'limits-open', text: t(frame.lang, 'band.limitsOpen') }]
+      : drawn.flatMap(d => d.tips),
   }
 }
 
@@ -671,19 +701,20 @@ export function routeName(model: string): string {
   return modelName(model.replace(/\s*\(.*\)$/, ''))
 }
 
-/** The last route: where it went (the provider's dot), the model, its cache hit; the way into the log. */
+/** The router's notice when it has one, else the last route: where it went, its model and cache hit; the way into the log. */
 function routeDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActions, room: number): RenderNode {
   const { Box, Text } = el
   if (view.hide.includes('route')) return ''
-  const r = view.route
-  if (!r) {
-    if (!view.notice) return ''
+  // The router's state now outranks a record of an earlier request (2026-10-25).
+  if (view.notice) {
     return (
       <Box key="fact-route" position="relative" flexShrink={1} minWidth={0} overflow="hidden">
         <Text {...lookOf(frame).mute} wrap="truncate">{view.notice.replace(/^ClaudeRipple:\s*/, '')}</Text>
       </Box>
     )
   }
+  const r = view.route
+  if (!r) return ''
   const tone = r.cachePct !== undefined ? cacheTone(r.cachePct) : 'ok'
   const k = lookOf(frame)
   const name = routeName(r.model)
@@ -764,16 +795,24 @@ function rule(el: Els, frame: Frame, key: string): RenderNode {
   )
 }
 
-type DrawnControl = { key: string; cells: number; node: RenderNode; tip: string }
+/** `counted`: what the row's budget takes for a control drawn narrower than it can grow (see DrawnFact). */
+type DrawnControl = { key: string; cells: number; counted?: number; node: RenderNode; tip: string }
 
-/** An icon control, lit under the pointer: its picture, its word when the band has room, its press. */
-function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word): DrawnControl {
+/**
+ * An icon control, lit under the pointer: its picture, its word when the band has room, its press.
+ * `widestPx`: the picture's width at its widest (a counted icon with its badge), which the budget takes.
+ */
+function iconControl(el: Els, frame: Frame, key: string, source: string, artPx: number, alt: string, tip: string, onPress: () => void, label?: string, word?: Word, widestPx = artPx): DrawnControl {
   const { Text } = el
   const pad = label ? 0.5 : 0.25
-  const cells = Math.ceil((artPx + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2)
+  // Exact, not rounded up to whole cells: the host takes fractions, and up to 0.7 of a cell after
+  // each icon read as a gap once the app's type made a cell wider (2026-10-25).
+  const slot = (px: number) => (px + (label ? CELL_PX + chOf(label) * CELL_PX * 1.04 : 0)) / CELL_PX + pad * 2
+  const cells = slot(artPx)
   return {
     key,
     cells,
+    counted: slot(widestPx),
     tip,
     node: lit(el, frame, key, cells, [pic(el, key, source, alt, artPx, 16), label ? <Text key={key + '-word'} {...(word ?? lookOf(frame).sub)}>{label}</Text> : '', press(el, key, cells * CELL_PX, onPress)], pad, tipScope(key)),
   }
@@ -797,14 +836,15 @@ function controlsDrawn(el: Els, frame: Frame, view: DashboardView, actions: Band
   out.push(iconControl(el, frame, 'warm', k.art.icon('flame', view.warm.on, 'amber'), ICON_PX, warmLabel, t(L, 'band.warmAlt', { state: state(view.warm.on) }) + ' · ' + t(L, view.warm.here ? 'band.warmHere' : 'settings.warmLine'), actions.toggleWarm, words.includes('warm') ? warmLabel : undefined, view.warm.on ? { color: k.tone('amber') } : k.sub))
   const agentsLabel = t(L, 'band.agents')
   const live = view.agents.live
-  // The live count sits on the icon's shoulder, in one picture of one width: no width change.
-  out.push(iconControl(el, frame, 'agents', k.art.agents(live, view.agentsOpen || live > 0), AGENTS_W, live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? k.ink : k.sub))
+  // The live count sits on the icon's shoulder, which is drawn only while there is a count: kept
+  // blank at zero it read as a gap after the icon (2026-10-25). The budget counts the shoulder.
+  out.push(iconControl(el, frame, 'agents', k.art.agents(live, view.agentsOpen || live > 0), countedWidth(live), live > 0 ? agentsLabel + ' ' + live : agentsLabel, t(L, 'band.agentsAlt', { count: live }), actions.toggleAgents, words.includes('agents') ? agentsLabel : undefined, view.agentsOpen ? k.ink : k.sub, AGENTS_W))
   const compactLabel = t(L, 'band.compact')
   // How many times the chat was compacted sits on the icon's shoulder, as the agents' live count
-  // does, in one picture of one width: the first compaction moves no neighbour.
+  // does, drawn only once there is one.
   const compactions = view.compactions
   const compactTip = t(L, 'band.compactAlt') + (compactions > 0 ? ' · ' + t(L, 'band.compactedTimes', { count: compactions }) : '')
-  out.push(iconControl(el, frame, 'compact', k.art.counted('compact', compactions, false), AGENTS_W, compactions > 0 ? compactLabel + ' ' + compactions : compactLabel, compactTip, actions.compact, words.includes('compact') ? compactLabel : undefined))
+  out.push(iconControl(el, frame, 'compact', k.art.counted('compact', compactions, false), countedWidth(compactions), compactions > 0 ? compactLabel + ' ' + compactions : compactLabel, compactTip, actions.compact, words.includes('compact') ? compactLabel : undefined, undefined, AGENTS_W))
   const clearLabel = t(L, 'band.clear')
   out.push(iconControl(el, frame, 'clear', k.art.icon('clear', false), ICON_PX, clearLabel, t(L, 'band.clearAlt'), actions.clear, words.includes('clear') ? clearLabel : undefined))
   const settingsLabel = t(L, 'band.settings')
@@ -915,7 +955,7 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   const effort = effortDrawn(el, frame, view, actions)
   // The second row is decided before the first row's budget: when it draws, the first row's limit
   // fact steps aside and the route takes its room.
-  const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS)
+  const limitsRow = limitsRowDrawn(el, frame, view, cols - CREST_CELLS, actions.toggleLimits)
   const optional = [modeDrawn(el, frame, view), contextDrawn(el, frame, view, actions.toggleContext), cacheDrawn(el, frame, view), ...(limitsRow ? [] : [limitDrawn(el, frame, view)])].filter((f): f is DrawnFact => f !== null)
   // The Auto word is its control: it never loses its shape, so no word of it is dropped, and the
   // spare words (the icons' beside it) go first when the row narrows.
@@ -925,14 +965,14 @@ function bandDrawn(el: Els, frame: Frame, view: DashboardView, actions: BandActi
   // cell, as the facts' air), and the hide button a half-separator of its own.
   const counted = (w: readonly string[]) => {
     const list = controlsDrawn(el, frame, view, actions, w)
-    return list.reduce((n, c) => n + c.cells, 0) + 0.15 * (list.length - 1) + (actions.hide ? 0.15 : 0)
+    return list.reduce((n, c) => n + (c.counted ?? c.cells), 0) + 0.15 * (list.length - 1) + (actions.hide ? 0.15 : 0)
   }
   let controlCells = counted(words)
   let route = view.hide.includes('route') ? 0 : ROUTE_ROOM
   let ruled = true
-  const span = (facts: DrawnFact[]) => facts.reduce((n, f) => n + f.cells + DRAWN_GAP, 0)
+  const span = (facts: DrawnFact[]) => facts.reduce((n, f) => n + countedCells(f) + DRAWN_GAP, 0)
   const rules = (facts: DrawnFact[]) => (ruled ? (facts.length ? RULE_CELLS + DRAWN_GAP : 0) + (route ? RULE_CELLS + DRAWN_GAP : 0) : 0)
-  const need = (facts: DrawnFact[]) => CREST_CELLS + DRAWN_GAP + effort.cells + DRAWN_GAP + rules(facts) + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
+  const need = (facts: DrawnFact[]) => CREST_CELLS + DRAWN_GAP + countedCells(effort) + DRAWN_GAP + rules(facts) + span(facts) + (route ? route + DRAWN_GAP : 0) + controlCells + close + 1
   let facts = optional
   // Narrow, things go in this order until the row fits: the icons' words (clear, compact,
   // settings, agents, keep-warm), the rules, then the route draws in to its least, then the mode

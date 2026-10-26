@@ -7,6 +7,9 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { EventLog } from "./eventlog.ts";
+import { TaskPlan } from "./task-plan.ts";
+import { BackgroundActivity } from "./background-activity.ts";
+import { toolInput } from "./tool-details.ts";
 import type { PushContext } from "./push-content.ts";
 import type { PushEvent } from "./protocol.ts";
 import { attachmentContent, fileImages, messageContent, sessionFileTool, type InputBlock } from "./images.ts";
@@ -14,7 +17,7 @@ import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_WAITING, DesktopBlockedError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -69,7 +72,8 @@ interface SessionRecord {
   createdBy: string;
   contextWindow: number | null;
   /** Missing on older host records; desktop continuations are explicitly excluded. */
-  desktopHandoff?: "pending" | "attempted" | "failed" | "excluded";
+  desktopHandoff?: "pending" | "opening" | "attempted" | "failed" | "excluded";
+  desktopHandoffRetryAt?: number;
   desktopHandoffAttempts?: number;
   desktopHandoffError?: string;
   desktopBridge?: boolean;
@@ -87,7 +91,7 @@ interface Live {
   /** Content blocks of the API message being streamed, merged across the SDK's per-block messages. */
   current: { msg: string; text: string; images?: ImagePart[]; files?: SessionFile[]; tools: ToolCall[]; model: string; thinkingBlocks: number[]; nextThinkingBlock: number } | null;
   /** Task/Agent tool ids → their subagent while it runs */
-  subs: Map<string, { description: string; model: string | null; steps: number }>;
+  subs: Map<string, { description: string; model: string | null; steps: number; parent?: string }>;
   turnStart: number;
   restartAfterTurn: boolean;
   retried: boolean;
@@ -234,14 +238,27 @@ function bridgeRequest(tool: string, input: Record<string, unknown>): { requestK
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One id may only ever name one message. This is the content a receipt remembers, so a reused id
+ * with other words or other files is refused instead of being answered with a success. */
+const SAME_ID_OTHER_CONTENT = "같은 메시지 ID에 다른 내용이 이미 접수되었습니다. 새 메시지로 다시 보내 주세요.";
+const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function sendFingerprint(text: string, attachments: Attachment[]): string {
+  return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
+}
+function createFingerprint(req: { cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): string {
+  return digest({ cwd: req.cwd, model: req.model, effort: req.effort, text: req.text, mode: req.permissionMode ?? "auto", isolation: req.isolation ?? "local", branch: req.baseBranch ?? null });
+}
 /** A stable v4-shaped UUID for a phone message id. */
 function uuidFrom(text: string): string {
   const h = createHash("sha256").update(text).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** The list-level state the host keeps outside any session's log: who wants a look, and what is archived. */
-export interface ListState { attention: Record<string, Attention>; archived: string[] }
+/** The list-level state the host keeps outside any session's log: who wants a look, what is archived,
+ * and up to which activity the phone has read each session (the app's unread dot is its own file,
+ * which the host only reads — so the phone's reading is remembered here). */
+export interface ListState { attention: Record<string, Attention>; archived: string[]; readAt: Record<string, number> }
 
 /**
  * The attention a state change should leave behind, or null when it should leave none.
@@ -277,7 +294,7 @@ export class Sessions {
   /** Slash commands per session (its init event), and the latest seen anywhere for sessions with none yet. */
   private commandLists = new Map<string, { at: number; list: string[] }>();
   private lastCommands: string[] = [];
-  private figuresAt = new Map<string, number>();
+  private figuresAt = new Map<string, { at: number; model: string; epoch: string; cliId: string }>();
   private lastFigures = new Map<string, string>();
   /** model → the context window the SDK reported for it (`modelUsage`), learned from host sessions and
    * reused for Mac sessions on the same model, which never report one. Kept in `context-windows.json`. */
@@ -291,9 +308,11 @@ export class Sessions {
   private handingOff = new Map<string, { messages: SdkUserMessage[] }>();
   private shuttingDown = false;
   private file: string;
-  /** Attention per session id, and archived session ids; kept outside the logs so both survive a restart. */
+  /** Attention per session id, archived session ids, and the activity each phone read up to; kept
+   * outside the logs so all three survive a restart. */
   private attention = new Map<string, Attention>();
   private archived = new Set<string>();
+  private readAt = new Map<string, number>();
   private listFile: string;
   private now: () => number;
   private receipts: MessageReceipts;
@@ -430,10 +449,13 @@ export class Sessions {
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     this.settings = new SessionSettings(path.join(opts.dir, "settings-operations.json"));
     this.sendQueue = SendQueue.open(opts.dir);
+    this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", DESKTOP_WAITING);
+    this.sendQueue.retryFailures(DESKTOP_BLOCKED, DESKTOP_WAITING);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
     for (const id of listState?.archived ?? []) this.archived.add(id);
+    for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
     this.sidebar = opts.desktopSidebar ? new DesktopSidebar({ ...opts.desktopSidebar, now: this.now,
       onError: error => (opts.log ?? console.error)(`[desktop sidebar] ${error instanceof Error ? error.message : String(error)}`),
     }) : null;
@@ -467,6 +489,12 @@ export class Sessions {
       if (this.records.has(p.session)) this.append(p.session, { kind: "permission_decided", id: p.id, decision: "expired", reason: "host_restarted" });
     }
     for (const r of this.records.values()) {
+      // A host exit during the launcher call did not confirm delivery to Desktop.
+      if (r.desktopHandoff === "opening") {
+        r.desktopHandoff = (r.desktopHandoffAttempts ?? 0) < 3 ? "pending" : "failed";
+        this.save();
+        if (r.desktopHandoff === "failed") this.append(r.id, { kind: "notice", code: "desktop_handoff_failed" }, false);
+      }
       if (r.state === "running" || r.state === "starting" || r.state === "waiting") {
         this.append(r.id, { kind: "notice", code: "host_restarted", text: "호스트가 다시 시작되어 이 턴이 중단되었습니다" }, false);
         this.setState(r, "stopped", undefined, false);
@@ -482,7 +510,15 @@ export class Sessions {
       const status = this.statusLine(s.id);
       return { ...s, ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.sendQueue.summary(s.id) };
     })];
-    return this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
+    const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
+    // A session the list no longer holds keeps no read record (this map must not outgrow the list).
+    const present = new Set(listed.map(s => s.id));
+    let pruned = false;
+    for (const id of [...this.readAt.keys()]) if (!present.has(id)) { this.readAt.delete(id); pruned = true; }
+    if (pruned) this.saveListState();
+    // Reading on the phone clears the Mac app's unread dot: a look after the last activity outranks
+    // the app's late-written unread set (sidebar.ts:98). Newer activity outruns the record again.
+    return listed.map(s => s.unread && (this.readAt.get(s.id) ?? 0) >= s.updatedAt ? { ...s, unread: false } : s);
   }
 
   groups(): string[] | undefined {
@@ -506,6 +542,7 @@ export class Sessions {
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
+      if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed" && this.now() >= (r.desktopHandoffRetryAt ?? 0)) this.handoff(r);
       if (!this.desktop) continue;
       const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
       // The Claude app worker has Remote Control on for a conversation the host is still driving
@@ -651,8 +688,12 @@ export class Sessions {
       if (wasRunning === undefined && firstSights >= FIRST_SIGHTS_PER_POLL) continue;
       this.macTurns.set(s.id, running);
       if (wasRunning === undefined) firstSights++;
-      if (wasRunning === undefined || wasRunning || running) {
-        const forced = wasRunning === undefined || (wasRunning && !running);
+      const previous = this.figuresAt.get(s.id);
+      // First materialization is not a replacement: no older snapshot existed to invalidate.
+      if (previous && !previous.epoch) previous.epoch = s.epoch;
+      const changed = previous && (previous.model !== s.model || s.epoch && previous.epoch !== s.epoch);
+      if (wasRunning === undefined || wasRunning || running || changed) {
+        const forced = wasRunning === undefined || (wasRunning && !running) || !!changed;
         void this.readFigures(s.id, record?.sdkSessionId ?? s.id, s.model, record?.contextWindow ?? null, forced, true);
       }
     }
@@ -752,9 +793,14 @@ export class Sessions {
     for (const s of sessions) {
       if (s.origin !== "desktop" || this.records.has(s.id) || this.archived.has(s.id)) continue;
       seen.add(s.id);
-      const permission = s.state === "waiting" || s.attention?.reason === "permission";
+      const permission = s.state === "waiting" || s.pending > 0;
       const previous = this.macStates.get(s.id);
       this.macStates.set(s.id, { state: s.state, permission });
+      const current = this.attention.get(s.id) ?? null;
+      // List-only desktop sessions have no record whose setState would retire the previous
+      // turn's attention. Use the same transition contract without generating startup alerts.
+      const next = nextAttention(current, previous?.state ?? "stopped", s.state, this.now());
+      if (next !== current) { this.setAttention(s.id, next); this.opts.onSessions(); }
       if (!previous) continue;
       if (permission && !previous.permission) this.alert(s.id, { kind: "permission" });
       else if (previous.state === "running" && s.state === "idle") {
@@ -790,22 +836,32 @@ export class Sessions {
   }
 
   /** The phone is looking at this session: clear its attention — except a permission request, which
-   * only clears when the approval is answered. Reports whether anything changed. */
+   * only clears when the approval is answered — and remember that the phone read up to the session's
+   * current activity, so the app's unread dot does not outlive the look (server.ts only forwards a
+   * seen from a visibly focused phone, so a background one cannot mark anything read).
+   * Reports whether anything the phone sees changed. */
   markSeen(id: string): boolean {
+    let changed = false;
     const current = this.attention.get(id);
-    if (!current || current.reason === "permission") return false;
-    this.attention.delete(id);
-    this.saveListState();
-    this.opts.onSessions();
-    return true;
+    if (current && current.reason !== "permission") { this.attention.delete(id); changed = true; }
+    // Only a row the list still shows as unread needs a record: once read up to its activity, the
+    // earlier timestamp stands, so a presence ping that changes nothing never rewrites list-state.json.
+    const activity = this.sidebar?.unreadActivity(this.records.get(id)?.sdkSessionId ?? id);
+    if (activity !== undefined && activity > (this.readAt.get(id) ?? 0)) {
+      this.readAt.set(id, Math.max(this.now(), activity)); changed = true;
+    }
+    if (changed) { this.saveListState(); this.opts.onSessions(); }
+    return changed;
   }
 
-  /** "Mark unread": put the attention back, guessed from what the session is doing now. */
+  /** "Mark unread": put the attention back, guessed from what the session is doing now, and forget
+   * what the phone had read so the app's unread dot can show again. */
   markUnread(id: string): Attention {
     const s = this.list().find(x => x.id === id);
     if (!s) throw new Error("no such session");
     const reason: AttentionReason = s.pending > 0 || s.state === "waiting" ? "permission" : s.state === "error" ? "failed" : "finished";
     const attention: Attention = { reason, at: this.now() };
+    if (this.readAt.delete(id)) this.saveListState();
     this.setAttention(id, attention);
     this.opts.onSessions();
     return attention;
@@ -838,7 +894,7 @@ export class Sessions {
   private continueDesktop(id: string, clientMsgId: string, bridgeMode = false): SessionRecord {
     if (!this.desktop) throw new Error("no such session");
     const { summary: s, open } = this.desktop.continuation(id);
-    if (open && !bridgeMode) throw new Error(DESKTOP_BLOCKED);
+    if (open && !bridgeMode) throw new DesktopBlockedError();
     const log = this.desktop.importInto(id, path.join(this.opts.dir, "sessions", id), this.now);
     // The app's registry records the folder the conversation runs in now; the transcript's first
     // line keeps the one it started in (a conversation moved folders, issue #82).
@@ -913,16 +969,18 @@ export class Sessions {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
     const state = process ? this.bridgeState(process) : r.desktopBridge ? "stopped" : r.state;
-    // The transcript keeps tasks whose end was never recorded; only a process the registry calls
-    // busy can have any running, so an idle one reports none.
+    // Main-turn idleness does not finish background work. Keep transcript observations separate
+    // from a complete engine inventory, which only the SDK Stop hook can confirm here.
     const working = process?.status === "busy" || process?.status === "shell";
-    const taskList = working ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : [];
+    const activity = r.desktopBridge ? null : this.taskState(r.id).activity;
+    const taskList = r.desktopBridge ? this.desktop?.backgroundTaskList(r.sdkSessionId ?? r.id) ?? [] : activity?.active ?? [];
+    const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
-    const plan = working ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : [];
+    const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
     // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
     const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
-    return { ...(r.desktopBridge ? { desktopBridge: true, tasks: taskList.length, taskList, turnStartedAt, plan, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -961,6 +1019,11 @@ export class Sessions {
   blob(id: string, blob: string): string | null {
     const data = this.log(id).blob(blob);
     if (data !== null) return data;
+    for (const [key, log] of this.logs) {
+      if (!key.startsWith(`${id}/sub-`)) continue;
+      const workerData = log.blob(blob);
+      if (workerData !== null) return workerData;
+    }
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     return this.desktop?.workerBlob(desktopId, blob) ?? this.sendQueue.editingBlob(id, blob);
   }
@@ -974,7 +1037,7 @@ export class Sessions {
   }
 
   private saveListState(): void {
-    writeFileAtomic(this.listFile, JSON.stringify({ attention: Object.fromEntries(this.attention), archived: [...this.archived] } satisfies ListState));
+    writeFileAtomic(this.listFile, JSON.stringify({ attention: Object.fromEntries(this.attention), archived: [...this.archived], readAt: Object.fromEntries(this.readAt) } satisfies ListState));
   }
 
   /** Set/clear a session's attention, persisting only when it actually changed. */
@@ -985,12 +1048,44 @@ export class Sessions {
     this.saveListState();
   }
 
+  private taskPlans = new Map<string, { log: EventLog; cursor: number; tracker: TaskPlan; activity: BackgroundActivity }>();
+
+  /** Replay only new durable events; a replaced epoch starts from its own list, not a previous session. */
+  private taskState(id: string): { log: EventLog; cursor: number; tracker: TaskPlan; activity: BackgroundActivity } {
+    let state = this.taskPlans.get(id);
+    if (this.shuttingDown && state) return state;
+    const log = this.log(id);
+    if (!state || state.log !== log) {
+      state = { log, cursor: 0, tracker: new TaskPlan(), activity: new BackgroundActivity() };
+      this.taskPlans.set(id, state);
+    }
+    const load = (text: import("./protocol.ts").Text): string => {
+      if (typeof text === "string") return text;
+      const value = log.blob(text.blob);
+      if (value === null) throw new Error("Task input blob is missing");
+      return value;
+    };
+    while (state.cursor < log.lastSeq) {
+      const page = log.readAfter(state.cursor);
+      for (const event of page.events) { state.tracker.accept(event, load); state.activity.accept(event, load); }
+      state.cursor = page.events.at(-1)?.seq ?? log.lastSeq;
+      if (!page.more) break;
+    }
+    return state;
+  }
+
   /** `touch` false: the host noticing a session is no longer live is not the session being used (a restart moved every old one to "now"). */
   private append(id: string, body: EventBody, touch = true): SessionEvent {
+    const previous = this.taskPlans.get(id);
+    const beforePlan = (previous?.tracker.version ?? 0) + (previous?.activity.version ?? 0);
     const event = this.log(id).append(body);
     const r = this.records.get(id);
+    const taskEvent = body.kind === "assistant" || body.kind === "tool_result" || body.kind === "user" || body.kind === "subagent" || body.kind === "background";
+    const current = r && !r.desktopBridge && taskEvent ? this.taskState(id) : null;
+    const planChanged = current && current.tracker.version + current.activity.version !== beforePlan;
     if (r && touch) r.updatedAt = this.now();
     this.opts.onEvent(id, event);
+    if (planChanged) this.opts.onSessions();
     return event;
   }
 
@@ -1050,6 +1145,7 @@ export class Sessions {
     const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
     if (!item) throw new Error("That message is no longer queued.");
     this.sendQueue.resume(id);
+    if (this.handingOff.has(id)) { this.opts.onSessions(); return id; }
     return this.dispatchQueued(id, item, false);
   }
 
@@ -1079,7 +1175,7 @@ export class Sessions {
       const r = this.records.get(id);
       if (r && !r.desktopBridge) { void this.drainQueue(id); continue; }
       const process = this.desktop?.liveProcess(r?.sdkSessionId ?? id);
-      if (process?.status === "idle") void this.drainQueue(id, true);
+      if (!process || process.status === "idle") void this.drainQueue(id, process?.status === "idle");
     }
   }
 
@@ -1105,9 +1201,18 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.handingOff.has(id) || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    const process = this.desktop?.liveProcess(desktopId);
+    if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
+      if (this.sendQueue.wait(id, head.id, DESKTOP_WAITING)) this.opts.onSessions();
+      return;
+    }
+    // Registry idle can precede the accepted bridge turn actually starting.
+    const sent = process?.bridgeSessionId ? this.bridgeRunning.get(process.bridgeSessionId) : undefined;
+    if (sent !== undefined && this.now() - sent < 9000) return;
     if (!registryIdle) {
       const summary = this.has(id) ? this.summaryOf(id) : undefined;
       if (!summary || BUSY.has(summary.state)) return;
@@ -1144,14 +1249,15 @@ export class Sessions {
     let before = 0;
     try { before = this.log(id).lastSeq; } catch { /* the send below creates it */ }
     try {
-      const sent = await this.send(id, item.id, item.text, attachments, "steer");
+      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true);
       this.sendQueue.remove(id, item.id);
       // Only a message sent from here waits for its own turn; one sent now rides the running turn.
       if (fromQueue) this.sendQueue.sent(id, before, this.now());
       this.opts.onSessions();
       return sent;
     } catch (error) {
-      this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
+      if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, DESKTOP_WAITING);
+      else this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
       this.opts.onSessions();
       throw error;
     }
@@ -1162,25 +1268,27 @@ export class Sessions {
   /** Idempotent on clientMsgId: a phone that resends after a dropped ack gets the same session.
    * A resend that finds a pending receipt left from before a host restart throws
    * OutcomeUnknownError instead of running again: the first attempt may or may not have run. */
-  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
-    for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
+  create(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     const key = `create:${req.clientMsgId}`;
-    if (this.receipts.status(key) === "completed") {
+    const status = this.receipts.status(key);
+    if (status !== null && this.receipts.conflict(key, createFingerprint(req))) return Promise.reject(new Error(SAME_ID_OTHER_CONTENT));
+    for (const r of this.records.values()) if (r.createdBy === req.clientMsgId) return Promise.resolve(r.id);
+    if (status === "completed") {
       const session = this.receipts.sessionOf(key);
       if (session && this.records.has(session)) return Promise.resolve(session);
       if (session) return Promise.resolve(session);
     }
-    if (this.receipts.status(key) === "pending") {
+    if (status === "pending") {
       // A resend can arrive while the first create is still checking the folder; both get the one session.
       const riding = this.creating.get(req.clientMsgId);
       if (riding) return riding;
       throw new OutcomeUnknownError();
     }
-    this.receipts.begin(key, "");
+    this.receipts.begin(key, "", createFingerprint(req));
     // A resend can arrive while the first create is still checking the folder; both get the one session.
     let pending = this.creating.get(req.clientMsgId);
     if (!pending) {
-      pending = this.createNew(req).then(
+      pending = this.createNew(req, title).then(
         id => { this.receipts.complete(key, id); return id; },
         (error: unknown) => { this.receipts.abandon(key); throw error; },
       ).finally(() => this.creating.delete(req.clientMsgId));
@@ -1189,7 +1297,7 @@ export class Sessions {
     return pending;
   }
 
-  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }): Promise<string> {
+  private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     const mode = req.permissionMode ?? "auto";
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const isolation = req.isolation ?? "local";
@@ -1203,10 +1311,11 @@ export class Sessions {
       : path.resolve(req.cwd);
     if (!(await isDirectory(cwd))) throw new Error(`not a folder: ${cwd}`);
     const now = this.now();
-    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
+    const r: SessionRecord = { id: randomUUID(), sdkSessionId: null, cwd, model: req.model, effort: req.effort, permissionMode: mode, title: title?.trim() || oneLine(req.text, 80), createdAt: now, updatedAt: now, state: "starting", createdBy: req.clientMsgId, contextWindow: null, desktopHandoff: "pending" };
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
+    if (this.opts.handoff) this.append(r.id, { kind: "notice", code: "desktop_handoff" });
     if (req.text.trim()) await this.send(r.id, req.clientMsgId, req.text);
     else this.setState(r, "idle");
     this.opts.onSessions();
@@ -1216,27 +1325,48 @@ export class Sessions {
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live.
    * The receipt is written pending before the input reaches the SDK and completed once the SDK
    * has accepted it; a resend of a completed id returns without running again, and a resend that
-   * finds a pending receipt from before a host restart throws OutcomeUnknownError. */
+   * finds a pending receipt from before a host restart throws OutcomeUnknownError.
+   * During Desktop handoff, ACK means durable queue ownership; its send receipt starts only at dispatch. */
   send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
+    return this.deliver(id, clientMsgId, text, attachments, behavior);
+  }
+
+  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false): string | Promise<string> {
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
     const key = `send:${id}:${clientMsgId}`;
-    if (this.receipts.status(key) === "completed") return id;
+    const fingerprint = sendFingerprint(text, attachments);
+    if (this.receipts.status(key) === "completed") {
+      // The id was accepted with other content: a silent ack would tell the phone work ran that
+      // never did. (Receipts from before fingerprints keep the idempotent answer.)
+      if (this.receipts.conflict(key, fingerprint)) throw new Error(SAME_ID_OTHER_CONTENT);
+      return id;
+    }
     if (this.receipts.status(key) === "pending") {
+      if (this.receipts.conflict(key, fingerprint)) throw new Error(SAME_ID_OTHER_CONTENT);
       const riding = this.sending.get(key) ?? this.bridgeSends.get(`${id}/${clientMsgId}`);
       if (riding) return riding;
       throw new OutcomeUnknownError();
     }
     if (this.seen(id, clientMsgId)) return id;
+    if (!queued && this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
     // Delegated turns own their own receipts; this wrapper only forwards them.
     if (/^\/(clear|new)\s*$/.test(text) && !attachments.length) {
       const s = this.list().find(s => s.id === id);
       if (!s) throw new Error("no such session");
-      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" });
+      // This is a fresh conversation, not an SDK /clear: carry its label separately from the
+      // empty prompt so persistence, the first SDK launch and the desktop handoff all retain it.
+      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" }, s.title);
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
     if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
-    this.receipts.begin(key, id);
+    // A Desktop handoff may finish before its RC transport exists. Acknowledge durable queue
+    // ownership, not an in-memory transfer that would later fail despite the phone's ACK.
+    if (!queued && this.handingOff.has(id) && this.records.get(id)?.desktopHandoff === "opening") {
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
+    this.receipts.begin(key, id, fingerprint);
     try {
       return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
     } catch (error) {
@@ -1258,6 +1388,9 @@ export class Sessions {
   }
 
   private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[]): string | Promise<string> {
+    // Stop closes this query's inbox before awaiting the SDK. Reject before recording the
+    // user/seen id or converting attachments, so a retry can enter the next query exactly once.
+    if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
@@ -1270,7 +1403,7 @@ export class Sessions {
         this.bridgeSends.set(key, sending);
         return sending;
       }
-      if (process || this.desktop.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+      if (process || this.desktop.isOpen(desktopId)) throw new DesktopBlockedError();
       if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
@@ -1368,6 +1501,7 @@ export class Sessions {
     this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
     for (const outcome of this.settings.replay(r.id)) this.append(r.id, { kind: "settings", ...outcome });
     r.desktopBridge = true;
+    r.contextWindow = null;
     r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
     this.save();
     this.opts.onSessions();
@@ -1391,7 +1525,10 @@ export class Sessions {
       const meta = this.desktop.metadataOf(transcript);
       if (meta && (meta.title !== r.title || meta.model && meta.model !== r.model)) {
         r.title = meta.title;
-        if (meta.model && !r.confirmedSettings?.model) r.model = meta.model;
+        if (meta.model && !r.confirmedSettings?.model) {
+          if (r.model !== meta.model) r.contextWindow = null;
+          r.model = meta.model;
+        }
         this.save();
         this.opts.onSessions();
       }
@@ -1741,7 +1878,7 @@ export class Sessions {
     if (!this.bridges.has(id) && bridgeId) { this.log(id); this.ensureBridge(id, bridgeId); }
     const connection = this.bridges.get(id);
     if (connection) {
-      if (connection.failed) throw new Error(DESKTOP_BLOCKED);
+      if (connection.failed) throw new DesktopBlockedError();
       try { await this.bridge.interrupt(connection.bridgeId); }
       catch (error) { this.bridgeFailure(id, error); throw error; }
       this.append(id, { kind: "notice", code: "interrupted" });
@@ -1796,7 +1933,7 @@ export class Sessions {
       this.ensureBridge(id, bridgeId);
       return bridgeId;
     }
-    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new Error(DESKTOP_BLOCKED);
+    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new DesktopBlockedError();
     return null;
   }
 
@@ -1854,6 +1991,7 @@ export class Sessions {
       const r = this.records.get(id)!;
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_model", model: m.model });
       if (this.shuttingDown) throw new OutcomeUnknownError();
+      if (r.model !== model) r.contextWindow = null;
       r.model = model;
       r.confirmedSettings = { ...r.confirmedSettings, model };
       this.save();
@@ -1890,6 +2028,7 @@ export class Sessions {
       if (this.live.get(id) !== live) throw new Error("The session stopped before its model changed. Try again.");
       await live.query.setModel(m.model);
     }
+    if (changedModel) r.contextWindow = null;
     r.model = model;
     r.effort = effort;
     this.save();
@@ -1927,7 +2066,7 @@ export class Sessions {
   // ---- the query ----------------------------------------------------------------------------
 
   private start(r: SessionRecord): Live {
-    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new Error(DESKTOP_BLOCKED);
+    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new DesktopBlockedError();
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};
@@ -1941,6 +2080,13 @@ export class Sessions {
       model: m.model,
       ...(m.effort ? { effort: m.effort } : {}),
       includePartialMessages: true,
+      hooks: { Stop: [{ hooks: [async (input: Record<string, unknown>) => {
+        if (this.shuttingDown || this.live.get(r.id) !== live || input.agent_id || !Array.isArray(input.background_tasks) && !Array.isArray(input.session_crons)) return {};
+        const activity = this.taskState(r.id).activity;
+        activity.inventory(input, this.now());
+        this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
+        return {};
+      }] }] },
       settingSources: ["user", "project", "local"],
       permissionMode: r.permissionMode ?? "auto",
       ...((r.bypassAllowed ?? r.permissionMode === "bypassPermissions") ? { allowDangerouslySkipPermissions: true } : {}),
@@ -2080,6 +2226,18 @@ export class Sessions {
         const message = msg.message as { content?: unknown } | undefined;
         const blocks = Array.isArray(message?.content) ? (message!.content as { type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }[]) : [];
         const converted = messageContent(message?.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) });
+        if (!parent && typeof converted.text === "string" && converted.text.startsWith("<task-notification>")) {
+          const activity = this.taskState(r.id).activity;
+          activity.notice(converted.text, this.now());
+          this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
+          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1];
+          const status = /<status>([^<]+)<\/status>/.exec(converted.text)?.[1];
+          if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
+            this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
+            live.subs.delete(tool);
+          }
+          return;
+        }
         // SDK user echoes normally already have a phone event; retain attachment-bearing echoes only.
         if (converted.images.length || converted.files.length) {
           const body: EventBody = { kind: "user", ...converted, clientMsgId: typeof msg.uuid === "string" ? msg.uuid : randomUUID() };
@@ -2089,12 +2247,14 @@ export class Sessions {
         for (const b of blocks) {
           if (b.type !== "tool_result" || !b.tool_use_id) continue;
           const body: EventBody = { kind: "tool_result", toolUseId: b.tool_use_id, ok: !b.is_error, ...messageContent(b.content, data => this.log(r.id).image(data), { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }) };
-          if (parent) { this.subLog(r.id, `sub-${parent}`)?.append(body); continue; }
-          this.append(r.id, body);
+          if (parent) this.subLog(r.id, `sub-${parent}`)?.append(body);
+          else this.append(r.id, body);
           const sub = live.subs.get(b.tool_use_id);
-          if (sub) {
+          const resultText = typeof body.text === "string" ? body.text : "";
+          const launch = !b.is_error && (toolInput(resultText)?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(resultText));
+          if (sub && !launch) {
+            this.workerEvent(r, live, b.tool_use_id, b.is_error ? "failed" : "done");
             live.subs.delete(b.tool_use_id);
-            this.append(r.id, { kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: sub.description, model: sub.model, status: b.is_error ? "failed" : "done", steps: sub.steps });
           }
         }
         return;
@@ -2112,8 +2272,8 @@ export class Sessions {
         }
         const ok = msg.subtype === "success" && msg.is_error !== true;
         const usage = msg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
-        const win = usage ? Object.values(usage).map((u) => u.contextWindow ?? 0).find((w) => w > 0) : undefined;
-        if (win) r.contextWindow = win;
+        const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(r.model))?.[1].contextWindow;
+        r.contextWindow = typeof win === "number" && Number.isFinite(win) && win > 0 ? win : null;
         for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
         const error = ok ? undefined : this.failureText(r.id, String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"))).slice(0, 500);
         this.append(r.id, { kind: "result", ok, ...(error ? { error } : {}), ms: typeof msg.duration_ms === "number" ? msg.duration_ms : this.now() - live.turnStart, turns: typeof msg.num_turns === "number" ? msg.num_turns : 0 });
@@ -2153,12 +2313,21 @@ export class Sessions {
     return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
   }
 
-  private handoff(r: SessionRecord, live: Live): void {
+  private handoff(r: SessionRecord, live = this.live.get(r.id)): void {
     const runner = this.opts.handoff;
-    if (!runner || !r.sdkSessionId || r.desktopBridge || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
+    if (!runner || !r.sdkSessionId || r.desktopBridge || this.archived.has(r.id) || !this.sdkIdle(r, live) || this.handingOff.has(r.id)) return;
     if (r.desktopHandoff !== "pending" && r.desktopHandoff !== "failed") return;
+    // An app worker already owns it, even when RC is off: do not open another writer.
+    if (this.desktop?.isOpen(r.sdkSessionId)) {
+      if (live) this.stop(r.id, live);
+      r.desktopHandoff = "attempted";
+      delete r.desktopHandoffRetryAt;
+      delete r.desktopHandoffError;
+      this.save();
+      return;
+    }
     if ((r.desktopHandoffAttempts ?? 0) >= 3) return;
-    r.desktopHandoff = "attempted";
+    r.desktopHandoff = "opening";
     r.desktopHandoffAttempts = (r.desktopHandoffAttempts ?? 0) + 1;
     this.save();
     const transfer = { messages: [] as SdkUserMessage[] };
@@ -2170,20 +2339,28 @@ export class Sessions {
         this.stop(r.id, live);
         // close() and iterator completion alone do not prove the writer has stopped.
         // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.
-        await live.query.processExited;
+        await live?.query.processExited;
         if (this.shuttingDown || r.desktopBridge) return;
         const result = await runner({ sessionId: r.sdkSessionId!, title: r.title, cwd: r.cwd });
+        if (this.shuttingDown) return;
+        r.desktopHandoff = "attempted";
         delete r.desktopHandoffError;
+        delete r.desktopHandoffRetryAt;
         this.save();
+        this.append(r.id, { kind: "notice", code: "desktop_handoff_requested" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] ${result}`);
       } catch (error) {
+        if (this.shuttingDown) return;
         r.desktopHandoff = "failed";
         r.desktopHandoffError = error instanceof Error ? error.message : String(error);
+        r.desktopHandoffRetryAt = this.now() + 30_000;
         this.save();
+        this.append(r.id, { kind: "notice", code: r.desktopHandoffAttempts! < 3 ? "desktop_handoff_retry" : "desktop_handoff_failed" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] failed: ${r.desktopHandoffError} (attempt ${r.desktopHandoffAttempts}/3)`);
       } finally {
         this.handingOff.delete(r.id);
         if (transfer.messages.length && !this.shuttingDown) await this.resumeAfterHandoff(r, transfer.messages);
+        if (!this.shuttingDown) void this.drainQueue(r.id);
       }
     });
   }
@@ -2223,16 +2400,29 @@ export class Sessions {
     const tools = (message.content ?? []).filter((b) => b.type === "tool_use" && b.id && b.name).map((b): ToolCall => ({ id: b.id!, name: b.name!, summary: summarize(b.name!, b.input ?? {}, r.cwd), input: JSON.stringify(b.input ?? {}, null, 2), ...sessionFileTool(b.name!, b.input ?? {}, { cwd: r.cwd, ...(r.sdkSessionId ? { sessionId: r.sdkSessionId } : {}) }, data => log.image(data)) }));
     converted.images.push(...fileImages(tools.flatMap(tool => tool.files ?? [])));
     log.append({ kind: "assistant", msg: message.id ?? randomUUID(), model: message.model ?? "", ...converted, tools });
+    for (const tool of tools) {
+      if (tool.name !== "Agent" && tool.name !== "Task") continue;
+      const block = message.content?.find(block => block.id === tool.id);
+      live.subs.set(tool.id, { description: tool.summary, model: typeof block?.input?.model === "string" ? block.input.model : null, steps: 0, parent });
+      this.workerEvent(r, live, tool.id, "running");
+    }
     const sub = live.subs.get(parent);
     if (!sub) return;
     sub.steps++;
-    // A named worker is spawned without a `model` argument, so its row had no model until it
-    // finished; its first answer says which model ran it.
     if (message.model && sub.model !== message.model) {
       const first = sub.model === null;
       sub.model = message.model;
-      if (first) this.append(r.id, { kind: "subagent", toolUseId: parent, sub: `sub-${parent}`, description: sub.description, model: sub.model, status: "running", steps: sub.steps });
+      if (first) this.workerEvent(r, live, parent, "running");
     }
+  }
+
+  /** A worker's lifecycle belongs to the conversation that launched it, never the main timeline by default. */
+  private workerEvent(r: SessionRecord, live: Live, toolUseId: string, status: "running" | "done" | "failed" | "stopped"): void {
+    const sub = live.subs.get(toolUseId);
+    if (!sub) return;
+    const body: EventBody = { kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: sub.description, model: sub.model, status, steps: sub.steps };
+    if (sub.parent) this.subLog(r.id, `sub-${sub.parent}`)?.append(body);
+    else this.append(r.id, body);
   }
 
   private flush(id: string, live: Live): void {
@@ -2289,16 +2479,26 @@ export class Sessions {
   /**
    * One read of the router's records for a session, appended when it changed. `id` is the host's id
    * for it, `cliId` the id Claude Code sends the router (`X-Claude-Code-Session-Id`). A Mac session
-   * has no window of its own, so the one learned for its model stands; none known stays null.
+   * has no window of its own. The learned SDK value is only a legacy native fallback: RouterClient
+   * prefers provider-bound router metadata, and never uses that cache for an unknown routed model.
    * `mac`: a session the router has no record of yet (an old one, from before it started) says nothing.
    */
   private async readFigures(id: string, cliId: string, model: string, contextWindow: number | null, force: boolean, mac: boolean): Promise<void> {
-    const last = this.figuresAt.get(id) ?? 0;
-    if (!force && this.now() - last < 15_000) return;
-    this.figuresAt.set(id, this.now());
+    const epoch = () => this.records.has(id) ? this.log(id).epoch : this.desktop?.snapshot(id)?.epoch ?? "";
+    const scope = { at: this.now(), model, epoch: epoch(), cliId };
+    const last = this.figuresAt.get(id);
+    const changed = last && (last.model !== model || last.epoch !== scope.epoch || last.cliId !== cliId);
+    if (!force && !changed && scope.at - (last?.at ?? 0) < 15_000) return;
+    const hadFigures = this.lastFigures.has(id);
+    if (changed) { this.lastFigures.delete(id); this.desktopFigures.delete(id); }
+    this.figuresAt.set(id, scope);
     let figures: Figures;
     try { figures = await this.opts.router.figures(cliId, model, contextWindow ?? this.windows.get(windowKey(model)) ?? null); } catch { return; }
-    if (mac && !figures.route && !figures.effort && !figures.workers.length) return;
+    // A replaced log/model or a newer read owns the next event, not this late reply.
+    if (this.shuttingDown || this.figuresAt.get(id) !== scope || epoch() !== scope.epoch) return;
+    const current = this.records.get(id);
+    if (current && (current.model !== model || (current.sdkSessionId ?? id) !== cliId)) return;
+    if (mac && !hadFigures && !figures.route && !figures.effort && !figures.workers.length) return;
     const { at: _at, ...rest } = figures;
     const key = JSON.stringify(rest);
     if (this.lastFigures.get(id) === key) return;

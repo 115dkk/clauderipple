@@ -8,7 +8,7 @@ import { rungOf } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -28,6 +28,7 @@ import { renderSetup } from './ui/setup'
 import { renderAgents, renderAgentsFallback, talkOf } from './ui/agents'
 import { renderContext, renderContextFallback } from './ui/context'
 import type { ContextActions } from './ui/context'
+import { renderLimits, renderLimitsFallback } from './ui/limits'
 import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { displayText } from './ui/display'
@@ -90,6 +91,8 @@ const stats = atom({ plugin: 'ripple', key: 'stats' } as const, emptyStats())
 const settingsDraft = atom({ plugin: 'ripple', key: 'settingsDraft' } as const, null)
 const setupStep = atom({ plugin: 'ripple', key: 'setupStep' } as const, 1)
 const compactNote = atom({ plugin: 'ripple', key: 'compactNote' } as const, '')
+/** The compact card's tidy-up switch: on unless the person turned it off, and their last choice is kept. */
+const compactTidy = atom({ plugin: 'ripple', key: 'compactTidy' } as const, true)
 const effortMenuOpen = atom({ plugin: 'ripple', key: 'effortMenuOpen' } as const, false)
 const agentsOpen = atom({ plugin: 'ripple', key: 'agentsOpen' } as const, false)
 /** Compactions of the main conversation that finished, for the Compact icon's count; /clear zeroes it. */
@@ -126,6 +129,7 @@ function same(a: unknown, b: unknown): boolean {
 const LOG_PANE = 'ripple-log'
 const AGENTS_PANE = 'ripple-agents'
 const CONTEXT_PANE = 'ripple-context'
+const LIMITS_PANE = 'ripple-limits'
 const HAIKU = 'claude-haiku-5-5'
 const EXECUTOR = 'Do the assigned task yourself. Inspect the relevant files, implement what was asked, and verify the result. Report the outcome concisely, citing evidence and marking uncertainty. Never delegate to another agent. Do not create unrequested files or commit unless explicitly asked.'
 let timersStarted = false
@@ -138,6 +142,16 @@ let judgeSequence = 0
 /** Jev's network blips and timeouts in a row. */
 let jevBlips = 0
 let generation = 0
+/** The press whose handoff fork is running: a result carries it so a /clear cannot be handed another chat's note. */
+let handoffRun = 0
+/**
+ * A finished agent's conversation, read once. The Agents pane is redrawn every second while any
+ * agent or task runs, and re-reading a conversation that cannot grow was a full transcript read
+ * per tick per open pane (B19). A resumed agent runs again first, which changes the key.
+ */
+let agentTalkCache: { id: string; key: string; talk: AgentTalk } | null = null
+/** Preserve delivery order when transcript reads overlap; reset guards below reject stale work. */
+let receiveWork: Promise<void> = Promise.resolve()
 let carriedPick = false
 /**
  * An agent's end that came before its spawn was recorded, kept until the record lands. A worker
@@ -345,7 +359,13 @@ async function syncSettings($: EngineInterface, admin: string): Promise<void> {
   // Claude Code writes `/autocompact` to settings.json itself, so this can change without a
   // settings revision: the band reads it on every poll.
   const at = snapshot.compactAt ?? null
-  if (at !== await read($, compactAt)) await update($, compactAt, () => at)
+  if (at !== await read($, compactAt)) {
+    await update($, compactAt, () => at)
+    // The share is counted against this window: a count of the old one is another context's.
+    contextRun += 1
+    fullMark = null
+    await update($, contextFull, () => null)
+  }
   let sync = await read($, settingsSync)
   // Session atoms survive reloads. Old pending paths/drafts cannot prove user intent
   // under this format; discard them rather than granting an old overwrite a new version.
@@ -455,21 +475,75 @@ async function toggleContext($: EngineInterface): Promise<void> {
   if ((await $.ui.panes()).some(p => p.id === CONTEXT_PANE)) await $.ui.close({ id: CONTEXT_PANE })
   else await $.ui.open({ id: CONTEXT_PANE, title: t(language, 'commands.contextTitle'), focus: true, closeOnEscape: true, holdToasts: true, rows: 30 })
 }
+/** What the precise count was taken in: the same tokens in another chat, model or window are a different share. */
+type FullMark = { basis: number | null; window: number | null; model: string; at: number | null; generation: number; context: number; run: number }
+let fullMark: FullMark | null = null
+/** Bumped whenever this chat's context is replaced or its model/window changes; a count from before is dropped. */
+let contextRun = 0
+/** Bumped when this chat's context is replaced by a compaction; clear/resume/fork move `generation`. */
+let contextEpoch = 0
+function countsHere(mark: FullMark, basis: number | null, model: string, at: number | null): boolean {
+  return mark.basis === basis && mark.model === model && mark.at === at && mark.generation === generation && mark.context === contextEpoch && mark.run === contextRun
+}
+/**
+ * The limits pane, opened from the band's limits row: every plan window with the share it has used
+ * and when it resets, which the row has no room to say. Opened again it closes, as does the pane's
+ * own close. The windows are read afresh on the way in, once a minute at most (refreshLimits).
+ */
+async function toggleLimits($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.close({ id: LIMITS_PANE })
+  else {
+    await refreshLimits($)
+    await $.ui.open({ id: LIMITS_PANE, title: t(language, 'commands.limitsTitle') })
+  }
+}
 /**
  * The token-count API's count of the context (`full`, one request per tool and memory file), kept
  * against the last response's tokens when it was asked for: the next step makes it stale, and the
- * pane (and the band, contextShare) shows the local estimate again.
+ * pane (and the band, contextShare) shows the local estimate again. Its tokens alone do not say
+ * which model, window or conversation counted them (2026-10-25: a model switch left 20% standing
+ * where the new window read 4%), so `fullMark` holds that state beside it. A slow answer is
+ * published only in the state it was asked for: a clear, compaction or model/window switch while
+ * it runs drops it instead of writing over the newer count (2026-10-25).
  */
 async function countContext($: EngineInterface): Promise<void> {
   if ((await read($, contextFull))?.busy) return
   const basis = (await read($, context))?.basis ?? null
+  const at = await read($, compactAt)
+  const model = await $.session.model()
+  const gen = generation
+  const epoch = contextEpoch
+  const run = ++contextRun
   await update($, contextFull, () => ({ basis, busy: true }))
   try {
-    const breakdown = (await $.session.usage({ breakdown: 'full' })).context.breakdown
+    const usage = await $.session.usage({ breakdown: 'full' })
+    const breakdown = usage.context.breakdown
+    const window = usage.context.window ?? null
+    // The answer must still describe this chat, model and request: a clear, a compaction or a
+    // switch while it ran makes it another context's count, and it is dropped.
+    const now = await $.session.usage().catch(error => { void report($, 'context check', error); return null })
+    const nowModel = await $.session.model()
+    const nowAt = await read($, compactAt)
+    const nowBasis = (await read($, context))?.basis ?? null
+    // Read the scope again after every await: a clear may have moved it while this ran.
+    const live = run === contextRun && gen === generation && epoch === contextEpoch && model === nowModel && at === nowAt && basis === nowBasis && now !== null && now.context.window === window
+    if (!live) {
+      await update($, contextFull, current => run === contextRun && current?.busy ? null : current)
+      return
+    }
+    fullMark = { basis, window, model, at, generation: gen, context: epoch, run }
     const none = t(await read($, lang), 'context.none')
-    await update($, contextFull, () => (breakdown ? { basis, breakdown } : { basis, error: none }))
+    const result = breakdown ? { basis, breakdown } : { basis, error: none }
+    await update($, contextFull, current => run === contextRun && gen === generation && epoch === contextEpoch ? result : current)
   } catch (error) {
-    await update($, contextFull, () => ({ basis, error: reason(error) }))
+    if (run !== contextRun || gen !== generation || epoch !== contextEpoch) {
+      await update($, contextFull, current => run === contextRun && current?.busy ? null : current)
+      return
+    }
+    fullMark = { basis, window: null, model, at, generation: gen, context: epoch, run }
+    const failure = { basis, error: reason(error) }
+    await update($, contextFull, current => run === contextRun && gen === generation && epoch === contextEpoch ? failure : current)
     await report($, 'context count', error)
   }
 }
@@ -854,7 +928,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
       const words = (await $.session.messages()).flatMap(m => { const text = humanText(m); return text ? [text] : [] }).slice(-10)
       words.push(...await read($, heardPrompts))
       if (!reason.quote || !userSaid(reason.quote, words)) return { deny: t(language, 'workers.notSaid', { name: asked }) }
-    }
+    } else if (!ruleReason(reason.text)) return { deny: t(language, 'workers.noReason', { name: asked }) }
     const known = [...files].some(([agent, f]) => agent.toLowerCase() === asked.toLowerCase() || agentModel(f)?.replace(/@[^@]*$/, '').toLowerCase() === asked.toLowerCase()) || ['opus', 'sonnet', 'haiku'].includes(asked) || asked.startsWith('claude-')
     if (!known) return { deny: t(language, 'workers.unknownModel', { name: asked }) }
   }
@@ -907,7 +981,12 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   if (fallbackReason) await $.ui.toast(t(language, 'toasts.workerFallback', { reason: fallbackReason, name: targetLabel(selected, language) }))
   await update($, lastSpawn, () => value)
   await update($, stats, current => addWorker(current, verdict.level))
-  return { input: { ...e, subagentType: selected.agent, model, prompt }, pick: value }
+  // A choice stays canonical for allow-lists, logs and effort (general-purpose:<model>).
+  // Dispatch an auto call's Claude choice through our own definition, which withholds Agent.
+  // A hook may change the definition and model, but cannot add disallowedTools to a spawn.
+  // Direct general-purpose calls keep their own definition and existing behaviour.
+  const executor = auto && (selected.agent === 'general-purpose' || /^(?:opus|sonnet|haiku)(?:@|$)|^claude-/.test(model ?? '')) ? 'ripple:auto' : selected.agent
+  return { input: { ...e, subagentType: executor, model, prompt }, pick: value }
 }
 
 async function toggleAuto($: EngineInterface): Promise<void> {
@@ -1008,7 +1087,7 @@ async function fork($: EngineInterface, prompt: string): Promise<ModelForkResult
  */
 async function queueHandoff($: EngineInterface): Promise<void> {
   if ((await read($, handoff))?.stage === 'writing') return
-  await update($, handoff, () => ({ stage: 'writing' as const }))
+  await update($, handoff, () => ({ stage: 'writing' as const, run: ++handoffRun }))
   await update($, panel, () => null)
   await update($, handoffQueued, () => true)
   // A tick now rather than at the next 15 s one: the card already says the note is being written.
@@ -1067,20 +1146,35 @@ async function driveHandoff($: EngineInterface): Promise<void> {
   const value = await read($, handoff)
   if (value?.stage !== 'writing' || value.text || !await read($, handoffQueued) || await read($, busy)) return
   await update($, handoffQueued, () => false)
+  // The chat this press belongs to. A /clear while the fork runs starts another one, and its note
+  // must not open a session over it (B11). `run` names the press, because a second press after the
+  // clear has a fork of its own and this one's answer is not it.
+  const chat = generation
+  const run = value.run
+  const stale = async (): Promise<boolean> => generation !== chat || (await read($, handoff))?.run !== run
+  /** Drop this press's card, unless a later press has already taken the state over. */
+  const drop = async (): Promise<void> => {
+    if ((await read($, handoff))?.run === run) await update($, handoff, () => null)
+  }
   try {
     const answer = await fork($, QUICK_PROMPT)
+    if (await stale()) { await drop(); return }
     if (!answer?.isAnswered || !answer.text.trim()) throw new Error(answer && !answer.isAnswered ? answer.reason : 'empty handoff')
-    await update($, handoff, () => ({ stage: 'writing' as const, text: answer.text }))
+    await update($, handoff, () => ({ stage: 'writing' as const, text: answer.text, run }))
     await moveToNewSession($)
   } catch (error) {
-    await update($, handoff, () => ({ stage: 'failed' as const }))
+    // A failure after the chat changed says nothing about this chat: no toast, no failed card.
+    if (await stale()) { await drop(); return }
+    await update($, handoff, () => ({ stage: 'failed' as const, run }))
     await $.ui.toast(t(language, 'toasts.handoffFailed'))
     await report($, 'handoff', error)
   }
 }
-async function runCompact($: EngineInterface, note = ''): Promise<void> {
+/** The tidy prompt the last Compact press sent and the main-loop turn it became; null once it settles. */
+type Tidy = { text: string; note: string; turnId: string | null }
+let tidy: Tidy | null = null
+async function compactNow($: EngineInterface, note: string): Promise<void> {
   const language = await read($, lang)
-  await update($, panel, () => null)
   await update($, resultCard, () => ({ stage: 'compacting' }))
   try {
     await $.command.run({ command: 'compact', args: note })
@@ -1089,6 +1183,49 @@ async function runCompact($: EngineInterface, note = ''): Promise<void> {
     await update($, resultCard, () => ({ stage: 'failed' as const, detail: t(language, 'alerts.compactFailed') }))
     await $.ui.toast(t(language, 'toasts.compactFailed'))
     await report($, 'compact command', error)
+  }
+}
+/** The tidy-up did not finish: nothing is compacted, and the card says the chat was left as it was. */
+async function tidyStopped($: EngineInterface): Promise<void> {
+  const language = await read($, lang)
+  await update($, resultCard, () => ({ stage: 'failed' as const, detail: t(language, 'alerts.tidyFailed') }))
+  await $.ui.toast(t(language, 'toasts.tidyStopped'))
+}
+/**
+ * A Compact press, and the tidy-up it asks for first (2026-10-25): a prompt of this plugin's own, a
+ * user turn of its own, so the chat says what it has done, what is left and what it decided, and
+ * updates its handoff or memory files while those are still in the transcript. The prompt and the
+ * answer stay in the transcript, and the summary is built from them. The turn it becomes is bound at
+ * `turn.start` and settled at `turn.complete`: only its own end compacts, and one that is stopped
+ * compacts nothing. A prompt still waiting for that turn when Compact is pressed again (the queue
+ * let it go, or the engine never started it) is given up and sent once more, so the button cannot be
+ * left dead; one already bound to a turn blocks the second press. With the switch off, the
+ * compaction goes at once.
+ */
+async function runCompact($: EngineInterface, note = ''): Promise<void> {
+  await update($, panel, () => null)
+  // A press while the tidy-up is bound to its turn sends nothing a second time; the card it shows
+  // says so. One still waiting for that turn is given up instead, and the prompt goes again below.
+  if (tidy) {
+    if (tidy.turnId !== null) return
+    tidy = null
+  }
+  const language = await read($, lang)
+  if (!await read($, compactTidy)) { await compactNow($, note); return }
+  await update($, resultCard, () => ({ stage: 'tidying' }))
+  const text = t(language, 'alerts.tidyPrompt')
+  const wait: Tidy = { text, note, turnId: null }
+  tidy = wait
+  try {
+    // In the person's words, not under "the ripple plugin sent a message": it is their Compact press.
+    const sent = await $.prompt.submit({ text, asUser: true })
+    if ('drop' in sent) throw new Error(sent.drop)
+  } catch (error) {
+    // A press made while this one was in flight has taken the wait over: its outcome is not this one's.
+    if (tidy !== wait) return
+    tidy = null
+    await tidyStopped($)
+    await report($, 'compact tidy', error)
   }
 }
 async function openCompact($: EngineInterface, surface: Frame['surface']): Promise<void> {
@@ -1197,12 +1334,30 @@ let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null
 async function contextShare($: EngineInterface, c: SessionContextUsage): Promise<{ percent: number; tokens: number; window: number; basis: number } | null> {
   if (c.tokens === undefined) return null
   const at = await read($, compactAt)
+  const model = await $.session.model()
   const full = await read($, contextFull)
-  let b = full?.breakdown && full.basis === c.tokens ? full.breakdown : null
+  // The count stands only where it was taken: same response, model, window and chat. A stale one
+  // is discarded here as well, so the pane cannot draw it from the atom after this poll.
+  const fresh = full?.breakdown && fullMark && countsHere(fullMark, c.tokens, model, at) && fullMark.window === c.window ? full : null
+  if (full?.breakdown && !full.busy && !fresh) {
+    fullMark = null
+    await update($, contextFull, () => null)
+  }
+  let b = fresh?.breakdown ?? null
   if (!b) {
-    const key = [c.tokens, c.window, at, await $.session.model()].join('|')
-    if (shareMemo?.key !== key) shareMemo = { key, breakdown: (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null }
-    b = shareMemo.breakdown
+    const gen = generation
+    const epoch = contextEpoch
+    const key = [c.tokens, c.window, at, model, gen, epoch].join('|')
+    if (shareMemo?.key !== key) {
+      let summary: SessionContextBreakdown | null = null
+      try { summary = (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null }
+      catch (error) { await report($, 'context summary', error) }
+      // A clear or compaction while the summary ran outranks it: publish only for the state it was asked in.
+      const modelNow = await $.session.model()
+      const atNow = await read($, compactAt)
+      if (gen === generation && epoch === contextEpoch && model === modelNow && at === atNow) shareMemo = { key, breakdown: summary }
+    }
+    b = shareMemo?.key === key ? shareMemo.breakdown : null
   }
   if (b && b.rawMaxTokens > 0) return { tokens: b.totalTokens, percent: b.percentage, window: b.rawMaxTokens, basis: c.tokens }
   const window = contextWindow(c.window, at)
@@ -1271,11 +1426,6 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     await refreshUsage($)
     await refreshLimits($)
-    const now = await $.clock.now()
-    const list = await read($, agents)
-    if (list.some(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000)) {
-      await update($, agents, value => value.map(a => a.state === 'running' && a.toolSince !== undefined && now - a.toolSince >= 8000 ? { ...a, state: 'waiting' } : a))
-    }
     await countAgents($)
     await scheduleCountdown($)
     if (await read($, handoff)) await driveHandoff($)
@@ -1321,7 +1471,7 @@ function startTimers($: EngineInterface): void {
  */
 async function agentsClock($: EngineInterface): Promise<void> {
   try {
-    if (!(await read($, agents)).some(a => a.state === 'running' || a.state === 'waiting') && !(await read($, bgTasks)).some(task => task.state === 'running')) return
+    if (!(await read($, agents)).some(a => a.state === 'running') && !(await read($, bgTasks)).some(task => task.state === 'running')) return
     if (!(await $.ui.panes()).some(p => p.id === AGENTS_PANE)) return
     await update($, agentsTick, n => n + 1)
   } catch (error) { await report($, 'agents clock', error) }
@@ -1361,8 +1511,23 @@ async function endBackground($: EngineInterface, text: string): Promise<void> {
  */
 async function countAgents($: EngineInterface): Promise<void> {
   const list = await read($, agents)
-  const counts = { live: list.filter(a => ['running', 'waiting'].includes(a.state)).length, total: list.length }
+  const counts = { live: list.filter(a => a.state === 'running').length, total: list.length }
   if (!same(counts, await read($, agentCounts))) await update($, agentCounts, () => counts)
+}
+/**
+ * Finished records the session keeps. A flat cap over the whole list dropped the oldest running
+ * worker as soon as 41 ran at once (2026-10-25): its card, the band's live count and every later
+ * step's tokens and effort went with it. Running and waiting records are never dropped; only the
+ * oldest finished ones are, newest first, and their order among the rest does not move.
+ */
+const AGENTS_KEPT = 40
+function retainAgents(list: AgentRec[]): AgentRec[] {
+  // A record saved before the waiting state was retired may still say so until it is read back.
+  const ended = list.filter(a => a.state !== 'running' && String(a.state) !== 'waiting')
+  const over = ended.length - AGENTS_KEPT
+  if (over <= 0) return list
+  const drop = new Set(ended.slice().sort((a, b) => (a.endedAt ?? a.startedAt) - (b.endedAt ?? b.startedAt)).slice(0, over).map(a => a.id))
+  return list.filter(a => !drop.has(a.id))
 }
 async function dashboard($: EngineInterface, working: boolean): Promise<DashboardView> {
   const s = await currentSettings($)
@@ -1415,7 +1580,7 @@ async function alertView($: EngineInterface, now: number): Promise<AlertView | n
     cold: d === 'cold' || coldAlert(m, c?.tokens ?? 0, now, await read($, coldHidden)),
     kept: d === 'kept' || keptAlert(await read($, kept), m, now),
     swamp: d === 'swamp' || (s.swampAlert && !await read($, busy) && swampAlert(swamped(c), await read($, swampHidden))) })
-  if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote) }
+  if (which === 'compact') return { kind: 'compactNote', draft: await read($, compactNote), tidy: await read($, compactTidy) }
   if (which === 'clear') return { kind: 'clear' }
   if (which === 'judgeDown') return { kind: 'judgeDown', judge: s.judge, reason: d === 'down' ? t(language, 'alerts.demoDown') : downReason!, network: d !== 'down' && await read($, judgeDownNetwork) }
   if (which === 'hot') return { kind: 'hot', limitKind: h?.kind ?? 'five_hour', percent: d === 'hot' ? 86 : h!.percent, resetsAt: h?.resetsAt, save: (await read($, saveUntil) ?? 0) > now }
@@ -1457,7 +1622,7 @@ async function dismiss($: EngineInterface, view: AlertView): Promise<void> {
 }
 function bandActions($: EngineInterface, surface: Frame['surface']): BandActions {
   return { toggleAuto: () => toggleAuto($), toggleWarm: () => toggleWarm($), compact: () => openCompact($, surface), clear: () => openClear($), handoff: () => queueHandoff($), toggleLog: () => toggleLog($), toggleAgents: () => toggleAgents($), openSettings: () => startPanel($, 'settings'),
-    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($), toggleContext: () => toggleContext($) }
+    toggleEffortMenu: () => update($, effortMenuOpen, value => !value), pickEffort: effort => manualPick($, effort), releaseDelegationPin: () => releaseDelegationPin($), toggleContext: () => toggleContext($), toggleLimits: () => toggleLimits($) }
 }
 function settingsActions($: EngineInterface): SettingsActions {
   return { patch: async change => {
@@ -1477,7 +1642,7 @@ function setupActions($: EngineInterface): SetupActions {
 }
 function alertActions($: EngineInterface, view: AlertView): AlertActions {
   return { compact: note => runCompact($, note), clear: async () => { await update($, panel, () => null); await $.command.run({ command: 'clear', args: '' }) }, dismiss: () => dismiss($, view), toggleSave: () => toggleSave($), openSettings: () => startPanel($, 'settings'),
-    noteInput: text => update($, compactNote, () => text), copy: () => copyHandoff($) }
+    noteInput: text => update($, compactNote, () => text), toggleTidy: () => update($, compactTidy, value => !value), copy: () => copyHandoff($) }
 }
 function agentsActions($: EngineInterface): AgentsActions {
   return {
@@ -1495,6 +1660,9 @@ function agentsActions($: EngineInterface): AgentsActions {
         await report($, 'agents view', viewed.deny)
       } catch (error) { await report($, 'agents view', error) }
       await update($, agentRunsOpen, () => [])
+      // An explicit open reads the conversation now, even if it was read before: the host may have
+      // kept what it says more up to date than this pane's last draw.
+      agentTalkCache = null
       await update($, agentOpen, () => id)
       try {
         const moved = await $.ui.scroll({ in: AGENTS_PANE, to: 'end' })
@@ -1510,13 +1678,23 @@ function agentsActions($: EngineInterface): AgentsActions {
  * An agent's conversation for the Agents pane, read again at each draw: its steps and tool calls
  * redraw the pane while it runs, so what it says shows as it says it. Paths in its tool calls read
  * relative to the session's folder, or under `~`.
+ *
+ * A finished agent's conversation cannot change, so it is read once: the pane's clock ticks for
+ * whichever agent is still running, and the open one being finished changed nothing it shows (B19).
  */
-async function agentTalk($: EngineInterface, id: string): Promise<AgentTalk> {
+async function agentTalk($: EngineInterface, id: string, record?: AgentRec): Promise<AgentTalk> {
+  // An instruction received after the agent ended still changes what its conversation shows.
+  const key = record ? `${record.state}:${record.endedAt ?? 0}:${record.tools}:${record.instructions?.length ?? 0}` : 'unknown'
+  if (record && record.state !== 'running' && agentTalkCache?.id === id && agentTalkCache.key === key) return agentTalkCache.talk
   try {
     const found = await $.session.messages({ agentId: id })
     if (!Array.isArray(found)) return { deny: found.deny }
     const cwd = await $.session.cwd().catch(() => undefined)
-    return { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }) }
+    const instructions = record?.instructions ?? (await read($, agents)).find(a => a.id === id)?.instructions ?? []
+    const talk: AgentTalk = { entries: talkOf(found, { ...(cwd ? { cwd } : {}), home: await userHome($) }, instructions) }
+    if (record && record.state !== 'running') agentTalkCache = { id, key, talk }
+    else if (agentTalkCache?.id === id) agentTalkCache = null
+    return talk
   } catch (error) { return { deny: reason(error) } }
 }
 /** What an agent is doing, in the words its conversation's tool rows use (tools.ts toolDetail): no leading `cd`, paths short. */
@@ -1528,7 +1706,7 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   const language = await read($, lang)
   if (e.agentId) {
     const a = (await read($, agents)).find(a => a.id === e.agentId)
-    return a?.pick && a.pick.target.agent === 'general-purpose' ? { ...e, effort: a.pick.effort } : e
+    return a?.pick && (a.pick.target.agent === 'general-purpose' || a.type === 'ripple:auto') ? { ...e, effort: a.pick.effort } : e
   }
   const previousModel = await read($, modelIs)
   const oldEffort = await read($, appEffort)
@@ -1536,6 +1714,10 @@ async function prepareStep($: EngineInterface, e: TurnStepInput): Promise<TurnSt
   if (changedModel) {
     await update($, modelIs, () => e.model)
     await update($, appEffort, () => e.effort ?? null)
+    // A precise count belongs to the model it counted.
+    contextRun += 1
+    fullMark = null
+    await update($, contextFull, () => null)
     if (previousModel !== null) {
       await update($, cache, () => null)
       await update($, lastRealReplyAt, () => null)
@@ -1586,6 +1768,13 @@ async function contextRenderFailure($: EngineInterface, e: RenderInput, error: u
   return renderContextFallback($.ui.resolve(e), f, reason(error), () => $.ui.close({ id: CONTEXT_PANE })) as RenderElement
 }
 
+/** The limits pane's last resort: its error and its way out; never reads state or the clock. */
+async function limitsRenderFailure($: EngineInterface, e: RenderInput, error: unknown, frame?: Frame): Promise<RenderElement> {
+  const f: Frame = frame ?? { surface: e.surface, columns: 'bodyColumns' in e.props ? e.props.bodyColumns : 80, maxRows: 30, now: 0, lang: 'en', appearance: 'auto', skin: 'flat' }
+  await report($, 'limits render', error, f.lang)
+  return renderLimitsFallback($.ui.resolve(e), f, reason(error), () => $.ui.close({ id: LIMITS_PANE })) as RenderElement
+}
+
 /** State-independent last resort for every non-agent surface; never reads state or the clock. */
 async function renderFailure($: EngineInterface, e: RenderInput, error: unknown, language: Lang = 'en', engine?: RenderNode): Promise<RenderElement> {
   const { Box, Text, Button } = $.ui.resolve(e)
@@ -1612,6 +1801,8 @@ export const register: Register = on => {
       // A failure here must not cost the commands: without them there is no /ripple to look with.
       try { await loadSettings($); await $.ui.status(undefined) }
       catch (error) { await report($, 'session.start settings', error) }
+      // Session atoms survive hot reloads: an old eight-second classification is still active work.
+      if ((await read($, agents)).some(a => String(a.state) === 'waiting')) await update($, agents, list => list.map(a => String(a.state) === 'waiting' ? { ...a, state: 'running' } : a))
       const language = await read($, lang)
       await $.command.register({ name: 'ripple', description: t(language, 'commands.description'), argumentHint: t(language, 'commands.argumentHint'), immediate: true })
       await $.command.register({ name: 'ripple-log', description: t(language, 'commands.logDescription'), immediate: true })
@@ -1646,6 +1837,10 @@ export const register: Register = on => {
       if (['clear', 'resume', 'fork'].includes(e.source)) {
         generation++
         judgeSequence++
+        // A count that started in the old chat must not land in this one.
+        contextRun += 1
+        fullMark = null
+        await update($, contextFull, () => null)
         await loadSettings($)
         await update($, busy, () => false)
         await update($, appEffort, () => null)
@@ -1683,6 +1878,28 @@ export const register: Register = on => {
         }
       }
     } catch (error) { await report($, 'classic.Stop', error) }
+    return next(e)
+  })
+  on('session.receive', { origin: { kind: 'coordinator' } }, async ($, e, next) => {
+    if (!e.agentId) return next(e)
+    const epoch = generation
+    const work = receiveWork.then(async () => {
+      if (epoch !== generation) return
+      const found = await $.session.messages({ agentId: e.agentId })
+      if (!Array.isArray(found)) throw new Error(found.deny)
+      if (epoch !== generation) return
+      // This event precedes queueing, not model consumption. SessionMessage has no stable id;
+      // the visible row count is an approximate receipt position, never a delivery assertion.
+      await update($, agents, list => list.map(a => {
+        if (a.id !== e.agentId || epoch !== generation) return a
+        const previous = a.instructions ?? []
+        return { ...a, instructions: [...previous, { text: e.text, after: found.length, ordinal: (previous.at(-1)?.ordinal ?? 0) + 1 }].slice(-20) }
+      }))
+    })
+    receiveWork = work.then(() => undefined, () => undefined)
+    // The message goes on at once: recording it reads the agent's transcript, and a slow or broken
+    // read must never hold the instruction back from the agent.
+    void work.catch(error => report($, 'agent instruction', error).catch(() => undefined))
     return next(e)
   })
   on('prompt.submit', async ($, e, next) => {
@@ -1775,8 +1992,21 @@ export const register: Register = on => {
     } catch (error) { await report($, 'turn.step record', error) }
     return answer
   })
+  on('turn.start', ($, e, next) => {
+    // The Compact press's tidy prompt becomes a turn of its own; its id is how its end is told from
+    // every other turn's (a prompt queued before it, or one the person types next).
+    if (tidy && tidy.turnId === null && !e.agentId && e.text.includes(tidy.text)) tidy.turnId = e.turnId
+    return next(e)
+  })
   on('turn.complete', async ($, e, next) => {
     try {
+      if (!e.agentId && tidy?.turnId === e.turnId) {
+        const note = tidy.note
+        tidy = null
+        // The compaction runs from a tick of its own, not inside this turn's hooks.
+        if (e.reason === 'answer') void $.clock.after(1, async () => { await compactNow($, note) })
+        else await tidyStopped($)
+      }
       if (e.agentId) {
         const now = await $.clock.now()
         const before = (await read($, agents)).find(a => a.id === e.agentId)
@@ -1787,13 +2017,13 @@ export const register: Register = on => {
           // Forks and other loops no spawn records end here too: only the latest few are kept.
           for (const id of endedEarly.keys()) if (endedEarly.size > 40) endedEarly.delete(id)
         }
-        await update($, agents, list => list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a))
+        await update($, agents, list => retainAgents(list.map(a => a.id === e.agentId ? { ...a, state, endedAt: now, now: undefined, toolSince: undefined } : a)))
         await countAgents($)
         // Its commands bound to its final response end with it; no notification follows them.
         if ((await read($, bgTasks)).some(task => task.agentId === e.agentId && task.endsWithAgent && task.state === 'running')) await update($, bgTasks, list => endWithAgent(list, e.agentId!, now))
         // A picked worker's outcome, once, joined to its pick by id: whether the session's tier or
         // the named model was enough is read from these lines later (2026-10-24).
-        if (before?.pick?.id && (before.state === 'running' || before.state === 'waiting')) {
+        if (before?.pick?.id && before.state === 'running') {
           await persistWorkerPick($, { ...outcome, pick: before.pick.id, model: before.model ?? null, cost: before.cost })
         }
       } else if (!forking) {
@@ -1808,13 +2038,21 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     let input = e
     let chosen: WorkerPick | undefined
+    // Forks, workflows, teammates, Claude Code's own agents and other plugins' agents are the
+    // engine's to start. Only a spawn this mod routes or corrects must fail closed when its policy
+    // cannot be read: running it exactly as sent is how a model reason and a switched-off provider
+    // were bypassed (2026-10-25).
+    const workflow = 'workflow' in e && !!e.workflow
+    const teammate = 'isTeammate' in e && !!e.isTeammate
+    const ours = !e.fork && !workflow && !teammate && !NATIVE_AGENTS.includes(e.subagentType) &&
+      (!e.subagentType.includes(':') || ['ripple:auto', 'auto'].includes(e.subagentType))
+    let language: Lang = 'en'
+    try { language = await read($, lang) } catch { /* the refusal below falls back to English */ }
     try {
       // Only the main chat delegates. A worker that starts its own worker waits on it idle, and a
       // Claude worker's 5-minute cache lapses meanwhile: 324k tokens rewritten in one request after
       // an 8.5-minute wait on 2026-10-11. Forks, workflows and teammates are the engine's, not this.
-      const workflow = 'workflow' in e && !!e.workflow
-      const teammate = 'isTeammate' in e && !!e.isTeammate
-      if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(await read($, lang), 'workers.nested') }
+      if (e.parentAgentId && !e.fork && !workflow && !teammate) return { deny: t(language, 'workers.nested') }
       const s = await currentSettings($)
       // Named workers and project agents are routed too; native helpers stay native (2026-10-24).
       if (!workflow && !teammate && takesOver(e, s)) {
@@ -1844,7 +2082,7 @@ export const register: Register = on => {
         try { await refreshModels($) } catch (error) { await report($, 'explicit worker catalogue', error) }
         const file = files.get(e.subagentType)
         const provider = file ? agentProvider(file) : e.model && !/^(?:sonnet|opus|haiku|fable|mythos|claude-)/.test(e.model) ? (await read($, routerModels)).find(m => m.value === e.model?.replace(/@[^@]*$/, ''))?.provider : 'anthropic'
-        if (provider && s.providers[provider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider }) }
+        if (provider && s.providers[provider] === false) return { deny: t(language, 'workers.disabled', { provider }) }
         const marker = readMarker(e.prompt)
         // Outside takeover a tier marker is dropped, never routed as a model named "hard".
         if (tierOf(marker)) {
@@ -1852,11 +2090,11 @@ export const register: Register = on => {
         } else if (marker) {
           const markerFile = files.get(marker.name) ?? [...files.values()].find(f => agentModel(f)?.replace(/@[^@]*$/, '') === marker.name)
           const markerProvider = markerFile ? agentProvider(markerFile) : (await read($, routerModels)).find(m => m.value === marker.name)?.provider
-          if (markerProvider && s.providers[markerProvider] === false) return { deny: t(await read($, lang), 'workers.disabled', { provider: markerProvider }) }
+          if (markerProvider && s.providers[markerProvider] === false) return { deny: t(language, 'workers.disabled', { provider: markerProvider }) }
         }
         const fix = await workerFix($, input)
         if (fix) {
-          if (fix.dropped) await $.ui.toast(t(await read($, lang), 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
+          if (fix.dropped) await $.ui.toast(t(language, 'toasts.ownModel', { name: e.subagentType, model: fix.dropped }))
           input = { ...input, prompt: fix.prompt, model: fix.model }
         }
       }
@@ -1865,7 +2103,13 @@ export const register: Register = on => {
         const bare = withoutReason(input.prompt)
         if (bare !== input.prompt) input = { ...input, prompt: bare }
       }
-    } catch (error) { input = e; await report($, 'agent.spawn prepare', error) }
+    } catch (error) {
+      input = e
+      await report($, 'agent.spawn prepare', error).catch(() => undefined)
+      // A managed spawn whose routing or correction could not be prepared is refused, never run
+      // as sent. The report above is the diagnostic; this denial is what the caller sees.
+      if (ours) return { deny: t(language, 'toasts.error', { reason: reason(error) }) }
+    }
     try {
       // The title names what really runs: the model set above, else the worker file's, else the parent's.
       if (!e.fork && !('workflow' in e && e.workflow) && !NATIVE_AGENTS.includes(e.subagentType) && input.description?.trim()) {
@@ -1884,7 +2128,7 @@ export const register: Register = on => {
         const early = endedEarly.get(result.agentId)
         endedEarly.delete(result.agentId)
         const rec: AgentRec = { id: result.agentId, description: input.description, type: input.subagentType, model: result.model, ...(chosen ? { pick: chosen } : {}), ...(provider ? { provider } : {}), ...(effort ? { effort } : {}), state: early?.state ?? 'running', startedAt: Math.min(now, early?.endedAt ?? now), ...(early ? { endedAt: early.endedAt } : {}), cost: 0 }
-        await update($, agents, list => [...list.filter(a => a.id !== rec.id), rec].slice(-40))
+        await update($, agents, list => retainAgents([...list.filter(a => a.id !== rec.id), rec]))
         await countAgents($)
         if (early && chosen?.id) await persistWorkerPick($, { ...early.outcome, pick: chosen.id, model: result.model ?? null, cost: 0 })
       }
@@ -1902,7 +2146,7 @@ export const register: Register = on => {
     try { answer = await next(e); return answer }
     finally {
       try {
-        if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId && a.toolSince === started ? { ...a, now: undefined, toolSince: undefined, state: a.state === 'waiting' ? 'running' : a.state } : a))
+        if (e.agentId) await update($, agents, list => list.map(a => a.id === e.agentId && a.toolSince === started ? { ...a, now: undefined, toolSince: undefined } : a))
       } catch (error) { await report($, 'tool.call finish', error) }
       try { if (answer && ['Bash', 'Monitor', 'TaskStop'].includes(e.tool)) await noteTask($, e, answer, started) }
       catch (error) { await report($, 'tool.call task', error) }
@@ -1913,7 +2157,15 @@ export const register: Register = on => {
     // one, a subagent's own and the ahead-of-time precompute do not.
     const counted = async (result: SessionCompactResult): Promise<SessionCompactResult> => {
       try {
-        if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) await update($, compactions, n => n + 1)
+        if (!e.agentId && e.trigger !== 'precompute' && 'messages' in result) {
+          await update($, compactions, n => n + 1)
+          // The count was of the context this compaction replaced: make it stale for a count already
+          // running too, which the epoch and run catch (2026-10-25).
+          contextEpoch += 1
+          contextRun += 1
+          fullMark = null
+          await update($, contextFull, () => null)
+        }
       } catch (error) { await report($, 'session.compact count', error) }
       return result
     }
@@ -2012,10 +2264,15 @@ export const register: Register = on => {
     try {
       language = await read($, lang)
       startTimers($)
-      if (e.props.hasSurvey) return next(e)
-      const which = await read($, panel)
-      const frame = await frameOf($, e)
       const el = $.ui.resolve(e)
+      // The terminal's survey needs the band's rows, so it gets them. The desktop draws its question
+      // box (a turn's next step, a question asked) as a card of its own, and yielding there blanked
+      // the band until the next prompt (2026-10-26): the band stays, the host's drawing over it.
+      const card = (e.surface === 'desktop' || e.surface === 'vscode') && 'Svg' in el
+      if (e.props.hasSurvey && !card) return next(e)
+      const which = await read($, panel)
+      if (e.props.hasSurvey && which !== null) return next(e)
+      const frame = await frameOf($, e)
       if (which === 'settings') return renderSettings(el, frame, await settingsView($), settingsActions($)) as RenderElement
       if (which === 'compact' || which === 'clear') {
         const choice = await alertView($, frame.now)
@@ -2027,19 +2284,21 @@ export const register: Register = on => {
       const { Box, Button, Text } = el
       // What the phone queued floats over whatever is here, only while something waits (ui/queue.tsx).
       const queued = await read($, phoneQueue)
-      const over = (node: RenderNode): RenderElement => (queued
-        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{renderPhoneQueue(el, frame, queued)}{node}</Box>
+      // The desktop's survey (above) sits under what the phone queued and over the band.
+      const survey = e.props.hasSurvey ? await next(e) : null
+      const over = (node: RenderNode | null): RenderElement => (queued || survey
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{queued ? renderPhoneQueue(el, frame, queued) : null}{survey}{node}</Box>
         : node) as RenderElement
       const below = queued ? { ...frame, maxRows: Math.max(1, frame.maxRows - PHONE_QUEUE_ROWS) } : frame
-      if (await read($, bandHidden)) return over(await next(e))
+      if (await read($, bandHidden)) return over(survey ? null : await next(e))
       const alert = await alertView($, frame.now)
       if (alert) return over(renderAlert(el, below, alert, alertActions($, alert)))
       const s = await currentSettings($)
-      if (s.layout === 'minimal') return over(await next(e))
+      if (s.layout === 'minimal') return over(survey ? null : await next(e))
       const actions = bandActions($, e.surface)
       // The desktop draws the band as one surface with its × inside; the terminal keeps the row
       // of facts and controls with the close control (and its effort button) after it.
-      if ((e.surface === 'desktop' || e.surface === 'vscode') && 'Svg' in el) {
+      if (card) {
         return over(renderBand(el, below, await dashboard($, e.props.isWorking), { ...actions, hide: () => { void toggleBar($) } }))
       }
       return over(
@@ -2075,10 +2334,12 @@ export const register: Register = on => {
       startTimers($)
       records = await read($, agents)
       frame = await frameOf($, e)
-      // Read to be drawn again each second an agent runs (agentsClock): its elapsed time ticks.
-      await read($, agentsTick)
       id = await read($, agentOpen)
-      const open = id === null ? undefined : { id, talk: await agentTalk($, id), runsOpen: await read($, agentRunsOpen) }
+      // The desktop replaces a whole answer, including the hovered native button. Do not
+      // repaint an open conversation every second just to tick its age: that drops the run
+      // line's hover under a still pointer. Steps and tools still refresh its words and age.
+      if (id === null || !isRich(frame)) await read($, agentsTick)
+      const open = id === null ? undefined : { id, talk: await agentTalk($, id, records.find(record => record.id === id)), runsOpen: await read($, agentRunsOpen) }
       if (open && 'deny' in open.talk) throw new Error(open.talk.deny)
       return renderAgents($.ui.resolve(e), frame, { agents: records, tasks: await read($, bgTasks), now: frame.now, showDone: await read($, agentsShowDone), ...(open ? { open } : {}) }, agentsActions($)) as RenderElement
     } catch (error) { return agentsRenderFailure($, e, error, { ...(frame ? { frame } : {}), records, wasOpen: id !== null }) }
@@ -2092,15 +2353,27 @@ export const register: Register = on => {
       // until then.
       const live = await read($, context)
       const full = await read($, contextFull)
-      const fresh = full?.breakdown && full.basis === (live?.basis ?? null) ? full : null
+      // The count's own window is the one it draws; another window clears it in contextShare, and
+      // a model or chat change is caught here before that poll (2026-10-25).
+      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await read($, compactAt))
+      const fresh = full?.breakdown && same ? full : null
       // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
       const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null
       const cwd = await $.session.cwd().catch(() => undefined)
-      const error = full && !full.busy && full.basis === (live?.basis ?? null) ? full.error : undefined
+      const error = full && !full.busy && same ? full.error : undefined
       return renderContext($.ui.resolve(e), frame, {
         breakdown, basis: fresh ? 'full' : 'summary', busy: !!full?.busy, ...(error ? { error } : {}),
         open: await read($, contextShowAll), place: { ...(cwd ? { cwd } : {}), home: await userHome($) },
       }, contextActions($)) as RenderElement
     } catch (error) { return contextRenderFailure($, e, error, frame) }
   }).catch(($, e, next) => contextRenderFailure($, e, next.error.message ?? next.error.kind))
+  on('ui.render', { component: 'Pane', requestId: LIMITS_PANE }, async ($, e) => {
+    let frame: Frame | undefined
+    try {
+      startTimers($)
+      frame = await frameOf($, e)
+      // The row the band gauges: the same reading, every provider account's windows.
+      return renderLimits($.ui.resolve(e), frame, { items: await read($, limits) ?? [] }) as RenderElement
+    } catch (error) { return limitsRenderFailure($, e, error, frame) }
+  }).catch(($, e, next) => limitsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

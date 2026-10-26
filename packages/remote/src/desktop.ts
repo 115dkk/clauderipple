@@ -9,6 +9,9 @@ import { creationDateToFileTime, parseFileTime, processCommands, processSnapshot
 import { fileImages, messageContent, sessionFileTool, type ImageSink } from "./images.ts";
 import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, type PermissionMode, type PlanStep, type SessionSummary, type ToolCall } from "./protocol.ts";
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
+import { TaskPlan } from "./task-plan.ts";
+import { BackgroundActivity } from "./background-activity.ts";
+export { nextPlan } from "./task-plan.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WINDOW = 256 * 1024;
@@ -16,7 +19,7 @@ const RECENT_MS = 14 * 24 * 60 * 60 * 1000;
 type RecordValue = Record<string, unknown>;
 type Summarize = (tool: string, input: RecordValue, cwd: string) => string;
 interface Source { file: string; size: number; mtime: number; unfinished: boolean; summary: SessionSummary }
-interface Imported { size: number; mtime: number; log: EventLog; dir: string }
+interface Imported { size: number; mtime: number; log: EventLog; dir: string; children?: Map<string, SubagentState> }
 export interface DesktopProcess { sessionId: string; pid: number; status: "busy" | "shell" | "idle" | "waiting"; bridgeSessionId?: string; /** The folder the app's worker runs in, as its registry records it. */ cwd?: string }
 
 /**
@@ -201,7 +204,7 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         const running = state?.get(toolUseId);
         if (running && resolve) {
           const info = resolve(toolUseId, running.input);
-          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: status === "completed" ? "done" : "failed", steps: info.steps });
+          bodies.push({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: status === "completed" ? "done" : status === "killed" || status === "stopped" ? "stopped" : "failed", steps: info.steps });
         }
         state?.delete(toolUseId);
       }
@@ -240,8 +243,9 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
       tools.push({ id: b.id, name: b.name,
         summary: worker ? [summary || str(input.subagent_type) || b.name, str(input.model)].filter(Boolean).join(" · ") : summary,
         input: JSON.stringify(input, null, 2), ...sessionFileTool(b.name, input, scope, sink) });
-      // Only a top-level worker opens its own log; sidechain records never carry their own subagent event.
-      if (worker && !sidechain && state && resolve) {
+      // A worker transcript is its own conversation: its Agent calls open child logs too.
+      // The top-level pass still skips sidechain records before reaching this point.
+      if (worker && state && resolve) {
         const info = resolve(b.id, input);
         const running: SubagentState = { description: info.description || summary || str(input.subagent_type) || b.name, model: info.model, steps: info.steps, bytes: info.bytes ?? 0, input };
         state.set(b.id, running);
@@ -329,53 +333,17 @@ function withoutEffort(model: string): string {
   return model.replace(/@[^@]*$/, "");
 }
 
-/** The Code tab's own task-list tool; the app shows the list it keeps above the composer. */
-const PLAN_TOOL = "mcp__ccd_turn__update_plan";
-const PLAN_STEPS = 12;
-const PLAN_TEXT = 160;
-
-/** The task list after one accepted update_plan call, as the Claude app applies it (read from its
- * bundle, 2026-10-23): `items` replaces the whole list; otherwise `done` and `start` (1-based) mark
- * steps, and `advance` completes the step in progress and starts the next pending one. */
-export function nextPlan(steps: PlanStep[] | null, input: RecordValue): PlanStep[] | null {
-  if (Array.isArray(input.items)) {
-    const list = input.items.flatMap((value): PlanStep[] => {
-      const item = object(value);
-      const words = str(item?.content).trim().slice(0, PLAN_TEXT);
-      return words ? [{ text: words, status: item?.status === "completed" || item?.status === "in_progress" ? item.status : "pending" }] : [];
-    }).slice(0, PLAN_STEPS);
-    return list.length ? list : steps;
-  }
-  if (!steps) return null;
-  const next = steps.map(step => ({ ...step }));
-  const step = (n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= next.length ? next[n - 1] : undefined;
-  for (const n of Array.isArray(input.done) ? input.done : []) { const done = step(n); if (done) done.status = "completed"; }
-  const start = step(input.start);
-  if (start) start.status = "in_progress";
-  if (input.advance === true || input.advance === "true") {
-    const at = next.findIndex(s => s.status === "in_progress");
-    const current = next[at];
-    if (current) current.status = "completed";
-    const following = next.find((s, i) => i > at && s.status === "pending") ?? next.find(s => s.status === "pending");
-    if (following) following.status = "in_progress";
-  }
-  return next;
-}
-
 /** Top-level task lifecycle only; synchronous workers and nested subagents are not background tasks.
  * Also the main turn's start as the app counts it: the person's last message (origin "human"; compaction
  * summaries and task notifications are not), until the model ends its turn or the person interrupts,
  * and that turn's task list, which the person's next message clears. */
 export class BackgroundTasks {
-  private tools = new Map<string, { name: string; background: boolean; label: string }>();
-  private active = new Map<string, BackgroundTask>();
-  private terminal = new Set<string>();
-  /** update_plan calls waiting for their result: the app refuses a malformed one, which changes nothing. */
-  private planCalls = new Map<string, RecordValue>();
-  private steps: PlanStep[] | null = null;
-  get count(): number { return this.active.size; }
-  get list(): BackgroundTask[] { return Array.from(this.active.values()); }
-  get plan(): PlanStep[] { return this.steps ?? []; }
+  private activity = new BackgroundActivity();
+  private planState = new TaskPlan();
+  get count(): number { return this.activity.active.length; }
+  get list(): BackgroundTask[] { return this.activity.active; }
+  get history(): BackgroundTask[] { return this.activity.history; }
+  get plan(): PlanStep[] { return this.planState.list; }
   turnStartedAt: number | null = null;
 
   accept(line: string): void {
@@ -383,7 +351,10 @@ export class BackgroundTasks {
     if (!r || r.isSidechain === true) return;
     const content = object(r.message)?.content;
     const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
-    if (r.type === "user" && object(r.origin)?.kind === "human" && Number.isFinite(at)) { this.turnStartedAt = at; this.steps = null; }
+    if (r.type === "user" && object(r.origin)?.kind === "human") {
+      if (Number.isFinite(at)) this.turnStartedAt = at;
+      this.planState.newTurn();
+    }
     else if (r.type === "user" && typeof content === "string" && /^\[Request interrupted/.test(content)) this.turnStartedAt = null;
     else if (r.type === "assistant" && Array.isArray(content) && !content.some(b => object(b)?.type === "tool_use") &&
       ["end_turn", "stop_sequence"].includes(str(object(r.message)?.stop_reason))) this.turnStartedAt = null;
@@ -392,8 +363,7 @@ export class BackgroundTasks {
     const queued = r.type === "attachment" && object(r.attachment)?.type === "queued_command" ? str(object(r.attachment)?.prompt) : "";
     const notification = queued || (r.type === "user" ? text(content) : "");
     if (notification.startsWith("<task-notification>")) {
-      const id = /<task-id>([^<]+)<\/task-id>/.exec(notification)?.[1];
-      if (id && /<status>(completed|killed|failed|stopped)<\/status>/.test(notification)) this.end(id);
+      this.activity.notice(notification, Number.isFinite(at) ? at : null);
       return;
     }
     for (const value of Array.isArray(content) ? content : []) {
@@ -401,42 +371,14 @@ export class BackgroundTasks {
       if (r.type === "assistant" && b?.type === "tool_use" && typeof b.id === "string") {
         const name = str(b.name);
         const input = object(b.input);
-        if (["Agent", "Task", "Bash"].includes(name)) this.tools.set(b.id, { name, background: input?.run_in_background === true, label: str(input?.description) || str(input?.command) || name });
-        // A task stopped with TaskStop gets no notification at all (seen 2026-10-16: a shell "running" four hours).
-        if (name === "TaskStop") this.tools.set(b.id, { name, background: false, label: str(input?.task_id) || str(input?.shell_id) });
-        if (name === PLAN_TOOL && input) this.planCalls.set(b.id, input);
+        if (input) { this.planState.call(b.id, name, input); this.activity.call(b.id, name, input); }
       }
-      const planCall = r.type === "user" && b?.type === "tool_result" ? str(b.tool_use_id) : "";
-      const plan = this.planCalls.get(planCall);
-      if (plan) {
-        this.planCalls.delete(planCall);
-        if (b?.is_error !== true) this.steps = nextPlan(this.steps, plan);
-        continue;
+      if (r.type === "user" && b?.type === "tool_result") {
+        const tool = str(b.tool_use_id), ok = b.is_error !== true, body = text(b.content);
+        this.planState.result(tool, ok, body);
+        this.activity.result(tool, ok, body, Number.isFinite(at) ? at : null, object(r.toolUseResult));
       }
-      if (r.type !== "user" || b?.type !== "tool_result" || b.is_error === true) continue;
-      const tool = this.tools.get(str(b.tool_use_id));
-      if (!tool) continue;
-      if (tool.name === "TaskStop") {
-        if (tool.label) this.end(tool.label);
-        this.tools.delete(str(b.tool_use_id));
-        continue;
-      }
-      const result = object(r.toolUseResult);
-      const body = text(b.content);
-      let id = "";
-      if (tool.name === "Bash") {
-        id = str(result?.backgroundTaskId) || (tool.background ? /(?:ID|id):\s*([\w-]+)/.exec(body)?.[1] ?? "" : "");
-      } else if (result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(body)) {
-        id = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(body)?.[1] || "";
-      }
-      if (id && !this.terminal.has(id)) this.active.set(id, { id, kind: tool.name === "Bash" ? "shell" : "agent", label: tool.label, startedAt: Number.isFinite(at) ? at : null, ...(tool.name === "Bash" ? {} : { sub: `sub-${str(b.tool_use_id)}` }) });
-      this.tools.delete(str(b.tool_use_id));
     }
-  }
-
-  private end(id: string): void {
-    this.active.delete(id);
-    this.terminal.add(id);
   }
 }
 
@@ -473,8 +415,11 @@ export class DesktopSessions {
       const live = this.liveProcess(s.summary.id);
       if (live?.bridgeSessionId) {
         const working = live.status === "busy" || live.status === "shell";
-        const taskList = working ? this.backgroundTaskList(s.summary.id) : [];
-        s.summary = { ...s.summary, tasks: taskList.length, taskList, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null, plan: working ? this.plan(s.summary.id) : [] };
+        const taskList = this.backgroundTaskList(s.summary.id);
+        s.summary = { ...s.summary, tasks: taskList.length, taskList, taskHistory: this.backgroundTaskHistory(s.summary.id), backgroundKnown: false, turnStartedAt: working ? this.turnStartedAt(s.summary.id) : null, plan: this.plan(s.summary.id) };
+      } else if (this.imported.has(s.summary.id) || this.tasks.has(s.summary.id)) {
+        const taskList = this.backgroundTaskList(s.summary.id).map(task => !live ? { ...task, state: "unknown" as const } : task);
+        s.summary = { ...s.summary, tasks: taskList.length, taskList, taskHistory: this.backgroundTaskHistory(s.summary.id), backgroundKnown: false, plan: this.plan(s.summary.id) };
       }
       const cached = this.imported.get(s.summary.id);
       return cached && cached.size === s.size && cached.mtime === s.mtime
@@ -562,6 +507,7 @@ export class DesktopSessions {
   }
 
   backgroundTasks(id: string): number { return this.backgroundTaskList(id).length; }
+  backgroundTaskHistory(id: string): BackgroundTask[] { return this.scan(id)?.history ?? []; }
   /** A background agent whose own transcript ends on its final answer is done, notification or not:
    * one read through TaskOutput, or finished before a compaction, never gets a <task-notification> line
    * in the session's transcript and otherwise stays "running" for good (seen 2026-10-14, five hours). */
@@ -666,12 +612,16 @@ export class DesktopSessions {
     if (!stat.isFile()) return null;
     const key = `${id}::${sub}`;
     const cached = this.subImports.get(key);
-    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) return cached.log;
+    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs && [...(cached.children ?? [])].every(([toolUseId, child]) => {
+      const info = this.subInfo(id, toolUseId, child.input);
+      return !info.ended && info.model === child.model && info.steps === child.steps && (info.bytes ?? 0) === child.bytes;
+    })) return cached.log;
     if (cached) { this.dispose(cached); this.subImports.delete(key); }
     this.temp ??= fs.mkdtempSync(path.join(os.tmpdir(), "ripple-desktop-"));
     const dir = fs.mkdtempSync(path.join(this.temp, "sub-"));
-    const log = this.importSub(id, file, dir);
-    this.subImports.set(key, { size: stat.size, mtime: stat.mtimeMs, log, dir });
+    const children = new Map<string, SubagentState>();
+    const log = this.importSub(id, file, dir, children);
+    this.subImports.set(key, { size: stat.size, mtime: stat.mtimeMs, log, dir, children });
     return log;
   }
 
@@ -685,17 +635,25 @@ export class DesktopSessions {
     return null;
   }
 
-  private importSub(id: string, file: string, dir: string): EventLog {
+  private importSub(id: string, file: string, dir: string, state: Map<string, SubagentState>): EventLog {
     const source = this.sources.get(id)!;
     const fd = this.openUnder(file);
     let at = source.summary.createdAt;
     const log = EventLog.open({ dir, now: () => at });
+    const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
     try {
       scanLines(fd, fs.fstatSync(fd).size, line => {
-        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true });
+        const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { allowSidechain: true, state, resolve });
         at = parsed.at ?? at;
         for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
       });
+      for (const [toolUseId, running] of state) {
+        const info = resolve(toolUseId, running.input);
+        if (info.ended) {
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+          state.delete(toolUseId);
+        }
+      }
       return log;
     } catch (error) { log.close(); throw error; }
     finally { fs.closeSync(fd); }
@@ -704,7 +662,14 @@ export class DesktopSessions {
   private scan(id: string): BackgroundTasks | null {
     const source = this.sources.get(id);
     if (!source) return null;
-    const fd = this.open(source.file);
+    let fd: number;
+    try { fd = this.open(source.file); }
+    catch (error) {
+      if (!missing(error)) throw error;
+      this.sources.delete(id);
+      this.tasks.delete(id);
+      return null;
+    }
     try {
       const size = fs.fstatSync(fd).size;
       let cached = this.tasks.get(id);

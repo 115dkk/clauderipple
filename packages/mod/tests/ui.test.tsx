@@ -17,10 +17,11 @@ import { chOf, displayWidth } from '../hooks/ui/theme'
 import { commandLine, editLines, runDiff, runSummary, shortPath, toolDetail } from '../hooks/ui/tools'
 import { renderAlert } from '../hooks/ui/alerts'
 import { BAND_RIPPLE, CREST_CELLS, bandMood, besideBand, modeLabel, renderBand, renderFooter } from '../hooks/ui/band'
+import { renderLimits } from '../hooks/ui/limits'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { rippleSource } from '../hooks/ui/parts'
 import { pic } from '../hooks/ui/kit'
-import { SVG_MAX_PX, svg } from '../hooks/ui/art'
+import { CELL_PX, SVG_MAX_PX, svg } from '../hooks/ui/art'
 import { renderLog } from '../hooks/ui/log'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
@@ -283,15 +284,16 @@ const ALERTS: AlertView[] = [
   { kind: 'judgeDown', judge: 'jev', reason: 'key rejected (401)' },
   { kind: 'result', stage: 'handingOff' },
   { kind: 'result', stage: 'handoffDone', detail: 'A new session opened with the handoff filled in: press Enter there to go on.' },
+  { kind: 'result', stage: 'tidying' },
   { kind: 'result', stage: 'compacting' },
   { kind: 'result', stage: 'compacted' },
   { kind: 'result', stage: 'failed', detail: 'Haiku timed out' },
-  { kind: 'compactNote', draft: '' },
+  { kind: 'compactNote', draft: '', tidy: true },
 ]
 
 test('every alert draws on both surfaces', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
+  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
   ALERTS.forEach((alert, i) => drawPane(on, 'alert-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, actions)))
   for (const surface of SURFACES) {
     for (let i = 0; i < ALERTS.length; i++) {
@@ -305,12 +307,12 @@ test('every alert draws on both surfaces', async ($, on) => {
 test('alert choices reach their callbacks', async ($, on) => {
   const { calls, fn } = recorder()
   const actions = {
-    compact: fn("compact"), clear: fn("clear"), dismiss: fn("dismiss"), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'), copy: fn('copy'),
+    compact: fn("compact"), clear: fn("clear"), dismiss: fn("dismiss"), toggleSave: fn('save'), openSettings: fn('settings'), noteInput: fn('note'), toggleTidy: fn('tidy'), copy: fn('copy'),
   }
   drawPane(on, 'cold', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[0]!, actions))
   drawPane(on, 'kept', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[1]!, actions))
   drawPane(on, 'hot', (el, surface) => renderAlert(el, frameOf(surface), ALERTS[3]!, actions))
-  drawPane(on, 'note', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'compactNote', draft: '' }, actions))
+  drawPane(on, 'note', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'compactNote', draft: '', tidy: true }, actions))
   drawPane(on, 'handed', (el, surface) => renderAlert(el, frameOf(surface), { kind: 'result', stage: 'handoffDone' }, actions))
   for (const surface of SURFACES) {
     const cold = await mount($, 'cold', surface)
@@ -321,13 +323,22 @@ test('alert choices reach their callbacks', async ($, on) => {
     const hot = await mount($, 'hot', surface)
     await hot.press({ key: 'save' })
     const note = await mount($, 'note', surface)
+    await note.press({ key: 'tidy' })
     await note.input({ key: 'note', text: 'keep the API decision' })
     const handed = await mount($, 'handed', surface)
     await handed.press({ key: 'copy' })
   }
-  const once = ['compact', 'dismiss', 'dismiss', 'save', 'compact:["keep the API decision"]', 'copy']
+  const once = ['compact', 'dismiss', 'dismiss', 'save', 'tidy', 'compact:["keep the API decision"]', 'copy']
   expect(calls).toEqual([...once, ...once])
 })
+
+/**
+ * The px a picture is drawn at: its document's own width. The Svg asks wider than that and fills
+ * the cells laid out for it (kit.tsx `filled`), so its `width` prop is not its size.
+ */
+function ownPx(picture: Drawn): number {
+  return Number(/^<svg\b[^>]*?\swidth="([\d.]+)"/.exec(String(picture.props?.source))?.[1])
+}
 
 /** The mascot pictures in a drawn tree: the Svgs on its 56 grid. */
 function mascots(tree: unknown): Drawn[] {
@@ -340,7 +351,7 @@ function mascots(tree: unknown): Drawn[] {
 
 test('each alert shows 리플이 with the face of its state, its gauge in 5% steps; the terminal keeps a text mark', async ($, on) => {
   const noop = () => undefined
-  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
+  const actions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
   const variants: [string, AlertView][] = [
     ['swamp-59', { kind: 'swamp', percent: 59, tokens: 118_000 }],
     ['swamp-61', { kind: 'swamp', percent: 61, tokens: 122_000 }],
@@ -356,7 +367,7 @@ test('each alert shows 리플이 with the face of its state, its gauge in 5% ste
     const found = mascots(await ui.drawn())
     expect(found.length, 'alert ' + i).toBe(1)
     // The full drawing (34 px up): brows and mouth say what the card is about.
-    expect(found[0]!.props?.width).toBe(34)
+    expect(ownPx(found[0]!)).toBe(34)
     // An image, not a frame: the desktop rebuilds a frame blank on each redraw.
     expect(found[0]!.props?.isInteractive, 'alert ' + i).toBeFalsy()
     sources.push(String(found[0]!.props?.source))
@@ -397,7 +408,7 @@ test('리플이 greets in setup and quick settings and waits in empty panes, nev
     const found = mascots(await ui.drawn())
     expect(found.length, id).toBe(count)
     if (tone) expect(String(found[0]!.props?.source).includes('stroke="' + tone + '"'), id).toBe(true)
-    if (size) expect(found[0]!.props?.width, id).toBe(size)
+    if (size) expect(ownPx(found[0]!), id).toBe(size)
     await ui.unmount()
     const terminal = await mount($, id, 'terminal', 64)
     expect(mascots(await terminal.drawn()).length, id).toBe(0)
@@ -485,12 +496,12 @@ const DEEP_INKS = ['#f2f0eb', '#cbc8bf', '#9c988e']
 test('every skin draws the band, the quick settings and a card on the desktop; flat paints the app\'s surface and its quiet words', async ($, on) => {
   const noop = () => undefined
   const bandActions = { toggleAuto: noop, toggleWarm: noop, compact: noop, clear: noop, handoff: noop, toggleLog: noop, toggleAgents: noop, openSettings: noop, toggleEffortMenu: noop, pickEffort: noop, hide: noop }
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
   const full: DashboardView = { ...DASH, extras: ['context', 'limits'], limit: { kind: 'five_hour', percent: 42, save: true }, effortMenu: true, warm: { on: true, pings: 2, cost: 9000 }, agents: { live: 2, total: 3 }, mode: 'Burn GPT' }
   for (const skin of SKINS) {
     drawPane(on, skin + '-band', el => renderBand(el, frameOf('desktop', 100, 12, skin), full, bandActions))
     drawPane(on, skin + '-quick', el => renderSettings(el, frameOf('desktop', 140, 12, skin), { settings: { ...SETTINGS, skin, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'fail', message: 'no' } } }, QUICK_ACTIONS))
-    drawPane(on, skin + '-card', el => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'compactNote', draft: '' }, alertActions))
+    drawPane(on, skin + '-card', el => renderAlert(el, frameOf('desktop', 100, 12, skin), { kind: 'compactNote', draft: '', tidy: true }, alertActions))
     drawPane(on, skin + '-setup', el => renderSetup(el, frameOf('desktop', 100, 12, skin), { step: 1, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }))
   }
   for (const skin of SKINS) {
@@ -537,7 +548,7 @@ test('band, settings and log pictures stay within the SVG limit on every surface
     expect((await ui.findAll({ type: 'Text' })).length > 0, id + ' ' + surface).toBe(true)
     for (const picture of await ui.findAll({ type: 'Svg' })) {
       expect(Number(picture.props.width) <= SVG_MAX_PX, id + ' width').toBe(true)
-      expect(Number(picture.props.height) <= SVG_MAX_PX, id + ' height').toBe(true)
+      expect(Number(picture.props.height ?? 0) <= SVG_MAX_PX, id + ' height').toBe(true)
     }
     await ui.unmount()
   }
@@ -647,13 +658,14 @@ test('the Agents pane draws live, finished and empty', async ($, on) => {
       expect(why, surface).toBeDefined()
       expect(why?.text).toContain('ui/')
     } else expect(why, surface).toBeUndefined()
-    // The API's own counts: 1200 + 38000 + 800 in, 95% of it from the cache, 5100 out, 12 tools.
-    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'in 40k · cache 95% · out 5.1k · tools 12' }), surface).toBeDefined()
-    else for (const value of ['40k', '95%', '5.1k', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
+    // The Claude app's count: the last prompt (1200 + 38000 + 800) plus the reply (5100), the cache's
+    // 95% share, and 12 tools.
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: 'tokens 45k · cache 95% · tools 12' }), surface).toBeDefined()
+    else for (const value of ['45k', '95%', '12']) expect(await ui.find({ type: 'Text', text: value }), value).toBeDefined()
     // Two agents finished: nothing hides behind "more".
     expect(await ui.find({ type: 'Button', key: 'done' }), surface).toBeUndefined()
     const empty = await mount($, 'agents-empty', surface, 64)
-    expect(await empty.find({ type: 'Text', text: 'No agents yet' }), "empty { type: 'Text', text: 'No agents yet' } " + surface).toBeDefined()
+    expect(await empty.find({ type: 'Text', text: 'No agents or background tasks yet' }), "empty { type: 'Text', text: 'No agents or background tasks yet' } " + surface).toBeDefined()
   }
   expect(calls).toEqual([])
 })
@@ -676,6 +688,7 @@ test('the Agents pane draws forty agents at once, and a record missing its title
   for (const { id, columns } of cases) {
     for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
       const ui = await mount($, 'forty-' + id, surface, columns)
+      // The title is the whole title on one line (the engine cuts it at the edge), so every card has it.
       for (const i of [0, 30, 31, 39]) expect(await ui.find({ type: 'Text', text: 'cheongju:송수아 ' + i }), surface + ' ' + id + ' ' + i).toBeDefined()
       const pictures = await ui.findAll({ type: 'Svg' })
       if (surface === 'terminal' || surface === 'mobile') expect(pictures).toHaveLength(0)
@@ -684,7 +697,7 @@ test('the Agents pane draws forty agents at once, and a record missing its title
         expect(tiles.length > 0, surface + ' ' + id + ' continuation').toBe(true)
         for (const picture of pictures) {
           expect(Number(picture.props.width) <= SVG_MAX_PX).toBe(true)
-          expect(Number(picture.props.height) <= SVG_MAX_PX).toBe(true)
+          expect(Number(picture.props.height ?? 0) <= SVG_MAX_PX).toBe(true)
         }
       }
       await ui.unmount()
@@ -698,7 +711,7 @@ test('the Agents pane draws forty agents at once, and a record missing its title
 
 test('the Agents pane draws forty mixed real-world records on every surface, skin and theme', async ($, on) => {
   const by = ['marker', 'session', 'judge', 'haiku', 'jev', 'model', 'default', 'tier'] as const
-  const states = ['running', 'waiting', 'done', 'failed', 'killed'] as const
+  const states = ['running', 'done', 'failed', 'killed'] as const
   const mixed: AgentRec[] = Array.from({ length: 40 }, (_, i): AgentRec => ({
     ...AGENTS[0]!, id: 'mixed-' + i, description: '에이전트 표시 오류 수정 ' + i,
     state: states[i % states.length]!,
@@ -736,8 +749,8 @@ test('the Agents pane draws forty mixed real-world records on every surface, ski
     const id = ['mixed', skin, appearance].join('-')
     for (const surface of ['desktop', 'terminal', 'vscode', 'mobile'] as const) {
       const ui = await mount($, id, surface, 40)
-      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 0' }), id + ' ' + surface).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 39' }), id + ' ' + surface).toBeDefined()
+      // The whole title is in the tree; the engine cuts it only as it draws.
+      for (const i of [0, 39]) expect(await ui.find({ type: 'Text', text: '에이전트 표시 오류 수정 ' + i }), id + ' ' + surface + ' ' + i).toBeDefined()
       await ui.unmount()
     }
   }
@@ -783,13 +796,43 @@ test('pictures tile at the SVG side limit without rescaling or restarting their 
         const y = Math.floor(i / across) * SVG_MAX_PX
         const width = Math.min(SVG_MAX_PX, size - x)
         const height = Math.min(SVG_MAX_PX, size - y)
-        expect(picture.props.width).toBe(width)
-        expect(picture.props.height).toBe(height)
+        // Each tile is its own size in its document and fills its cells as any picture does.
+        expect(ownPx(picture)).toBe(width)
+        expect(String(picture.props.source)).toMatch(new RegExp('^<svg\\b[^>]*\\sheight="' + height + '"'))
+        expect(Number(picture.props.width) >= width && picture.props.height === undefined).toBe(true)
         expect(String(picture.props.source)).toContain('viewBox="' + [x, y, width, height].join(' ') + '"')
         expect(String(picture.props.source).slice(String(picture.props.source).indexOf('><style>'))).toBe(source.slice(source.indexOf('><style>')))
       }
       await ui.unmount()
     }
+  }
+})
+
+// The desktop's newer type (2026-10-25) set a cell at ~8.8 px, not the CELL_PX the pictures are
+// drawn for: pictures asked at their own px fell short of their cells, the band's sea ended before
+// its right edge and its icons sat in wide gaps.
+test('every picture fills the cells laid out for it, so it keeps its place whatever px a cell is', async ($, on) => {
+  const noop = () => undefined
+  const draws: [string, Draw][] = [
+    ['band', el => renderBand(el, frameOf('desktop', 100), DASH, BAND_ACTIONS)],
+    ['settings', el => renderSettings(el, frameOf('desktop', 100), { settings: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
+    ['agents', el => renderAgents(el, frameOf('desktop', 64), { agents: AGENTS, now: NOW, showDone: true }, AGENT_NOOP)],
+    ['alert', el => renderAlert(el, frameOf('desktop', 100), ALERTS[0]!, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop })],
+  ]
+  for (const [id, draw] of draws) drawPane(on, 'cells-' + id, draw)
+  for (const [id] of draws) {
+    const ui = await mount($, 'cells-' + id, 'desktop', 100)
+    let pictures = 0
+    walk(await ui.drawn(), n => {
+      const only = n.type === 'Box' && n.children?.length === 1 ? n.children[0] as Drawn : null
+      if (only?.type !== 'Svg') return
+      pictures++
+      const key = id + ' ' + String(n.props?.key)
+      expect(Math.abs(Number(n.props?.width) * CELL_PX - ownPx(only)) < 0.5, key + ' cells').toBe(true)
+      expect(Number(only.props?.width) >= ownPx(only) && only.props?.height === undefined, key + ' fills').toBe(true)
+    })
+    expect(pictures > 0, id).toBe(true)
+    await ui.unmount()
   }
 })
 
@@ -898,18 +941,13 @@ test('an open conversation is headed by a chevron back and its title, which stay
   // The card under the head names no title again: the head has it.
   expect(await top.findAll({ type: 'Text', text: 'Port the request log renderer' })).toHaveLength(1)
   await top.press({ key: 'back' })
+  // Scrolled, no copy of the head is redrawn at the window's top: the engine pins no row, and the
+  // copy trailed the words, landed mid-pane and flickered (2026-10-25).
   const down = await mount($, 'float-down', 'desktop', 64)
-  const float = await down.find({ key: 'float-head' })
-  expect(float?.props.top).toBe(12)
-  expect(float?.props.left).toBe(0)
-  expect(float?.props.right).toBe(0)
-  // On a plate of the pane's own surface, so the words under it do not show through.
-  expect(await down.find({ key: 'pic-float-plate' })).toBeDefined()
-  // The desktop drops a picture whose alt is blank (2026-10-24: this plate and the prompt's grey card
-  // were never drawn, and the words showed through the head): every picture here says something.
+  expect(await down.find({ key: 'float-head' })).toBeUndefined()
+  expect(await down.findAll({ key: 'open-head' })).toHaveLength(1)
   for (const svg of await down.findAll({ type: 'Svg' })) expect(String(svg.props.alt ?? '').trim(), String(svg.props.source).slice(0, 80)).not.toBe('')
-  await down.press({ key: 'back-float' })
-  expect(calls).toEqual(['back', 'back'])
+  expect(calls).toEqual(['back'])
 })
 
 test('a long prompt folds to its first lines under a fade, and Show more unfolds it', async ($, on) => {
@@ -1025,6 +1063,27 @@ test('the log pane keeps its content', async ($, on) => {
   expect(calls).toEqual(['scope', 'scope'])
 })
 
+test('a request made on the Fast tier shows FAST beside its effort, and no other request does (#97)', async ($, on) => {
+  const base = { source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, effort: 'high', mine: true }
+  const rows: StatusRequest[] = [
+    { ...base, at: '2026-10-10T13:19:10', requestedTier: 'priority', servedTier: 'default' } as StatusRequest,
+    { ...base, at: '2026-10-10T13:18:55' },
+    { ...base, at: '2026-10-10T13:18:40', requestedTier: 'flex' },
+  ]
+  drawPane(on, 'log-fast', (el, surface) => renderLog(el, frameOf(surface, 64), { rows, mineOnly: true }, { toggleScope: () => undefined }))
+  drawPane(on, 'log-fast-none', (el, surface) => renderLog(el, frameOf(surface, 64), { rows: rows.slice(1), mineOnly: true }, { toggleScope: () => undefined }))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'log-fast', surface, 64)
+    // One badge for the one priority request, on the effort line (the line after the model's).
+    expect((await ui.findAll({ type: 'Text', text: 'FAST' })).length, surface).toBe(1)
+    const efforts: string[][] = []
+    walk(await ui.drawn(), n => { if (n.type === 'Box' && (n.children ?? []).some(c => (c as Drawn).type === 'Text' && ((c as Drawn).children ?? []).join('') === 'high')) efforts.push(((n.children ?? []) as Drawn[]).map(c => (c.children ?? []).join(''))) })
+    expect(efforts.map(line => line.includes('FAST')), surface).toEqual([true, false, false])
+    const none = await mount($, 'log-fast-none', surface, 64)
+    expect(await none.find({ type: 'Text', text: 'FAST' }), surface).toBeUndefined()
+  }
+})
+
 // ---- Nothing cut, nothing reloaded (2026-10-10) -------------------------------------------------
 
 type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
@@ -1062,7 +1121,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
   // over it (kit.tsx), never from a blank button over nothing.
   const noop = () => undefined
   const setupActions = { patch: noop, jevKey: noop, testJev: noop, openAllSettings: noop, back: noop, next: noop, finish: noop, skip: noop }
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
   const cases: [string, Draw][] = [
     ['one-quick', (el, surface) => renderSettings(el, frameOf(surface, 64, 30), { settings: { ...SETTINGS, jevSource: 'typesafe' }, jev: { source: null, test: { state: 'idle' } } }, QUICK_ACTIONS)],
     ...([1, 2, 3, 4] as const).map((step): [string, Draw] => ['one-setup-' + step, (el, surface) => renderSetup(el, frameOf(surface, 64, 30), { step, draft: SETTINGS, jev: { source: null, test: { state: 'idle' } } }, setupActions)]),
@@ -1082,7 +1141,7 @@ test('every picture is a plain image, 리플이 the one face, and every blank pr
 
 test('a card says one thing: at most one main action, the others quiet, one way to let it go', async ($, on) => {
   const noop = () => undefined
-  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop }
+  const alertActions = { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop }
   const all: AlertView[] = [...ALERTS, { kind: 'hot', limitKind: 'five_hour', percent: 97, save: true }]
   all.forEach((alert, i) => drawPane(on, 'say-' + i, (el, surface) => renderAlert(el, frameOf(surface), alert, alertActions)))
   for (let i = 0; i < all.length; i++) {
@@ -1111,15 +1170,15 @@ test('a card says one thing: at most one main action, the others quiet, one way 
   expect(await on_.find({ type: 'Button', key: 'dismiss' })).toBeDefined()
 })
 
-test('no drawing cuts its text: no truncating Text on any surface', async ($, on) => {
+test('no drawing cuts its text, but for the agent card\'s title and model name, which the app\'s proportional type cuts at the edge', async ($, on) => {
   const noop = () => undefined
+  // The engine's own ellipsis, on the two spots whose width the app's type decides: a character
+  // count there measured cells and cut too soon (2026-10-25).
   const settingsActions = QUICK_ACTIONS
   const cases: [string, Draw][] = [
     ['cut-quick', (el, surface) => renderSettings(el, frameOf(surface, 60, 30), { settings: SETTINGS, jev: { source: null, test: { state: 'fail', message: 'key rejected (401) '.repeat(4) } } }, settingsActions)],
-    ['cut-agents', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS.map(a => ({ ...a, description: a.description + ' and a much longer tail of words that runs past any pane width', state: 'running' as const })), now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
-    ['cut-agents-done', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: AGENTS, now: NOW, showDone: true }, { ...AGENT_NOOP, toggleDone: noop })],
     ['cut-log', (el, surface) => renderLog(el, frameOf(surface, 40), { rows: [{ at: '2026-10-10T13:19:10', source: 'a-very-long-requested-model-name@high', target: 'another-very-long-routed-model-name', provider: 'opencode-go', status: 200, ok: true, ms: 2140 }], mineOnly: false }, { toggleScope: noop })],
-    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, copy: noop })]),
+    ...ALERTS.map((alert, i): [string, Draw] => ['cut-alert-' + i, (el, surface) => renderAlert(el, frameOf(surface, 40), alert, { compact: noop, clear: noop, dismiss: noop, toggleSave: noop, openSettings: noop, noteInput: noop, toggleTidy: noop, copy: noop })]),
   ]
   for (const [id, draw] of cases) drawPane(on, id, draw)
   for (const surface of SURFACES) {
@@ -1131,6 +1190,23 @@ test('no drawing cuts its text: no truncating Text on any surface', async ($, on
       await ui.unmount()
     }
   }
+})
+
+test('the agent card is the one drawing the engine cuts: its title and its model name alone', async ($, on) => {
+  // The app's type is proportional, so a character count cut too soon; these two take their row's
+  // free width and the engine ellipsis them at the edge (2026-10-25).
+  const agent: AgentRec = { ...AGENTS[0]!, description: 'Mobile / motion — a title long enough to reach the edge of any pane', model: 'gpt-6.1-sol@high' }
+  drawPane(on, 'cut-card', (el, surface) => renderAgents(el, frameOf(surface, 40), { agents: [agent], now: NOW, showDone: false }, AGENT_NOOP))
+  const cuts = async (surface: Surface): Promise<string[]> => {
+    const ui = await mount($, 'cut-card', surface, 40)
+    const cut: string[] = []
+    walk(await ui.drawn(), n => { if (n.type === 'Text' && String(n.props?.wrap ?? '').startsWith('truncate')) cut.push(String((n.children ?? []).join(''))) })
+    await ui.unmount()
+    return cut
+  }
+  expect(await cuts('desktop'), 'desktop').toEqual([agent.description, 'gpt-6.1-sol'])
+  // The terminal draws its own rows and wraps; the app's ellipsis is the desktop's.
+  expect(await cuts('terminal'), 'terminal').toEqual([])
 })
 
 // ---- The band holds still (2026-10-10) ----------------------------------------------------------
@@ -1152,6 +1228,62 @@ test('within a minute the band draws the same tree; a minute on, only the countd
     expect(now).toContain('"42m"')
     expect(await drawn('later-' + surface)).toBe(now)
     expect((await drawn('minute-' + surface)).replace(/\b41m\b/g, '42m')).toBe(now)
+  }
+})
+
+test('while it works the current runs along the capsule\'s true bottom, in a picture of its own that a redraw keeps', async ($, on) => {
+  const working = (live: number, total: number, extra: Partial<DashboardView> = {}): DashboardView => ({ ...DASH, isWorking: true, agents: { live, total }, ...extra })
+  const busy = working(1, 1)
+  // The same band a moment on, with more requests out and every row it can add (the pin, the
+  // limits, the effort menu): nothing in the current depends on any of it.
+  const more = working(2, 3, { effortMenu: true, delegationPin: 'Opus', extras: ['limits'], limits: [{ provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 }] })
+  for (const skin of SKINS) {
+    drawPane(on, 'current-' + skin, el => renderBand(el, frameOf('desktop', 94, 12, skin), busy, BAND_ACTIONS))
+    drawPane(on, 'current-more-' + skin, el => renderBand(el, frameOf('desktop', 94, 12, skin), more, BAND_ACTIONS))
+    drawPane(on, 'current-idle-' + skin, el => renderBand(el, frameOf('desktop', 94, 12, skin), DASH, BAND_ACTIONS))
+  }
+  /** The pictures that carry `part` of a drawing (the current's class, the sea's glows). */
+  const pictures = async (ui: { findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }, part: string) =>
+    (await ui.findAll({ type: 'Svg' })).map(picture => String(picture.props.source)).filter(source => source.includes(part))
+  for (const skin of SKINS) {
+    const ui = await mount($, 'current-' + skin, 'desktop', 94)
+    const later = await mount($, 'current-more-' + skin, 'desktop', 94)
+    const idle = await mount($, 'current-idle-' + skin, 'desktop', 94)
+    // Only the deep has water for a current to run in; a band at rest has none.
+    expect(await pictures(ui, 'class="cu"'), skin).toHaveLength(skin === 'deep' ? 1 : 0)
+    expect(await pictures(idle, 'class="cu"'), skin + ' at rest').toHaveLength(0)
+    const line = await ui.find({ key: 'band-current' })
+    if (skin === 'deep') {
+      // A separate placed node at the capsule's own bottom: no `top`, and no `height` of its own,
+      // which the host takes in whole rows and painted as a plate over the band.
+      expect(line?.props).toMatchObject({ position: 'absolute', bottom: 0, left: 0 })
+      expect(line?.props.top).toBeUndefined()
+      expect(line?.props.height).toBeUndefined()
+      expect(line?.props.backgroundColor).toBeUndefined()
+      // The line is its picture's own 2 px, so the picture, not the Box, sizes it.
+      expect((await pictures(ui, 'class="cu"'))[0]).toMatch(/\sheight="2"/)
+    } else expect(line).toBeUndefined()
+    // No wash over the band: nothing is painted in the colour of the plate that was there.
+    const plates: string[] = []
+    for (const mounted of [ui, later, idle]) walk(await mounted.drawn(), n => {
+      if (n.type === 'Box' && String(n.props?.backgroundColor ?? '').includes('103,232,249')) plates.push(String(n.props?.key ?? 'Box'))
+    })
+    expect(plates, skin).toEqual([])
+    // Not in the sea's picture: its height is only an estimate of the capsule's.
+    const seas = await pictures(ui, 'class="br"')
+    expect(seas, skin).toHaveLength(skin === 'deep' ? 1 : 0)
+    for (const source of seas) expect(source).not.toContain('class="cu"')
+    if (skin === 'deep') {
+      // Two frames that differ only in the requests out: the same key and the same document, so a
+      // host that keeps the picture keeps its motion; no negative delay to open it part way.
+      expect(await pictures(later, 'class="cu"')).toEqual(await pictures(ui, 'class="cu"'))
+      expect(await later.find({ key: 'band-current' })).toBeDefined()
+      expect(await later.find({ key: 'pic-band-current' })).toBeDefined()
+      expect((await pictures(ui, 'class="cu"'))[0]).not.toContain('animation-delay')
+    }
+    await ui.unmount()
+    await later.unmount()
+    await idle.unmount()
   }
 })
 
@@ -1178,7 +1310,7 @@ test('리플이 acts out the band: thinking, working, drowsy, asleep or idle, on
     const tree = await ui.drawn()
     const found = mascots(tree)
     expect(found.length, id).toBe(1)
-    expect(found[0]!.props?.width, id).toBe(BAND_RIPPLE)
+    expect(ownPx(found[0]!), id).toBe(BAND_RIPPLE)
     expect(found[0]!.props?.isInteractive, id).toBeFalsy()
     sources[id] = String(found[0]!.props?.source)
     // Drawn for the capsule's dark water whatever the app's theme.
@@ -1246,10 +1378,13 @@ test('no value moves a neighbour: every slot keeps its width whatever it shows',
   for (const lang of LANGS) {
     for (const surface of SURFACES) {
       const seen: Record<string, unknown> = {}
+      // The drawn band's effort and context take the value shown, and the agents icon its badge only
+      // while it has a count, tight (2026-10-25): what follows moves. Everything else keeps its width.
+      const tight = surface === 'desktop' ? ['fact-effort', 'fact-context', 'agents'] : []
       for (let i = 0; i < views.length; i++) {
         const ui = await mount($, lang + '-' + surface + '-' + i, surface, 110)
         for (const [key, value] of Object.entries(layoutOf(await ui.drawn()))) {
-          if (key in seen) expect(value, lang + ' ' + surface + ' view ' + i + ' ' + key).toEqual(seen[key])
+          if (key in seen && !tight.includes(key)) expect(value, lang + ' ' + surface + ' view ' + i + ' ' + key).toEqual(seen[key])
           else seen[key] = value
         }
         await ui.unmount()
@@ -1415,6 +1550,102 @@ test('with the limits row drawn, save mode\'s word follows Claude\'s windows', a
 })
 
 
+// 2026-10-25: the owner moved the reset times off the band into a pane the row opens. Each window
+// reads there with its share and when it resets — the time left while close, the weekday and clock
+// once far — under its provider account's head.
+test('the limits pane reads every window\'s share and reset', async ($, on) => {
+  const limits = [
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 28, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString() },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day' as const, label: '', percent: 8, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'five_hour' as const, label: '', windowMinutes: 300, percent: 12, resetsAt: new Date(NOW + 45 * 60_000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day' as const, label: '', windowMinutes: 10080, percent: 97 },
+  ]
+  // Every pane answered before the first mount: the hooks beneath the plugins register first.
+  for (const surface of SURFACES) {
+    drawPane(on, 'limits-' + surface, el => renderLimits(el, { ...frameOf(surface), lang: 'ko' }, { items: limits }))
+    drawPane(on, 'limits-none-' + surface, el => renderLimits(el, { ...frameOf(surface), lang: 'ko' }, { items: [] }))
+  }
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'limits-' + surface, surface)
+    expect(await ui.find({ type: 'Text', text: '기간별 한도' }), surface).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '기간별 사용률과 초기화 시각입니다.' }), surface).toBeDefined()
+    // One head per provider account, numbered when a provider has several.
+    for (const head of ['Claude', 'GPT 1', 'GPT 2']) expect(await ui.find({ type: 'Text', text: head }), surface + ' ' + head).toBeDefined()
+    // Every window: its name, its share, and when it resets ("2시간 뒤", "45분 뒤"; a weekday past
+    // twenty hours — 13 October 2026 at 13:20 is a Tuesday).
+    for (const text of ['28%', '8%', '12%', '97%', '2시간 뒤', '45분 뒤', '화 13:20']) expect(await ui.find({ type: 'Text', text }), surface + ' ' + text).toBeDefined()
+    // A window the router gave no reset for says nothing about one.
+    expect((await ui.findAll({ type: 'Text' })).filter(text => /뒤$|^초기화 중$/.test(text.text)), surface).toHaveLength(2)
+    await ui.unmount()
+    const none = await mount($, 'limits-none-' + surface, surface)
+    expect(await none.find({ type: 'Text', text: '아직 한도 사용량을 확인할 수 없습니다.' }), surface).toBeDefined()
+    await none.unmount()
+  }
+})
+
+// 2026-10-25: the row itself is the way in. It lights under the pointer and says what pressing it
+// shows; the reset times are no longer written on it.
+test('the desktop limits row is a button that opens the limits pane', async ($, on) => {
+  const { calls, fn } = recorder()
+  const actions = { ...BAND_ACTIONS, toggleLimits: fn('limits') }
+  const limits: DashboardView['limits'] = [
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 28, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString() },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 8, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
+  ]
+  drawPane(on, 'limits-row', el => renderBand(el, { ...frameOf('desktop', 94), lang: 'ko' }, { ...DASH, extras: ['limits'], limits }, actions))
+  const ui = await mount($, 'limits-row', 'desktop', 94)
+  expect(await ui.find({ type: 'Button', key: 'limits-open' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '눌러서 기간별 사용률과 초기화 시각 보기' })).toBeDefined()
+  // The shares are on the row; the reset times are the pane's.
+  for (const figure of ['28%', '8%']) expect(await ui.find({ type: 'Text', text: figure }), figure).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /뒤$/ })).toBeUndefined()
+  await ui.press({ key: 'limits-open' })
+  expect(calls).toEqual(['limits'])
+  await ui.unmount()
+})
+
+test('making the limits row pressable adds no in-flow height or vertical air', async ($, on) => {
+  const limits: DashboardView['limits'] = [
+    { provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 },
+    { provider: 'chatgpt', account: 0, kind: 'seven_day', label: '', percent: 8 },
+  ]
+  for (const skin of SKINS) for (const columns of [94, 200]) for (const active of [false, true]) {
+    const id = ['limits-height', skin, columns, active].join('-')
+    drawPane(on, id, el => renderBand(el, frameOf('desktop', columns, 12, skin), { ...DASH, extras: ['limits'], limits }, { ...BAND_ACTIONS, ...(active ? { toggleLimits: () => undefined } : {}) }))
+  }
+  for (const skin of SKINS) for (const columns of [94, 200]) {
+    const rows: string[] = []
+    for (const active of [false, true]) {
+      const ui = await mount($, ['limits-height', skin, columns, active].join('-'), 'desktop', columns)
+      const tree = await ui.drawn()
+      // Compare the actual in-flow tree with the unpressable row (1837316's layout):
+      // absolute paint and hit targets cannot add height, including round-border default padding.
+      const flow = (node: unknown): unknown => {
+        if (!node || typeof node !== 'object') return node
+        const n = node as Drawn
+        if (n.props?.position === 'absolute') return null
+        const { key, ...props } = n.props ?? {}
+        return { type: n.type, props, children: (n.children ?? []).map(flow).filter(n => n !== null) }
+      }
+      const row = await ui.find({ key: 'band-limits' })
+      expect(row?.props.paddingTop).toBe(0.5)
+      let rowTree: Drawn | undefined
+      walk(tree, n => { if (n.props?.key === 'band-limits') rowTree = n })
+      rows.push(JSON.stringify(flow(rowTree)))
+      const light = await ui.find({ key: 'limits-light' })
+      if (active) {
+        expect(light?.props.position).toBe('absolute')
+        expect(light?.props.paddingY).toBe(0)
+        expect(light?.props.top).toBe(0)
+        expect(light?.props.bottom).toBe(0)
+      } else expect(light).toBeUndefined()
+      expect((await ui.find({ key: 'limits-row' }))?.props.borderStyle).toBeUndefined()
+      await ui.unmount()
+    }
+    expect(rows[1], skin + ' ' + columns + ' in-flow layout').toBe(rows[0])
+  }
+})
+
 // ---- Tool runs (2026-10-20: a worker's commands read as a wall, each wrapped over lines) ------------
 
 test('a run of tool calls is headed in one line as the Claude app heads it', () => {
@@ -1467,10 +1698,11 @@ test('a run is one quiet line in the app\'s words, its edits\' lines in a chip a
   drawPane(on, 'chip-open', el => renderAgents(el, { ...frameOf('desktop', 64), lang: 'ko' }, { agents: [done], now: NOW, showDone: false, open: { id: 'a1', talk: { entries: talk }, runsOpen: ['c0'] } }, AGENT_NOOP))
   const ui = await mount($, 'chip-ko', 'desktop', 64)
   expect(await ui.find({ type: 'Text', text: '실행됨 명령 7개, 편집함 파일 9개, 읽음 파일 3개' })).toBeDefined()
-  // Under the pointer the quiet words take the page's ink, as the app's line does; nothing lit behind.
+  // The words carry no hover of their own: lit words and the press's light fought under a still
+  // pointer and the line flickered (2026-10-25). The press over the line is its one hover.
   const lit: unknown[] = []
   walk(await ui.drawn(), n => { if (n.type === 'Text' && (n.children ?? []).join('') === '실행됨 명령 7개, 편집함 파일 9개, 읽음 파일 3개') lit.push((n as { hover?: unknown }).hover) })
-  expect(lit).toEqual([expect.objectContaining({ color: 'inherit' })])
+  expect(lit).toEqual([undefined])
   const chip = await svgByAlt(ui, '52줄 추가, 380줄 삭제')
   expect(chip).toBeDefined()
   expect(String(chip?.props.source)).toContain('+52')
@@ -1593,9 +1825,9 @@ test('a running row and card draw the same tree a tick on and across 59s → 1m 
       }
     }
   }
-  // The open card's numbers rows are there from the start, a dash for each figure not yet reported.
+  // The open card's second row is there from the start, a dash for each figure not yet reported.
   const fresh = await mount($, 'still-fresh', 'desktop', 68)
-  expect(await fresh.findAll({ type: 'Text', text: /^–$/ })).toHaveLength(3)
+  expect(await fresh.findAll({ type: 'Text', text: /^–$/ })).toHaveLength(2)
   expect(await fresh.find({ type: 'Text', text: /^0$/ })).toBeDefined()
   for (const lang of ['en', 'ko', 'zh', 'ja', 'es', 'pt'] as const) {
     for (const columns of STILL_COLUMNS) {
@@ -1608,7 +1840,7 @@ test('a running row and card draw the same tree a tick on and across 59s → 1m 
   }
 })
 
-test('a narrow card keeps its model on one line without the vendor path, and its numbers in two fixed rows', async ($, on) => {
+test('a narrow card keeps its model on one line without the vendor path, and the same two body rows as a wide one', async ($, on) => {
   const why = 'session model · General / Standard'
   const agent: AgentRec = { ...STILL_AGENT, pick: { ...STILL_AGENT.pick!, why, by: 'session' } }
   // The card heads an open conversation; the title is the page's head row there.
@@ -1619,19 +1851,25 @@ test('a narrow card keeps its model on one line without the vendor path, and its
   for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
     // No vendor path, and no pick line.
     expect(await ui.find({ type: 'Text', text: /deepseek-ai\// }), side + ' vendor').toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /^deepseek-v/ }), side + ' model').toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^deep/ }), side + ' model').toBeDefined()
     expect(await ui.find({ type: 'Text', text: /표준/ }), side + ' level').toBeUndefined()
     expect(await ui.find({ type: 'Text', text: why }), side + ' why').toBeUndefined()
   }
-  // Narrow: the name is cut to fit beside the effort; the numbers take two rows; the time ends the head.
-  expect((await narrow.find({ type: 'Text', text: /^deepseek-v/ }))!.text.endsWith('…'), 'cut model').toBe(true)
-  expect(await narrow.find({ key: 'nums-1' }), 'narrow nums-1').toBeDefined()
-  expect(await wide.find({ key: 'nums-1' }), 'wide nums-1').toBeUndefined()
-  for (const ui of [narrow, wide]) expect(await ui.find({ key: 'open-head-end' }), 'time in the head').toBeDefined()
+  // Neither width pre-cuts the name: the whole string is drawn and the engine ellipsis it at the
+  // edge when its row is short, since the app's type is proportional.
+  for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
+    const model = await ui.find({ type: 'Text', text: 'deepseek-v4.1-flash-1017' })
+    expect(model?.props.wrap, side + ' model cut').toBe('truncate-end')
+  }
+  for (const [side, ui] of [['narrow', narrow], ['wide', wide]] as const) {
+    expect(await ui.find({ key: 'model-row' }), side + ' model row').toBeDefined()
+    expect(await ui.find({ key: 'nums' }), side + ' numbers row').toBeDefined()
+    expect(await ui.find({ key: 'nums-1' }), side + ' no second numbers row').toBeUndefined()
+    expect(await ui.find({ key: 'open-head-end' }), side + ' time in the head').toBeDefined()
+  }
   expect(await narrow.find({ type: 'Text', text: '3분 12초' }), 'time').toBeDefined()
-  // The time never takes a row of its own, and a long title is cut to the head's one line beside it.
+  // The time never takes a row of its own, and the title is the whole string, one line the engine cuts.
   for (const ui of [narrow, wide]) expect(await ui.find({ key: 'time-row' })).toBeUndefined()
-  const title = (await narrow.find({ type: 'Text', text: /^Port the/ }))!.text
-  expect(title.endsWith('…')).toBe(true)
-  expect(chOf(title) <= 33).toBe(true)
+  const title = await narrow.find({ type: 'Text', text: STILL_TITLE })
+  expect(title?.props.wrap, 'title cut').toBe('truncate-end')
 })

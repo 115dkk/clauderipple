@@ -14,7 +14,7 @@ import { StreamMapper, conversationKey, estimateTokens, formatSse, serverToolNam
 import { refusesReplayedReasoning } from "../../reasoning.ts";
 import type { RequestUsage } from "../../requestlog.ts";
 import { exhaustionHeaders, providerExhaustion, type ProviderExhaustion } from "../../health.ts";
-import type { SearchBackend, SearchHit, WebSearchQuery } from "../../websearch.ts";
+import type { SearchBackend, SearchHit, SearchOutcome, WebSearchQuery } from "../../websearch.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { codexClientVersion, latestCodexVersion, parseCodexCatalog } from "./catalog.ts";
 import { noteChatgptModelWindows } from "./windows.ts";
@@ -387,7 +387,7 @@ export class ChatGptAdapter {
     };
   }
 
-  private async searchWeb(model: string, query: WebSearchQuery, maxResults = 10, signal?: AbortSignal): Promise<{ hits: SearchHit[]; text?: string }> {
+  private async searchWeb(model: string, query: WebSearchQuery, maxResults = 10, signal?: AbortSignal): Promise<SearchOutcome> {
     // The Responses tool exposes an allowed-domain filter but no exclusion filter. Ignoring a block
     // would violate the caller's request; fail visibly so the proxy can choose another backend.
     if (query.blockedDomains?.length) throw new Error("ChatGPT web search does not support blocked_domains");
@@ -446,6 +446,7 @@ export class ChatGptAdapter {
     const hits: SearchHit[] = [];
     let text = "";
     let searches = 0;
+    let usage: RequestUsage | undefined;
     try {
       for (;;) {
         const { done, value } = await reader.read();
@@ -459,6 +460,13 @@ export class ChatGptAdapter {
           if (event.type === "response.completed") {
             const completed = event.response as { tool_usage?: { web_search?: { num_requests?: unknown } }; usage?: { input_tokens?: number; input_tokens_details?: { cached_tokens?: number }; output_tokens?: number } } | undefined;
             searches = typeof completed?.tool_usage?.web_search?.num_requests === "number" ? completed.tool_usage.web_search.num_requests : searches;
+            // The search spends the account's real quota, so the log records its tokens like any
+            // other turn's: `input_tokens` is what the prompt read, `cached_tokens` the cached part.
+            const u = completed?.usage;
+            if (u) {
+              const cached = u.input_tokens_details?.cached_tokens ?? 0;
+              usage = { input: (u.input_tokens ?? 0) - cached, cached, output: u.output_tokens ?? 0 };
+            }
           }
           if (event.type === "error") throw new Error(`ChatGPT web search: ${String((event.error as { message?: unknown } | undefined)?.message ?? "backend error")}`);
         }
@@ -471,7 +479,11 @@ export class ChatGptAdapter {
     const selected = [...unique.values()].slice(0, maxResults);
     if (searches < 1 || selected.length === 0) throw new Error(`ChatGPT web search: no cited results returned (searches=${searches})`);
     const prose = text.trim();
-    return prose ? { hits: selected, text: prose } : { hits: selected };
+    return {
+      hits: selected,
+      ...(prose ? { text: prose } : {}),
+      ...(usage ? { usage } : {}),
+    };
   }
 
   /**

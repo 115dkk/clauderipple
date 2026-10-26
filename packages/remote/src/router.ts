@@ -75,38 +75,41 @@ export class RouterClient {
 
   /** The mod's figures for one Claude Code session, from the router's own request records. */
   async figures(sessionId: string, mainModel: string, contextWindow: number | null): Promise<Figures> {
-    const [reqs, status, window] = await Promise.all([
+    const [reqs, status, windows] = await Promise.all([
       this.get<{ requests: RequestRecord[] }>(`/api/requests?kind=messages&n=400&session=${encodeURIComponent(sessionId)}`).catch(() => ({ requests: [] })),
       this.get<{ claude?: { accounts?: { quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }>("/api/status").catch(() => ({})),
-      contextWindow ?? this.catalogWindow(mainModel),
+      // Sessions already throttle figures. Do not keep a second model-only cache: the same id
+      // can be rerouted, or its catalogue window can change, without changing the session model.
+      this.get<unknown>("/api/context-windows").catch(() => null),
     ]);
-    return computeFigures(reqs.requests, mainModel, window, status, Date.now());
+    return computeFigures(reqs.requests, mainModel, (route, source) => figureWindow(windows, source, route, contextWindow), status, Date.now());
   }
+}
 
-  private windows: { at: number; map: Record<string, number> } | null = null;
-
-  /**
-   * The router's catalogue window for a model (`GET /api/context-windows`), for a session whose CLI
-   * never told us one: a Claude app session. Read at most every 10 minutes; unknown or an older
-   * router without the endpoint is null.
-   */
-  private async catalogWindow(model: string): Promise<number | null> {
-    // Claude Code's own suffix: "[1m]" is the million-token variant of the same model.
-    if (/\[1m\]$/i.test(model)) return 1_000_000;
-    if (!this.windows || Date.now() - this.windows.at > 10 * 60_000) {
-      const body = await this.get<{ windows?: unknown }>("/api/context-windows").catch(() => null);
-      const raw = body?.windows && typeof body.windows === "object" ? body.windows as Record<string, unknown> : null;
-      // A failed read is not cached: the next refresh asks again.
-      if (raw) {
-        const map: Record<string, number> = {};
-        for (const [id, value] of Object.entries(raw)) if (typeof value === "number" && value > 0) map[id] = value;
-        this.windows = { at: Date.now(), map };
-      }
+/** Resolve usage against the model that actually served it, never the native alias's SDK cap. */
+function figureWindow(body: unknown, mainModel: string, route: Figures["route"], sdkWindow: number | null): number | null {
+  const data = obj(body);
+  const lookup = (map: Record<string, unknown>, model: string): unknown => map[model.split("@")[0]!] ?? map[base(model)];
+  const positive = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  const target = route?.model ?? mainModel;
+  if (data.resolvedWindows && typeof data.resolvedWindows === "object") {
+    const map = obj(data.resolvedWindows);
+    // The source entry preserves an explicit route override, but only while that route still
+    // names the provider/target recorded on this request. A fallback uses its own target entry.
+    for (const id of [mainModel, target]) {
+      const entry = obj(lookup(map, id));
+      if (typeof entry.model !== "string") continue;
+      if (route && (base(entry.model) !== base(target) || (entry.provider ?? "anthropic") !== route.provider)) continue;
+      return positive(entry.contextWindow); // an explicit unknown must not fall through to a stale SDK value
     }
-    const map = this.windows?.map ?? {};
-    const id = model.replace(/\[[^\]]*\]$/, "");
-    return map[model] ?? map[id] ?? map[base(id)] ?? null;
+    return null;
   }
+  // Older routers lack provider-bound resolutions. Only the actual target's exact map entry is
+  // usable; do not strip [1m] or infer a window from a model's name.
+  const known = positive(lookup(obj(data.windows), target));
+  if (known !== null) return known;
+  return route?.provider === "anthropic" && base(target) === base(mainModel) && target.startsWith("claude-")
+    ? positive(sdkWindow) : null;
 }
 
 export function groupModels(opts: ModOptions, levels: EffortLevels): ProviderGroup[] {
@@ -134,16 +137,17 @@ export function groupModels(opts: ModOptions, levels: EffortLevels): ProviderGro
 
 /**
  * Cache % is read over all input of the session's main-model requests; context % is the latest
- * main request's input over the window the CLI reported for the model. Unknown stays null.
+ * main request's input over its resolved model window (or the caller's measured window). Unknown stays null.
  * `route` is where that same latest request went (the router's target, not the model asked for).
  */
-export function computeFigures(records: RequestRecord[], mainModel: string, contextWindow: number | null, status: { claude?: { accounts?: { quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }, now: number): Figures {
+export function computeFigures(records: RequestRecord[], mainModel: string, window: number | null | ((route: Figures["route"], source: string) => number | null), status: { claude?: { accounts?: { quota?: { rate_limits?: { primary?: Window; secondary?: Window } } }[] } }, now: number): Figures {
   const main = base(mainModel);
   let read = 0, all = 0;
   let effort: Effort | null = null;
   let latest = -Infinity;
   let lastInput: number | null = null;
   let route: Figures["route"] = null;
+  let source = mainModel;
   const workers = new Map<string, { model: string; provider: string; requests: number }>();
   for (const r of records) {
     const target = r.target ?? r.source ?? "";
@@ -156,6 +160,7 @@ export function computeFigures(records: RequestRecord[], mainModel: string, cont
       // A request still streaming has no usage yet; it would read as an empty context (measured: 0% mid-turn).
       if (at > latest && input > 0) {
         latest = at; effort = toEffort(r.effort) ?? effort; lastInput = input;
+        source = r.source ?? mainModel;
         route = { model: target.replace(/@[^@]*$/, ""), provider: r.provider ?? "", ok: r.ok === true, status: typeof r.status === "number" ? r.status : null };
       }
     } else if (target) {
@@ -165,6 +170,8 @@ export function computeFigures(records: RequestRecord[], mainModel: string, cont
       workers.set(key, w);
     }
   }
+  const value = typeof window === "function" ? window(route, source) : window;
+  const contextWindow = typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
   const windows = status.claude?.accounts?.[0]?.quota?.rate_limits;
   const five = [windows?.primary, windows?.secondary].find((w) => w?.window_minutes === 300);
   return {

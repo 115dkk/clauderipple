@@ -854,6 +854,7 @@ export class OpenAiStreamMapper {
       return [...out, ...this.fail(typeof error?.message === "string" ? error.message : "upstream response failed", typeof error?.code === "string" ? error.code : undefined)];
     }
     out.push(...this.flushResponses());
+    if (this.sawCompletion) out.push(...this.finish());
     return out;
   }
 

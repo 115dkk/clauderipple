@@ -9,6 +9,24 @@
 
 /** Largest WebSocket frame either side sends, in bytes of UTF-8 JSON (Paseo #2610: 8 MB killed the socket). */
 export const FRAME_CAP = 256 * 1024;
+/**
+ * A host frame over FRAME_CAP is split for a client that advertised `chunkedFrames`: a `chunk`
+ * frame carries one slice of the original frame's UTF-8 bytes, base64, and the shared Link joins
+ * them and hands the whole JSON text to the normal handling. The original bytes are never cut,
+ * escaped or rewritten, so a queue, edit answer or session list arrives exactly as it was built.
+ * Chunks are only ever sent to a client that asked; every other client keeps the one-frame wire.
+ *
+ * The size cap is fixed so a broken or hostile sender cannot grow the phone's memory without
+ * bound: past it the host takes today's `too_large` path instead of chunking.
+ */
+export const CHUNK_MESSAGE_MAX = 16 * 1024 * 1024;
+/** Bytes a chunk frame spends on keys, its id, index and numbers, before the base64 payload. */
+export const CHUNK_OVERHEAD = 1024;
+/** Payload bytes per chunk: the largest base64 that still leaves FRAME_CAP room for the envelope. */
+export const CHUNK_DATA_BYTES = Math.floor((FRAME_CAP - CHUNK_OVERHEAD) / 4) * 3;
+/** A partial assembly with no chunk for this long is dropped; the link then reconnects. */
+export const CHUNK_TIMEOUT_MS = 30_000;
+
 /** A string field longer than this is moved out of the event into a blob fetched on demand. */
 export const INLINE_CAP = 32 * 1024;
 /** Client pings this often; either side calls the link stale after STALE_MS of silence. */
@@ -101,8 +119,9 @@ export type EventBody = MessageImages & (
   | { kind: "assistant"; msg: string; model: string; text: Text; tools: ToolCall[] }
   | { kind: "tool_result"; toolUseId: string; ok: boolean; text: Text }
   /** A subagent ran; its own log is `sub` and loads only when asked (Paseo #5820). */
-  | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed"; steps: number }
+  | { kind: "subagent"; toolUseId: string; sub: string; description: string; model: string | null; status: "running" | "done" | "failed" | "stopped"; steps: number }
   | ({ kind: "permission"; id: string; tool: string; title: string; summary: string; input: Text; canAlways: boolean } & PermissionContent)
+  | { kind: "background"; tasks: BackgroundTask[]; known: boolean }
   | { kind: "mode"; mode: PermissionMode }
   | { kind: "permission_decided"; id: string; decision: "allow" | "allow_always" | "deny" | "expired"; reason?: string; ruleStatus?: RuleStatus }
   | ({ kind: "settings"; reqId: string } & SettingsResult)
@@ -111,7 +130,7 @@ export type EventBody = MessageImages & (
   | { kind: "figures"; figures: Figures }
   | { kind: "notice"; code: NoticeCode; text?: string });
 
-export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked";
+export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed";
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 
@@ -202,8 +221,12 @@ export interface SessionSummary {
   turnStartedAt?: number | null;
   /** What those background tasks are, oldest first; absent on older hosts. */
   taskList?: BackgroundTask[];
-  /** The Code tab's task list for the running turn (its update_plan tool), in order; empty when the
-   * turn has none or the session is not working. Absent on older hosts. */
+  taskHistory?: BackgroundTask[];
+  /** False/absent means transcript observations only, not a complete inventory of PR/CI subscriptions. */
+  backgroundKnown?: boolean;
+  activityAt?: number | null;
+  /** Confirmed tasks from update_plan, TodoWrite and TaskCreate/Update/List, in order.
+   * Session-scoped tasks survive turn completion; Code's per-turn plan clears on a new human turn. */
   plan?: PlanStep[];
   /** The main turn is idle but background work (subagents, shells) still runs: the app's dark blink. */
   background?: boolean;
@@ -230,16 +253,25 @@ export interface SessionSummary {
   epoch: string;
 }
 
-export interface BackgroundTask { id: string; kind: "agent" | "shell"; label: string; startedAt: number | null; /** an agent's own log for `op: "sub"`; absent on older hosts */ sub?: string }
-export interface PlanStep { text: string; status: "pending" | "in_progress" | "completed" }
+export interface BackgroundTask {
+  id: string; kind: "agent" | "shell" | "monitor" | "schedule" | "subscription" | "other"; label: string; startedAt: number | null;
+  sub?: string; state?: "running" | "done" | "failed" | "stopped" | "unknown";
+  command?: string; schedule?: string; nextAt?: number; endedAt?: number; category?: string;
+}
+export interface PlanStep { id?: string; text: string; status: "pending" | "in_progress" | "completed" }
 
 /** One queued message as the phone shows it; `id` is the phone's clientMsgId. */
-export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** why sending it failed; the queue is held */ error?: string }
+export interface QueuedMessage { id: string; text: string; attachments: number; at: number; /** Why it failed or is waiting; only queueHeld requires explicit resume. */ error?: string }
 
 export interface ModelOption { model: string; name: string; provider: string; efforts: Effort[]; usable: boolean }
 export interface ProviderGroup { provider: string; label: string; usable: boolean; models: ModelOption[] }
 
 export interface FolderEntry { path: string; name: string; lastUsed?: number; model?: string }
+/** One row in a session folder's read-only listing; `path` is relative to the session folder. */
+export interface SessionFolderEntry { name: string; path: string; dir: boolean; bytes: number | null; /** a symlink that leads outside the folder: shown, not opened */ blocked?: boolean }
+export interface FolderListing { path: string; parent: string | null; entries: SessionFolderEntry[]; truncated: boolean }
+/** One small file from a session folder, base64. Larger files are refused, never truncated. */
+export interface FolderFile { path: string; name: string; mediaType: string; bytes: number; data: string }
 
 /**
  * `desktopProblem`: why sends, approvals and live state for Claude app (Mac) sessions cannot work
@@ -248,14 +280,18 @@ export interface FolderEntry { path: string; name: string; lastUsed?: number; mo
 export interface HostInfo { name: string; version: string; routerOk: boolean; routerProblem?: string; desktopProblem?: string;
   /** The host keeps queued messages (ReqOp enqueue/queue_*); an older host leaves the queue to the phone. */
   queue?: boolean;
-  capabilities?: { sessionFiles: boolean };
+  capabilities?: { sessionFiles: boolean;
+    /** read-only session folder listing and small-file reads */ folderFiles?: boolean;
+    /** `op: "diff"` takes a `scope`, so the diff pane can switch between uncommitted work and the
+     * branch. Absent on an older host, which always answers with its own order. */
+    diffScope?: boolean };
   /** the mod's mode, effort range and provider limits; absent on older hosts or when the router is down */
   ripple?: RippleStatus }
 
 // ---- client → host --------------------------------------------------------------------
 
 /** Per-connection opt-in. Missing/non-array lists mean no features; unknown entries are ignored. */
-export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles"] as const;
+export const CLIENT_FEATURES = ["settingsResult", "scopedAlways", "sessionFiles", "chunkedFrames", "folderFiles"] as const;
 export type ClientFeature = typeof CLIENT_FEATURES[number];
 
 export type ClientMsg =
@@ -294,10 +330,16 @@ export type ReqOp =
   | { op: "blob"; session: string; id: string; offset?: number }
   | { op: "sub"; session: string; sub: string; afterSeq?: number }
   /** What changed in this session's own folder; the host reads the folder from the session, never
-   * from the phone. Read-only: a scope, a base branch, and one patch per file (see DiffView). */
-  | { op: "diff"; session: string }
+   * from the phone. Read-only: a scope, a base branch, and one patch per file (see DiffView).
+   * `scope` picks the comparison (`auto` is the host's own order); hosts that do not know it answer
+   * as `auto`, and the answer's own `scope` is what was actually shown. */
+  | { op: "diff"; session: string; scope?: DiffScope }
   /** Slash command names (no "/") the session accepts, for the composer's "/" menu. */
   | { op: "commands"; session: string }
+  /** Read-only listing of a session folder; `path` is relative to it. */
+  | { op: "folder_list"; session: string; path?: string }
+  /** One small file from that listing, base64; refuses anything larger. */
+  | { op: "folder_file"; session: string; path: string }
   /** Queue a message for when the running turn ends; attachments are uploads, as for `send`. A
    * session that is not busy takes it at once. Answers `{ queued: true }`; a resent id is a no-op. */
   | { op: "enqueue"; session: string; clientMsgId: string; text: string; attachments?: Attachment[] }
@@ -364,11 +406,27 @@ export interface DiffFile {
   removed: number;
   /** the unified diff text; empty for binary files and for a file the limits cut away */
   patch: string;
+  /** This file's patch is not all of it: a size limit, a deadline or the frame budget stopped it.
+   * Absent when the patch (or its absence, for a binary) is complete. */
+  cut?: boolean;
 }
+
+/** Which comparison a diff view makes. `auto` is the host's own order: uncommitted work first,
+ * else the branch against its base. The other two ask for one of them, even when it is empty. */
+export type DiffScope = "auto" | "uncommitted" | "branch";
 
 // ---- host → client --------------------------------------------------------------------
 
+/**
+ * One slice of a host frame too large for FRAME_CAP, sent only to a client whose hello listed
+ * `chunkedFrames`. `data` is base64 of the original frame's UTF-8 bytes at `index` of `total`;
+ * `bytes` is the whole original length, the same on every slice. The shared Link assembles these
+ * before any other handling (chunks.ts), so the app never sees this type.
+ */
+export interface ChunkFrame { t: "chunk"; id: string; index: number; total: number; bytes: number; data: string }
+
 export type HostMsg =
+  | ChunkFrame
   | { t: "ready"; host: HostInfo; sessions: SessionSummary[]; groups?: string[] | undefined }
   | { t: "pong"; n: number }
   | { t: "denied"; reason: "token" }

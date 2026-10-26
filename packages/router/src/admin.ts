@@ -31,7 +31,8 @@ import { runCli, startCliDetached, parseUpdateCheck, type DetachedCli } from "./
 import { AutoUpdater } from "./autoupdate.ts";
 export { parseUpdateCheck, type UpdateCheck } from "./cli-control.ts";
 import { fileURLToPath } from "node:url";
-import type { Config, Provider, ProviderModel } from "./config.ts";
+import type { Config, Provider, ProviderCredential, ProviderModel } from "./config.ts";
+import { withFileLock } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
 import { generatedAgents } from "./agents.ts";
@@ -41,6 +42,7 @@ import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
 import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
+import { resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
 import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
@@ -52,7 +54,7 @@ import { resolveCompatibleCaps } from "./compat.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
-import { measureModel, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
+import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
@@ -106,11 +108,22 @@ export type AdminDeps = {
   phone?: PhoneDeps;
   config: () => Config;
   configFile: string;
+  /**
+   * Validation errors from the config file as last read. An invalid file is still adopted on the
+   * first read so the router can serve the fix, but readiness must not call that healthy (G-D14).
+   */
+  configErrors?: () => string[];
   log: Logger;
   stats: () => Stats;
   health: () => number;
   providerHealth?: () => Record<string, ProviderExhaustion>;
   version: string;
+  /**
+   * The installation identity this process captured at start: its home's opaque id (immutable for
+   * this process, even if the file changes) and its own pid. Status reports both, and a shutdown
+   * request is accepted only from the installation this process actually is (B01/D6).
+   */
+  instance?: { installId: string | null; pid: number };
   requests: RequestLog;
   /** Optional: chatgpt providers' latest rate-limit snapshot and credential status. */
   chatgpt?: () => {
@@ -682,6 +695,41 @@ function antigravityGroupsOut(accounts: readonly GoogleAccountStatus[], now: num
 const MOD_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
 const modEfforts = (levels: readonly string[] | undefined): Effort[] => (levels ?? []).filter((level): level is Effort => MOD_EFFORTS.includes(level));
 
+/**
+ * An OpenCode Go subscription's spent windows, from the same `/usage` read `/api/limits` shows.
+ * One key is out once any of its windows (five-hour, weekly, monthly) reads 100%, because the plan
+ * refuses every model on that key; it is back when the latest of its full windows resets. The
+ * provider leaves the ladder only while every key is out, as rotation would otherwise find one to
+ * use (#95). No reader, a failed read or an empty answer is not evidence: the answer stays today's.
+ */
+async function opencodeGoOut(
+  deps: AdminDeps,
+  name: string,
+  credentials: readonly ProviderCredential[] | undefined,
+  now: number,
+): Promise<{ reason: "quota_exhausted"; until: number } | undefined> {
+  const read = deps.opencodeUsage;
+  if (!read) return undefined;
+  const keys = credentials?.length ? credentials : [undefined];
+  const backs: number[] = [];
+  for (const credential of keys) {
+    let windows: OpenCodeWindow[];
+    try {
+      windows = await read(name, credential?.id);
+    } catch {
+      return undefined;
+    }
+    if (!windows.length) return undefined;
+    const full = windows.filter((w) => w.used_percent >= 100);
+    if (!full.length) return undefined;
+    // Every window must have room again, so the latest full one is when this key returns. The
+    // subscription's own reset is the honest answer; without one, the runtime default applies.
+    backs.push(Math.max(...full.map((w) => (w.reset_at !== undefined ? w.reset_at * 1000 : now + 30 * 60_000))));
+  }
+  const until = Math.min(...backs);
+  return until > now ? { reason: "quota_exhausted", until } : undefined;
+}
+
 async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<ModOptions> {
   const cfg = deps.config();
   const chatgpt = await chatgptStatus(deps);
@@ -695,8 +743,10 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
   }));
   const now = Date.now();
-  const providers = Object.entries(cfg.providers).map(([name, p]) => {
+  const providers = await Promise.all(Object.entries(cfg.providers).map(async ([name, p]) => {
     let usable = true;
+    // A spent OpenCode Go window, which the picker must skip before it hands out the work (#95).
+    let usageOut: { reason: "quota_exhausted"; until: number } | undefined;
     if (p.type === "chatgpt") {
       const accounts = chatgpt.accounts[name];
       usable = accounts ? accounts.some(a => a.state === "ready" && !exhaustedForMs(a.quota))
@@ -709,9 +759,17 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
       // due token before each turn, so only an account that must sign in again is out.
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY)
         : claudeAuthStore(deps).describeSource() !== null || listClaudeAccounts(homeDir()).some(a => !a.needsReauth);
+    } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
+      usageOut = await opencodeGoOut(deps, name, p.credentials, now);
+      if (usageOut) usable = false;
     }
     if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready" && !c.paused);
     const exhausted = health[name];
+    // A runtime exhaustion mark and a spent subscription window can both be true; the later reset
+    // is the one the ladder has to wait for.
+    let out: { reason: string; exhaustedAt?: number; exhaustedUntil: number } | undefined;
+    if (exhausted) out = { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until };
+    if (usageOut && (!out || usageOut.until > out.exhaustedUntil)) out = { reason: usageOut.reason, exhaustedUntil: usageOut.until };
     const modelsOut: Record<string, ModelUnavailable> = {};
     if (p.type === "google" && p.auth === "antigravity") {
       const groups = antigravityGroupsOut(google[name] ?? [], now);
@@ -722,11 +780,11 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
         if (scope && groups[scope]) modelsOut[id] = groups[scope];
       }
     }
-    return { name, type: p.type, usable: usable && !exhausted, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
-      ...(exhausted ? { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until } : {}),
+    return { name, type: p.type, usable: usable && !out, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
+      ...(out ? { reason: out.reason, ...(out.exhaustedAt !== undefined ? { exhaustedAt: out.exhaustedAt } : {}), exhaustedUntil: out.exhaustedUntil } : {}),
       ...(Object.keys(modelsOut).length ? { models: modelsOut } : {}),
     };
-  });
+  }));
   const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
   const zen = Object.values(cfg.providers).find(p => {
     if (!p.models?.some(m => isJudgeOnlyModel(m.id))) return false;
@@ -842,6 +900,10 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
   // can go through. In picker mode a missing certificate trust or app proxy entry looks, from the
   // app, exactly like a dead router. Each problem is a code the tray and the GUI can name.
   const problems: string[] = [];
+  // A config that failed validation is not a healthy router: the routes it names may be missing,
+  // and the file has to be fixed before anything else can be trusted (G-D14).
+  const configErrors = deps.configErrors?.() ?? [];
+  if (configErrors.length) problems.push("config");
   if (env.HTTPS_PROXY !== wantProxy) problems.push("settings");
   if (deps.health() > 0) problems.push("upstream");
   if (picker.enabled) {
@@ -854,10 +916,22 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
     version: deps.version,
     autoUpdate: deps.autoUpdater?.status() ?? { enabled: cfg.autoUpdate !== false, running: false },
     readiness: { ready: problems.length === 0, problems },
+    // The errors themselves, so a reader can name the line to fix rather than only "config".
+    config: { errors: configErrors },
+    // Outbound provider calls run on undici's own dispatcher, never the environment's proxy
+    // variables, so a network that requires a proxy is bypassed silently. Names only: a proxy URL
+    // can carry a credential (G-D11). The dashboard says so; readiness is unaffected, since a
+    // proxy that is set but not needed is not a fault.
+    envProxy: { set: ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_USE_ENV_PROXY"].filter((name) => (process.env[name] ?? "") !== "") },
     // Which files this process is running, so the app can tell an old router from its own after
     // an update: a zip unpacked next to the previous install left the old one serving (2026-09-15).
     runtime: { node: process.execPath, router: process.argv[1] ?? null, startedAt: STARTED_AT },
     home: homeDir(),
+    // The identity captured when this process started: a caller accepts this status as its own only
+    // when both the installation id and the pid match what it would act on. A file changed while
+    // this process runs does not rewrite what it is.
+    installId: deps.instance?.installId ?? null,
+    pid: deps.instance?.pid ?? null,
     listen: cfg.listen,
     upstream: cfg.upstream,
     adminPort: adminPort(cfg),
@@ -1003,9 +1077,14 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
   res.end(out);
 }
 
-/** Write the config file atomically. The one save path: the GUI's PUT and the capability
- * measurement both go through it, so the router never picks up a half-written file either way. */
+/** Write the config file atomically under its lock. The one save path: the GUI's PUT, the
+ * capability measurements and the CLI's picker toggle all go through it or take the same lock, so
+ * the router never picks up a half-written file and two writers never replace it mid-change. */
 function writeConfigFile(configFile: string, config: Config): void {
+  withFileLock(configFile, () => writeConfigFileLocked(configFile, config));
+}
+
+function writeConfigFileLocked(configFile: string, config: Config): void {
   const tmp = `${configFile}.tmp-${process.pid}-${Date.now()}`;
   fs.mkdirSync(path.dirname(configFile), { recursive: true });
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n");
@@ -1500,6 +1579,11 @@ function effortUndeclared(p: Provider): boolean {
   return false;
 }
 
+/** Ollama's native API base when this provider is Ollama (local daemon or cloud), else null. */
+function ollamaBase(p: Provider): string | null {
+  return p.type === "openai-compatible" ? ollamaApiBase(p.url, p.preset) : null;
+}
+
 /**
  * Fold measurements into the config on disk.
  *
@@ -1508,11 +1592,13 @@ function effortUndeclared(p: Provider): boolean {
  * Only a model that is still present is touched, and only into a blank field — a `wire`,
  * `effortLevels` or `contextWindow` already on the model is the user's or the vendor's, and an
  * explicitly empty ladder is a decision
- * (it disables the provider fallback), not an empty slot. A model whose measurement errored is
- * left entirely alone. The result is validated with the same `validate` the GUI's save uses, so a
- * bad edit is refused rather than written.
+ * (it disables the provider fallback), not an empty slot. Ollama is the exception
+ * (`replaceEmptyEffort`): there the empty ladder is what an unread capability was saved as, so the
+ * vendor's own `/api/show` answer takes its place. A model whose measurement errored is left
+ * entirely alone. The result is validated with the same `validate` the GUI's save uses, so a bad
+ * edit is refused rather than written.
  */
-function applyMeasurements(configFile: string, providerName: string, results: Measured[]): { applied: number } | { error: string } {
+function applyMeasurements(configFile: string, providerName: string, results: Measured[], options: { replaceEmptyEffort?: boolean } = {}): { applied: number } | { error: string } {
   let current: Config;
   try {
     current = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
@@ -1528,7 +1614,8 @@ function applyMeasurements(configFile: string, providerName: string, results: Me
     if (!model) continue;
     const before = `${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}`;
     if (model.wire === undefined) model.wire = result.wire;
-    if (model.effortLevels === undefined && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
+    const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
+    if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
     if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
     if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
   }
@@ -1553,14 +1640,20 @@ function startMeasureJob(providerName: string, models: string[], deps: AdminDeps
  * for a save in the GUI. A model was measured only when its provider was saved, so a provider set up
  * before effort discovery — every DeepSeek, Kimi or GLM key on 0.8.1 and earlier — would otherwise
  * stay without effort until its owner happened to save it again. A model with a ladder (measured,
- * or typed) is the config's and left alone; so is one whose provider declares a ladder.
+ * or typed) is the config's and left alone; so is one whose provider declares a ladder. Ollama is
+ * the exception: an empty ladder there is what a probe that could never see its thinking levels left
+ * behind, so it is measured again and replaced by what `/api/show` states.
  */
 export function measureUnsettledModels(deps: AdminDeps): number {
   let started = 0;
   for (const [name, provider] of Object.entries(deps.config().providers)) {
     if (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible") continue;
-    if (!effortUndeclared(provider)) continue;
-    const models = (provider.models ?? []).filter((model) => model.effortLevels === undefined).map((model) => model.id);
+    const ollama = ollamaBase(provider) !== null;
+    const undeclared = effortUndeclared(provider);
+    if (!undeclared && !ollama) continue;
+    const models = (provider.models ?? [])
+      .filter((model) => (undeclared && model.effortLevels === undefined) || (ollama && model.effortLevels !== undefined && model.effortLevels.length === 0))
+      .map((model) => model.id);
     if (models.length === 0) continue;
     startMeasureJob(name, models, deps);
     started++;
@@ -1676,6 +1769,7 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
   const headers = "headers" in provider ? provider.headers : undefined;
   const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
   const preset = "preset" in provider ? provider.preset : undefined;
+  const ollama = ollamaBase(provider);
   const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
   const measureOne = async (id: string): Promise<void> => {
     const listed = catalogEntry(catalog, preset, id);
@@ -1685,14 +1779,23 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     // one request is also what finds a model the plan refuses (403 FreeTierError, DataPolicyError).
     const stated = ladder.length > 0 || discover ? listed?.effortLevels : undefined;
     const known = stated !== undefined;
-    const measured = await measureModel(id, candidates, known ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }, { discover: discover && !known });
+    // Ollama states thinking levels and the context length itself; a probe cannot see either, and
+    // its unknown-field probe measures every thinking model as taking no effort. Its own `/api/show`
+    // answers first, and the ladder probing it would only answer wrongly is skipped.
+    const facts = ollama ? await ollamaModelFacts(ollama, id, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }) : undefined;
+    const measured = await measureModel(id, candidates, known || facts ? [] : ladder, { fetch: fetchImpl, ...(sessionHeader ? { sessionHeader } : {}), ...(headers ? { headers } : {}) }, { discover: discover && !known && !facts });
     if (stated && measured.wire) measured.effortLevels = stated;
+    if (facts) {
+      // An answer without levels is a model that takes no effort: a fact, not a blank.
+      measured.effortLevels = facts.effortLevels ?? [];
+      if (facts.contextWindow !== undefined) measured.contextWindow = facts.contextWindow;
+    }
     // The wire was answered, so the model exists: the catalogue's own window travels with the result
     // and is written only into a model that has none (see applyMeasurements).
     if (measured.wire && listed?.contextWindow !== undefined) measured.contextWindow = listed.contextWindow;
     job.results.push(measured);
     job.done++;
-    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : ""}` : ""}`}`);
+    deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : facts ? " (ollama)" : ""}` : ""}`}`);
   };
   // Models are independent, so a few run at once and a slow upstream answer holds up only its own
   // model. Levels inside one model stay sequential: a burst there invites 429s, and a level that
@@ -1702,7 +1805,7 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
     for (let id = queue.shift(); id !== undefined; id = queue.shift()) await measureOne(id);
   }));
   try {
-    const outcome = applyMeasurements(deps.configFile, providerName, job.results);
+    const outcome = applyMeasurements(deps.configFile, providerName, job.results, { replaceEmptyEffort: ollama !== null });
     if ("error" in outcome) {
       MEASURE_JOBS.set(jobId, { ...job, state: "failed", error: outcome.error, finishedAt: Date.now() });
       deps.log.warn(`admin: measurement for ${providerName} was not applied: ${outcome.error}`);
@@ -1745,28 +1848,44 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
  * effective catalogue window as bootstrap/picker; an explicit route window still wins. Without a
  * catalogue window, the stored values retain their old precedence. Unknown is absent.
  * `catalogWindows` identifies values the picker window editor must not offer to override.
+ * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
+ * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
  */
-async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number> }> {
+async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> }> {
   const cfg = deps.config();
   const windows: Record<string, number> = {};
   const catalogWindows: Record<string, number> = {};
-  const put = (id: string, fallback?: number): void => {
+  const resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> = {};
+  const put = (id: string, fallback?: number, native = false): void => {
     const base = id.split("@")[0]!;
     const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
     const live = chatgptModelWindow(cfg, id);
+    // Keep the legacy editor maps, but give usage readers a provider-bound resolution. A native
+    // alias's window and the global compaction setting are not the routed model's capacity.
+    const resolved = resolve(id, {}, cfg) ?? (cfg.aliases[base] ? resolve(cfg.aliases[base], {}, cfg) : null);
+    const model = resolved?.model.split("@")[0] ?? base;
+    const provider = resolved ? cfg.providers[resolved.provider] : undefined;
+    const explicit = resolved && !cfg.direct.some(d => base.startsWith(d.prefix)) ? route?.contextWindow : undefined;
+    const own = cfg.cli.extraModels.find(m => m.model.split("@")[0] === model)?.contextWindow
+      ?? provider?.models?.find(m => m.id === model || m.id === model.replace(/-\d{8}$/, ""))?.contextWindow;
+    const known = resolved ? explicit ?? live ?? own : native ? fallback : undefined;
+    if (!resolvedWindows[id]) resolvedWindows[id] = {
+      model, provider: resolved?.provider ?? null,
+      contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null,
+    };
     const value = route?.contextWindow ?? live ?? fallback;
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
     windows[id] = Math.floor(value);
     if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
   };
-  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow);
+  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow, true);
   for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
   for (const provider of Object.values(cfg.providers)) {
     for (const model of ("models" in provider && provider.models) || []) put(model.id, model.contextWindow);
   }
   for (const id of Object.keys(cfg.routes)) put(id);
   for (const id of Object.keys(cfg.aliases)) put(id);
-  return { windows, catalogWindows };
+  return { windows, catalogWindows, resolvedWindows };
 }
 
 function tailLines(file: string, n: number): string {
@@ -1894,6 +2013,16 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (!deps.shutdown) {
           sendJson(res, 501, { error: "shutdown not available" });
           return;
+        }
+        // A caller that names an installation must name the one this process actually is (captured
+        // at start, not read from disk now). A caller that names none is an older CLI.
+        const claimed = req.headers["x-clauderipple-install-id"];
+        if (typeof claimed === "string") {
+          const ours = deps.instance?.installId ?? null;
+          if (ours && claimed !== ours) {
+            sendJson(res, 409, { error: "installation mismatch" });
+            return;
+          }
         }
         // Answer before draining: the caller needs to know the request was accepted, and the
         // drain can outlive the connection (it waits for in-flight model calls, up to 90s).

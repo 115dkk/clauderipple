@@ -10,10 +10,12 @@
 // themselves. Files it writes are recorded in a manifest; marked current targets can recover lost
 // ownership. A hand-written `muse.md` or `gpt.md` is never overwritten or removed.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
+import { withFileLock } from "./locked-file.ts";
 import { declaredBy } from "./routing.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
@@ -222,38 +224,52 @@ function fileContent(name: string, modelId: string, title: string, provider: str
 
 type Manifest = { agents: string[] };
 
-function readManifest(file: string): Manifest {
+function readManifest(file: string, strict = false): Manifest {
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { agents?: unknown };
-    if (Array.isArray(parsed.agents)) return { agents: parsed.agents.filter((a): a is string => typeof a === "string") };
-  } catch {
-    /* missing or broken: treat as empty, and it is rewritten below */
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { agents?: unknown } | null;
+    if (Array.isArray(parsed?.agents) && parsed.agents.every((name): name is string => typeof name === "string" && /^[a-z0-9-]+$/.test(name))) return { agents: parsed.agents };
+    throw new Error("생성 워커 목록이 올바르지 않아 워커 파일을 제거하지 않았습니다.");
+  } catch (error) {
+    // A missing manifest is an empty claim; unreadable or invalid claims block every deletion.
+    if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return { agents: [] };
 }
 
 /**
- * Uninstall: the manifest is the ownership boundary, never all of ~/.claude/agents. Names another
- * install's manifest also records (`sharedWith`) stay: two homes write the same agent folder.
+ * The shared worker folder's lock. The manifest is per home, but the files are one folder for every
+ * installation on the account, so two routers or an install and a router would otherwise write the
+ * same name over each other (2026-10-25 lock audit). The lock lives outside the folder so Claude
+ * Code's watcher never sees it.
  */
-export function removeGeneratedAgentFiles(dir: string, manifestPath: string, sharedWith?: string): void {
-  if (!fs.existsSync(manifestPath)) return;
-  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { agents?: unknown };
-  if (!Array.isArray(parsed.agents) || !parsed.agents.every(name => typeof name === "string" && /^[a-z0-9-]+$/.test(name))) {
-    throw new Error("생성 워커 목록이 올바르지 않아 워커 파일을 제거하지 않았습니다.");
-  }
-  if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("워커 폴더가 심볼릭 링크이므로 제거하지 않았습니다.");
-  const shared = new Set(sharedWith && path.resolve(sharedWith) !== path.resolve(manifestPath) ? readManifest(sharedWith).agents : []);
-  for (const name of parsed.agents) {
-    if (shared.has(name)) continue;
-    const file = path.join(dir, `${name}.md`);
-    if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) continue;
-    const text = fs.readFileSync(file, "utf8");
-    // A recorded worker replaced by a person's own definition is no longer ours.
-    if (parseFrontmatter(text)?.name === name && isGenerated(text)) fs.rmSync(file);
-  }
-  fs.rmSync(manifestPath);
-  cache.delete(dir);
+function agentDirLock(dir: string): string {
+  const key = crypto.createHash("sha256").update(path.resolve(dir)).digest("hex").slice(0, 16);
+  return path.join(os.tmpdir(), `clauderipple-agents-${key}`);
+}
+
+/**
+ * Uninstall: the manifest is the ownership boundary, never all of ~/.claude/agents. Names another
+ * install's manifest also records (`sharedWith`: the default home's and every home the ownership
+ * store knows) stay: two homes write the same agent folder.
+ */
+export function removeGeneratedAgentFiles(dir: string, manifestPath: string, sharedWith?: string | string[]): void {
+  withFileLock(agentDirLock(dir), () => {
+    if (!fs.existsSync(manifestPath)) return;
+    const parsed = readManifest(manifestPath, true);
+    if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw new Error("워커 폴더가 심볼릭 링크이므로 제거하지 않았습니다.");
+    const sharedPaths = (Array.isArray(sharedWith) ? sharedWith : sharedWith ? [sharedWith] : []).filter((file) => path.resolve(file) !== path.resolve(manifestPath));
+    const shared = new Set(sharedPaths.flatMap((file) => readManifest(file, true).agents));
+    for (const name of parsed.agents) {
+      if (shared.has(name)) continue;
+      const file = path.join(dir, `${name}.md`);
+      if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) continue;
+      const text = fs.readFileSync(file, "utf8");
+      // A recorded worker replaced by a person's own definition is no longer ours.
+      if (parseFrontmatter(text)?.name === name && isGenerated(text)) fs.rmSync(file);
+    }
+    fs.rmSync(manifestPath);
+    cache.delete(dir);
+  });
 }
 
 export type GeneratedAgent = { name: string; model: string; provider: string };
@@ -298,7 +314,17 @@ export type SyncOptions = {
  */
 export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: SyncOptions = {}): string[] {
   if (cfg.cli.agentFiles === false) return [];
+  try {
+    return withFileLock(agentDirLock(dir), () => syncAgentFilesLocked(cfg, dir, log, opts));
+  } catch (e) {
+    // Another installation's sync holds the folder (or it cannot be locked): skip this pass.
+    // Nothing is left half-written; the next start or file change syncs again.
+    log?.warn(`agent files: cannot lock ${dir} (${(e as Error).message}); this pass was skipped`);
+    return [];
+  }
+}
 
+function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefined, opts: SyncOptions): string[] {
   const manifestFile = opts.manifestPath ?? path.join(homeDir(), "generated-agents.json");
   const manifest = readManifest(manifestFile);
   const owned = new Set(manifest.agents);

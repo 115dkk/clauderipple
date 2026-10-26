@@ -20,6 +20,8 @@ interface Entry {
   editing?: { blob: string; file: string }[];
   /** After the phone's Stop: nothing goes on its own until the person sends or resumes. */
   held: boolean;
+  /** Distinguishes the person's Stop from an automatic failure, including across restart. */
+  heldBy?: "user" | "failure";
   /** The Claude app's session id, when it differs from the phone's; the mod finds its count by it. */
   desktopId?: string;
   /** The last message sent from here: the next waits until the turn it started has ended. */
@@ -41,7 +43,7 @@ export class SendQueue {
     for (const [session, entry] of Object.entries(saved)) {
       if (!entry || !Array.isArray(entry.items)) continue;
       const items = entry.items.filter(item => item && typeof item.id === "string" && typeof item.text === "string" && Array.isArray(item.attachments));
-      if (items.length || entry.awaiting || entry.editing?.length) queue.entries.set(session, { items, held: entry.held === true, ...(typeof entry.desktopId === "string" ? { desktopId: entry.desktopId } : {}), ...(entry.awaiting ? { awaiting: entry.awaiting } : {}), ...(entry.editing?.length ? { editing: entry.editing } : {}) });
+      if (items.length || entry.awaiting || entry.editing?.length) queue.entries.set(session, { items, held: entry.held === true, ...(entry.heldBy ? { heldBy: entry.heldBy } : {}), ...(typeof entry.desktopId === "string" ? { desktopId: entry.desktopId } : {}), ...(entry.awaiting ? { awaiting: entry.awaiting } : {}), ...(entry.editing?.length ? { editing: entry.editing } : {}) });
     }
     return queue;
   }
@@ -91,7 +93,7 @@ export class SendQueue {
     if (editing) {
       entry.editing = item!.attachments.map((a, index) => ({ blob: editing[index]!.blob, file: a.file }));
     } else for (const a of item!.attachments) fs.rmSync(path.join(this.blobs, a.file), { force: true });
-    if (!entry.items.length) entry.held = false;
+    if (!entry.items.length) { entry.held = false; delete entry.heldBy; }
     this.prune(session);
     this.save();
     return item!;
@@ -117,13 +119,37 @@ export class SendQueue {
     if (!item) return;
     item.error = error;
     this.entries.get(session)!.held = true;
+    this.entries.get(session)!.heldBy ??= "failure";
     this.save();
+  }
+
+  /** A known pre-send obstacle is not a failed write: keep watching, with the reason visible. */
+  wait(session: string, id: string, reason: string): boolean {
+    const item = this.entries.get(session)?.items.find(item => item.id === id);
+    if (!item || item.error === reason) return false;
+    item.error = reason;
+    this.save();
+    return true;
+  }
+
+  /** Older hosts held these definite pre-send refusals forever. Never release an explicit Stop. */
+  retryFailures(error: string, reason: string): void {
+    let changed = false;
+    for (const entry of this.entries.values()) {
+      if (!entry.held || entry.heldBy === "user" || entry.items[0]?.error !== error) continue;
+      entry.held = false;
+      delete entry.heldBy;
+      entry.items[0].error = reason;
+      changed = true;
+    }
+    if (changed) this.save();
   }
 
   hold(session: string): boolean {
     const entry = this.entries.get(session);
-    if (!entry?.items.length || entry.held) return false;
+    if (!entry?.items.length || entry.heldBy === "user") return false;
     entry.held = true;
+    entry.heldBy = "user";
     this.save();
     return true;
   }
@@ -132,6 +158,7 @@ export class SendQueue {
     const entry = this.entries.get(session);
     if (!entry?.held) return false;
     entry.held = false;
+    delete entry.heldBy;
     for (const item of entry.items) delete item.error;
     this.save();
     return true;

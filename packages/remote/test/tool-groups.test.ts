@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { timelineItems, type Item } from "../web/timeline.ts";
 import { setLang, t } from "../web/i18n.ts";
+import { item } from "../web/views.ts";
+import type { UI } from "../web/views.ts";
 
 const assistant = (key: string, text = "", names = ["Read"]): Item => ({ type: "assistant", key, ver: key, text, streaming: false, tools: names.map((name, i) => ({ id: `${key}-${i}`, name, summary: `${name} summary`, input: "input", result: { ok: true, text: "output" } })), model: "test", at: 1 });
 const worker: Item = { type: "subagent", key: "worker", ver: "1", toolUseId: "agent-0", sub: "sub-agent", description: "Review files", model: null, status: "done", steps: 3 };
@@ -85,4 +87,20 @@ test("group keeps individual input/output and localizes counts", () => {
   assert.equal(t("tool.groupWorkers", { n: 1, w: 2 }), "1 tool · 2 workers");
   setLang("ko");
   assert.equal(t("tool.group", { n: group.tools }), "도구 2개 사용");
+});
+
+test("a thinking block and a tool's own detail are drawn from the state kept beside the row, not from the element", () => {
+  // The app records a <details> toggle in `ui.expanded`; drawing from there is what survives the row
+  // being replaced while its text streams, or the conversation being opened again.
+  const ui = (keys: string[]): UI => ({ expanded: new Map(keys.map(key => [key, null])) } as unknown as UI);
+  const thinking: Item = { type: "thinking", key: "h1", ver: "1", text: "Checking the log", streaming: true, msg: "m", at: 1 };
+  assert.ok(item(thinking, ui([])).startsWith('<details class="tool-details" data-k="t:h1">'), "a closed block says where its state is kept");
+  assert.ok(item(thinking, ui(["t:h1"])).startsWith('<details class="tool-details" data-k="t:h1" open>'), "an open one is drawn open");
+
+  // Activity lives in a group: the group has to be open for its tool's own detail to be drawn.
+  const run = timelineItems({ state: "idle", items: [assistant("b", "Here it is", ["Read"])] }).find(row => row.type === "toolGroup")!;
+  assert.ok(run.type === "toolGroup");
+  assert.ok(!item(run, ui([run.key])).includes("d:b-0"), "a closed group draws no detail block");
+  assert.ok(item(run, ui([run.key, "b-0"])).includes('<details class="tool-details" data-k="d:b-0">'), "a tool's detail block starts closed");
+  assert.ok(item(run, ui([run.key, "b-0", "d:b-0"])).includes('<details class="tool-details" data-k="d:b-0" open>'), "and opens where the person left it");
 });

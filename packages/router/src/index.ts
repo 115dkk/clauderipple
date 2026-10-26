@@ -10,6 +10,7 @@ import path from "node:path";
 import { codexEnabled, followCodexCache, writeCodexCatalog } from "../../cli/src/codex.ts";
 import { ingressModels } from "./ingress/models.ts";
 import { ConfigStore, awakeSettings, configPath, homeDir, terminateHosts, tetherSettings } from "./config.ts";
+import { ensureInstallationId } from "./installation-id.ts";
 import { AwakeController, execRunner, type Activity } from "./awake.ts";
 import { TetherController } from "./tether.ts";
 import { AutoUpdater } from "./autoupdate.ts";
@@ -45,7 +46,10 @@ const logFile = process.env.CLAUDERIPPLE_NO_LOGFILE ? null : path.join(home, "lo
 let log: Logger | null = null;
 // Created after listen(); the config callback below runs before that and finds it null.
 let tunnels: RemoteTunnels | null = null;
+/** The last config read's validation errors: the status and readiness report them (G-D14). */
+let configErrors: string[] = [];
 const store = new ConfigStore(undefined, (c, errors) => {
+  configErrors = [...errors];
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
   log?.info(`config loaded: ${Object.keys(c.routes).length} routes, ${Object.keys(c.providers).length} providers, direct=${c.direct.map((d) => d.prefix).join(",") || "-"}`);
   // Keep the Codex app's model list in step with the models we serve (only while `codex on` is in effect).
@@ -245,9 +249,23 @@ proxy
     const catalogEvery = 2 * 60 * 60_000;
     proxy.chatgptRefreshCatalog();
     setInterval(() => proxy.chatgptRefreshCatalog(), catalogEvery).unref();
+    // Captured once, at start: this process's installation id and pid are what it reports and what
+    // a control request is checked against, whatever the files say later (B01/D6).
+    const instance = {
+      installId: (() => {
+        try {
+          return ensureInstallationId(homeDir());
+        } catch {
+          return null;
+        }
+      })(),
+      pid: process.pid,
+    };
     const adminDeps: AdminDeps = {
       autoUpdater,
+      instance,
       config: () => store.get(),
+      configErrors: () => configErrors,
       configFile: configPath(),
       log: log!,
       stats: () => proxy.stats,

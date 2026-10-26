@@ -70,7 +70,8 @@ async function api(path, opts) {
 // The router writes `cli.models` to settings.json on this save (they only take effect there). If
 // that write could not happen it says so here — a slot that silently does nothing is the bug this
 // call used to be, so a failure must reach the screen rather than the router log.
-async function configRequest(next) {
+/** @param {Object} next @param {(fresh: Object) => Object} [rebase] Reapply an editor's atomic changes on a conflict. */
+async function configRequest(next, rebase) {
   // Older routers return a raw config without a revision: keep their existing PUT contract.
   const base = configSnapshots.get(next.configRevision);
   const arrayKeys = { models: "id", extraModels: "model", direct: "prefix", credentials: "id" };
@@ -79,17 +80,27 @@ async function configRequest(next) {
     try {
       const out = await api("/api/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
       if (out && out.configRevision !== undefined) next.configRevision = out.configRevision;
-      if (out && out.warning) toast(out.warning, true);
       return out;
     } catch (error) {
-      if (error.status !== 409 || !changes || attempt >= 3) throw error;
+      if (error.status !== 409 || (!changes && !rebase) || attempt >= 3) throw error;
       const fresh = await api("/api/config");
-      const rebased = modApply(fresh, changes, arrayKeys);
+      const rebased = rebase ? rebase(fresh) : modApply(fresh, changes, arrayKeys);
       // Callers retain `next` as their saved copy, including everything the retry preserved.
       for (const key of Object.keys(next)) delete next[key];
       Object.assign(next, rebased);
     }
   }
+}
+
+/** Report one save outcome, never a success toast over a partial-success warning.
+ * @param {{warning?: string} | undefined} out
+ * @param {string} [message] Success text; omitted by editors with an inline saved status.
+ * @param {string} [warning] An additional caller warning, shown alongside the server's warning.
+ */
+function configSaved(out, message, warning) {
+  const warnings = [out && out.warning, warning].filter(Boolean);
+  if (warnings.length) toast(warnings.join("\n"), true);
+  else if (message) toast(message);
 }
 
 // A save sends the whole config, so it starts from what the router holds now rather than the copy
@@ -252,7 +263,12 @@ function chevronIcon() { return svgIcon("0 0 8 13", ["M1.5 1.5l5 5-5 5"], "chevr
 
 function showView(name) {
   if (name !== "phone") { phoneGeneration++; hidePhoneQr(); }
-  for (const button of $all(".nav-btn")) button.classList.toggle("active", button.dataset.view === name);
+  for (const button of $all(".nav-btn")) {
+    const active = button.dataset.view === name;
+    button.classList.toggle("active", active);
+    // The style showed the current page; a screen reader was told nothing (G-D10).
+    if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+  }
   for (const view of $all(".view")) view.classList.toggle("active", view.id === `view-${name}`);
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   applyOffline();
@@ -322,9 +338,15 @@ async function refreshHealth() {
   ));
   $("#health-requests").replaceChildren(el("div", { class: "row" }, [el("span", { class: "k", text: t("health.requests") }), el("span", { class: "v", text: t("health.requestsFmt", Object.fromEntries(Object.entries(status.stats || {}).map(([key, value]) => [key, typeof value === "number" ? value.toLocaleString() : value]))) })]));
   renderHealthProviders();
+  renderDiagnostics();
   if (clientsLoaded) renderClients();
   if (modState.settings) renderModNotice();
   const details = $("#health-details");
+  // A start this page recorded is over once the router says so — a failure included — so the button
+  // is not left saying "running" with no way back (G-D07).
+  if (updateState.check && updateState.check.running && status.autoUpdate && status.autoUpdate.running === false) {
+    updateState.check = { ...updateState.check, running: false };
+  }
   modRedraw(details, [
     versionRow(),
     autoUpdateRow(),
@@ -334,6 +356,79 @@ async function refreshHealth() {
     el("div", { class: "row" }, [el("span", { class: "k", text: t("health.cli") }), el("span", { class: "v", text: status.cliVersion })]),
   ]);
 }
+
+// ---- Diagnostics: what the router says is in the way, and a copy that carries no secrets -------
+
+/** One readiness problem in words, with the action that clears it; an unknown code stays as it is. */
+function readinessProblemText(code) {
+  if (code === "settings") return t("health.diagnosticSettings");
+  if (code === "upstream") return t("health.diagnosticUpstream");
+  if (code === "picker-ca") return t("health.diagnosticPickerCa");
+  if (code === "picker-proxy") return t("health.diagnosticPickerProxy");
+  if (code === "config") return t("health.diagnosticConfig");
+  if (String(code).startsWith("provider:")) return t("health.diagnosticProvider", { name: String(code).slice(9) });
+  return String(code);
+}
+/**
+ * The problems the router reports, and the validation errors in its config: readiness once said
+ * "ready" while nothing could connect and did not say why the picker showed no models (G-D08), and a
+ * config the router could not read was adopted without a word (G-D14). A reason and its fix, or
+ * nothing at all.
+ */
+function renderDiagnostics() {
+  const box = $("#health-diagnostics");
+  const wrap = $("#health-diagnostics-section");
+  if (!box || !wrap || !status) return;
+  const problems = (status.readiness && Array.isArray(status.readiness.problems)) ? status.readiness.problems : [];
+  const configErrors = (status.config && Array.isArray(status.config.errors)) ? status.config.errors : [];
+  const envProxy = (status.envProxy && Array.isArray(status.envProxy.set)) ? status.envProxy.set : [];
+  wrap.hidden = problems.length === 0 && configErrors.length === 0 && envProxy.length === 0;
+  if (wrap.hidden) { box.replaceChildren(); return; }
+  const rows = problems.map((code) => cell(readinessProblemText(code), badge("warn", String(code))));
+  for (const error of configErrors) rows.push(cell(t("health.diagnosticConfig"), badge("bad", "config"), [el("span", { class: "cell-sub mono", text: String(error) })]));
+  // Not a fault: a proxy that is set but not needed changes nothing. Said anyway, because an
+  // upstream call that needed one would otherwise fail with no hint why (G-D11).
+  if (envProxy.length) rows.push(cell(t("health.diagnosticEnvProxy", { list: envProxy.join(", ") }), badge("warn", "env-proxy")));
+  box.replaceChildren(...rows);
+}
+/**
+ * What a person can paste into a report without handing over a credential: versions, readiness,
+ * config errors, proxy state (whether it points here, never the keys) and provider names with their
+ * connection state. Token values, headers, request bodies and file paths stay out (G-D15).
+ */
+function diagnosticBundle() {
+  const providers = Object.entries((status && status.providers) || {}).map(([name, entry]) => ({
+    name,
+    type: entry.type || null,
+    reachable: entry.reachable === undefined ? null : entry.reachable,
+    usable: entry.usable === undefined ? null : entry.usable,
+    needsLogin: Boolean(entry.needsLogin),
+  }));
+  return {
+    app: "ClaudeRipple",
+    version: status.version,
+    cli: status.cliVersion,
+    readiness: status.readiness || null,
+    config: status.config || null,
+    envProxy: status.envProxy || null,
+    settings: { pointsAtRouter: Boolean(status.settings && status.settings.pointsAtRouter) },
+    autoUpdate: status.autoUpdate ? { enabled: Boolean(status.autoUpdate.enabled), running: Boolean(status.autoUpdate.running), kind: status.autoUpdate.kind || null, failed: Boolean(status.autoUpdate.lastError) } : null,
+    listen: status.listen || null,
+    providers,
+  };
+}
+async function copyDiagnostics() {
+  if (!status) return;
+  if (!confirm(t("health.copyDiagnosticsConfirm"))) return;
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(diagnosticBundle(), null, 2));
+    toast(t("health.copyDiagnosticsDone"));
+  } catch (error) {
+    toast(t("common.actionFailed"), true, error.message);
+  }
+}
+const diagnosticsCopy = $("#diagnostics-copy");
+if (diagnosticsCopy) diagnosticsCopy.addEventListener("click", () => void copyDiagnostics());
 
 // The update check runs on a click, not with the 5-second refresh: it asks the npm registry. What an
 // update means depends on how this copy was installed, so the router's CLI decides and runs it; the
@@ -354,10 +449,10 @@ async function toggleAutoUpdate(enabled) {
     // Do not use latestConfig's stale fallback for an automatic-install preference.
     const next = await api("/api/config");
     next.autoUpdate = enabled;
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     if (status.autoUpdate) status.autoUpdate.enabled = enabled;
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
   } catch (error) {
     toast(t("common.saveFailed"), true, error.message);
   } finally {
@@ -385,6 +480,10 @@ function versionRow() {
     button.addEventListener("click", () => void (action ? startUpdate() : checkForUpdate()));
     if (check && !check.newer && !updateState.busy) note = t("update.latest");
   }
+  // An install that ran and failed is not "the latest version": the reason stays in reach, and the
+  // button is the retry (G-D07). The router's own text is shown, as it is the only detail there is.
+  const failed = status.autoUpdate && status.autoUpdate.lastError && !status.autoUpdate.running && !updateState.busy;
+  if (failed && button) note = `${t("update.lastFailed")} ${shortError(status.autoUpdate.lastError)}`;
   const row = cell(el("span", { class: "cell-label", text: `${t("health.version")} ${status.version}` }), button, note);
   row.id = "health-version-row";
   return row;
@@ -873,20 +972,55 @@ function renderClients() {
   toolsSwitch.onchange = () => { toolsSwitch.disabled = true; void toggleWorkerTools(!toolsLimited).finally(() => { toolsSwitch.disabled = false; }); };
   void renderCodexClient();
   const groups = groupedModels(currentConfig);
-  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => cell(
-    labelOf(claudeModels.find((model) => model.id === source) || { id: source }),
-    el("span", { text: labelOf((groups.find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model }) }),
-  ));
+  const mapped = Object.entries(currentConfig.routes || {}).map(([source, route]) => {
+    const target = (groups.find((group) => group.name === route.provider) || { models: [] }).models.find((model) => model.id === route.model) || { id: route.model };
+    // Where a model goes when its provider cannot answer is part of what routes it: shown here, not
+    // only enforced by the router, and left to the config file rather than made a form (U36).
+    const fallbacks = (route.fallbacks || []).map((fallback) => {
+      const model = (groups.find((group) => group.name === fallback.provider) || { models: [] }).models.find((item) => item.id === fallback.model) || { id: fallback.model };
+      return `${labelOf(model)} · ${providerLabel(fallback.provider, currentConfig.providers[fallback.provider] || {})}`;
+    });
+    return cell(
+      labelOf(claudeModels.find((model) => model.id === source) || { id: source }),
+      el("span", { text: labelOf(target) }),
+      fallbacks.length ? el("span", { class: "cell-sub", text: t("slots.fallbacks", { list: fallbacks.join(" → ") }) }) : null,
+    );
+  });
   $("#client-claude-code-rows").replaceChildren(...(mapped.length ? mapped : [el("div", { class: "cell-note", text: t("slots.noChanges") })]));
 }
+// The five-second status poll re-runs the Clients screen. Rebuilding the model controls then would
+// replace a window field being typed in — losing the value and the focus — though the poll changes
+// nothing they are drawn from. Each render remembers what it drew and repeats only for different
+// data; the slot rows also read each provider's measured search ability, so that is part of their key.
+let pickerModelsDrawnFor = { key: null };
+let modelSlotsDrawnFor = { key: null };
+// A window field being typed into when a config or catalogue change rebuilds the rows: the text
+// and the caret stay, and the saved value does not overwrite them before the person is done (B20).
+const pickerWindowDrafts = new Map();
 function renderClientPickerModels(enabled) {
   const card = $("#client-picker-models-card");
   card.hidden = !enabled;
   if (!enabled) return;
   const box = $("#client-picker-models");
   const checked = new Set(((currentConfig.cli && currentConfig.cli.extraModels) || []).map((item) => item.model));
+  const groups = groupedModels(currentConfig);
+  const key = JSON.stringify([
+    [...checked].sort(),
+    groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
+      model.id, labelOf(model), discoveredContextWindow(group.name, model.id) ?? null,
+      savedContextWindow(model.id) ?? null, pickerContextWindows.catalogWindows[model.id] ?? null,
+    ])]),
+  ]);
+  // Typing in a window changes none of this, and the catalogue arrives once with the screen, so a
+  // repeat poll — or a save elsewhere on this screen — has nothing new to draw.
+  if (key === pickerModelsDrawnFor.key && box.childElementCount) return;
+  const typing = document.activeElement;
+  const typingModel = typing && typing.classList && typing.classList.contains("model-window") && box.contains(typing) ? typing.dataset.model : null;
+  const typingCaret = typingModel ? typing.selectionStart : null;
+  const known = new Set(groups.flatMap((group) => group.models.map((model) => model.id)));
+  for (const id of [...pickerWindowDrafts.keys()]) if (!known.has(id)) pickerWindowDrafts.delete(id);
   box.replaceChildren();
-  for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+  for (const group of groups) for (const model of group.models) {
     const input = el("input", { type: "checkbox", checked: checked.has(model.id) });
     input.dataset.model = model.id;
     input.dataset.provider = group.name;
@@ -894,10 +1028,11 @@ function renderClientPickerModels(enabled) {
     const discovered = discoveredContextWindow(group.name, model.id);
     const saved = savedContextWindow(model.id);
     const catalogWindow = pickerContextWindows.catalogWindows[model.id];
+    const draft = pickerWindowDrafts.get(model.id);
     // Blank means "use the fallback" except when the live catalogue owns the value.
     const windowField = el("input", {
       type: "number", class: "model-window", min: "1", step: "1000",
-      value: catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
+      value: draft !== undefined ? draft : catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
       placeholder: discovered !== undefined ? String(discovered) : t("slots.windowGlobal"),
       title: t(catalogWindow !== undefined ? "slots.windowCodex" : "slots.windowHelp"),
       readonly: catalogWindow !== undefined ? "" : undefined,
@@ -906,6 +1041,7 @@ function renderClientPickerModels(enabled) {
     windowField.hidden = !input.checked;
     if (windowNote) windowNote.hidden = !input.checked;
     windowField.dataset.model = model.id;
+    windowField.addEventListener("input", () => pickerWindowDrafts.set(model.id, windowField.value));
     windowField.addEventListener("change", () => void saveClientPickerModels());
     input.addEventListener("change", () => {
       windowField.hidden = !input.checked;
@@ -923,6 +1059,16 @@ function renderClientPickerModels(enabled) {
     ]));
   }
   if (!box.childElementCount) box.appendChild(hint(t("slots.noProviderModels")));
+  pickerModelsDrawnFor = { key };
+  // The person was typing here before the rows were rebuilt: the field has their text back, and the
+  // caret goes where it was so the next keystroke continues the number.
+  if (typingModel) {
+    const again = box.querySelector(`.model-window[data-model="${CSS.escape(typingModel)}"]`);
+    if (again && !again.hidden) {
+      again.focus();
+      if (typingCaret !== null) { try { again.setSelectionRange(typingCaret, typingCaret); } catch { /* number inputs have no selection */ } }
+    }
+  }
 }
 // Claude Code picks these before a request exists, so routing cannot reach them: a search, a title
 // or a subagent goes wherever the CLI already decided. Left empty, Claude answers them — which is
@@ -958,10 +1104,23 @@ function renderModelSlots() {
   // With a web search backend set, the search is intercepted before routing and never reaches
   // `smallFast`, so the "no web search here" label there would be false.
   const searchIntercepted = Boolean(currentConfig.webSearch);
+  const groups = groupedModels(currentConfig);
+  const key = JSON.stringify([
+    MODEL_SLOTS.map((slot) => chosen[slot] || ""),
+    searchIntercepted ? 1 : 0,
+    currentConfig.webSearch ? [currentConfig.webSearch.provider, currentConfig.webSearch.model] : null,
+    groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
+      model.id, labelOf(model), providerCannotSearch(group.name, model.id),
+      Boolean(currentConfig.providers[group.name] && currentConfig.providers[group.name].type === "anthropic"),
+    ])]),
+  ]);
+  // A provider's search ability is the only thing here the status poll can change; an unchanged key
+  // means the selects already show this pass. Replacing them would take the focus off one mid-use.
+  if (key === modelSlotsDrawnFor.key && rows.childElementCount) return;
   const nodes = MODEL_SLOTS.map((slot) => {
     const select = el("select", {});
     select.appendChild(el("option", { value: "", text: t("slots.slotDefault") }));
-    for (const group of groupedModels(currentConfig)) for (const model of group.models) {
+    for (const group of groups) for (const model of group.models) {
       const option = el("option", { value: model.id, text: `${labelOf(model)} · ${providerLabel(group.name, group.provider)}` });
       if (chosen[slot] === model.id) option.selected = true;
       // `smallFast` is what a WebSearch runs on, so an inability to search is fatal there and
@@ -984,6 +1143,7 @@ function renderModelSlots() {
   });
   nodes.push(renderWebSearchSlot());
   rows.replaceChildren(...nodes);
+  modelSlotsDrawnFor = { key };
 }
 
 // The backend `cfg.webSearch` names answers the search instead of the `smallFast` slot. Only the
@@ -1025,10 +1185,10 @@ async function saveWebSearch(value) {
   if (picked) next.webSearch = { provider: picked.provider, model: picked.model, ...(maxResults !== undefined ? { maxResults } : {}) };
   else delete next.webSearch;
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     renderModelSlots();
-    toast(t("slots.webSearchSaved"));
+    configSaved(out, t("slots.webSearchSaved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 
@@ -1043,15 +1203,16 @@ async function saveModelSlots() {
   for (const select of $all("#client-model-slots select[data-slot]")) models[select.dataset.slot] = select.value;
   next.cli = { ...(next.cli || {}), models };
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     // Saying "saved" over a choice that will make every search fail is the same silent no-op this
     // screen was already guilty of once. The label on the option warns before the fact; this catches
     // a session that already had it selected. With a web search backend set the search never
     // reaches `smallFast`, so there is nothing to warn about.
-    const owners = models.smallFast && !next.webSearch ? providersOffering(next, models.smallFast) : [];
-    if (owners.length && providerCannotSearch(owners[0], models.smallFast)) toast(t("slots.noWebSearchWarn"), true);
-    else toast(t("slots.slotSaved"));
+    const savedModels = next.cli.models;
+    const owners = savedModels.smallFast && !next.webSearch ? providersOffering(next, savedModels.smallFast) : [];
+    const warning = owners.length && providerCannotSearch(owners[0], savedModels.smallFast) ? t("slots.noWebSearchWarn") : undefined;
+    configSaved(out, t("slots.slotSaved"), warning);
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 
@@ -1184,7 +1345,14 @@ function clientPickerSelections() {
 async function saveClientPickerModels() {
   if (!currentConfig) return;
   const next = applyPickerSelections(clone(await latestConfig()), clientPickerSelections());
-  try { await configRequest(next); currentConfig = next; toast(t("slots.saved")); } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+  try {
+    const out = await configRequest(next);
+    currentConfig = next;
+    // Everything the fields held, drafts included, is now the saved copy: there is nothing left to
+    // carry over the next rebuild.
+    pickerWindowDrafts.clear();
+    configSaved(out, t("slots.saved"));
+  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
 }
 function pickerModeOn() {
   return Boolean(status && status.picker && status.picker.enabled);
@@ -1232,9 +1400,9 @@ async function toggleWorkerTools(enabled) {
   const next = clone(await latestConfig());
   next.cli = { ...(next.cli || {}), limitWorkerTools: enabled };
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
   renderClients();
 }
@@ -1794,6 +1962,8 @@ setInterval(() => { if (!macBusy && !macSetup.running) void refreshMac(); }, 500
 function claudeSelect(selected) {
   const select = el("select", {});
   for (const model of claudeModels) select.appendChild(selectOption(model.id, labelOf(model)));
+  // A retired source still identifies a saved route, including when its row is removed.
+  if (selected && !claudeModels.some((model) => model.id === selected)) select.appendChild(selectOption(selected, selected));
   select.value = selected || claudeModels[0].id;
   return select;
 }
@@ -1805,7 +1975,10 @@ function targetSelect(route) {
     for (const model of group.models) optgroup.appendChild(selectOption(JSON.stringify([group.name, model.id]), labelOf(model)));
     select.appendChild(optgroup);
   }
-  select.value = route ? JSON.stringify([route.provider, route.model]) : "";
+  const value = route ? JSON.stringify([route.provider, route.model]) : "";
+  // Do not make an unavailable saved target look like passthrough; it must remain removable.
+  if (route && !$all("option", select).some((option) => option.value === value)) select.appendChild(selectOption(value, `${route.provider} / ${route.model} (?)`));
+  select.value = value;
   return select;
 }
 function effortSelect(value, levels) {
@@ -1862,7 +2035,7 @@ function slotRow(id, route) {
     effortCell,
     el("div", { class: "map-remove" }, [remove]),
   );
-  row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.value });
+  row._get = () => ({ id: source.value, route: routeFromTarget(target.value), effort: effort.disabled ? undefined : effort.value });
   sync();
   return row;
 }
@@ -1876,6 +2049,8 @@ async function loadSlots() {
     const routes = currentConfig.routes || {};
     const ids = [...claudeModels.map((model) => model.id), ...Object.keys(routes).filter((id) => !claudeModels.some((model) => model.id === id))];
     for (const id of ids) rows.appendChild(slotRow(id, routes[id]));
+    // Compare against what the controls actually displayed, not implicit/defaulted config fields.
+    slotsBaseline = readSlotRoutes();
     updateSlotSummary();
   } catch (error) {
     toast(t("common.loadFailed"), true, error.message);
@@ -1966,6 +2141,38 @@ function updateSlotSummary() {
 let slotsSaveTimer = null;
 let slotsSaving = false;
 let slotsSaveAgain = false;
+/** Last acknowledged controls, independent of currentConfig (other screens refresh that).
+ * @type {Record<string, {provider: string, model: string, effort?: string} | null> | null}
+ */
+let slotsBaseline = null;
+/** Snapshot the controls before any await; a change during GET/PUT belongs to the next save. */
+function readSlotRoutes() {
+  const entries = $all("#slots-list .map-row").map((row) => {
+    const { id, route, effort } = row._get();
+    return [id, route ? { ...route, ...(effort !== undefined ? { effort } : {}) } : null];
+  });
+  if (new Set(entries.map(([id]) => id)).size !== entries.length) throw new Error(t("slots.duplicate"));
+  return Object.fromEntries(entries);
+}
+/** A changed row owns its provider/model/effort together; untouched rows and latest metadata survive.
+ * Explicit removal wins over a remote edit. An edited row deleted remotely is recreated in full,
+ * without resurrecting old metadata. Apply the same rule before PUT and after every 409.
+ * @param {Object} fresh
+ * @param {Record<string, Object | null>} before
+ * @param {Record<string, Object | null>} after
+ */
+function mergeSlotRoutes(fresh, before, after) {
+  const next = clone(fresh);
+  next.routes = { ...(next.routes || {}) };
+  const changed = new Set(modChanges(before, after).map((change) => change.path[0]));
+  for (const id of changed) {
+    const route = after[id];
+    if (!route) { delete next.routes[id]; continue; }
+    next.routes[id] = { ...next.routes[id], ...route };
+    if (route.effort === undefined) delete next.routes[id].effort;
+  }
+  return next;
+}
 function slotsStatus(text, isError) {
   const box = $("#slots-status");
   box.textContent = text;
@@ -1979,27 +2186,22 @@ function scheduleSlotsSave() {
   slotsSaveTimer = setTimeout(() => void saveSlots(), 500);
 }
 async function saveSlots() {
-  if (!currentConfig) return;
+  if (!currentConfig || !slotsBaseline) return;
   if (slotsSaving) { slotsSaveAgain = true; return; }
+  clearTimeout(slotsSaveTimer);
+  slotsSaveTimer = null;
   slotsSaving = true;
   try {
-    const next = clone(await latestConfig());
-    const routes = {};
-    const seen = new Set();
-    for (const row of $all("#slots-list .map-row")) {
-      const item = row._get();
-      if (seen.has(item.id)) { slotsStatus(t("slots.duplicate"), true); return; }
-      seen.add(item.id);
-      if (!item.route) continue;
-      const route = { ...((next.routes || {})[item.id] || {}), ...item.route };
-      if (effortLevelsFor(item.route.provider, item.route.model).length) route.effort = item.effort;
-      else delete route.effort;
-      routes[item.id] = route;
-    }
-    next.routes = routes;
-    await configRequest(next);
+    const sent = readSlotRoutes();
+    const before = slotsBaseline;
+    const rebase = (fresh) => mergeSlotRoutes(fresh, before, sent);
+    // A failed read must not fall back to stale settings, including on legacy routers.
+    const next = rebase(await api("/api/config"));
+    const out = await configRequest(next, rebase);
     currentConfig = next;
-    slotsStatus(t("slots.saved"));
+    slotsBaseline = sent;
+    slotsStatus(out && out.warning ? out.warning : t("slots.saved"), Boolean(out && out.warning));
+    configSaved(out);
     updateSlotSummary();
   } catch (error) {
     slotsStatus(`${t("common.saveFailed")} ${error.message}`, true);
@@ -2074,14 +2276,34 @@ function measureSummary(results) {
 }
 
 /**
+ * Whether this provider is Ollama (the local daemon or the cloud endpoint).
+ *
+ * Ollama states a model's thinking levels and context length in its own `/api/show`, beside the
+ * OpenAI-compatible surface, and a probe on that surface reads an unknown `reasoning_effort` as no
+ * effort at all. An empty ladder is therefore what an unread Ollama model looks like, not a
+ * decision (Discord report, 0.12.14).
+ */
+function isOllamaProvider(provider) {
+  if (!provider) return false;
+  if (provider.preset === "ollama") return true;
+  const url = String(provider.url || "");
+  return /^https?:\/\/(?:[^/]*\.)?ollama\.com(?::\d+)?(?:[/?#]|$)/i.test(url)
+    || /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):11434(?:[/?#]|$)/i.test(url);
+}
+
+/**
  * Measure the models of one provider, in the background, and show the config the result settled.
  *
  * Only models missing a wire or a ladder are sent: one the operator set is their decision, and the
  * router will not overwrite it either, so measuring it again would spend requests to change nothing.
+ * Ollama's empty ladder is the exception — see `isOllamaProvider`.
  */
 async function startMeasurement(providerName, provider) {
   if (!provider || (provider.type !== "openai-compatible" && provider.type !== "anthropic-compatible")) return;
-  const models = modelsOf(provider).filter((model) => !model.wire || !model.effortLevels).map((model) => model.id);
+  const ollama = isOllamaProvider(provider);
+  const models = modelsOf(provider)
+    .filter((model) => !model.wire || !model.effortLevels || (ollama && Array.isArray(model.effortLevels) && model.effortLevels.length === 0))
+    .map((model) => model.id);
   if (models.length === 0) return;
   let jobId;
   try {
@@ -2186,8 +2408,40 @@ function renderProviderRail() {
   else if (!visible.length) list.appendChild(el("div", { class: "provider-rail-empty", text: t("providers.noSelection") }));
 }
 
+/**
+ * Everywhere a config names this provider besides its own block. Removing the block alone leaves a
+ * config the router refuses (a fallback or the search naming an unknown provider), so these are what
+ * a removal also cleans up — shown first, so nothing goes quietly (B13).
+ */
+function providerUsages(config, name) {
+  const routes = config.routes || {};
+  // The picker list names a provider per extra model; ownership follows the same rule the removal
+  // uses, so a model that routes elsewhere is not counted twice.
+  const extraModels = ((config.cli && config.cli.extraModels) || []).filter((entry) => {
+    const rule = (config.direct || []).filter((item) => entry.model.startsWith(item.prefix)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
+    const route = routes[entry.model];
+    return (rule ? rule.provider : route ? route.provider : pickerOwner(config, entry.model)) === name;
+  });
+  return {
+    routes: Object.entries(routes).filter(([, route]) => route && route.provider === name).map(([id]) => id),
+    fallbacks: Object.entries(routes).flatMap(([id, route]) => (route && Array.isArray(route.fallbacks) ? route.fallbacks : []).filter((fallback) => fallback && fallback.provider === name).map((fallback) => ({ route: id, model: fallback.model }))),
+    direct: (config.direct || []).filter((rule) => rule && rule.provider === name).length,
+    picker: extraModels.length,
+    search: Boolean(config.webSearch && config.webSearch.provider === name),
+    classifier: Boolean(config.autoModeClassifier && config.autoModeClassifier.provider === name),
+  };
+}
+/** The usage line's extra clauses, each absent when the config does not name this provider there. */
+function usageSuffix(usage, keys) {
+  return (usage.search ? keys.search : "") + (usage.classifier ? keys.classifier : "");
+}
 async function removeProvider(name, provider) {
-  if (!confirm(t("providers.removeConfirm", { name: providerLabel(name, provider) }))) return;
+  const usages = providerUsages(currentConfig || {}, name);
+  // What else goes with it is said before the confirm, never discovered afterwards.
+  const extra = usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
+    ? `\n\n${t("providers.removeExtra", { fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker })}${usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })}`
+    : "";
+  if (!confirm(`${t("providers.removeConfirm", { name: providerLabel(name, provider) })}${extra}`)) return;
   const next = clone(await latestConfig());
   // Resolve ownership before deleting declarations or the disambiguating direct rules.
   if (next.cli) next.cli.extraModels = (next.cli.extraModels || []).filter((entry) => {
@@ -2196,10 +2450,25 @@ async function removeProvider(name, provider) {
     return (rule ? rule.provider : route ? route.provider : pickerOwner(next, entry.model)) !== name;
   });
   delete next.providers[name];
-  next.routes = Object.fromEntries(Object.entries(next.routes || {}).filter(([, route]) => route.provider !== name));
+  // Routes and their fallbacks: a route that pointed here goes, and no other route keeps a fallback
+  // to a provider that no longer exists.
+  next.routes = Object.fromEntries(Object.entries(next.routes || {}).flatMap(([id, route]) => {
+    if (route.provider === name) return [];
+    const fallbacks = (route.fallbacks || []).filter((fallback) => fallback.provider !== name);
+    const cleaned = { ...route };
+    if (route.fallbacks !== undefined) {
+      if (fallbacks.length) cleaned.fallbacks = fallbacks;
+      else delete cleaned.fallbacks;
+    }
+    return [[id, cleaned]];
+  }));
   next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
+  // The search and the Auto-mode classifier name a provider of their own; left behind, they are the
+  // same unknown-provider error as a fallback.
+  if (next.webSearch && next.webSearch.provider === name) delete next.webSearch;
+  if (next.autoModeClassifier && next.autoModeClassifier.provider === name) delete next.autoModeClassifier;
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     selectedProviderName = Object.keys(next.providers)[0] || null;
     providerDetailTab = "overview";
@@ -2207,8 +2476,14 @@ async function removeProvider(name, provider) {
     clientsLoaded = false;
     closeProviderDetail();
     renderProviderWorkspace();
-    toast(t("common.saved"));
-  } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    configSaved(out, t("common.saved"));
+  } catch (error) {
+    // The router refused (another change landed first): say so and show the config it holds, rather
+    // than leaving the form's copy on screen as if the removal had happened.
+    toast(t("common.saveFailed"), true, error.message);
+    providersLoaded = false;
+    void loadProviders();
+  }
 }
 
 function providerTabs(name, provider) {
@@ -2216,7 +2491,7 @@ function providerTabs(name, provider) {
   if ((provider.type === "anthropic" && provider.auth === "claude-code") || provider.type === "chatgpt" || (provider.type === "google" && provider.auth === "antigravity") || isKeyProvider(provider)) tabs.push({ id: "accounts", label: t("providers.accounts") });
   tabs.push({ id: "models", label: t("providers.modelsTab") });
   return el("div", { class: "provider-tabs", role: "tablist" }, tabs.map((tab) => {
-    const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
+    const button = el("button", { class: providerDetailTab === tab.id ? "active" : "", type: "button", role: "tab", id: `provider-tab-${tab.id}`, "aria-controls": "provider-tab-panel", "aria-selected": String(providerDetailTab === tab.id), text: tab.label });
     button.addEventListener("click", () => { providerDetailTab = tab.id; renderProviderDetail(); });
     return button;
   }));
@@ -2241,8 +2516,20 @@ function providerOverview(name, provider) {
     running ? el("div", { class: "cell-note", text: t("measure.running", { done: measuring.done, total: measuring.total }) }) : null,
   ], running ? t("measure.help") : null);
   const quota = quotaLine(name);
+  // Where this provider is named besides its own block: routes, fallbacks, direct rules, the picker
+  // and the two single-provider settings. Seeing them before pressing remove is the point (B13).
+  const usages = providerUsages(currentConfig || {}, name);
+  const usedBy = usages.routes.length || usages.fallbacks.length || usages.direct || usages.picker || usages.search || usages.classifier
+    ? section(t("providers.usedBy"), [
+        cell(t("providers.usageCounts", { routes: usages.routes.length, fallbacks: usages.fallbacks.length, direct: usages.direct, picker: usages.picker }) + usageSuffix(usages, { search: t("providers.usageSearch"), classifier: t("providers.usageClassifier") })),
+        usages.fallbacks.length
+          ? el("div", { class: "cell-note" }, [el("span", { class: "cell-sub mono", text: t("providers.usageFallbacks", { list: usages.fallbacks.map((fallback) => `${fallback.route} → ${fallback.model}`).join(", ") }) })])
+          : null,
+      ])
+    : null;
   return el("div", { class: "provider-panel" }, [
     connection,
+    usedBy,
     quota ? section(null, [cell(t("providers.usage"), el("span", { text: quota }))]) : null,
     modelSummary,
   ]);
@@ -2265,12 +2552,12 @@ async function saveAnthropicRotation(name, provider, enabled, control, message) 
   if (enabled) next.providers[name].accountPool = true;
   else delete next.providers[name].accountPool;
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     slotsLoaded = false;
     clientsLoaded = false;
     renderProviderWorkspace();
-    toast(t("providers.rotationSaved"));
+    configSaved(out, t("providers.rotationSaved"));
   } catch (error) {
     control.checked = !enabled;
     message.textContent = "";
@@ -2810,11 +3097,11 @@ function keyUsageText(name, index) {
 
 async function saveKeyPool(next) {
   try {
-    await configRequest(next);
+    const out = await configRequest(next);
     currentConfig = next;
     keyForm = null;
     renderProviderWorkspace();
-    toast(t("common.saved"));
+    configSaved(out, t("common.saved"));
     void refreshHealth();
     return true;
   } catch (error) {
@@ -3019,7 +3306,7 @@ function renderProviderDetail() {
   else if (providerDetailTab === "accounts" && isKeyProvider(provider)) content = keyAccountsPanel(name);
   else if (providerDetailTab === "models") content = providerModelsPanel(name, provider);
   else { providerDetailTab = "overview"; content = providerOverview(name, provider); }
-  detail.replaceChildren(back, header, providerTabs(name, provider), content, el("div", { class: "group provider-remove" }, [remove]));
+  detail.replaceChildren(back, header, providerTabs(name, provider), el("div", { id: "provider-tab-panel", role: "tabpanel", "aria-labelledby": `provider-tab-${providerDetailTab}` }, [content]), el("div", { class: "group provider-remove" }, [remove]));
 }
 
 function renderProviderWorkspace() {
@@ -3065,9 +3352,14 @@ $("#providers-refresh").addEventListener("click", async () => {
 // ---- Provider modal -----------------------------------------------------------------
 
 let modalCleanup = null;
+/** What had focus when the dialog opened, restored when it closes (G-D10). */
+let modalOpener = null;
 function showModal(content, cleanup) {
   if (modalCleanup) modalCleanup();
   modalCleanup = cleanup || null;
+  // Where the keyboard was before the dialog opened: closing puts it back there instead of on <body> (G-D10).
+  const active = document.activeElement;
+  modalOpener = active && typeof active.focus === "function" ? active : null;
   $("#modal-content").replaceChildren(content);
   $("#modal-backdrop").hidden = false;
   const first = $("#modal-content input, #modal-content button, #modal-content select");
@@ -3079,15 +3371,46 @@ function closeModal() {
   if (cleanup) cleanup();
   $("#modal-backdrop").hidden = true;
   $("#modal-content").replaceChildren();
+  const opener = modalOpener;
+  modalOpener = null;
+  if (opener && opener.isConnected) opener.focus();
+}
+/**
+ * The dialog's own focusables, in tab order. Hidden and disabled controls stay out: Tab must not
+ * land on a field the screen does not show.
+ */
+function modalFocusables() {
+  return $all("#modal-content button, #modal-content input, #modal-content select, #modal-content textarea, #modal-content a[href]", $("#modal-content"))
+    .filter((node) => !node.disabled && node.getClientRects().length > 0);
 }
 $("#modal-close").addEventListener("click", closeModal);
 $("#modal-backdrop").addEventListener("click", (event) => { if (event.target === $("#modal-backdrop")) closeModal(); });
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("#modal-backdrop").hidden) { closeModal(); return; }
-  if (event.key === "Enter" && !$("#modal-backdrop").hidden && event.target.tagName !== "TEXTAREA") {
-    const action = $("#modal-content [data-default-action]");
-    if (action && !action.disabled) { event.preventDefault(); action.click(); }
+  // keyCode 229 also covers the IME commit key on browsers that already cleared isComposing.
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || $("#modal-backdrop").hidden) return;
+  if (event.key === "Escape") { closeModal(); return; }
+  // Tab stays inside the dialog: the page behind it is inert to the pointer, and a keyboard that
+  // walked out into it could press something the dialog is covering (G-D10).
+  if (event.key === "Tab") {
+    const focusables = modalFocusables();
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey ? active === first || !$("#modal-content").contains(active) : active === last || !$("#modal-content").contains(active)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+    return;
   }
+  if (event.key !== "Enter" || event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+  // Only single-line text entry gets the shortcut. Buttons (including Cancel), selects, links,
+  // checkboxes, textareas and editable regions keep their own native keyboard behaviour.
+  const target = event.target;
+  if (!$("#modal-content").contains(target) || target.tagName !== "INPUT" || target.isContentEditable) return;
+  if (!["text", "search", "email", "url", "tel", "password", "number"].includes(target.type)) return;
+  const action = $("#modal-content [data-default-action]");
+  if (action && !action.disabled) { event.preventDefault(); action.click(); }
 });
 
 function openClaudeAccountConsent(providerName) {
@@ -3300,6 +3623,10 @@ function openAnthropicProviderForm(options) {
   const sourceLine = el("div", { class: "small" });
   let foundModels = modelsOf(existing).length ? modelsOf(existing) : claudeModels.map((model) => ({ id: model.id, name: labelOf(model) }));
   let selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+  // What the checklist started with: a new provider's list is drawn from the fallback catalogue, and
+  // a first live listing may fill in the rest only while the user has left that set as it was.
+  const initialSelection = new Set(selected);
+  let listed = false;
   const modelArea = el("div", { class: "form-field" });
   function renderModels() {
     const modelsBox = modelChecklist(foundModels, selected);
@@ -3332,9 +3659,16 @@ function openAnthropicProviderForm(options) {
       if (Array.isArray(response.models) && response.models.length) {
         // Anthropic's own list, so a release shows up here without a ClaudeRipple update. A saved
         // model the list no longer carries stays visible and ticked rather than dropped on save.
-        const listed = new Set(response.models.map((model) => model.id));
-        foundModels = [...response.models, ...modelsOf(existing).filter((model) => !listed.has(model.id))];
-        selected = new Set(existing ? modelsOf(existing).map((model) => model.id) : foundModels.map((model) => model.id));
+        // What is ticked now wins: this listing arrives after the form opened, so it must not re-tick
+        // a model the user just unchecked. Only a new provider's first listing — one whose selection
+        // still matches the fallback set the form opened with — starts with all of them.
+        const ticked = modelArea.querySelector(".model-picker").selected().map((model) => model.id);
+        const untouched = ticked.length === initialSelection.size && ticked.every((id) => initialSelection.has(id));
+        const keep = tickedAfterListing(!existing && !listed && untouched, ticked, response.models.map((model) => model.id));
+        listed = true;
+        const named = new Set(response.models.map((model) => model.id));
+        foundModels = [...response.models, ...modelsOf(existing).filter((model) => !named.has(model.id))];
+        selected = keep;
         renderModels();
       }
     } catch (error) { if (formActive) result.replaceChildren(el("span", { class: "bad-text", text: t("providers.probeFailed") }), el("div", { class: "small", text: error.message })); }
@@ -3367,7 +3701,7 @@ function openAnthropicProviderForm(options) {
     // accountPool makes these models native Claude routing targets. Without it this remains the
     // historical OpenAI ingress provider, and routing deliberately ignores it.
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "claude-code" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); }
+    try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "claude-code" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -3376,11 +3710,11 @@ function openAnthropicProviderForm(options) {
   if (auth.value === "claude-code") void runProbe();
 }
 /**
- * What a Grok form's check leaves ticked. A handful of models, so a new provider's first listing
- * starts with all of them ticked. Every later check — and every check of a saved provider — keeps
+ * What a model list's check leaves ticked. A caller may start a new provider's first listing with
+ * everything ticked (Grok, Claude). Every later check — and every check of a saved provider — keeps
  * what is ticked at that moment, so a model the user unticked stays unticked.
  */
-function grokTickedAfterCheck(firstListing, tickedIds, listedIds) {
+function tickedAfterListing(firstListing, tickedIds, listedIds) {
   return new Set(firstListing ? listedIds : tickedIds);
 }
 
@@ -3397,6 +3731,9 @@ function openGrokProviderForm(options) {
   const probeButton = el("button", { class: "btn secondary", type: "button", text: t("providers.check") });
   let foundModels = modelsOf(existing);
   const currentChecked = new Set(foundModels.map((model) => model.id));
+  // What the checklist opened with. The first listing fills it out only while the person has left
+  // that set as it was: a model typed in before the list arrived is theirs and stays ticked (B21).
+  const initialSelection = new Set(currentChecked);
   let listed = false;
   const modelArea = el("div", { class: "form-field" });
   function renderModels(checked, help) {
@@ -3418,7 +3755,9 @@ function openGrokProviderForm(options) {
       ].filter(Boolean));
       if (Array.isArray(response.models) && response.models.length) {
         const ticked = modelArea.querySelector(".model-picker").selected();
-        const keep = grokTickedAfterCheck(!existing && !listed, ticked.map((model) => model.id), response.models.map((model) => model.id));
+        const tickedIds = ticked.map((model) => model.id);
+        const untouched = tickedIds.length === initialSelection.size && tickedIds.every((id) => initialSelection.has(id));
+        const keep = tickedAfterListing(!existing && !listed && untouched, tickedIds, response.models.map((model) => model.id));
         listed = true;
         foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
         renderModels(keep);
@@ -3466,9 +3805,9 @@ function openGrokProviderForm(options) {
     };
     applyProviderLabel(next.providers[providerName], providerName, typedName);
     const existingSelections = pickerSelectionsExcept(next, providerName);
-    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
+    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections, true);
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
+    try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -3525,8 +3864,10 @@ function openGoogleProviderForm(options) {
       if (Array.isArray(response.models) && response.models.length) {
         const ticked = modelArea.querySelector(".model-picker").selected();
         // The catalogue lists dozens of Gemini variants, so a new provider starts with none ticked
-        // rather than all of them; saved and typed picks stay ticked and visible.
-        const keep = new Set([...currentChecked, ...ticked.map((model) => model.id)]);
+        // rather than all of them; saved and typed picks stay ticked and visible. The box as it is
+        // now is the answer: merging the saved set back in re-ticked a model the user unchecked
+        // while the listing was still in flight.
+        const keep = new Set(ticked.map((model) => model.id));
         foundModels = [...ticked.filter((model) => !response.models.some((m) => m.id === model.id)), ...response.models];
         renderModels(keep, t("providers.modelsFoundMany"));
       }
@@ -3578,9 +3919,9 @@ function openGoogleProviderForm(options) {
     // Same rule as the other provider forms: read after the provider is updated, so an unticked
     // model is already undeclared and falls out of the picker on its own.
     const existingSelections = pickerSelectionsExcept(next, providerName);
-    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections);
+    applyPickerSelections(next, pickerInput.checked ? [...existingSelections, ...checkedModels.map((model) => ({ ...model, provider: providerName }))] : existingSelections, true);
     saveButton.disabled = true;
-    try { await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); toast(t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
+    try { const out = await configRequest(next); currentConfig = next; selectedProviderName = providerName; providerDetailTab = auth.value === "antigravity" ? "accounts" : "overview"; slotsLoaded = false; clientsLoaded = false; providersLoaded = false; closeModal(); await loadProviders(); configSaved(out, t("common.saved")); await offerPickerOn(pickerInput.checked && checkedModels.length > 0); }
     catch (error) { toast(t("common.saveFailed"), true, error.message); }
     finally { saveButton.disabled = false; }
   });
@@ -3890,7 +4231,7 @@ function openProviderForm(options) {
     }
     saveButton.disabled = true;
     try {
-      await configRequest(next);
+      const out = await configRequest(next);
       currentConfig = next;
       selectedProviderName = providerName;
       providerDetailTab = "overview";
@@ -3898,7 +4239,7 @@ function openProviderForm(options) {
       providersLoaded = false;
       closeModal();
       await loadProviders();
-      toast(t("common.saved"));
+      configSaved(out, t("common.saved"));
       await offerPickerOn(pickerInput.checked && checkedModels.length > 0);
       // Detached on purpose. Measuring asks every ticked model several questions, which is far
       // longer than a save should take, and a model whose wire is still unknown works exactly as it
@@ -4909,13 +5250,16 @@ for (const selector of ["#logs-from", "#logs-to"]) {
 renderPeriodControl();
 fillCustomDates();
 
-const EMPTY_BUCKET = { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, avgMs: 0, cacheHitPercent: 0 };
+const EMPTY_BUCKET = { count: 0, ok: 0, failed: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, avgMs: 0, cacheHitPercent: 0, conversationTokens: 0 };
 function renderSummary(summary) {
   const providers = (summary && summary.providers) || {};
   const total = (requestProvider ? providers[requestProvider] : summary && summary.total) || EMPTY_BUCKET;
   $("#logs-summary").replaceChildren(
     summaryChip(t("logs.summary.requests"), formatNumber(total.count)),
     summaryChip(t("logs.summary.success"), `${formatNumber(total.ok)} / ${formatNumber(total.failed)}`),
+    // The router groups conversations: last whole prompt + every output, as on the Agents card.
+    // Input/output and the model table keep their independent request-volume accounting.
+    summaryChip(t("logs.th.tokens"), formatNumber(total.conversationTokens)),
     // On its own line: with the whole input counted the number runs to eight digits, and the
     // ellipsis on one line cut the cache rate off entirely.
     summaryChip(t("logs.summary.input"), formatNumber(totalInputOf(total)), t("logs.cacheHit", { percent: total.cacheHitPercent || 0 })),
@@ -4970,6 +5314,8 @@ function modelUsageRow(entry) {
   const total = totalInputOf(entry);
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: entry.model, title: entry.model }),
+    // A WebSearch side request is counted apart from the model's own turns; the router marks it.
+    entry.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
     el("span", { class: `provider-badge ${providerClass(entry.provider)}`, text: providerLabel(entry.provider) }),
   ]);
   // The labels show only where a narrow window drops the header row.
@@ -4994,14 +5340,18 @@ function totalInputOf(usage) {
 function requestDetail(record) {
   const details = [
     [t("logs.detail.id"), record.id],
-    [t("logs.detail.kind"), record.kind],
+    [t("logs.detail.kind"), record.purpose === "web-search" ? `${record.kind} · ${t("logs.webSearch")}` : record.kind],
     [t("logs.detail.stop"), record.stopReason || t("logs.none")],
     [t("logs.detail.uncached"), record.usage ? formatNumber(record.usage.input) : t("logs.none")],
     [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
-  ].map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
-  if (record.note) details.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
-  return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, details)])]);
+  ];
+  // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
+  // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
+  if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
+  const cells = details.map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
+  if (record.note) cells.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
+  return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, cells)])]);
 }
 function requestRow(record) {
   const row = el("tr", { class: "request-row", title: record.note || "", onclick: () => { expandedRequestId = expandedRequestId === record.id ? null : record.id; renderRequests(requestRows); } });
@@ -5012,7 +5362,10 @@ function requestRow(record) {
   const model = el("div", { class: "request-models" }, [
     el("span", { class: "model", text: record.target }),
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
+    record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
     el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: providerLabel(record.provider) }),
+    // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
+    record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
   ].filter(Boolean));
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
   // which read as a two-token request (2026-09-23). The split is in the detail row.
