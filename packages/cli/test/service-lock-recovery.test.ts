@@ -63,7 +63,7 @@ for (const damaged of [false, true]) {
     const before = fs.readdirSync(lock);
     assert.throws(() => withServiceLock(key, () => assert.fail("unproven lock stolen"), () => "self"), error => {
       assert.equal((error as NodeJS.ErrnoException).code, "ELOCKED");
-      assert.equal((error as Error).message, `서비스 작업 잠금의 소유자를 확인할 수 없습니다. 다른 ClaudeRipple 설치·제거·재시작 작업이 실행 중이 아니라면 이 잠금 폴더를 지운 뒤 다시 시도해 주세요. (${lock})`);
+      assert.equal((error as Error).message, `서비스 작업 잠금의 소유자를 확인할 수 없습니다. 다른 ClaudeRipple 설치, 제거, 재시작 작업이 실행 중이 아니라면 이 잠금 폴더를 삭제한 뒤 다시 시도해 주세요. (${lock})`);
       return true;
     });
     assert.deepEqual(fs.readdirSync(lock), before);

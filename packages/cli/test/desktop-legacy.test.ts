@@ -93,7 +93,7 @@ for (const reason of ["other-installation", "different-port"] as const) {
     const before = currentAppProxy();
     const config = fs.readFileSync(path.join(f.home, "config.json"), "utf8");
     const command = pickerOffCommand(f);
-    assert.throws(command.run, /프록시 제거를 확인하지 못해/);
+    assert.throws(command.run, /프록시가 제거되었는지 확인하지 못해/);
     assert.deepEqual(currentAppProxy(), before);
     assert.equal(fs.readFileSync(path.join(f.home, "config.json"), "utf8"), config);
     assert.equal(command.trustRemovals(), 0);
@@ -164,12 +164,12 @@ for (const scenario of ["owners-store", "default-home", "damaged-owners-store"] 
     const deps = { ...f.deps, probe: () => ({ version: "0.12.14", home }) };
     const meta = fs.readFileSync(path.join(configLibraryDir(), "_meta.json"), "utf8");
     const entry = fs.readFileSync(path.join(configLibraryDir(), "legacy.json"), "utf8");
-    assert.throws(() => migrateLegacyAppProxy(f.url, home, deps), /어느 설치가 설정했는지 확인할 수 없어/);
-    assert.throws(() => applyAppProxy(f.url, home, undefined, deps), /어느 설치가 설정했는지 확인할 수 없어/);
+    assert.throws(() => migrateLegacyAppProxy(f.url, home, deps), /어느 설치에서 설정했는지 확인할 수 없어/);
+    assert.throws(() => applyAppProxy(f.url, home, undefined, deps), /어느 설치에서 설정했는지 확인할 수 없어/);
     assert.equal(fs.readFileSync(path.join(configLibraryDir(), "_meta.json"), "utf8"), meta);
     assert.equal(fs.readFileSync(path.join(configLibraryDir(), "legacy.json"), "utf8"), entry);
     const command = pickerOffCommand({ ...f, home, deps });
-    assert.throws(command.run, /어느 설치가 설정했는지 확인할 수 없어/);
+    assert.throws(command.run, /어느 설치에서 설정했는지 확인할 수 없어/);
     assert.equal(command.trustRemovals(), 0);
     assert.deepEqual(command.messages, []);
   });

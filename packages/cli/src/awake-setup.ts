@@ -312,7 +312,7 @@ export function releaseFailedHint(platform: NodeJS.Platform = process.platform):
 export function remainingAwakeGrantHint(opts: { platform?: NodeJS.Platform; exists?: (file: string) => boolean } = {}): string | null {
   if ((opts.platform ?? process.platform) !== "darwin") return null;
   if (!(opts.exists ?? fs.existsSync)(SUDOERS_FILE)) return null;
-  return `덮개를 닫아도 잠들지 않게 하는 관리자 권한 규칙이 남아 있습니다. 더 이상 필요하지 않다면 \`sudo rm ${SUDOERS_FILE}\`을 직접 실행해 주세요. (또는 \`clauderipple awake setup --remove\`)`;
+  return `덮개를 닫아도 시스템이 잠자기에 들어가지 않게 하는 관리자 권한 규칙이 남아 있습니다. 더 이상 필요하지 않다면 \`sudo rm ${SUDOERS_FILE}\`을 직접 실행해 주세요. (또는 \`clauderipple awake setup --remove\`)`;
 }
 
 /**

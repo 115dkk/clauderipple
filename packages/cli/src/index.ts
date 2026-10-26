@@ -97,7 +97,7 @@ function pickerOff(): void {
     if (!migrateLegacyAppProxy(proxyUrl, home)) throw new Error("Claude Desktop 프록시의 설치 소유권을 확인하지 못해 피커 설정과 CA를 보존했습니다. 이 설치의 서비스를 복구하고 프록시 설정을 확인한 뒤 다시 시도해 주세요.");
   }
   const removed = removeAppProxy(proxyUrl, home);
-  if (currentAppProxy().ours) throw new Error("Claude Desktop 프록시 제거를 확인하지 못해 피커 설정과 CA를 보존했습니다. 프록시를 설정한 설치와 포트를 확인한 뒤 해당 설치에서 다시 시도해 주세요.");
+  if (currentAppProxy().ours) throw new Error("Claude Desktop 프록시가 제거되었는지 확인하지 못해 피커 설정과 CA를 보존했습니다. 프록시를 설정한 설치와 포트를 확인한 뒤 해당 설치에서 다시 시도해 주세요.");
   console.log(removed ? "✓ Claude Desktop config library entry removed (previous entry restored if there was one)" : "✓ no ClaudeRipple config library entry");
   setPickerEnabled(false);
   console.log("✓ picker.enabled = false");
@@ -105,7 +105,7 @@ function pickerOff(): void {
   const store = isWindows ? "your user certificate store" : isLinux ? `your NSS database (${nssDb()})` : "the login keychain";
   const removal = untrustCa(certPaths(home).caPem, { sweep: false, missingCaTrustRemoved: flag("confirm-missing-ca-trust-removed") });
   console.log(
-    removal === "missing" ? `CA 파일이 없어 인증서 등록 여부를 확인하지 못했습니다. 원래 인증서를 ${certPaths(home).caPem} 경로에 복원하거나, 인증서 저장소에서 이 설치의 CA를 확인하고 제거한 뒤 \`clauderipple picker off --confirm-missing-ca-trust-removed\`를 실행해 주세요. 같은 이름의 다른 설치 인증서는 삭제하지 마세요.`
+    removal === "missing" ? `CA 파일이 없어 인증서 등록 여부를 확인하지 못했습니다. 원래 인증서를 ${certPaths(home).caPem} 경로에 복원하거나, 인증서 저장소에서 이 설치의 CA를 확인하고 제거한 뒤 \`clauderipple picker off --confirm-missing-ca-trust-removed\`를 실행해 주세요. 같은 이름의 다른 설치 인증서는 삭제하지 않도록 주의해 주세요.`
     : removal === "removed" ? `✓ CA removed from ${store}`
     : removal === "absent" ? `✓ CA was not in ${store}`
     : `! CA removal was not confirmed; it may still be trusted. Remove the "${CA_NAME}" certificate from ${store} by hand.`,
@@ -440,7 +440,7 @@ async function reportLeftovers(home: string): Promise<void> {
     console.log(`  원격(SSH) 호스트 ${hosts.length}대의 설정이 남아 있습니다: ${hosts.join(", ")}`);
     console.log("  더 이상 필요하지 않다면 각 호스트에서 `clauderipple remote remove <호스트>`를 실행해 주세요.");
   }
-  console.log("  설치 명령이 셸 프로필에 추가한 PATH 줄은 그대로 두었습니다. ClaudeRipple을 완전히 지울 때는 그 줄(주석 `# ClaudeRipple`)을 삭제해 주세요.");
+  console.log("  설치 명령이 셸 프로필에 추가한 PATH 설정 줄은 그대로 두었습니다. ClaudeRipple을 완전히 제거할 때는 해당 줄(주석 `# ClaudeRipple`)을 삭제해 주세요.");
 }
 
 async function status(): Promise<void> {

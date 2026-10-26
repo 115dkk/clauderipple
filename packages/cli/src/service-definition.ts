@@ -52,8 +52,8 @@ function recoverServiceLock(lock: string, lookup: ProcessStartLookup): boolean {
 
 function lockHeld(lock: string, ownerUnknown = false): Error {
   const message = ownerUnknown
-    ? `서비스 작업 잠금의 소유자를 확인할 수 없습니다. 다른 ClaudeRipple 설치·제거·재시작 작업이 실행 중이 아니라면 이 잠금 폴더를 지운 뒤 다시 시도해 주세요. (${lock})`
-    : `서비스 작업 잠금이 있어 작업을 중단했습니다. 다른 작업이 끝났는지 확인해 주세요. (${lock})`;
+    ? `서비스 작업 잠금의 소유자를 확인할 수 없습니다. 다른 ClaudeRipple 설치, 제거, 재시작 작업이 실행 중이 아니라면 이 잠금 폴더를 삭제한 뒤 다시 시도해 주세요. (${lock})`
+    : `서비스 작업 잠금이 걸려 있어 작업을 중단했습니다. 다른 작업이 완료되었는지 확인해 주세요. (${lock})`;
   return Object.assign(new Error(message), { code: "ELOCKED" });
 }
 
@@ -104,7 +104,7 @@ export function definitionGeneration(value: unknown): string {
 }
 
 export function assertGeneration(read: () => unknown, expected: string): void {
-  if (definitionGeneration(read()) !== expected) throw new Error("서비스 정의가 작업 중에 변경되어 작업을 중단했습니다. 현재 설치의 서비스 상태를 다시 확인해 주세요.");
+  if (definitionGeneration(read()) !== expected) throw new Error("서비스 정의가 작업 도중 변경되어 작업을 중단했습니다. 현재 설치의 서비스 상태를 다시 확인해 주세요.");
 }
 
 /** Inspect errors are not absence, and a symlink is not a definition this installation may replace. */
