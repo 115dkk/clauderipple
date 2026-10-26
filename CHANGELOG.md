@@ -1,5 +1,285 @@
 # Changelog
 
+## 0.12.15 — 2026-10-26
+
+### Added
+
+- **The band's Compact has the chat tidy up before it summarises.** The press sends a turn of its
+  own that asks the chat to say what it has done and what is left, note its decisions and update any
+  handoff or memory file; the prompt and the answer stay in the transcript and the summary is built
+  from them. The switch beside Compact is on until turned off, and with it off the chat compacts at
+  once as before. The prompt reaches the model as the person's own words rather than as a message
+  from the plugin, a press whose prompt was dropped sends it again instead of leaving the button
+  dead, and a turn that is stopped or fails compacts nothing and says so.
+- **The limits row opens a pane that says when each plan window resets.** The row is a button now,
+  lit under the pointer, and the pane lists every provider account's windows with the share used and
+  when each resets: the time left while a window is close ("2시간 뒤"), else the weekday and the
+  local clock ("목 09:00"), and "초기화 중" once it has passed. Pressed again or closed, it goes,
+  and its press takes no width from the row; each window's own hover tip gave way to the row's one
+  hint.
+- **A Fast request is marked FAST in the band's log and the dashboard** (#97). Telling which GPT
+  requests burn the subscription faster meant opening `requests.jsonl`, since a Fast request looked
+  like any other row. The band's log shows FAST in the accent colour after the effort on a row's
+  second line, the dashboard puts an outlined FAST badge after the provider and a "requested tier /
+  served tier" line in the expanded detail, and the mark follows the requested tier because the
+  ChatGPT sign-in often serves "default" for a Fast request.
+- **The dashboard's Status page names each problem and the step that clears it.** Readiness listed
+  codes only the tray explained, so an untrusted certificate or a missing Desktop proxy entry looked
+  like a dead router. The page now words each problem, including a config that failed validation and
+  was adopted anyway (status carries the errors and `/readyz` answers 503), and offers a diagnostic
+  copy of versions, states and provider names that never carries a key or a header. Provider calls
+  bypass a company proxy in the environment, so diagnostics name the proxy variables that are set
+  without their values and say upstream connections ignore them. An update that started and failed
+  now shows its reason with a retry, modal dialogs keep Tab inside and put focus back where it was,
+  and every dashboard language carries every key.
+- **The browser remote's session list folds, pins and searches its projects.** Sections fold to
+  their name and count (the archive starts folded and opens in place), pinning lifts the Desktop
+  app's stars and this device's own pins into a section of their own, and a search reaches every
+  segment of a session's working directory. One page of rows draws at a time with a "show more" row,
+  and each row's menu offers archive, pin and mark unread, disabled with a reason while the computer
+  is away. A search with no list to look at says so, and is never shown as "nothing matched".
+- **The browser remote shows what a session changed, and asks for uncommitted work or the branch.**
+  The session header opens the same pane the phone has: the uncommitted/branch switch where the host
+  offers it, each file with its line counts, and one file's whole patch over the list with git's
+  headers left out and copy of just the change. Previous and next walk only the files that have a
+  patch and are disabled at the ends; the list and the open file keep their scroll, and Escape
+  returns focus to the header button it was opened from.
+- **A session's folder can be read from the phone, one small file at a time.** A new pair of request
+  ops lists the folder and reads one file of at most 1 MB, always resolved against the session's own
+  cwd: absolute paths, `..` and symlinks that lead outside are refused after realpath, a larger file
+  is reported with its size, dotfiles are left out, and the host advertises the capability so an
+  older app sees nothing new. The folder sheet now lists the drives at the top of every browse
+  (leaving out the one being browsed, cached for half a minute) and takes a typed path, so a folder
+  that no longer exists comes back as an error instead of an empty list.
+- **The browser remote keeps your place in a conversation as it grows.** Answers can be copied from
+  a control named for screen readers, an answer the host moved into a blob is read to its last page
+  first, and a refused clipboard names the browser's refusal instead of claiming a copy. A selection
+  made while the answer streams is carried across the redraw by character offsets, an opened thinking
+  block or tool detail stays open when its row is redrawn, earlier pages load by themselves one at a
+  time with a deadline, a refusal or a dropped connection offers the reader's own retry, an empty page
+  ends the asking, and a conversation opens again where it was left rather than at its end.
+- **The phone and the browser draw a command, a finished turn and a decided plan as what they are.**
+  Compaction, a fresh start and a rewind are drawn as their state — running until the turn they
+  started ends, then done or failed — in one quiet row with no control on it, while an unknown slash
+  command is left to the host and drawn as words. A finished turn names itself ("턴 3"), but only
+  where the conversation's first page is loaded. A completed plan card reopens read-only, a late or
+  replayed acknowledgement from an old turn no longer restores a plan, and Code and provider plans,
+  TodoWrite and TaskCreate/Update/List now share one successful-result reducer, so a reconnect or a
+  completed turn no longer hides outstanding work.
+- **A question with several parts keeps your drafts and submits once.** The browser's sequential
+  prompts became navigable question cards with full option previews: drafts are scoped to the
+  session's epoch, custom input is kept exactly, single and multi-select contracts are enforced, an
+  incomplete or duplicate decision is blocked, fields being edited stay stable while chrome updates,
+  and keyboard focus returns after a selection.
+- **Background work and worker conversations stay visible on the phone and the browser.** Commands,
+  monitors and scheduled wakeups left running while the main turn is idle are listed with SDK Stop
+  inventories (PR and CI subscriptions included), stopped and failed workers are told apart, and an
+  unknown state is kept when no authoritative inventory exists. A worker's open conversation follows
+  its steps, asking only for what came after the last one and reading the launch instruction once,
+  and a nested worker keeps a return path with its frame's position and tool state.
+
+### Changed
+
+- **The Logs summary counts a period's tokens once per conversation.** Adding every request inflated
+  the total, and subtracting cached input failed after a cache loss or a provider translation. The
+  summary now has a tokens chip counted the way the Agents card counts — the last whole prompt per
+  conversation plus every output in the period, from persisted conversation identities —
+  while the input and output chips keep the split and the request-volume counters are unchanged;
+  older logs fall back to independent-request counts. The request row reads the whole prompt in its
+  input cell with the cache's share on a pill and the output in a cell of its own. Usage is read only
+  from the response's own top-level object, so usage embedded in a tool input or in response text
+  cannot inflate a count.
+- **The Agents card reads like the app's task list and counts tokens as the app does.** Every step
+  re-sends the whole conversation, so summing each step's input ran to millions; a worker's tokens
+  are now the last response's whole prompt plus every response's output, and a finished worker takes
+  the larger of that and its last response's own count. The card is a one-line title the engine cuts
+  with an ellipsis, with the time and a chevron at its end, then the model's name with its effort,
+  then tokens, cache and tool count; the time's colour carries the state, a four-digit tool count
+  reads 1.2k, the cached share rounds down so 99.96% reads 99%, a whole card opens its conversation,
+  and a background task's card follows the same layout. The empty pane now says that background
+  commands and watches appear there too.
+- **Every pull request is typechecked and tested on macOS, Linux and Windows.** Linux and Windows
+  run non-blocking until they pass, since the suite has only been run on macOS. CI also parses every
+  mod file, resolves its relative imports and checks that `hooks.json` and `plugin.json` name files
+  that exist, without executing the mod or fetching the engine, and the publish workflow packs the
+  tarball, installs it into an empty prefix with scripts disabled and checks the files an install
+  runs, so a missing `dist/` cannot ship.
+
+### Fixed
+
+- **Claude Code's mid-conversation system messages are folded for compatible vendors** (#92,
+  OpenRouter). Claude Code 2.1.308+ puts SessionStart hook context and deferred-tool deltas in
+  messages with role "system" carrying `tool_addition` and `tool_removal` blocks; only top-level
+  fields were cleaned, so a vendor's Anthropic skin refused every turn with a 400 once a hook or a
+  deferred MCP tool was in play. Such a message becomes a user turn with its text byte-for-byte; a
+  `tool_addition`'s definition joins tools through the same loop declared tools get and is appended
+  after them so the cached tool prefix does not move, a `tool_removal` goes with its block, and the
+  request log counts each fold.
+- **OpenCode Go's spent plan is read as a spent plan, and delegation skips it** (#95). The service
+  answers a used-up subscription window with a 429 whose body says "Go usage limit exceeded" and no
+  retry header, which the classifier read as a temporary rate limit: the worker retried the same 429
+  for minutes and the next delegation chose the same provider. The pattern now carries the plan's
+  own phrase with a per-minute/hour guard, and the ladder leaves out a provider whose every key has
+  a window at 100%, naming its reset as `exhaustedUntil`, so the next delegation does not spend a
+  429 on it.
+- **OpenCode Go's `gemini-4-argon` runs on its Google wire** (#94, in part). The listing no longer
+  carries `gemini-4-argon-contributor` and carries `gemini-4-argon` instead, but a model picked from
+  the listing saves only its id and name, so without a preset row it inherited the preset's
+  Responses wire and the vendor refused it with "Model does not support this protocol". The row is
+  written out as the wire is published per model, not per family.
+- **A session read on the phone no longer keeps its unread dot** (#96). The dot comes from the
+  Claude app's own Local Storage, which the host only read; clearing attention never told the list
+  the phone had read the session, so a session opened on the phone stayed unread forever. The host
+  now records the activity the phone read per session and reports unread false once that record
+  reaches the sidebar's last activity; anything newer is unread again, mark-unread forgets the
+  record, and records for sessions that left the list are pruned. Writes stay rare: only a dot
+  actually shown is recorded.
+- **A web search the router serves itself is logged under its own model with usage.** It was logged
+  with the target's name and no usage, so the model table showed a phantom model with zero tokens
+  (126 requests in a week). The record now names the model the search ran on, keeps purpose
+  "web-search" and carries the backend's usage; the model table and recent requests key rows by
+  purpose, tag them "web search" with the help note worded as the page's other notes, read older
+  provider/model records with no tokens as the same row, and hourly buckets write purpose.
+- **The tray stops replacing itself, and an update leaves the dashboard as you left it** (#93).
+  Started as `electron main.js`, the tray read Electron's own version instead of its package's, so it
+  saw a newly updated router on every poll and replaced itself about every two seconds; the version
+  now comes from one function, and a pair that never converges is counted in
+  `~/.clauderipple/tray-replacement.json` — after three launches the tray stays up and says why once.
+  A replacement is now started as a login launch and shows the window only when it was up before, so
+  an automatic update no longer brings a closed dashboard to the front, and `clauderipple update`
+  refreshes the fetched Electron into a staging folder before moving it over.
+- **A pinned ClaudeRipple shows our icon instead of Electron's.** macOS keeps a Dock pin by bundle
+  path and draws that bundle while the app is not running, so the running tray could only paint our
+  icon over Electron's atom. macOS now runs `tray-runtime/ClaudeRipple.app`, a copy of the fetched
+  Electron with our name, identifier, icon and an ad-hoc signature, rebuilt on every refresh and
+  falling back to plain Electron if the build fails. A pin that already points at Electron.app
+  cannot be rewritten by code: unpin it and pin the new bundle.
+- **The tray waits for a slow but valid answer and labels a quota by its real period.** After a TCP
+  connection it took any quiet moment for a dead router, and every primary quota window was labelled
+  weekly. Readiness now uses the router's own answer, and a quota window is labelled by the period it
+  actually covers.
+- **Uninstalling a second installation no longer takes the real install's setup.** The release check
+  installs under its own home and port, but its uninstall removed the Claude Desktop proxy and the
+  Codex provider whatever they pointed at, deleted the keychain's CA by name (the real install's has
+  the same one) and removed worker files the real install had written. A home other than
+  `~/.clauderipple` now removes only its own: the proxy and the Codex provider when they point at
+  its port, its CA by fingerprint, and worker files the default home's manifest does not record;
+  `picker off` and `direct on` follow the same rule, and `direct on` keeps a Desktop proxy the
+  person wrote instead of refusing it.
+- **Install and uninstall act only on what this home recorded.** Every install on an account shares
+  one launchd label, systemd unit and task name, so a definition is not proof of ownership: acting on
+  one now requires the home it records, an unreadable one is preserved and reported, and a launcher
+  that records this home is adopted while a malformed marker stays unknown. A service that is already
+  stopped reads as removed rather than a permission error, a control that fails leaves the definition
+  in place, and the Windows phone host is started and stopped through its own runtime home with only
+  an explicit success counted. A value in `~/.claude/settings.json` is removed only when this home
+  recorded it and no other home records the same value, a file that is not a JSON object is refused
+  so its other keys are never dropped, and a worker file is removed only after every shared claim was
+  read. A legacy entry an older version wrote without a marker is taken over only on independent
+  evidence that it is this home's, and an ambiguous or unreadable one stays untouched and reported.
+  A restart also waits for the relaunched router to answer before judging it, so a healthy restart is
+  no longer reported as unverified.
+- **A direct switch keeps what it can prove and refuses the rest.** A direct transition accepts
+  Claude Code's own opus, sonnet and haiku aliases and refuses a shared routed slot before changing
+  either client, so a preserved model cannot become a broken direct connection. CA removal fails
+  closed when its fingerprint or the trust store cannot be read, and a certificate whose trust
+  settings outlived it in the keychain no longer reads as trusted.
+- **Uninstall removes this installation's phone host and says what it cannot take back.** The phone
+  host is a second account-wide service, and uninstalling left it running against files about to
+  disappear; it is now read first and stopped and removed only when its definition records this
+  installation's home, while another home's host, or one that records none, is reported and left
+  alone (an explicit `remote uninstall` may still take an unrecorded one). Uninstall names the
+  sudoers grant `awake setup` installed, the PATH line the installer added to the profile and any
+  remote SSH hosts still configured, and the context cap it wrote is claimed like a model slot so it
+  takes back exactly its own value.
+- **An interrupted install keeps the old runtime, the command and its lock.** `install.sh` deleted
+  the runtime folder before unpacking Node into it, so a failed download, extraction or a full disk
+  left neither; the archive is now unpacked beside it and swapped with two renames, the previous
+  runtime is put back if the swap fails, the command wrapper is renamed over instead of removed
+  first, a backup that cannot be deleted is reported while the run continues, and Node is rolled
+  back until npm and its wrapper succeed. Service locks are claimed with an atomic directory holding
+  its owner's identity, published only once that owner exists, and reclaimed only after that exact
+  process exits — a failed process lookup is not read as one — so a crashed controller no longer
+  blocks every later run; empty or damaged legacy locks are kept and their manual recovery is named.
+- **An Ollama model takes its thinking levels and context window from `/api/show`.** Its
+  OpenAI-compatible surface reports ids alone and ignores `reasoning_effort`, so the probe measured
+  every thinking model as taking none, wrote `[]` to the config where an empty ladder means a
+  decision, and the model kept showing no effort steps and no context window. Providers on
+  ollama.com or the local daemon are measured through `/api/show` first, an empty ladder on Ollama
+  is treated as blank rather than settled, and a ladder someone set is never replaced.
+- **A cancelled turn is not counted against the provider, and a finished stream ends at once.** A
+  person's cancellation was recorded as an upstream failure and interrupted delivery as a completed
+  one; cancellation is now kept out of global upstream health, interrupted delivery is recorded as
+  aborted, and a translated stream completes at its protocol terminal with the usage before it
+  instead of waiting for EOF.
+- **A macOS host no longer stalls for seconds on every session list.** `Sessions.list` asked whether
+  each closed Claude app session was open, and on macOS each ask ran a synchronous `ps -axo
+  pid,command` — dozens per list, every poll and every phone update, stalling the host for 5 to 14
+  seconds: phone pushes went out late, relay pings ran late, and Remote Control state reads and the
+  away probe timed out behind them. macOS now reads one snapshot at start and refreshes it in the
+  background every five seconds, as Windows already did.
+- **A session's folder and times read as the phone shows them.** A Windows host's cwd was split on "/"
+  alone, so a session row showed the whole path instead of the folder, and a home folder was only
+  abbreviated when the string matched exactly; both separators and drive-letter case are handled now.
+  The clock follows the phone's 12/24-hour and language settings (HH:MM only as a fallback), and file
+  sizes read in KB/MB with a decimal only where it distinguishes something.
+- **A phone message arrives whole, once, and from the computer that owns it.** A long host message is
+  transported in bounded UTF-8 chunks and reassembled before delivery while older clients keep
+  their wire contract, an attachment up to 8 MiB is validated with bounded checks instead of
+  recursive matching, and a reused message id carrying other words or attachments is refused with a
+  sentence the phone can show instead of being answered as a success that never ran. A handoff input
+  is kept in the host queue with its original id and photo bytes until a session can receive it,
+  recovered across a restart without a second writer and retried within the existing three attempts,
+  while an explicit Stop still holds. Queues are bound to the pairing identity so a replacement host
+  does not receive the previous one's unsent messages, refused originals stay readable and copyable,
+  and a native push now names the sending host so a tap cannot open a session in the wrong pairing.
+- **A phone's connection recovers once, and its figures follow the model it is routed to.** A socket
+  left healthy after a background suspension was replaced on every foreground, and a probe that went
+  unanswered left the phone waiting. Healthy sockets are kept, recovery starts within three seconds
+  of an unanswered probe, there is one retry and countdown chain, and superseded sockets and stale
+  callbacks are closed so a stop cannot revive an old timer. A turn's text now closes at response,
+  approval and lifecycle boundaries, so a later running turn cannot revive an old cursor; a
+  session's context capacity comes from the routed model rather than a stale SDK cache and is
+  dropped on a model or epoch change; a conversation started after `/clear` keeps its title, stale
+  attention is retired when desktop work resumes, and a failed desktop credential read is retried
+  only within its window.
+- **The band draws at the app's own type again.** Since the app's newer type sets a cell at about
+  8.8 px, pictures sat in gaps wider than themselves, the sea ended short of the capsule's right
+  edge, fewer facts fit and the route shrank to "Op…". Each picture now fills the cells laid out for
+  it whatever px a cell is, icon slots are the pictures' exact width, the facts and Handoff pill sit
+  half a cell from what they show, and a counted icon draws its badge only while it has a count. The
+  work current runs along the capsule's true bottom and no longer restarts on a redraw, and the
+  limits row keeps its height under the pointer.
+- **The Agents pane keeps live workers and stops re-reading what cannot change.** The forty-record
+  limit applied to running workers too, cutting live cards off from their counts and usage; it now
+  bounds only finished ones. A long command stays in the running state instead of turning amber
+  after eight seconds, queued coordinator follow-ups are shown in the agent's conversation, the
+  instruction is recorded beside its delivery so a slow read cannot delay it, `/clear` no longer
+  empties the Agents list, a finished conversation is read once per state instead of on every
+  redraw, an open conversation no longer redraws on the clock, a tool-run line presses and lights
+  along its whole width without flicker, and an agent's page keeps its head at the top while
+  scrolling.
+- **A worker runs on the definition and policy it was prepared with.** Switching auto to
+  general-purpose discarded the Agent tool restriction, so the registered definition is kept and
+  only its model is overridden, with the picked effort applied to the executor too. A managed worker
+  whose routing policy cannot be prepared is refused rather than run on unchecked input, engine-owned
+  agents stay independent, and an empty or incomplete rule reason is refused. A current router
+  outage now shows over historical routes, and context counts are bound to the model, capacity and
+  context generations so a late response cannot overwrite them after a clear, resume or compaction.
+- **A Handoff answer from a chat that was cleared is dropped.** A fork outlives `/clear`, so its
+  answer came back to the new chat and opened a session there with the old chat's note. Each press
+  now carries a run id and the chat generation it started in, and an answer that lands elsewhere is
+  dropped without a toast or a failed card.
+- **The dashboard keeps your edits and clears what a removal leaves behind.** Removing a provider
+  left the web search, the Auto-mode classifier and other routes' fallbacks pointing at a provider
+  that no longer existed, which the config check refuses; the removal now clears them, the provider
+  page lists every place it is named, and the confirm says what else will go, while the Clients page
+  shows each route's fallback chain. A config or catalogue change rebuilt the picker rows and
+  replaced a context window being typed: typed text is carried over the rebuild with its caret and
+  saved on the next change, a Grok model typed before the first listing is no longer unticked, only
+  edited mapping rows are rebased, changed controls are no longer rebuilt during status polling, and
+  a success notice no longer masks a partial-save warning.
+
 ## 0.12.14 — 2026-10-24
 
 ### Added
