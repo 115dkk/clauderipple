@@ -20,6 +20,9 @@ interface Stored { token: string; lang: "ko" | "en"; platform?: "ios" | "android
 interface NotifierOptions {
   dir: string; send: ExpoSender; seenRecently: (session: string) => boolean; log: (line: string) => void;
   context?: (session: string, event: PushEvent) => PushContext | Promise<PushContext>;
+  /** The identity the phone pairs with (the relay pairing's host key). It rides in the payload so a
+   * tap from a previous computer is not opened against this one. */
+  host?: string;
 }
 
 export function validPushKey(key: string): boolean {
@@ -108,14 +111,15 @@ export class ExpoNotifier {
       const body = expoBody(event, stored.lang);
       if (!body) return;
       try {
-        let payload: ExpoPayload = { to: stored.token, title: "Ripple Remote", body, data: { session }, sound: "default", ttl: event.kind === "permission" || event.kind === "question" ? 3600 : 86400 };
+        const identity = this.opts.host ? { host: this.opts.host } : {};
+        let payload: ExpoPayload = { to: stored.token, title: "Ripple Remote", body, data: { session, ...identity }, sound: "default", ttl: event.kind === "permission" || event.kind === "question" ? 3600 : 86400 };
         if (stored.key) {
           try {
             context ??= Promise.resolve(this.opts.context?.(session, event) ?? {});
             const e = encryptPush(stored.key, pushContent(event, stored.lang, await context, body));
             payload = stored.platform === "android"
-              ? { to: stored.token, data: { session, e, fallback: body }, priority: "high", ttl: payload.ttl }
-              : { ...payload, mutableContent: true, data: { session, e } };
+              ? { to: stored.token, data: { session, ...identity, e, fallback: body }, priority: "high", ttl: payload.ttl }
+              : { ...payload, mutableContent: true, data: { session, ...identity, e } };
           } catch {
             // No private exception text in logs; a context/crypto failure must still deliver fallback.
             this.opts.log(`expo push: content unavailable for device ${id.slice(0, 8)}; sending fallback`);

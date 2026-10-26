@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Sessions } from "../src/sessions.ts";
-import { BridgeClient } from "../src/bridge-client.ts";
+import { BridgeClient, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { liveDesktopProcesses, type DesktopProcess } from "../src/desktop.ts";
 import { ATTACHMENT_CAP, ATTACHMENT_COUNT } from "../src/protocol.ts";
@@ -321,6 +321,59 @@ test("attach replays approvals requested before the stream connected, skipping a
   assert.equal(await f.sessions.decide(id, pending[0]!.id, "deny"), true);
   assert.equal(f.posts.length, 1);
   assert.equal(await f.sessions.decide(id, pending[0]!.id, "deny"), false, "the second answer resolves nothing again");
+});
+
+for (const bridgeAppears of [true, false]) test(`a completed Desktop session without RC waits, then sends once when ${bridgeAppears ? "RC appears" : "the Desktop writer exits"}`, async t => {
+  const f = fixture(t);
+  f.registry.set(id, { sessionId: id, pid: 42, status: "idle" });
+  assert.throws(() => f.sessions.send(id, "direct-blocked", "not accepted"), DesktopBlockedError);
+  f.sessions.enqueue(id, "waiting-rc", "원문\n" + "긴 메시지 😀".repeat(1000));
+  await tick();
+  assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
+  assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.error, DESKTOP_WAITING);
+  assert.equal(f.queries(), 0);
+  assert.equal(f.posts.length, 0);
+  if (bridgeAppears) f.registry.get(id)!.bridgeSessionId = "bridge";
+  else f.registry.clear();
+  f.sessions.pollQueued();
+  await tick(); await tick();
+  assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  assert.equal(f.queries(), bridgeAppears ? 0 : 1);
+  assert.equal(f.posts.length, bridgeAppears ? 1 : 0);
+  if (bridgeAppears) assert.equal((f.posts[0] as { events: { payload: { message: { content: string } } }[] }).events[0]!.payload.message.content, "원문\n" + "긴 메시지 😀".repeat(1000));
+  f.sessions.pollQueued();
+  await f.sessions.pollDesktop();
+  await tick();
+  assert.equal(f.queries() + f.posts.length, 1, "no repeated input on subsequent polls");
+});
+
+test("a user-paused RC wait remains paused after the bridge appears", async t => {
+  const f = fixture(t);
+  f.registry.set(id, { sessionId: id, pid: 42, status: "idle" });
+  f.sessions.enqueue(id, "stopped-wait", "kept");
+  await tick();
+  f.sessions.holdQueue(id);
+  f.registry.get(id)!.bridgeSessionId = "bridge";
+  f.sessions.pollQueued();
+  await f.sessions.pollDesktop();
+  await tick();
+  assert.equal(f.posts.length, 0);
+  assert.equal(f.sessions.summaryOf(id)?.queueHeld, true);
+  f.sessions.resumeQueue(id);
+  await tick(); await tick();
+  assert.equal(f.posts.length, 1);
+});
+
+test("a definite bridge refusal keeps its queued original visible and requires explicit retry", async t => {
+  const f = fixture(t, true);
+  f.sessions.enqueue(id, "refused-queue", "keep the original");
+  await tick(); await tick();
+  assert.equal(f.sessions.summaryOf(id)?.queueHeld, true);
+  assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "keep the original");
+  f.sessions.pollQueued();
+  await f.sessions.pollDesktop();
+  await tick();
+  assert.equal(f.posts.length, 1);
 });
 
 // The queue for a Claude app session goes over Remote Control when the app says the turn ended,

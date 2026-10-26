@@ -14,12 +14,20 @@ type Target = { provider: string; model: string; effort?: string };
 type Rows = { first: Target | null; rest: Target | null };
 type Setting = NonNullable<Config["autoModeClassifier"]>;
 
-function loadTranslation(): { classifierRowsOf: (settings: unknown) => Rows; classifierSettingOf: (first: Target | null, rest: Target | null) => Setting | undefined } {
+type Translation = {
+  classifierRowsOf: (settings: unknown) => Rows;
+  classifierSettingOf: (first: Target | null, rest: Target | null) => Setting | undefined;
+  classifierNames: (settings: unknown, provider: string) => boolean;
+  classifierWithout: (settings: unknown, provider: string) => Setting | undefined;
+};
+
+function loadTranslation(): Translation {
   const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
   const start = source.indexOf("/** The two rows a setting shows");
-  const end = source.indexOf("\nconst CLASSIFIER_REFUSES_STAGE2");
+  const end = source.indexOf("// Claude Code refuses these", start);
   assert.ok(start > 0 && end > start, "app.js no longer holds the classifier translation where this test reads it");
-  return new Function(`${source.slice(start, end)}; return { classifierRowsOf, classifierSettingOf };`)();
+  // The slice may end in a line comment, so the return starts on a line of its own.
+  return new Function(`${source.slice(start, end)}\nreturn { classifierRowsOf, classifierSettingOf, classifierNames, classifierWithout };`)();
 }
 
 function loadI18n(): Record<string, Record<string, string>> {
@@ -60,6 +68,100 @@ test("whatever two rows the person picks save as a setting the router accepts, a
   }
   assert.deepEqual(classifierSettingOf(haiku, haiku), haiku, "one model for both is written without stage1");
   assert.equal(classifierSettingOf(null, null), undefined, "both left to Claude Code removes the field");
+});
+
+test("removing a provider clears each stage that named it and keeps the other", () => {
+  const { classifierNames, classifierWithout } = loadTranslation();
+  const others: Config["providers"] = { chatgpt: providers.chatgpt! };
+  const cases: [string, Setting, Setting | undefined][] = [
+    ["a first stage on the removed provider goes back to Claude Code", { ...luna, stage1: sonnet }, { ...luna, stage1: "native" }],
+    ["a first stage on another provider outlives the rest's", { ...sonnet, stage1: luna }, { stage1: luna }],
+    ["one target on both stages leaves nothing", haiku, undefined],
+    ["the first stage alone leaves nothing", { stage1: haiku }, undefined],
+    ["a native first stage leaves nothing once the rest goes", { ...haiku, stage1: "native" }, undefined],
+  ];
+  for (const [name, setting, kept] of cases) {
+    assert.equal(classifierNames(setting, "cls"), true, name);
+    assert.deepEqual(classifierWithout(setting, "cls"), kept, name);
+    if (kept) assert.deepEqual(validate({ ...DEFAULTS, providers: others, autoModeClassifier: kept }), [], `${name}: the next save is accepted`);
+  }
+  assert.equal(classifierNames({ ...luna, stage1: "native" }, "cls"), false, "a setting that never names the provider is left alone");
+  assert.equal(classifierNames(undefined, "cls"), false);
+});
+
+// The row save from app.js, run against two stub selects. The router's GET and PUT wait until the test
+// lets each one through, and a landed save redraws the selects from what it stored, as the page does.
+function loadSave() {
+  const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
+  const block = (from: string, to: string) => {
+    const start = source.indexOf(from), end = source.indexOf(to, start);
+    assert.ok(start > 0 && end > start, `app.js no longer holds ${from}`);
+    return source.slice(start, end);
+  };
+  const h = {
+    rows: { first: "", rest: "" } as Record<string, string>,
+    stored: { providers } as Record<string, unknown>,
+    gets: [] as (() => void)[],
+    puts: [] as (() => void)[],
+    writes: [] as Record<string, unknown>[],
+  };
+  const save = new Function("h", `
+    let currentConfig = JSON.parse(JSON.stringify(h.stored));
+    const clone = (value) => JSON.parse(JSON.stringify(value)), t = (key) => key, toast = () => {};
+    const routeFromTarget = (value) => { if (!value) return null; const [provider, model] = JSON.parse(value); return { provider, model }; };
+    const $ = (selector) => {
+      const match = /data-classifier(-effort)?="(\\w+)"/.exec(selector);
+      return match && !match[1] ? { value: h.rows[match[2]] } : { value: "" };
+    };
+    const latestConfig = () => new Promise((resolve) => h.gets.push(() => resolve(currentConfig = clone(h.stored))));
+    const configRequest = (next) => new Promise((resolve) => h.puts.push(() => { h.stored = clone(next); h.writes.push(clone(next)); resolve({}); }));
+    ${block("/** The two rows a setting shows", "// Claude Code refuses these")}
+    const renderAutoClassifier = () => {
+      const rows = classifierRowsOf(currentConfig.autoModeClassifier);
+      for (const stage of ["first", "rest"]) h.rows[stage] = rows[stage] ? JSON.stringify([rows[stage].provider, rows[stage].model]) : "";
+    };
+    ${block("function classifierRowValue(", "function clientPickerSelections(")}
+    return saveAutoClassifier;
+  `)(h) as () => Promise<void>;
+  return { h, save };
+}
+
+test("overlapping classifier saves store the last choice", async () => {
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const pick = (target: Target) => JSON.stringify([target.provider, target.model]);
+  // The stub effort selects are empty, so no effort is saved.
+  const last = { provider: luna.provider, model: luna.model, stage1: haiku };
+
+  // B is chosen while A's write is on its way: A lands and redraws, and B still saves B.
+  {
+    const { h, save } = loadSave();
+    h.rows.first = pick(sonnet); h.rows.rest = pick(luna);
+    void save();
+    await flush(); h.gets.shift()!(); await flush();
+    assert.equal(h.puts.length, 1, "A is being written");
+    h.rows.first = pick(haiku);
+    const second = save();
+    h.puts.shift()!(); await flush();
+    h.gets.shift()!(); await flush(); h.puts.shift()!();
+    await second;
+    assert.equal(h.writes.length, 2);
+    assert.deepEqual(h.writes.at(-1)!.autoModeClassifier, last, "the newer choice is the one stored");
+    assert.equal(h.rows.first, pick(haiku), "the rows show what was stored last");
+  }
+
+  // B is chosen while A is still reading the config: A never writes.
+  {
+    const { h, save } = loadSave();
+    h.rows.first = pick(sonnet); h.rows.rest = pick(luna);
+    void save();
+    await flush();
+    h.rows.first = pick(haiku);
+    const second = save();
+    h.gets.shift()!(); await flush();
+    h.gets.shift()!(); await flush(); h.puts.shift()!();
+    await second;
+    assert.deepEqual(h.writes.map((write) => write.autoModeClassifier), [last], "an overtaken save is dropped");
+  }
 });
 
 test("every language the dashboard speaks has the classifier rows", () => {

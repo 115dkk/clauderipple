@@ -11,7 +11,7 @@ import { ChatGptAdapter } from "../src/providers/chatgpt/index.ts";
 import { Logger } from "../src/log.ts";
 import { RequestLog } from "../src/requestlog.ts";
 
-type WindowsResponse = { windows: Record<string, number>; catalogWindows: Record<string, number> };
+type WindowsResponse = { windows: Record<string, number>; catalogWindows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> };
 
 test("the real catalogue lookup and probe give bootstrap, picker and admin the effective Codex window", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-window-api-"));
@@ -28,6 +28,8 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
   fs.writeFileSync(path.join(home, "chatgpt-auth.json"), JSON.stringify({ accessToken: "test-only", accountId: "fixture", expiresAt: Date.now() + 3_600_000, source: "own" }));
   const provider: ChatGptProvider = { type: "chatgpt", auth: "own", url: "https://codex.example.test", models: [
     { id: "gpt-6.1-sol", contextWindow: 272000 },
+    { id: "gpt-6-astra", contextWindow: 272000 },
+    { id: "unknown-capacity" },
     { id: "provider-only", contextWindow: 123000 },
     { id: "unlisted", contextWindow: 234000 },
   ] };
@@ -35,13 +37,17 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
     ...DEFAULTS, admin: { port: 0 },
     providers: { chatgpt: provider, other: { type: "openai-compatible", url: "https://other.example.test", models: [{ id: "other-model", contextWindow: 800000 }] } },
     direct: [{ prefix: "gpt-", provider: "chatgpt" }, { prefix: "prefix-", provider: "chatgpt" }],
-    aliases: { sol: "gpt-6.1-sol" },
+    aliases: { sol: "gpt-6.1-sol", astra: "gpt-6-astra" },
     routes: {
+      "claude-opus-4-8": { provider: "chatgpt", model: "gpt-6-astra" },
+      "claude-opus-unknown": { provider: "chatgpt", model: "unknown-capacity" },
       "claude-opus-5": { provider: "chatgpt", model: "gpt-6.1-sol" },
       "claude-sonnet-5": { provider: "chatgpt", model: "gpt-6.1-sol", contextWindow: 600000 },
     },
     cli: { autoCompactWindow: 258400, extraModels: [
       { model: "gpt-6.1-sol", name: "Sol", contextWindow: 272000 },
+      { model: "gpt-6-astra", name: "Astra", contextWindow: 272000 },
+      { model: "unknown-capacity", name: "Unknown" },
       { model: "sol", name: "Alias", contextWindow: 272000 },
       { model: "prefix-only", name: "Prefix", contextWindow: 272000 },
       { model: "other-model", name: "Other", contextWindow: 700000 },
@@ -54,7 +60,11 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
     if (url.startsWith("https://registry.npmjs.org/")) return Response.json({ version: "1.0.0" });
     if (url.startsWith("https://codex.example.test/codex/models?")) {
       catalogueHits++;
-      return Response.json({ models: ["gpt-6.1-sol", "provider-only", "prefix-only"].map(slug => ({ slug, visibility: "list", context_window: 500000, effective_context_window_percent: 95 })) });
+      return Response.json({ models: [
+        ...["gpt-6.1-sol", "provider-only", "prefix-only"].map(slug => ({ slug, visibility: "list", context_window: 500000, effective_context_window_percent: 95 })),
+        // Shape and numbers from the local Codex cache, not an assumed Astra capacity.
+        { slug: "gpt-6-astra", visibility: "list", context_window: 272000, effective_context_window_percent: 95 },
+      ] });
     }
     assert.ok(url.startsWith("http://127.0.0.1:"), `unexpected network request: ${url}`);
     return nativeFetch(input, init);
@@ -65,7 +75,7 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
     config: () => cfg, configFile: path.join(home, "config.json"), log,
     stats: () => ({ inFlight: 0, messagesInFlight: 0, started: 0, completed: 0, failed: 0 }), health: () => 0, version: "test",
     requests: new RequestLog(path.join(home, "requests.jsonl")),
-    claudeModels: async () => [{ id: "claude-opus-5", name: "Opus", contextWindow: 1000000, line: "opus" }],
+    claudeModels: async () => ["claude-opus-5", "claude-opus-4-8", "claude-opus-unknown"].map(id => ({ id, name: "Opus", contextWindow: 1000000, line: "opus" })),
     chatgpt: () => ({ auth: {}, quota: {}, models: () => adapter.fetchModels() }),
   });
   t.after(() => admin.close());
@@ -78,6 +88,9 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
   const before = await readWindows();
   assert.equal(before.windows["gpt-6.1-sol"], 272000, "stored value before any catalogue read");
   assert.deepEqual(before.catalogWindows, {});
+  assert.deepEqual(before.resolvedWindows["claude-opus-4-8"], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 272000 }, "stored target window beats the native alias before a live catalogue read");
+  assert.equal(before.resolvedWindows["claude-opus-unknown"]?.contextWindow, null, "unknown routed capacity cannot inherit the native million");
+  assert.equal(before.resolvedWindows["unknown-capacity"]?.contextWindow, null, "global compaction is not a known model capacity");
 
   const listed = await adapter.fetchModels();
   assert.equal(listed?.find(model => model.id === "gpt-6.1-sol")?.contextWindow, 475000);
@@ -102,6 +115,10 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
   assert.equal(catalogueHits, 1, "the probe reuses the adapter's parsed cache");
 
   const after = await readWindows();
+  for (const id of ["gpt-6-astra", "astra", "claude-opus-4-8"]) {
+    assert.deepEqual(after.resolvedWindows[id], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 258400 });
+  }
+  assert.equal(after.resolvedWindows["claude-sonnet-5"]?.contextWindow, 600000, "resolved metadata keeps an explicit route override");
   for (const id of ["gpt-6.1-sol", "sol", "provider-only", "prefix-only", "claude-opus-5"]) {
     assert.equal(after.windows[id], 475000, id);
     assert.equal(after.catalogWindows[id], 475000, `${id} is catalogue-backed`);

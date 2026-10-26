@@ -254,6 +254,8 @@ test("hosted web search sends the measured Responses tool and extracts cited res
   }]);
   assert.deepEqual(outcome.hits, [{ title: "Node.js downloads", url: "https://nodejs.org/en/download/current" }]);
   assert.equal(outcome.text, "Node 24.21.0 is current.");
+  // The search spends the account's quota, so the tokens it read travel with the outcome.
+  assert.deepEqual(outcome.usage, { input: 100, cached: 0, output: 10 });
 });
 
 test("image generation sends the hosted tool with references and returns the decoded image", async () => {

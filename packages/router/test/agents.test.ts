@@ -247,6 +247,24 @@ test("uninstall refuses corrupt manifests and path traversal before removing any
   }
 });
 
+test("uninstall preserves all workers and its manifest when another installation's manifest is unreadable or invalid", t => {
+  const dir = tmp(); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, "ours.json");
+  const shared = path.join(dir, "theirs.json");
+  syncAgentFiles(cfgWith({ p: p(["owned"]) }), dir, undefined, { manifestPath: manifest });
+  const before = fs.readFileSync(path.join(dir, "owned.md"), "utf8");
+  for (const content of ["{broken", "null", JSON.stringify({ agents: ["owned", 7] }), JSON.stringify({ agents: ["../owned"] })]) {
+    fs.writeFileSync(shared, content);
+    assert.throws(() => removeGeneratedAgentFiles(dir, manifest, [shared]));
+    assert.equal(fs.readFileSync(path.join(dir, "owned.md"), "utf8"), before);
+    assert.equal(fs.existsSync(manifest), true);
+  }
+  fs.rmSync(shared);
+  fs.mkdirSync(shared);
+  assert.throws(() => removeGeneratedAgentFiles(dir, manifest, [shared]));
+  assert.equal(fs.existsSync(path.join(dir, "owned.md")), true);
+});
+
 test("agentNameFor maps everything outside [a-z0-9-] to a dash", () => {
   assert.equal(agentNameFor("deepseek-v4.1-flash"), "deepseek-v4-1-flash");
   assert.equal(agentNameFor("gpt-5.6/terra"), "gpt-5-6-terra");

@@ -33,7 +33,11 @@ export function providerExhaustion(status: number, body = "", retryMs?: number, 
   if (RELAY_UPSTREAM_FAILED.test(body)) return undefined;
   const balance = /\b(?:insufficient[_ -]+(?:balance|credits?|funds)|(?:balance|credits?)[_ -]+(?:insufficient|exhausted|depleted))\b/i.test(body);
   const billing = /\bbilling[_ -]+(?:hard[_ -]+)?(?:limit|exhausted|quota)|\b(?:exhausted|exceeded|insufficient)[_ -]+billing\b|\byour project has exceeded its monthly spending cap\b/i.test(body);
-  const quota = /\b(?:insufficient_quota|usage_limit_reached|quota[_ -]+exhausted|exhausted[_ -]+quota)\b/i.test(body);
+  // OpenCode Go answers a spent subscription window with `{"type":"error","error":{"type":
+  // "GoUsageLimitError","message":"Go usage limit exceeded"},"metadata":{"limitName":"weekly"}}`
+  // (#95, measured 2026-10-25). Its wording says "usage limit", not "rate limit", so the plan's own
+  // phrase is the subscription's quota; a limit counted per minute or hour is still a speed limit.
+  const quota = /\b(?:insufficient_quota|usage_limit_reached|quota[_ -]+exhausted|exhausted[_ -]+quota|go[_ -]*usage[_ -]*limit[_ -]*(?:error|exceeded)|usage[_ -]+limit[_ -]+exceeded(?!\s+(?:per|a|each|every)\s+(?:second|minute|hour)))\b/i.test(body);
   if (status !== 402 && !balance && !billing && !quota) return undefined;
   const reason = balance ? "insufficient_balance" : billing || status === 402 ? "billing_exhausted" : "quota_exhausted";
   const wait = retryMs !== undefined && Number.isFinite(retryMs) && retryMs > 0 ? retryMs : 30 * 60_000;

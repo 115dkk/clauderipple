@@ -8,7 +8,7 @@ registerHooks({ resolve(specifier, context, next) {
   const source = context.parentURL?.includes('/packages/mod/hooks/')
   return next(source && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/.test(specifier) ? `${specifier}.ts` : specifier, context)
 } })
-const { AUTO_DESCRIPTION, modelReason, withoutRouting, userSaid, readMarker, agentProvider, chatgptUsable,
+const { AUTO_DESCRIPTION, modelReason, ruleReason, withoutRouting, userSaid, readMarker, agentProvider, chatgptUsable,
   ladderPick, markerDomain, workerRule, routerModelOptions, zenJev, spawnModel, takesOver, claudeCandidates, allowed } = await import('../../packages/mod/hooks/workers.ts')
 const { agentModel, delegationPin, pinAllows, pinSaid, PIN_SAID_MAX, rivalProviders, userNamed } = await import('../../packages/mod/hooks/worker.ts')
 const candidates: WorkerCandidate[] = [
@@ -36,6 +36,12 @@ test('a model reason names its source and the user\'s quoted words; the worker n
   for (const prompt of ['no reason here', 'Model reason: guess "solo"']) assert.equal(modelReason(prompt), null)
   assert.equal(withoutRouting('[[ripple: opus@high]]\nModel reason: user "오푸스로 번역해"\nTranslate the strings.'), 'Translate the strings.')
   assert.equal(withoutRouting('[[ripple: standard ui]]\nFix the sheet.'), 'Fix the sheet.')
+})
+
+test('a rule reason needs a concrete file and a non-empty rule; an empty one names nothing', () => {
+  for (const text of ['memory/translation-pipeline-scope.md — 번역 초안은 Opus', 'rules/workers.md — UI copy runs on Astra', 'CLAUDE.md - always', 'docs/2026-10-12-worker-tiers.md — tiers', 'C:\\rules\\x.md — windows path', 'x/md: a path']) assert.equal(ruleReason(text), true, text)
+  // No file, no rule, or a bare word where the file belongs.
+  for (const text of ['', 'CLAUDE.md', 'rules/workers.md —', '— always', 'translation runs on Opus', 'docs file.md', 'CLAUDE.md.']) assert.equal(ruleReason(text), false, text)
 })
 
 test('a quote counts only when the user said it, whitespace and case aside, and is not a lone word', () => {

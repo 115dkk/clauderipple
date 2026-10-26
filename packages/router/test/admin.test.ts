@@ -10,6 +10,7 @@ import { Logger } from "../src/log.ts";
 import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
+import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
@@ -36,6 +37,7 @@ async function withAdmin(
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
     shutdown?: () => void;
+    instance?: NonNullable<AdminDeps["instance"]>;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
     startCliDetached?: (args: string[], log: string) => void;
     claudeOAuthFetch?: (url: string, init: RequestInit) => Promise<Response>;
@@ -45,6 +47,7 @@ async function withAdmin(
     measureFetch?: (url: string, init: RequestInit) => Promise<Response>;
     modelCatalog?: () => Promise<unknown>;
     modelScoresFetch?: typeof fetch;
+    configErrors?: NonNullable<AdminDeps["configErrors"]>;
     chatgpt?: NonNullable<AdminDeps["chatgpt"]>;
     google?: NonNullable<AdminDeps["google"]>;
     opencodeUsage?: NonNullable<AdminDeps["opencodeUsage"]>;
@@ -194,6 +197,50 @@ test("mod options and status expose runtime provider exhaustion and clear it on 
     assert.equal(recovered.providers[0]?.usable, true);
     assert.equal(recovered.providers[0]?.reason, undefined);
   }, { providerHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+});
+
+test("mod options leave an OpenCode Go provider out only while every key's plan is spent (#95)", async () => {
+  const cfg = makeCfg({ providers: {
+    go: {
+      type: "openai-compatible", preset: "opencode-go", url: "https://opencode.ai/zen/go/v1",
+      headers: { authorization: "Bearer hidden-default-key" },
+      credentials: [
+        { id: "key-a", headers: { authorization: "Bearer hidden-a" } },
+        { id: "key-b", headers: { authorization: "Bearer hidden-b" } },
+      ],
+      models: [{ id: "deepseek-v4.1-flash" }],
+    },
+  } });
+  const weekly = (percent: number, resetAt: number): OpenCodeWindow => ({ kind: "seven_day", used_percent: percent, window_minutes: 10080, reset_at: resetAt });
+  const soon = Math.round((Date.now() + 3_600_000) / 1000);
+  const later = Math.round((Date.now() + 7_200_000) / 1000);
+  // keyed by the credential id the router's own `/api/limits` read uses.
+  let windows: Record<string, OpenCodeWindow[]> = {};
+  await withAdmin(cfg, async ({ port }) => {
+    const go = async () => ((await (await fetch(`${base()}:${port}/api/mod-options`)).json()) as ModOptions).providers.find((p) => p.name === "go")!;
+    // One key still has room: rotation serves the work, so the provider stays in the ladder.
+    windows = { "key-a": [weekly(100, soon)], "key-b": [weekly(40, later)] };
+    assert.equal((await go()).usable, true);
+    assert.equal((await go()).reason, undefined);
+    // Every key is spent: the provider leaves the ladder until the first key's window resets.
+    windows = { "key-a": [weekly(100, soon), { kind: "five_hour", used_percent: 20, window_minutes: 300 }], "key-b": [weekly(100, later)] };
+    const out = await go();
+    assert.equal(out.usable, false);
+    assert.equal(out.reason, "quota_exhausted");
+    const back = out.exhaustedUntil ?? 0;
+    assert.ok(back > Date.now() && back <= Date.now() + 3_600_000 + 5_000, `key-a's weekly reset lifts it first (${back - Date.now()} ms)`);
+    // A spent five-hour window alone is just as final as the weekly one.
+    windows = { "key-a": [{ kind: "five_hour", used_percent: 100, window_minutes: 300, reset_at: soon }], "key-b": [weekly(100, later)] };
+    assert.equal((await go()).usable, false);
+    // A window whose reset already passed is no evidence: the next read will carry the new percent.
+    windows = { "key-a": [weekly(100, Math.round((Date.now() - 60_000) / 1000))], "key-b": [weekly(100, later)] };
+    assert.equal((await go()).usable, true);
+    // Unknown usage — an empty answer, or one key's read missing — keeps today's answer.
+    windows = {};
+    assert.equal((await go()).usable, true);
+    windows = { "key-a": [weekly(100, soon)] };
+    assert.equal((await go()).usable, true);
+  }, { opencodeUsage: async (_name: string, credentialId?: string) => windows[credentialId ?? ""] ?? [], modelScoresFetch: async () => new Response("{}") });
 });
 
 test("mod options count a stored Claude account as signed in when Claude Code's own login is not seen", async () => {
@@ -796,6 +843,22 @@ test("/readyz separates readiness from liveness and names each problem", async (
     const status = (await (await fetch(`${base()}:${port}/api/status`)).json()) as { readiness: { ready: boolean; problems: string[] } };
     assert.deepEqual(status.readiness, body);
   });
+});
+
+// G-D14: the first read adopts an invalid config so the router can serve the fix, but that is not
+// a healthy router: readiness said "ready" over a config whose routes could not exist.
+test("a config that failed validation is reported as a problem, with its errors", async () => {
+  const errors = ["route x: fallback 0 names unknown provider \"q\""];
+  await withAdmin(makeCfg(), async ({ port }) => {
+    const status = (await (await fetch(`${base()}:${port}/api/status`)).json()) as {
+      readiness: { ready: boolean; problems: string[] }; config: { errors: string[] };
+    };
+    assert.equal(status.readiness.ready, false);
+    assert.ok(status.readiness.problems.includes("config"), status.readiness.problems.join(","));
+    assert.deepEqual(status.config.errors, errors);
+    const ready = await fetch(`${base()}:${port}/readyz`);
+    assert.equal(ready.status, 503);
+  }, { configErrors: () => errors });
 });
 
 test("GET /api/status returns a snapshot", async () => {
@@ -1536,7 +1599,7 @@ test("GET /api/requests filters newest records and returns a summary", async () 
       assert.deepEqual((await list.json() as { requests: { id: string }[] }).requests.map((r) => r.id), ["older"]);
       const summary = await fetch(`${base()}:${extra.port}/api/requests/summary?since=3600`);
       const body = await summary.json() as { total: { count: number; ok: number; failed: number; cached: number } };
-      assert.deepEqual(body.total, { count: 2, ok: 1, failed: 1, input: 20, cached: 80, cacheWrite: 0, output: 7, cacheHitPercent: 80, avgMs: 200 });
+      assert.deepEqual(body.total, { count: 2, ok: 1, failed: 1, input: 20, cached: 80, cacheWrite: 0, output: 7, cacheHitPercent: 80, avgMs: 200, conversationTokens: 107, ungroupedRequests: 1 });
     } finally {
       extra.close();
     }
@@ -1696,6 +1759,50 @@ test("POST /api/shutdown reports 501 when the router supplied no drain hook", as
     const res = await fetch(`${base()}:${port}/api/shutdown`, { method: "POST" });
     assert.equal(res.status, 501);
   });
+});
+
+test("POST /api/shutdown refuses another installation's id, accepts its own and an older CLI", async () => {
+  let called = 0;
+  const ours = "a".repeat(32);
+  await withAdmin(
+    makeCfg(),
+    async ({ port, home }) => {
+      // A file rewritten while the process runs must not change what this process is.
+      fs.writeFileSync(path.join(home, "installation-id"), `${"d".repeat(32)}\n`, { mode: 0o600 });
+      const post = (id?: string) => fetch(`${base()}:${port}/api/shutdown`, { method: "POST", ...(id ? { headers: { "x-clauderipple-install-id": id } } : {}) });
+
+      const foreign = await post("b".repeat(32));
+      assert.equal(foreign.status, 409);
+      assert.equal(called, 0, "another installation's request never drains this router");
+      const disk = await post("d".repeat(32));
+      assert.equal(disk.status, 409, "the id captured at start, not the file on disk, decides");
+
+      const own = await post(ours);
+      assert.equal(own.status, 202);
+      assert.equal(called, 1);
+
+      // A CLI from before the id existed sends no header; it keeps working as it did.
+      const legacy = await post();
+      assert.equal(legacy.status, 202);
+      assert.equal(called, 2);
+    },
+    { shutdown: () => void called++, instance: { installId: ours, pid: 4242 } },
+  );
+});
+
+test("status reports the identity this process captured at start", async () => {
+  const ctx = { installId: "c".repeat(32), pid: 5150 };
+  await withAdmin(makeCfg(), async ({ port, home }) => {
+    const read = async () => (await (await fetch(`${base()}:${port}/api/status`)).json()) as { installId?: unknown; pid?: unknown };
+    const before = await read();
+    assert.equal(before.installId, ctx.installId);
+    assert.equal(before.pid, ctx.pid);
+    // The file changing later is not this process's identity.
+    fs.writeFileSync(path.join(home, "installation-id"), `${"e".repeat(32)}\n`, { mode: 0o600 });
+    const after = await read();
+    assert.equal(after.installId, ctx.installId);
+    assert.equal(after.pid, ctx.pid);
+  }, { instance: ctx });
 });
 
 test("admin rejects rebinding Hosts and foreign write Origins but accepts dashboard and tray requests", async () => {
@@ -2706,6 +2813,94 @@ test("measureUnsettledModels: discovers effort for a ladderless provider's unset
     assert.deepEqual(onDisk?.providers.kimi?.models?.[1]?.effortLevels, [], "a settled model is left as it was");
     assert.deepEqual(onDisk?.providers.groq?.models?.[0]?.effortLevels, [], "a field the endpoint ignores is no effort");
     assert.deepEqual([...asked].sort(), ["kimi-k3", "llama-4"], "not the settled model, DeepSeek or the pass-through relay");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Ollama states a model's thinking levels and context length in its own `/api/show`. Its
+// OpenAI-compatible surface reports ids alone and ignores an unknown `reasoning_effort`, which a
+// probe measured as "no effort" — an empty ladder that then looked settled (Discord, 0.12.14).
+test("an Ollama model's effort and context come from /api/show, and an empty ladder is filled", async () => {
+  const cfg = makeCfg({
+    providers: {
+      "ollama-cloud": {
+        type: "openai-compatible",
+        url: "https://ollama.com/v1",
+        headers: { authorization: "Bearer key" },
+        caps: { reasoning: "none", effortLevels: [] },
+        models: [
+          { id: "gpt-oss:120b", name: "GPT-OSS 120B", effortLevels: [] },
+          { id: "qwen3:235b", name: "Qwen3 235B", effortLevels: ["low"] },
+        ],
+      },
+    },
+  });
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  const measureFetch = async (url: string, init: RequestInit): Promise<Response> => {
+    const body = init.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    calls.push({ url, body });
+    if (!url.endsWith("/api/show")) return new Response("{}", { status: 200 });
+    return new Response(JSON.stringify(body.model === "gpt-oss:120b"
+      ? { thinking: { values: ["low", "medium", "high"] }, model_info: { "gptoss.context_length": 1048576 } }
+      : { model_info: { "qwen3.context_length": 262144 } }), { status: 200 });
+  };
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "ollama-cloud", models: ["gpt-oss:120b", "qwen3:235b"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    assert.deepEqual(calls.filter((c) => c.url === "https://ollama.com/api/show").map((c) => c.body.model), ["gpt-oss:120b", "qwen3:235b"]);
+    assert.equal(calls.some((c) => "reasoning_effort" in c.body), false, "no ladder probing: the vendor states it");
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers["ollama-cloud"]!.models!;
+    assert.deepEqual(models.find((m) => m.id === "gpt-oss:120b")?.effortLevels, ["low", "medium", "high"], "an empty ladder is a blank on Ollama");
+    assert.equal(models.find((m) => m.id === "gpt-oss:120b")?.contextWindow, 1048576);
+    assert.deepEqual(models.find((m) => m.id === "qwen3:235b")?.effortLevels, ["low"], "a ladder someone set stands");
+    assert.equal(models.find((m) => m.id === "qwen3:235b")?.contextWindow, 262144);
+  }, { measureFetch });
+});
+
+test("measureUnsettledModels re-measures Ollama's empty ladders, and leaves an empty one elsewhere", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ollama-"));
+  try {
+    const cfg = makeCfg({
+      providers: {
+        ollama: {
+          type: "openai-compatible",
+          url: "http://127.0.0.1:11434/v1",
+          preset: "ollama",
+          caps: { reasoning: "none", effortLevels: [] },
+          models: [{ id: "llama3.3" }, { id: "qwen3", effortLevels: [] }, { id: "settled", effortLevels: ["low"] }],
+        },
+        // Same empty ladder, but not Ollama: there an empty ladder is a decision and stands.
+        groq: { type: "openai-compatible", url: "http://127.0.0.1:9/v1", wire: "chat", caps: { reasoning: "none", effortLevels: [] }, models: [{ id: "llama-4", effortLevels: [] }, { id: "blank" }] },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const asked: string[] = [];
+    const measureFetch = async (url: string, init: RequestInit): Promise<Response> => {
+      const model = (JSON.parse(String(init.body)) as { model: string }).model;
+      asked.push(model);
+      if (!url.endsWith("/api/show")) return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ thinking: { values: ["low", "high"] }, model_info: { "qwen3.context_length": 131072 } }), { status: 200 });
+    };
+    const deps = { config: () => cfg, configFile, log: new Logger(null, 1_000_000, 1, false), measureFetch } as unknown as AdminDeps;
+    assert.equal(measureUnsettledModels(deps), 2, "the Ollama provider and the ladderless one");
+    let onDisk: Config | undefined;
+    const models = () => onDisk?.providers.ollama?.models ?? [];
+    for (let i = 0; i < 200 && !(models().find((m) => m.id === "llama3.3")?.effortLevels?.length && models().find((m) => m.id === "qwen3")?.contextWindow); i++) {
+      await new Promise((resolveP) => setTimeout(resolveP, 5));
+      onDisk = JSON.parse(fs.readFileSync(configFile, "utf8")) as Config;
+    }
+    assert.deepEqual(models().find((m) => m.id === "llama3.3")?.effortLevels, ["low", "high"], "an unset ladder is stated now");
+    assert.deepEqual(models().find((m) => m.id === "qwen3")?.effortLevels, ["low", "high"], "the empty ladder is replaced");
+    assert.equal(models().find((m) => m.id === "qwen3")?.contextWindow, 131072);
+    assert.deepEqual(models().find((m) => m.id === "settled")?.effortLevels, ["low"], "a ladder someone set stands");
+    assert.deepEqual(onDisk?.providers.groq?.models?.[0]?.effortLevels, [], "an empty ladder elsewhere is still a decision");
+    assert.ok(!asked.includes("settled"), `a settled model is not measured: ${JSON.stringify(asked)}`);
+    assert.ok(!asked.includes("llama-4"), `a non-Ollama empty ladder is not measured: ${JSON.stringify(asked)}`);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }

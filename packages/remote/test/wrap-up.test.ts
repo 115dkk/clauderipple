@@ -113,13 +113,26 @@ test("a blocked question raises an attention the phone clears by opening the ses
   assert.equal(f.listed().attention, null, "a later poll does not raise the same question again");
 });
 
-test("an ask that is not blocked pushes the question but leaves no attention", async t => {
+test("a desktop-only turn clears stale question attention when work restarts and marks its new finish", async t => {
+  const f = fixture(t, { tail: [wrapUp({ ask: "Continue?", blocked: true }), done] });
+  await f.poll();
+  f.advance(); f.setStatus("idle"); await f.poll();
+  assert.equal(f.listed().attention?.reason, "question");
+  f.write([spoken("next", "Continue")]);
+  f.advance(); f.setStatus("busy"); await f.poll();
+  assert.equal(f.listed().attention, null, "a question from a previous turn is not still pending");
+  f.write([answer, done]);
+  f.advance(); f.setStatus("idle"); await f.poll();
+  assert.equal(f.listed().attention?.reason, "finished", "unopened desktop sessions use the same transition contract");
+});
+
+test("an ask that is not blocked pushes the question but only marks finished output", async t => {
   const f = fixture(t, { tail: [wrapUp({ recap: "Two options.", ask: "Which one first?" }), done] });
   await f.poll();
   f.advance(); f.setStatus("idle");
   await f.poll();
   assert.deepEqual(f.alerts.map(a => a.body), [{ kind: "question", ask: "Which one first?", blocked: false }]);
-  assert.equal(f.listed().attention, null);
+  assert.equal(f.listed().attention?.reason, "finished");
 });
 
 test("the status line is the recap's first sentence, and the list is sent only when it changes", async t => {

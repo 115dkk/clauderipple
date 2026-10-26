@@ -4,6 +4,33 @@ import { OpenAiStreamMapper, toOpenAiRequest, type ChatRequest, type ResponsesRe
 import { toolNameForResponses, toolNameRestoreMap, type AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import { promptAdditions } from "../src/identity.ts";
+import { SseParser } from "../src/providers/chatgpt/sse.ts";
+
+test("the SSE terminal preserves preceding usage and ignores trailing frames across every chunk boundary", () => {
+  const usage = { choices: [], usage: { prompt_tokens: 40, completion_tokens: 5 } };
+  const source = `data: ${JSON.stringify(usage)}\r\n\r\ndata: [DONE]\r\n\r\ndata: {"error":{"message":"late"}}\n\n`;
+  for (let split = 0; split <= source.length; split++) {
+    const parser = new SseParser();
+    const events = [...parser.feed(source.slice(0, split)), ...parser.feed(source.slice(split))];
+    assert.deepEqual(events, [usage]);
+    assert.equal(parser.sawDone, true);
+    assert.deepEqual(parser.feed('data: {"error":{"message":"later"}}\n\n'), []);
+  }
+});
+
+for (const type of ["response.completed", "response.incomplete"]) {
+  test(`${type} finishes once with usage and ignores subsequent errors`, () => {
+    const mapper = new OpenAiStreamMapper("test");
+    const events = mapper.feed({ type, response: { usage: { input_tokens: 4, output_tokens: 2 }, ...(type === "response.incomplete" ? { incomplete_details: { reason: "max_output_tokens" } } : {}) } }, "responses");
+    assert.equal(mapper.isFinished, true);
+    assert.equal(events.filter((event) => event.event === "message_stop").length, 1);
+    assert.deepEqual(mapper.finish(), []);
+    assert.deepEqual(mapper.feed({ error: { message: "late", code: "server_is_overloaded" } }, "responses"), []);
+    assert.equal(mapper.failure, undefined);
+    assert.equal(mapper.stopReason, type === "response.completed" ? "end_turn" : "max_tokens");
+    assert.equal(mapper.usage.output_tokens, 2);
+  });
+}
 
 /** The signature this router puts on a Chat reasoning block, as its own adapter would write it. */
 function CHAT_SIG(field: "reasoning_content" | "reasoning", model = "x", provider = ""): string {
@@ -639,12 +666,13 @@ test("Chat interleaved parallel call fragments emit one complete block per index
 test("token-limited tool calls finish as max_tokens on both OpenAI wires", () => {
   for (const wire of ["chat", "responses"] as const) {
     const mapper = new OpenAiStreamMapper("test");
-    if (wire === "chat") mapper.feed({ choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "Read", arguments: '{"path":' } }] }, finish_reason: "length" }] }, wire);
+    const events = [];
+    if (wire === "chat") events.push(...mapper.feed({ choices: [{ delta: { tool_calls: [{ index: 0, id: "a", function: { name: "Read", arguments: '{"path":' } }] }, finish_reason: "length" }] }, wire));
     else {
-      mapper.feed({ type: "response.output_item.added", item: { type: "function_call", id: "a", name: "Read" } }, wire);
-      mapper.feed({ type: "response.incomplete", response: { incomplete_details: { reason: "max_output_tokens" } } }, wire);
+      events.push(...mapper.feed({ type: "response.output_item.added", item: { type: "function_call", id: "a", name: "Read" } }, wire));
+      events.push(...mapper.feed({ type: "response.incomplete", response: { incomplete_details: { reason: "max_output_tokens" } } }, wire));
     }
-    const events = mapper.finish();
+    events.push(...mapper.finish());
     assert.equal((events.find((event) => event.event === "message_delta")!.data.delta as { stop_reason: string }).stop_reason, "max_tokens");
     assert.equal(mapper.message().stop_reason, "max_tokens");
   }

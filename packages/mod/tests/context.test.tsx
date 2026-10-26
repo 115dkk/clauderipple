@@ -140,7 +140,7 @@ test('the Context pane draws the breakdown on the terminal and the desktop, in e
       expect(svgs.some(s => s.props?.alt === (L ? '컨텍스트 구성 46%' : 'Context breakdown 46%')), c.id).toBe(true)
       for (const s of svgs) {
         expect(s.props?.isInteractive, c.id).toBeFalsy()
-        expect(Number(s.props?.width) <= SVG_MAX_PX && Number(s.props?.height) <= SVG_MAX_PX, c.id).toBe(true)
+        expect(Number(s.props?.width) <= SVG_MAX_PX && Number(s.props?.height ?? 0) <= SVG_MAX_PX, c.id).toBe(true)
       }
       // Every press a blank one laid over our own drawing: no host Button paints our words.
       walk(tree, n => { if (n.type === 'Button') expect(String(n.props?.label ?? '').trim(), c.id + ' ' + String(n.props?.key)).toBe('') })
@@ -235,6 +235,8 @@ test('register.tsx draws the pane from the session\'s summary breakdown and coun
     const breakdown = e.breakdown === 'full' ? { ...BREAKDOWN, totalTokens: 81_300 } : BREAKDOWN
     return { value: { startedAt: NOW, context: { window: 200_000, ...(e.breakdown ? { breakdown } : {}) }, rateLimits: [] } }
   })
+  // The precise count's key names the model it counted (register.tsx countContext).
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.close', () => ({ value: undefined }))

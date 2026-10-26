@@ -68,30 +68,39 @@ test("Auto mode classifier overrides only its own system request and ignores con
 });
 
 test("Auto mode classifier sends only the first stage to its stage-1 target", () => {
-  // Shapes as CLI 2.1.310 builds them: n is the same thinking allowance on every stage.
-  const n = 0;
+  // Shapes as CLI 2.1.310 builds them. n is the thinking allowance added to every stage: 2048 when the
+  // classifier model rejects disabled thinking, 0 otherwise. So a first stage asks for 64 or 2112
+  // tokens and a second stage for 8192 or 10240.
   const system = "You are a security monitor for autonomous AI coding agents.\n\nEvaluate the action.";
   const classifier = (shape: Record<string, unknown>) => ({ system, ...body("<transcript>…</transcript> Err on the side of blocking."), ...shape });
-  const stage1 = classifier({ max_tokens: 64 + n, stop_sequences: ["</block>"] });
-  const stage2 = classifier({ max_tokens: 8192 + n });
-  const fast = classifier({ max_tokens: 256 + n });
-  const severity = classifier({ max_tokens: 64 + n, stop_sequences: ["</severity>"] });
   const configured: Config = {
     ...cfg,
     providers: { ...cfg.providers, cls: { type: "anthropic", auth: "claude-code", accountPool: true } },
     autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "high", stage1: { provider: "cls", model: "claude-sonnet-5-5" } },
   };
 
-  const first = resolve("claude-haiku-5-5", stage1, configured)!;
-  assert.deepEqual([first.provider, first.model, first.effort], ["cls", "claude-sonnet-5-5", undefined]);
-  assert.match(first.tag, /\(auto-mode classifier, stage 1\)$/);
-  for (const [name, request] of [["second stage", stage2], ["fast mode, where yes blocks", fast], ["severity score", severity]] as const) {
-    const r = resolve("claude-haiku-5-5", request, configured)!;
-    assert.deepEqual([r.provider, r.model, r.effort], ["chatgpt", "gpt-6-luna", "high"], name);
-    assert.match(r.tag, /\(auto-mode classifier\)$/, name);
+  for (const n of [0, 2048]) {
+    const stage1 = classifier({ max_tokens: 64 + n, stop_sequences: ["</block>"] });
+    const stage2 = classifier({ max_tokens: 8192 + n });
+    const fast = classifier({ max_tokens: 256 + n });
+    const severity = classifier({ max_tokens: 64 + n, stop_sequences: ["</severity>"] });
+    const first = resolve("claude-haiku-5-5", stage1, configured)!;
+    assert.deepEqual([first.provider, first.model, first.effort], ["cls", "claude-sonnet-5-5", undefined], `first stage, n = ${n}`);
+    assert.match(first.tag, /\(auto-mode classifier, stage 1\)$/);
+    for (const [name, request] of [["second stage", stage2], ["fast mode, where yes blocks", fast], ["severity score", severity]] as const) {
+      const r = resolve("claude-haiku-5-5", request, configured)!;
+      assert.deepEqual([r.provider, r.model, r.effort], ["chatgpt", "gpt-6-luna", "high"], `${name}, n = ${n}`);
+      assert.match(r.tag, /\(auto-mode classifier\)$/, name);
+    }
   }
+  // 8192 is a second stage's budget with no allowance, above every first stage 2.1.310 sends. A request
+  // with `</block>` that asks for that much is not a shape this release builds, so it goes with the rest:
+  // a first stage misread this way only takes longer, while a full verdict misread as a first stage
+  // would land on the quick target.
   assert.equal(resolve("claude-haiku-5-5", classifier({ max_tokens: 8192, stop_sequences: ["</block>"] }), configured)!.model, "gpt-6-luna", "a second-stage budget never counts as a first stage");
+  assert.equal(resolve("claude-haiku-5-5", classifier({ max_tokens: 64 + 8192, stop_sequences: ["</block>"] }), configured)!.model, "gpt-6-luna", "an allowance this large sends the first stage with the rest");
   assert.equal(resolve("claude-haiku-5-5", classifier({ max_tokens: 64, stop_sequences: ["</block>", "</reason>"] }), configured)!.model, "gpt-6-luna", "only the exact stop list matches");
+  const stage1 = classifier({ max_tokens: 64, stop_sequences: ["</block>"] });
   assert.equal(resolve("claude-haiku-5-5", { ...stage1, tools: [{ name: "Bash" }] }, configured), null, "a tool-using turn is never a classifier");
 
   const single: Config = { ...configured, autoModeClassifier: { provider: "chatgpt", model: "gpt-6-luna", effort: "high" } };

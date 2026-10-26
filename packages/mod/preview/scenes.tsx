@@ -13,6 +13,7 @@ import { renderContext } from '../hooks/ui/context'
 import type { ContextView } from '../hooks/ui/context'
 import { renderPhoneQueue } from '../hooks/ui/queue'
 import { renderLog } from '../hooks/ui/log'
+import { renderLimits } from '../hooks/ui/limits'
 import { renderSettings } from '../hooks/ui/settings'
 import { renderSetup } from '../hooks/ui/setup'
 import type { AgentEntry, AlertView, DashboardView, Frame, SettingsView } from '../hooks/ui/view'
@@ -89,7 +90,7 @@ const AGENTS: AgentRec[] = [
   {
     id: 'd1', description: 'deepseek-v4.1-flash·low · 테스트 실패 원인 조사', type: 'deepseek-v4-1-flash', model: 'deepseek-v4.1-flash@low', provider: 'deepseek',
     pick: { domain: 'test', level: 'light', effort: 'low', why: '로그 한 군데만 보면 되는 조사', target: { agent: 'deepseek-v4-1-flash' }, by: 'marker', rung: 'light', ms: 0 },
-    state: 'waiting', now: 'Bash npm test -- --runInBand', toolSince: NOW - 41_000, startedAt: NOW - 95_000, cost: 0,
+    state: 'running', now: 'Bash npm test -- --runInBand', toolSince: NOW - 41_000, startedAt: NOW - 95_000, cost: 0,
     effort: 'low', answeredBy: 'deepseek-v4.1-flash', usage: { input: 900, cached: 41_000, cacheWrite: 2100, output: 3100 }, tools: 9,
   },
   {
@@ -308,6 +309,12 @@ const SCENES: Scene[] = [
   { name: 'band-limits-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-70', columns: 70, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
+  // The limits pane the row opens (2026-10-25): every window's share, and when it resets — the time
+  // left while it is close, else a weekday and the clock.
+  { name: 'limits-pane', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS }) },
+  { name: 'limits-pane-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS }) },
+  { name: 'limits-pane-all', columns: 100, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ALL }) },
+  { name: 'limits-pane-none', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: [] }) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
   // two real widths. Narrow, the scoped windows go first, then a later provider's group.
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
@@ -322,7 +329,8 @@ const SCENES: Scene[] = [
   { name: 'alert-swamp', draw: alert({ kind: 'swamp', percent: 63, tokens: 126_000 }) },
   { name: 'alert-hot', draw: alert({ kind: 'hot', limitKind: 'five_hour', percent: 86, resetsAt: '2026-10-12T15:40:00', save: false }) },
   { name: 'alert-judge', draw: alert({ kind: 'judgeDown', judge: 'jev', reason: 'key rejected (401)' }) },
-  { name: 'alert-compact', draw: alert({ kind: 'compactNote', draft: '' }) },
+  { name: 'alert-compact', draw: alert({ kind: 'compactNote', draft: '', tidy: true }) },
+  { name: 'alert-tidying', draw: alert({ kind: 'result', stage: 'tidying' }) },
   { name: 'alert-handing', draw: alert({ kind: 'result', stage: 'handingOff' }) },
   { name: 'alert-handed', draw: alert({ kind: 'result', stage: 'handoffDone', detail: '새 대화를 열고 입력창에 인수인계 내용을 넣었습니다. 새 대화에서 Enter를 누르면 이어갑니다.' }) },
   { name: 'alert-compacted', draw: alert({ kind: 'result', stage: 'compacted' }) },
