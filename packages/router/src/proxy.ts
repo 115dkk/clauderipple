@@ -43,7 +43,8 @@ import { conversationKey, type AnthropicRequest } from "./providers/chatgpt/tran
 import { adminPort, providerFor, searchProviderFor, terminateHosts } from "./config.ts";
 import type { CertStore } from "./certs.ts";
 import { chatPickerModels, injectPickerModels, isBootstrapPath } from "./picker.ts";
-import { effortLevels, effortLevelsForModel } from "./admin.ts";
+import { effortLevelsForModel } from "./admin.ts";
+import { effortLevels, isTargetProvider, runsServerTools } from "./targets.ts";
 import { requestConversationKey, ResponseUsageTap, requestId, type RequestLog, type RequestRecord, type RequestUsage } from "./requestlog.ts";
 import { credentialHeaderValues, redactErrorText, redactHeaders } from "./redact.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -1023,7 +1024,7 @@ export class Proxy {
       //
       // Say so in the shape the CLI prints. A search that fails visibly can be retried by a human;
       // one that returns prose shaped like an answer cannot.
-      if (search && route && json && !this.canRunServerTools(route.provider, cfg)) {
+      if (search && route && json && !runsServerTools(cfg, route.provider)) {
         // A ChatGPT provider has a search of its own — the backend `webSearch` names — so a search
         // routed there is served by it, not refused. Requiring `webSearch` as well refused every
         // search of a `smallFast` slot pointed at Luna while the Clients screen called that provider
@@ -1222,7 +1223,7 @@ export class Proxy {
             return;
           }
           if (provider.type === "anthropic") {
-            if (!provider.accountPool || provider.auth !== "claude-code") {
+            if (!isTargetProvider(provider)) {
               finish("400", 0, "native Anthropic provider is available through OpenAI ingress only", false);
               res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { type: "invalid_request_error", message: "native Anthropic provider is available through OpenAI ingress only" } }));
               return;
@@ -1797,7 +1798,7 @@ export class Proxy {
       // Refuse before sending rather than after. A provider that cannot run the server tool is sent
       // "perform a web search" with no tool attached, and a model told to search with nothing to
       // search with narrates a tool call instead — an answer shaped like success, holding nothing.
-      if (!searchVia && !this.canRunServerTools(settings.provider, this.deps.config())) {
+      if (!searchVia && !runsServerTools(this.deps.config(), settings.provider)) {
         this.deps.log.warn(`web search: provider ${settings.provider} does not run server tools; leaving the request alone`);
         return false;
       }
@@ -1838,22 +1839,6 @@ export class Proxy {
     res.writeHead(200, headers).end(payload);
     finish("200", Buffer.byteLength(payload), `web search via ${settings.provider}`, false, usage ? { usage } : undefined);
     return true;
-  }
-
-  /**
-   * Whether this provider executes Anthropic's server-side tools (`web_search`) itself, rather than
-   * having them dropped on the way out. Only an anthropic-compatible provider whose preset or caps
-   * say so, measured per provider — `serverTools` in compat.ts. Two routes to the same vendor can
-   * differ: DeepSeek's own endpoint runs it, the same model through OpenCode Go does not.
-   */
-  private canRunServerTools(name: string, cfg: Config): boolean {
-    const provider = cfg.providers[name];
-    // A routed native account still calls Anthropic's Messages API unchanged, so Anthropic executes
-    // its own server tools. Only translated/compatible providers need an explicit measured capability.
-    if (provider?.type === "anthropic") return provider.accountPool === true && provider.auth === "claude-code";
-    if (!provider || provider.type !== "anthropic-compatible") return false;
-    const preset = provider.preset ? PRESETS.find((entry) => entry.id === provider.preset) : undefined;
-    return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).serverTools;
   }
 
   /**
@@ -1903,7 +1888,7 @@ export class Proxy {
     if (!configured) return false;
     const provider = providerFor(configured, target.model);
     if (provider.type === "anthropic") {
-      if (!provider.accountPool || provider.auth !== "claude-code") return false;
+      if (!isTargetProvider(provider)) return false;
       const accounts = this.claudeAccounts.peekCredentials();
       return accounts.length > 0 && this.pool.hasUsable(target.provider, accounts);
     }

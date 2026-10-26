@@ -30,6 +30,15 @@ and `decide` returns the route, carrying that `kind` and the model the client
 adapters read `kind` through `promptAdditions` (identity.ts) to know what they may
 add to the system prompt.
 
+What a provider can do is answered in one module, `targets.ts`: whether it can take
+routed requests at all (`isTargetProvider`, `ingressOnly`), who declares a model id
+(`declaredBy`, `qualifiedModel`), which efforts it takes (`effortLevels`), and
+whether it runs web search (`runsServerTools`, `answersWebSearch`). The router's
+callers (routing, validation, the proxy, agent files, model scores, the admin
+status) ask it instead of spelling the rule themselves. The dashboard keeps one
+copy of `isTargetProvider` for providers not saved yet, and `ui-targets.test.ts`
+holds that copy to the router's.
+
 Why this path is stable:
 
 - Anthropic's [corporate proxy docs](https://code.claude.com/docs/en/corporate-proxy)
@@ -1274,7 +1283,11 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   same flow); they are not an Anthropic guarantee, and reuse of one or multiple
   subscriptions is subject to Anthropic's terms and possible account restrictions.
 - A native `anthropic` provider remains OpenAI-ingress-only unless it explicitly
-  sets `accountPool: true`. With that flag and `auth: "claude-code"`, Claude
+  sets `accountPool: true` with `auth: "claude-code"` (`isTargetProvider`). The
+  config refuses one as a fallback or a classifier target; as a primary route or a
+  direct rule it is accepted, ignored at routing time (the request passes through),
+  and reported: the config save answers with a warning per such rule, and the
+  router logs it when it reads the config (`targetWarnings`). With the pool, Claude
   Desktop/Code Messages requests stay unmodified except for the routed model and
   selected identity. The runtime pool is ordered current observed/env/Claude Code
   login first, then ClaudeRipple-owned accounts. When none of them is usable, a
