@@ -255,8 +255,10 @@ function uuidFrom(text: string): string {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-/** The list-level state the host keeps outside any session's log: who wants a look, and what is archived. */
-export interface ListState { attention: Record<string, Attention>; archived: string[] }
+/** The list-level state the host keeps outside any session's log: who wants a look, what is archived,
+ * and up to which activity the phone has read each session (the app's unread dot is its own file,
+ * which the host only reads — so the phone's reading is remembered here). */
+export interface ListState { attention: Record<string, Attention>; archived: string[]; readAt: Record<string, number> }
 
 /**
  * The attention a state change should leave behind, or null when it should leave none.
@@ -306,9 +308,11 @@ export class Sessions {
   private handingOff = new Map<string, { messages: SdkUserMessage[] }>();
   private shuttingDown = false;
   private file: string;
-  /** Attention per session id, and archived session ids; kept outside the logs so both survive a restart. */
+  /** Attention per session id, archived session ids, and the activity each phone read up to; kept
+   * outside the logs so all three survive a restart. */
   private attention = new Map<string, Attention>();
   private archived = new Set<string>();
+  private readAt = new Map<string, number>();
   private listFile: string;
   private now: () => number;
   private receipts: MessageReceipts;
@@ -451,6 +455,7 @@ export class Sessions {
     const listState = readJson<ListState>(this.listFile);
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
     for (const id of listState?.archived ?? []) this.archived.add(id);
+    for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
     this.sidebar = opts.desktopSidebar ? new DesktopSidebar({ ...opts.desktopSidebar, now: this.now,
       onError: error => (opts.log ?? console.error)(`[desktop sidebar] ${error instanceof Error ? error.message : String(error)}`),
     }) : null;
@@ -505,7 +510,15 @@ export class Sessions {
       const status = this.statusLine(s.id);
       return { ...s, ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.sendQueue.summary(s.id) };
     })];
-    return this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
+    const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
+    // A session the list no longer holds keeps no read record (this map must not outgrow the list).
+    const present = new Set(listed.map(s => s.id));
+    let pruned = false;
+    for (const id of [...this.readAt.keys()]) if (!present.has(id)) { this.readAt.delete(id); pruned = true; }
+    if (pruned) this.saveListState();
+    // Reading on the phone clears the Mac app's unread dot: a look after the last activity outranks
+    // the app's late-written unread set (sidebar.ts:98). Newer activity outruns the record again.
+    return listed.map(s => s.unread && (this.readAt.get(s.id) ?? 0) >= s.updatedAt ? { ...s, unread: false } : s);
   }
 
   groups(): string[] | undefined {
@@ -823,22 +836,32 @@ export class Sessions {
   }
 
   /** The phone is looking at this session: clear its attention — except a permission request, which
-   * only clears when the approval is answered. Reports whether anything changed. */
+   * only clears when the approval is answered — and remember that the phone read up to the session's
+   * current activity, so the app's unread dot does not outlive the look (server.ts only forwards a
+   * seen from a visibly focused phone, so a background one cannot mark anything read).
+   * Reports whether anything the phone sees changed. */
   markSeen(id: string): boolean {
+    let changed = false;
     const current = this.attention.get(id);
-    if (!current || current.reason === "permission") return false;
-    this.attention.delete(id);
-    this.saveListState();
-    this.opts.onSessions();
-    return true;
+    if (current && current.reason !== "permission") { this.attention.delete(id); changed = true; }
+    // Only a row the list still shows as unread needs a record: once read up to its activity, the
+    // earlier timestamp stands, so a presence ping that changes nothing never rewrites list-state.json.
+    const activity = this.sidebar?.unreadActivity(this.records.get(id)?.sdkSessionId ?? id);
+    if (activity !== undefined && activity > (this.readAt.get(id) ?? 0)) {
+      this.readAt.set(id, Math.max(this.now(), activity)); changed = true;
+    }
+    if (changed) { this.saveListState(); this.opts.onSessions(); }
+    return changed;
   }
 
-  /** "Mark unread": put the attention back, guessed from what the session is doing now. */
+  /** "Mark unread": put the attention back, guessed from what the session is doing now, and forget
+   * what the phone had read so the app's unread dot can show again. */
   markUnread(id: string): Attention {
     const s = this.list().find(x => x.id === id);
     if (!s) throw new Error("no such session");
     const reason: AttentionReason = s.pending > 0 || s.state === "waiting" ? "permission" : s.state === "error" ? "failed" : "finished";
     const attention: Attention = { reason, at: this.now() };
+    if (this.readAt.delete(id)) this.saveListState();
     this.setAttention(id, attention);
     this.opts.onSessions();
     return attention;
@@ -1014,7 +1037,7 @@ export class Sessions {
   }
 
   private saveListState(): void {
-    writeFileAtomic(this.listFile, JSON.stringify({ attention: Object.fromEntries(this.attention), archived: [...this.archived] } satisfies ListState));
+    writeFileAtomic(this.listFile, JSON.stringify({ attention: Object.fromEntries(this.attention), archived: [...this.archived], readAt: Object.fromEntries(this.readAt) } satisfies ListState));
   }
 
   /** Set/clear a session's attention, persisting only when it actually changed. */

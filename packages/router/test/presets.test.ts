@@ -63,6 +63,12 @@ test("OpenCode Go is one preset whose models carry the wire each one speaks", ()
   assert.equal(wireOf("gemini-4-argon-contributor"), "google");
   assert.equal(byId.get("gemini-4-argon-contributor")?.url, "https://opencode.ai/inference/go/google");
   assert.equal(byId.get("gemini-4-argon-contributor")?.authHeader, undefined, "the google transport moves the key to x-goog-api-key itself");
+  // The plan's listing moved off the Contributor id to `gemini-4-argon` (measured 2026-10-25, #94).
+  // A model picked from `/models` saves only `{id, name}`, so this row is what keeps it on Google's
+  // wire instead of the preset's Responses default (`Model does not support this protocol`).
+  assert.equal(wireOf("gemini-4-argon"), "google");
+  assert.equal(byId.get("gemini-4-argon")?.url, "https://opencode.ai/inference/go/google");
+  assert.equal(byId.get("gemini-4-argon")?.authHeader, undefined, "the google transport moves the key to x-goog-api-key itself");
   // Gone from the catalogue and from the docs: a preset row for a model the vendor no longer serves
   // is one the operator can tick and never use.
   assert.equal(byId.has("union-alpha"), false);

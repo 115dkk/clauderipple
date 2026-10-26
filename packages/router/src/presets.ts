@@ -321,6 +321,12 @@ export const PRESETS: ProviderPreset[] = [
       // full URL as https://opencode.ai/inference/go/google/v1beta/models/<id> (read 2026-10-21).
       // `providerFor` folds it into an ordinary google provider, and the transport appends
       // `/v1beta/models/<id>:generateContent` to this base (providers/google/transport.ts).
+      //
+      // Measured 2026-10-25 (#94): `/models` no longer lists `gemini-4-argon-contributor` and lists
+      // `gemini-4-argon` instead, as does the plan's docs. A model picked from `/models` keeps only
+      // `{id, name}`, so without this row it would inherit the preset's Responses wire and be refused
+      // (`Model does not support this protocol`); the same id saved with this wire and url answered 200.
+      { id: "gemini-4-argon", name: "Gemini 4 Argon", wire: "google", url: "https://opencode.ai/inference/go/google" },
       { id: "gemini-4-argon-contributor", name: "Gemini 4 Argon (Contributor)", wire: "google", url: "https://opencode.ai/inference/go/google" },
     ],
     // Measured 2026-09-18 against the live endpoint, one effort at a time: none, minimal, low,

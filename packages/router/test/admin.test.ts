@@ -10,6 +10,7 @@ import { Logger } from "../src/log.ts";
 import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
+import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
 import { saveClaudeAuthFile, saveClaudeOAuthFile } from "../src/providers/anthropic-token-file.ts";
@@ -196,6 +197,50 @@ test("mod options and status expose runtime provider exhaustion and clear it on 
     assert.equal(recovered.providers[0]?.usable, true);
     assert.equal(recovered.providers[0]?.reason, undefined);
   }, { providerHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+});
+
+test("mod options leave an OpenCode Go provider out only while every key's plan is spent (#95)", async () => {
+  const cfg = makeCfg({ providers: {
+    go: {
+      type: "openai-compatible", preset: "opencode-go", url: "https://opencode.ai/zen/go/v1",
+      headers: { authorization: "Bearer hidden-default-key" },
+      credentials: [
+        { id: "key-a", headers: { authorization: "Bearer hidden-a" } },
+        { id: "key-b", headers: { authorization: "Bearer hidden-b" } },
+      ],
+      models: [{ id: "deepseek-v4.1-flash" }],
+    },
+  } });
+  const weekly = (percent: number, resetAt: number): OpenCodeWindow => ({ kind: "seven_day", used_percent: percent, window_minutes: 10080, reset_at: resetAt });
+  const soon = Math.round((Date.now() + 3_600_000) / 1000);
+  const later = Math.round((Date.now() + 7_200_000) / 1000);
+  // keyed by the credential id the router's own `/api/limits` read uses.
+  let windows: Record<string, OpenCodeWindow[]> = {};
+  await withAdmin(cfg, async ({ port }) => {
+    const go = async () => ((await (await fetch(`${base()}:${port}/api/mod-options`)).json()) as ModOptions).providers.find((p) => p.name === "go")!;
+    // One key still has room: rotation serves the work, so the provider stays in the ladder.
+    windows = { "key-a": [weekly(100, soon)], "key-b": [weekly(40, later)] };
+    assert.equal((await go()).usable, true);
+    assert.equal((await go()).reason, undefined);
+    // Every key is spent: the provider leaves the ladder until the first key's window resets.
+    windows = { "key-a": [weekly(100, soon), { kind: "five_hour", used_percent: 20, window_minutes: 300 }], "key-b": [weekly(100, later)] };
+    const out = await go();
+    assert.equal(out.usable, false);
+    assert.equal(out.reason, "quota_exhausted");
+    const back = out.exhaustedUntil ?? 0;
+    assert.ok(back > Date.now() && back <= Date.now() + 3_600_000 + 5_000, `key-a's weekly reset lifts it first (${back - Date.now()} ms)`);
+    // A spent five-hour window alone is just as final as the weekly one.
+    windows = { "key-a": [{ kind: "five_hour", used_percent: 100, window_minutes: 300, reset_at: soon }], "key-b": [weekly(100, later)] };
+    assert.equal((await go()).usable, false);
+    // A window whose reset already passed is no evidence: the next read will carry the new percent.
+    windows = { "key-a": [weekly(100, Math.round((Date.now() - 60_000) / 1000))], "key-b": [weekly(100, later)] };
+    assert.equal((await go()).usable, true);
+    // Unknown usage — an empty answer, or one key's read missing — keeps today's answer.
+    windows = {};
+    assert.equal((await go()).usable, true);
+    windows = { "key-a": [weekly(100, soon)] };
+    assert.equal((await go()).usable, true);
+  }, { opencodeUsage: async (_name: string, credentialId?: string) => windows[credentialId ?? ""] ?? [], modelScoresFetch: async () => new Response("{}") });
 });
 
 test("mod options count a stored Claude account as signed in when Claude Code's own login is not seen", async () => {

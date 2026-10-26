@@ -35,6 +35,27 @@ test("explicit billing/quota errors mark exhaustion; transient 429 and unrelated
   assert.equal(providerExhaustion(402)?.reason, 'billing_exhausted');
 });
 
+test("OpenCode Go's spent subscription window is quota exhaustion, not a speed limit (#95)", () => {
+  const now = 1_000_000;
+  // The measured 429 body (2026-10-25): a weekly Go window, no retry header, no billing vocabulary.
+  const body = JSON.stringify({
+    type: "error",
+    error: { type: "GoUsageLimitError", message: "Go usage limit exceeded" },
+    metadata: { workspace: "org_hidden", limitName: "weekly" },
+  });
+  assert.deepEqual(providerExhaustion(429, body, undefined, now), { reason: "quota_exhausted", at: now, until: now + 1_800_000 });
+  assert.equal(providerExhaustion(429, '{"error":{"type":"GoUsageLimitError"}}')?.reason, "quota_exhausted");
+  // The message alone reads the same; so does a plain usage-limit phrase.
+  assert.equal(providerExhaustion(429, "Go usage limit exceeded")?.reason, "quota_exhausted");
+  assert.equal(providerExhaustion(429, '{"error":{"message":"usage limit exceeded"}}')?.reason, "quota_exhausted");
+  // A limit counted per minute is still a speed limit, however it is worded.
+  for (const text of ['quota per minute exceeded', 'rate_limit_exceeded', 'Go usage limit per minute exceeded', 'usage limit exceeded per minute', 'Usage limit reached for this minute']) {
+    assert.equal(providerExhaustion(429, text), undefined, text);
+  }
+  // Only a 429/402 carries it, never another status.
+  assert.equal(providerExhaustion(400, body), undefined);
+});
+
 test("Google's monthly spending cap is billing exhaustion, including its JSON error message", () => {
   const now = 1_000_000;
   const message = "Your project has exceeded its monthly spending cap.";

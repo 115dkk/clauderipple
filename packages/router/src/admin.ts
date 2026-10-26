@@ -31,7 +31,7 @@ import { runCli, startCliDetached, parseUpdateCheck, type DetachedCli } from "./
 import { AutoUpdater } from "./autoupdate.ts";
 export { parseUpdateCheck, type UpdateCheck } from "./cli-control.ts";
 import { fileURLToPath } from "node:url";
-import type { Config, Provider, ProviderModel } from "./config.ts";
+import type { Config, Provider, ProviderCredential, ProviderModel } from "./config.ts";
 import { withFileLock } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
@@ -695,6 +695,41 @@ function antigravityGroupsOut(accounts: readonly GoogleAccountStatus[], now: num
 const MOD_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
 const modEfforts = (levels: readonly string[] | undefined): Effort[] => (levels ?? []).filter((level): level is Effort => MOD_EFFORTS.includes(level));
 
+/**
+ * An OpenCode Go subscription's spent windows, from the same `/usage` read `/api/limits` shows.
+ * One key is out once any of its windows (five-hour, weekly, monthly) reads 100%, because the plan
+ * refuses every model on that key; it is back when the latest of its full windows resets. The
+ * provider leaves the ladder only while every key is out, as rotation would otherwise find one to
+ * use (#95). No reader, a failed read or an empty answer is not evidence: the answer stays today's.
+ */
+async function opencodeGoOut(
+  deps: AdminDeps,
+  name: string,
+  credentials: readonly ProviderCredential[] | undefined,
+  now: number,
+): Promise<{ reason: "quota_exhausted"; until: number } | undefined> {
+  const read = deps.opencodeUsage;
+  if (!read) return undefined;
+  const keys = credentials?.length ? credentials : [undefined];
+  const backs: number[] = [];
+  for (const credential of keys) {
+    let windows: OpenCodeWindow[];
+    try {
+      windows = await read(name, credential?.id);
+    } catch {
+      return undefined;
+    }
+    if (!windows.length) return undefined;
+    const full = windows.filter((w) => w.used_percent >= 100);
+    if (!full.length) return undefined;
+    // Every window must have room again, so the latest full one is when this key returns. The
+    // subscription's own reset is the honest answer; without one, the runtime default applies.
+    backs.push(Math.max(...full.map((w) => (w.reset_at !== undefined ? w.reset_at * 1000 : now + 30 * 60_000))));
+  }
+  const until = Math.min(...backs);
+  return until > now ? { reason: "quota_exhausted", until } : undefined;
+}
+
 async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<ModOptions> {
   const cfg = deps.config();
   const chatgpt = await chatgptStatus(deps);
@@ -708,8 +743,10 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     billing: billingOf(cfg.providers[a.provider] as { type: string; auth?: string; preset?: string; url?: string }, a.model),
   }));
   const now = Date.now();
-  const providers = Object.entries(cfg.providers).map(([name, p]) => {
+  const providers = await Promise.all(Object.entries(cfg.providers).map(async ([name, p]) => {
     let usable = true;
+    // A spent OpenCode Go window, which the picker must skip before it hands out the work (#95).
+    let usageOut: { reason: "quota_exhausted"; until: number } | undefined;
     if (p.type === "chatgpt") {
       const accounts = chatgpt.accounts[name];
       usable = accounts ? accounts.some(a => a.state === "ready" && !exhaustedForMs(a.quota))
@@ -722,9 +759,17 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
       // due token before each turn, so only an account that must sign in again is out.
       usable = p.auth === "api-key" ? !!(p.apiKey || process.env.ANTHROPIC_API_KEY)
         : claudeAuthStore(deps).describeSource() !== null || listClaudeAccounts(homeDir()).some(a => !a.needsReauth);
+    } else if (p.type === "openai-compatible" && isOpenCodeGo(p)) {
+      usageOut = await opencodeGoOut(deps, name, p.credentials, now);
+      if (usageOut) usable = false;
     }
     if (credentials[name]) usable = usable && credentials[name]!.some(c => c.state === "ready" && !c.paused);
     const exhausted = health[name];
+    // A runtime exhaustion mark and a spent subscription window can both be true; the later reset
+    // is the one the ladder has to wait for.
+    let out: { reason: string; exhaustedAt?: number; exhaustedUntil: number } | undefined;
+    if (exhausted) out = { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until };
+    if (usageOut && (!out || usageOut.until > out.exhaustedUntil)) out = { reason: usageOut.reason, exhaustedUntil: usageOut.until };
     const modelsOut: Record<string, ModelUnavailable> = {};
     if (p.type === "google" && p.auth === "antigravity") {
       const groups = antigravityGroupsOut(google[name] ?? [], now);
@@ -735,11 +780,11 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
         if (scope && groups[scope]) modelsOut[id] = groups[scope];
       }
     }
-    return { name, type: p.type, usable: usable && !exhausted, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
-      ...(exhausted ? { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until } : {}),
+    return { name, type: p.type, usable: usable && !out, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
+      ...(out ? { reason: out.reason, ...(out.exhaustedAt !== undefined ? { exhaustedAt: out.exhaustedAt } : {}), exhaustedUntil: out.exhaustedUntil } : {}),
       ...(Object.keys(modelsOut).length ? { models: modelsOut } : {}),
     };
-  });
+  }));
   const models = Object.entries(cfg.providers).flatMap(([provider, p]) => (p.models ?? []).map(m => ({ model: m.id, provider, name: m.name ?? m.id, judgeOnly: isJudgeOnlyModel(m.id) })));
   const zen = Object.values(cfg.providers).find(p => {
     if (!p.models?.some(m => isJudgeOnlyModel(m.id))) return false;

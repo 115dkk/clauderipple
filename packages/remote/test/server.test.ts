@@ -20,6 +20,7 @@ import { VISIBLE_MS } from "../src/push.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
 import { bridgeFixture, bridgeId, tick } from "./bridge-fixture.ts";
+import { claudeAppData } from "./app-data.ts";
 
 const webDir = fileURLToPath(new URL("../web", import.meta.url));
 const token = "remote-test-token-not-a-real-pairing-token";
@@ -29,7 +30,7 @@ const router = {
   models: async () => [],
 };
 
-function scriptedQuery() {
+function scriptedQuery(sdkId = "sdk-1") {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const spies = { interrupt: 0, setModel: [] as (string | undefined)[], close: 0 };
@@ -40,7 +41,7 @@ function scriptedQuery() {
         let turn = 0;
         for await (const user of params.prompt) {
           users.push(user);
-          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: "sdk-1" };
+          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: sdkId };
           const id = `m${turn}`;
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id } } };
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", delta: { type: "text_delta", text: "po" } } };
@@ -118,7 +119,7 @@ class Peer {
   }
 }
 
-async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, desktopProjects?: string, desktopProcesses?: () => string, queryFn?: QueryFn) {
+async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, desktopProjects?: string, desktopProcesses?: () => string, queryFn?: QueryFn, sidebarRoot?: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-server-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -129,6 +130,7 @@ async function fixture(t: TestContext, extra: Partial<ServerOptions> = {}, deskt
   let server: HostServer | undefined;
   let closing = false;
   const sessions = new Sessions({ dir, router, permissions, queryFn: queryFn ?? fake.queryFn, coalesceMs: 5, ...(desktopProjects ? { desktopProjects, desktopProcesses: desktopProcesses ?? (() => ""), ...(extra.now ? { now: extra.now } : {}) } : {}),
+    ...(sidebarRoot ? { desktopSidebar: { root: sidebarRoot } } : {}),
     onEvent: session => { if (!closing) server?.onEvent(session); },
     onSessions: () => { if (!closing) server?.onSessions(); },
   });
@@ -1056,6 +1058,29 @@ test("seen requires fresh visible presence and an attached session, including re
   reconnected.send({ t: "seen", session: id });
   await reconnected.barrier();
   assert.equal(reason(), undefined);
+});
+
+test("a session read on a visible phone loses the app's unread dot in the next list, and a background seen cannot clear it", async t => {
+  const cliId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const app = claudeAppData(t, cliId);
+  const f = await fixture(t, {}, undefined, undefined, scriptedQuery(cliId).queryFn, app.root);
+  const id = await f.create();
+  const unread = () => f.sessions.list().find(s => s.id === id)?.unread === true;
+  assert.equal(unread(), true, "the Claude app still lists the session as unread");
+  const peer = await f.auth();
+  peer.send({ t: "attach", session: id });
+  await peer.take("events");
+  peer.send({ t: "presence", visible: true });
+  peer.send({ t: "seen", session: id });
+  const frame = await peer.take("sessions", m => m.sessions.some(s => s.id === id && s.unread === false));
+  assert.equal(frame.msg.sessions.find(s => s.id === id)?.unread, false, "reading it on the phone resends the list without the dot");
+  peer.send({ t: "unread", session: id });
+  await peer.barrier();
+  assert.equal(unread(), true, "mark-unread brings the dot back");
+  peer.send({ t: "presence", visible: false });
+  peer.send({ t: "seen", session: id });
+  await peer.barrier();
+  assert.equal(unread(), true, "a background seen cannot mark the app's dot read");
 });
 
 test("WebSocket upgrade refuses an evil Origin", { timeout: 4500 }, async t => {
