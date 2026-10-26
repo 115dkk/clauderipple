@@ -482,7 +482,7 @@ declare module 'claude-code' {
        * The Context pane's precise count (the token-count API's), kept against the context's tokens
        * when it was asked for (`basis`); `busy` while it runs, `error` when it failed.
        */
-      contextFull: { basis: number | null; breakdown?: import('claude-code').SessionContextBreakdown; busy?: boolean; error?: string } | null
+      contextFull: { basis: number | null; breakdown?: SessionContextBreakdown; busy?: boolean; error?: string } | null
       /** The Context pane's sections shown whole. */
       contextShowAll: ('memory' | 'mcp' | 'skills' | 'agents')[]
       /** The person's last two prompts as submitted, mid-turn ones included for the judge (2026-10-24). */
