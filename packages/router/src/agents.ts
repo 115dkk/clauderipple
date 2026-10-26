@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { adminPort, homeDir, type Config, type Provider } from "./config.ts";
 import { withFileLock } from "./locked-file.ts";
-import { declaredBy } from "./routing.ts";
+import { declaredBy, qualifiedModel } from "./routing.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { GROK_EFFORT_LEVELS } from "./providers/grok/catalog.ts";
 import { shortName } from "../../cli/src/hooks/agent-title.ts";
@@ -285,7 +285,7 @@ export function generatedAgents(cfg: Config, dir = defaultAgentDir(), manifestPa
     const provider = owners.length === 1 ? owners[0] : undefined;
     const target = provider ? cfg.providers[provider] : undefined;
     if (!provider || !target || (target.type === "anthropic" && !target.accountPool)) continue;
-    result.push({ name: entry.name, model, provider });
+    result.push({ name: entry.name, model: qualifiedModel(model, cfg)?.model ?? model, provider });
   }
   return result.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -304,8 +304,8 @@ export type SyncOptions = {
 };
 
 /**
- * Bring `dir`'s generated agent files in step with `cfg`: one file per model exactly one non-anthropic
- * provider declares, and remove the ones this router wrote whose model is no longer ticked. Only
+ * Bring `dir`'s generated agent files in step with `cfg`: one file per outbound provider/model
+ * declaration, and remove the ones this router wrote whose model is no longer ticked. Only
  * files named in the manifest or marked current targets are written; only manifest files are removed.
  * A hand-written agent is left alone, and a name it already uses is skipped rather than overwritten.
  *
@@ -334,24 +334,25 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
   const handNames = new Set<string>();
   for (const entry of scanned.values()) if (!owned.has(entry.name)) handNames.add(entry.name);
 
-  // Targets: each model declared by exactly one provider, that provider not ingress-only.
+  // Targets: one worker per declaring outbound provider; the first owner keeps the old name (#94).
   const targets = new Map<string, { modelId: string; title: string; provider: string; suffix: string }>();
   for (const [providerName, provider] of Object.entries(cfg.providers)) {
     if (provider.type === "anthropic" && !provider.accountPool) continue;
     for (const model of provider.models ?? []) {
       if (isJudgeOnlyModel(model.id)) continue;
       const owners = declaredBy(model.id, cfg);
-      if (owners.length !== 1) {
-        if (owners.length > 1) log?.warn(`agent files: "${model.id}" is declared by ${owners.join(", ")}; not generating an agent for it`);
-        continue;
-      }
-      const name = agentNameFor(model.id);
+      const first = owners.find(name => {
+        const owner = cfg.providers[name]!;
+        return owner.type !== "anthropic" || owner.accountPool;
+      });
+      const duplicate = owners.length > 1;
+      const name = agentNameFor(model.id) + (duplicate && first !== providerName ? `-${agentNameFor(providerName)}` : "");
       const clash = targets.get(name);
       if (clash) {
         log?.warn(`agent files: "${model.id}" and "${clash.modelId}" both map to "${name}"; skipping "${model.id}"`);
         continue;
       }
-      targets.set(name, { modelId: model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id) });
+      targets.set(name, { modelId: duplicate ? `${providerName}:${model.id}` : model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id) });
     }
   }
 

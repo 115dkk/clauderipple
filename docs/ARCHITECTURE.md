@@ -13,6 +13,7 @@ Everything below is backed by a document, a file, or a measured log. Items marke
 
 CLI: CONNECT api.anthropic.com  → ClaudeRipple terminates TLS (leaf cert signed by ca.pem)
      per request, in order:
+       qualified declaration  → select the named declaring provider, strip only its qualifier
        direct rule (prefix)   → send to that provider, model unchanged (+effort)
        slot alias (routes)    → rewrite model (+effort), send to provider adapter
        exactly one provider's
@@ -513,6 +514,16 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
   a whole session without anyone writing a rule. An ingress-only owner still counts
   as an owner, so a third party also offering `claude-opus-5` reads as an ambiguity
   to ask about rather than a silent redirection of Claude traffic.
+  **Provider-qualified ids (2026-10-26, issue #94).** `<provider>:<modelId>` selects
+  that provider only when the prefix is a key in `providers` and its declared models
+  include the remaining id (dated/undated forms match). Otherwise the whole string
+  stays a model id, so Ollama's `qwen3:8b` is unchanged. Qualification takes precedence
+  over a prefix rule; the upstream receives only `modelId`, with `@effort` handled as
+  before. Ingress-only declarations still cannot be outbound targets. Marker aliases,
+  including those derived from agent files, may name qualified ids. A bare duplicate
+  remains ambiguous: the refusal names the qualified alternatives rather than guessing
+  a provider or leaking the request to Anthropic. Effort ladders, windows and scores
+  follow the selected provider; usage records keep provider and original model id apart.
   Prefix rules stay useful for what no provider declares yet (`gpt-` catches a model
   released today). A model reaching a provider this way carries no per-model context
   window unless it is also in `cli.extraModels` or a slot — the same as a direct rule.
@@ -525,11 +536,21 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     resolved anywhere different**. Picker exposure stays what the operator ticked; it is
     routing that stopped needing to be said twice.
 - **Worker definitions derive from the same list (2026-09-20).** A ticked model is
-  also a subagent the operator can name: for every id exactly one non-ingress
-  provider declares, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
+  also a subagent the operator can name: for every non-ingress provider's declared
+  id, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
   `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
   `model:` = the exact id, `@high` when the provider offers any effort level —
-  `@medium` until 2026-10-02). It
+  `@medium` until 2026-10-02). For a duplicate id, the first outbound provider in
+  config key order keeps that name; later providers use `<name>-<provider>` (the
+  same filename sanitisation applies). **All** duplicate workers carry a qualified
+  `model:` (`google-gemini:gemini-4-argon@high`), including the one keeping its old
+  name; single-owner files stay byte-identical. This preserves existing ladder names
+  when a second provider adds the model, instead of deleting both workers (#94).
+  Name collisions and hand-written files retain their existing priority. Generated
+  worker metadata reports each actual provider with the original model id, and the
+  mod checks quota by that pair, so a spent Google API worker can fall through to
+  the OpenCode Go worker for the same model. The dashboard's existing provider groups
+  distinguish them without a second display convention. The router
   records what it wrote in `<home>/generated-agents.json` and touches **only**
   those files: a hand-written agent of the same name wins and is left alone, an
   unticked model removes its generated file and nothing else, identical content is

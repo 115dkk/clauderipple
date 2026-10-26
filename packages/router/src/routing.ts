@@ -26,7 +26,7 @@ const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 // Anchored: the marker is honoured only at the very top of a user message. A subagent prompt starts
 // with it; a compaction summary that *quotes* one does not, and on 2026-09-20 such a quote in a
 // GPT-6 Astra session's summary re-routed the whole session to `muse` on ChatGPT (400 on every turn).
-const MARKER = /^\s*\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9.\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/;
+const MARKER = /^\s*\[\[\s*(?:ripple|gpt)\s*:\s*([A-Za-z0-9._:/\-]+)\s*(?:@\s*([A-Za-z]+))?\s*\]\]/;
 // A Workflow script's agent gets its prompt inside the harness's frame (CLI 2.1.308, 2026-10-22): a
 // relayed user request, then one header line ending "The computed task text follows:" and the
 // script's text with every line indented. The script's first line is that prompt's top, as a spawned
@@ -66,8 +66,10 @@ function scanMarker(body: unknown): { name: string; effort?: string } | null {
 export function markerOverride(body: unknown, aliases: Record<string, string>): { model: string; effort?: string } | null {
   const hit = scanMarker(body);
   if (!hit) return null;
-  const model = aliases[hit.name] ?? hit.name;
-  return hit.effort ? { model, effort: hit.effort } : { model };
+  const target = aliases[hit.name] ?? hit.name;
+  const [model, suffix] = target.split("@");
+  const effort = hit.effort ?? suffix;
+  return effort ? { model: model!, effort } : { model: model! };
 }
 
 export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | null {
@@ -106,6 +108,18 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     return provider?.type === "anthropic" && !provider.accountPool;
   };
 
+  // Explicit provider spelling selects that declaration, never a competing prefix rule (#94).
+  const qualified = qualifiedModel(base, cfg);
+  if (qualified) {
+    const ov = markerOverride(body, cfg.aliases);
+    if (ov) {
+      const target = resolve(`${ov.model}@${ov.effort ?? effort ?? ""}`, {}, cfg);
+      return target ? { ...target, tag: `${model}->${target.model} (marker)` } : null;
+    }
+    if (ingressOnly(qualified.provider)) return null;
+    return { ...qualified, effort, tag: `${model}->${qualified.model}` };
+  }
+
   const direct = cfg.direct.find((d) => base.startsWith(d.prefix));
   if (direct && ingressOnly(direct.provider)) return null;
   if (direct) {
@@ -117,6 +131,8 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
     // it `muse-spark-1.3-contributor`, which ChatGPT refuses (2026-09-20). The marker's model is
     // placed the way any requested model is: its own prefix rule, else its one declaring provider.
     if (finalModel !== base) {
+      const qualified = qualifiedModel(finalModel, cfg);
+      if (qualified) return ingressOnly(qualified.provider) ? null : { ...qualified, effort: finalEffort, tag: `${model}->${qualified.model} (marker)` };
       const ownDirect = cfg.direct.find((d) => finalModel.startsWith(d.prefix));
       const provider = ownDirect ? ownDirect.provider : soleOwner(finalModel, cfg);
       if (!provider || ingressOnly(provider)) return null;
@@ -150,6 +166,8 @@ export function resolve(model: unknown, body: unknown, cfg: Config): Resolved | 
   // leave, so nothing that routes today routes differently.
   const ov = markerOverride(body, cfg.aliases);
   const finalModel = ov?.model ?? base;
+  const markerTarget = qualifiedModel(finalModel, cfg);
+  if (markerTarget) return ingressOnly(markerTarget.provider) ? null : { ...markerTarget, effort: ov?.effort ?? effort, tag: `${model}->${markerTarget.model} (marker)` };
   // A marker's target takes its own prefix rule even when the incoming Claude model had no rule.
   // Prefixes deliberately cover models not declared yet, so ownership alone cannot place it.
   const ownDirect = ov ? cfg.direct.find((d) => finalModel.startsWith(d.prefix)) : undefined;
@@ -206,17 +224,31 @@ export function isClassifierStage1(body: unknown): boolean {
   return Array.isArray(stops) && stops.length === 1 && stops[0] === "</block>" && typeof max === "number" && max < 8192;
 }
 
-/**
- * Providers whose own `models` list carries this id. Dated and undated forms match each other, the
- * same way a slot lookup does. Ingress-only providers are included on purpose — see the call site.
- */
 /** The one provider declaring this id, or null when none or several do. */
 function soleOwner(id: string, cfg: Config): string | null {
   const owners = declaredBy(id, cfg);
   return owners.length === 1 ? owners[0]! : null;
 }
 
+/** A colon is a qualifier only when its prefix is a configured owner of the remaining id.
+ * Otherwise the whole id (including Ollama's qwen3:8b) keeps its existing meaning. */
+export function qualifiedModel(id: string, cfg: Config): { provider: string; model: string } | null {
+  const base = id.split("@")[0]!;
+  const colon = base.indexOf(":");
+  if (colon <= 0) return null;
+  const provider = base.slice(0, colon);
+  const model = base.slice(colon + 1);
+  return Object.hasOwn(cfg.providers, provider) && rawDeclaredBy(model, cfg).includes(provider) ? { provider, model } : null;
+}
+
+/** Declared owners, including ingress-only providers. Qualified ids select one declared owner;
+ * dated and undated forms match just as they do for slots. Never guess an ambiguous bare id. */
 export function declaredBy(id: string, cfg: Config): string[] {
+  const qualified = qualifiedModel(id, cfg);
+  return qualified ? [qualified.provider] : rawDeclaredBy(id.split("@")[0]!, cfg);
+}
+
+function rawDeclaredBy(id: string, cfg: Config): string[] {
   const undated = id.replace(/-\d{8}$/, "");
   const owners: string[] = [];
   for (const [name, provider] of Object.entries(cfg.providers)) {
@@ -240,14 +272,23 @@ export function declaredBy(id: string, cfg: Config): string[] {
  */
 export function unroutableReason(model: unknown, body: unknown, cfg: Config): string | null {
   if (typeof model !== "string") return null;
-  if (model.startsWith("claude-")) return null;
 
   const at = model.indexOf("@");
   const base = at > 0 ? model.slice(0, at) : model;
   const marker = scanMarker(body);
 
   const aliased = marker ? cfg.aliases[marker.name] : undefined;
-  const effective = aliased ?? (marker ? marker.name : base);
+  const effective = (aliased ?? (marker ? marker.name : base)).split("@")[0]!;
+  // A Claude request still passes through, marker or not: the delegation markers ([[ripple:
+  // standard]], [[ripple: opus@high]]) sit on Claude workers and are no model of ours. Only a marker
+  // naming a model two providers declare is refused, since passing it on would run it on Claude (#94).
+  if (base.startsWith("claude-") && !(marker && rawDeclaredBy(effective, cfg).length > 1)) return null;
+  if (effective.startsWith("claude-") && !qualifiedModel(effective, cfg)) return null;
+  const qualified = qualifiedModel(effective, cfg);
+  if (qualified) {
+    const provider = cfg.providers[qualified.provider]!;
+    return provider.type === "anthropic" && !provider.accountPool ? `provider "${qualified.provider}" is ingress-only` : null;
+  }
   const hasDirect = (id: string): boolean => cfg.direct.some((d) => id.startsWith(d.prefix));
 
   // Mirror `resolve`. A prefix rule on the requested model honours the marker: the marker's model is
@@ -263,7 +304,7 @@ export function unroutableReason(model: unknown, body: unknown, cfg: Config): st
 
   const owners = declaredBy(effective, cfg);
   if (owners.length > 1) {
-    return `"${effective}" is declared by two providers (${owners.join(", ")}); add a route or direct rule`;
+    return `"${effective}" is declared by two providers (${owners.join(", ")}); use ${owners.map(owner => `"${owner}:${effective}"`).join(" or ")}, or add a route or direct rule`;
   }
   if (owners.length === 1) {
     const owner = owners[0]!;
