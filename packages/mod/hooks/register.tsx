@@ -2273,28 +2273,35 @@ export const register: Register = on => {
       const which = await read($, panel)
       if (e.props.hasSurvey && which !== null) return next(e)
       const frame = await frameOf($, e)
-      if (which === 'settings') return renderSettings(el, frame, await settingsView($), settingsActions($)) as RenderElement
+      const { Box, Button, Text } = el
+      // What the hooks after ours drew here (another mod's tree, the desktop's survey) stays, with
+      // ours under it: a band drawn in its place blanked their rows (catalogue review, 2026-10-26).
+      // The engine alone draws nothing here but a survey, so its bare answer (or none) is left out.
+      const drawn = await next(e)
+      const theirs = drawn != null && (e.props.hasSurvey || drawn.type !== 'engine') ? drawn : null
+      const after = (node: RenderNode): RenderElement => (theirs
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{theirs}{node}</Box>
+        : node) as RenderElement
+      if (which === 'settings') return after(renderSettings(el, frame, await settingsView($), settingsActions($)))
       if (which === 'compact' || which === 'clear') {
         const choice = await alertView($, frame.now)
-        if (choice) return renderAlert(el, frame, choice, alertActions($, choice)) as RenderElement
+        if (choice) return after(renderAlert(el, frame, choice, alertActions($, choice)))
       }
       if (which === 'setup') {
-        return renderSetup(el, frame, { draft: normalizeSettings(await read($, settingsDraft) ?? await read($, settings)), jev: await read($, jev), step: await read($, setupStep) }, setupActions($)) as RenderElement
+        return after(renderSetup(el, frame, { draft: normalizeSettings(await read($, settingsDraft) ?? await read($, settings)), jev: await read($, jev), step: await read($, setupStep) }, setupActions($)))
       }
-      const { Box, Button, Text } = el
       // What the phone queued floats over whatever is here, only while something waits (ui/queue.tsx).
       const queued = await read($, phoneQueue)
-      // The desktop's survey (above) sits under what the phone queued and over the band.
-      const survey = e.props.hasSurvey ? await next(e) : null
-      const over = (node: RenderNode | null): RenderElement => (queued || survey
-        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{queued ? renderPhoneQueue(el, frame, queued) : null}{survey}{node}</Box>
-        : node) as RenderElement
+      // Theirs sits under what the phone queued and over the band.
+      const over = (node: RenderNode | null): RenderElement => (queued || theirs
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{queued ? renderPhoneQueue(el, frame, queued) : null}{theirs}{node}</Box>
+        : node ?? drawn) as RenderElement
       const below = queued ? { ...frame, maxRows: Math.max(1, frame.maxRows - PHONE_QUEUE_ROWS) } : frame
-      if (await read($, bandHidden)) return over(survey ? null : await next(e))
+      if (await read($, bandHidden)) return over(null)
       const alert = await alertView($, frame.now)
       if (alert) return over(renderAlert(el, below, alert, alertActions($, alert)))
       const s = await currentSettings($)
-      if (s.layout === 'minimal') return over(survey ? null : await next(e))
+      if (s.layout === 'minimal') return over(null)
       const actions = bandActions($, e.surface)
       // The desktop draws the band as one surface with its × inside; the terminal keeps the row
       // of facts and controls with the close control (and its effort button) after it.

@@ -2350,6 +2350,22 @@ test('a desktop survey draws over the band instead of blanking it', async ($, on
   await survey.unmount()
 })
 
+test('the dashboard keeps what another mod drew above the prompt, on the terminal and the desktop', async ($, on) => {
+  boundaries(on)
+  http(on)
+  await start($)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await band($, surface)
+    expect(await ui.find({ type: 'Text', text: 'host drawing' }), `${surface}: the other mod's drawing`).toBeDefined()
+    expect(await ui.find({ key: surface === 'terminal' ? 'auto' : 'compact' }), `${surface}: the band beside it`).toBeDefined()
+    await ui.unmount()
+  }
+  await command($, 'settings')
+  const settings = await band($)
+  expect(await settings.find({ type: 'Text', text: 'host drawing' }), 'settings card').toBeDefined()
+  await settings.unmount()
+})
+
 test('log queries by session and reopening follows engine panes, not stale atoms', async ($, on) => {
   const b = boundaries(on)
   const urls = http(on)
