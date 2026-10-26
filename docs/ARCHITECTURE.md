@@ -13,6 +13,7 @@ Everything below is backed by a document, a file, or a measured log. Items marke
 
 CLI: CONNECT api.anthropic.com  → ClaudeRipple terminates TLS (leaf cert signed by ca.pem)
      per request, in order:
+       qualified declaration  → select the named declaring provider, strip only its qualifier
        direct rule (prefix)   → send to that provider, model unchanged (+effort)
        slot alias (routes)    → rewrite model (+effort), send to provider adapter
        exactly one provider's
@@ -529,6 +530,16 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
   a whole session without anyone writing a rule. An ingress-only owner still counts
   as an owner, so a third party also offering `claude-opus-5` reads as an ambiguity
   to ask about rather than a silent redirection of Claude traffic.
+  **Provider-qualified ids (2026-10-26, issue #94).** `<provider>:<modelId>` selects
+  that provider only when the prefix is a key in `providers` and its declared models
+  include the remaining id (dated/undated forms match). Otherwise the whole string
+  stays a model id, so Ollama's `qwen3:8b` is unchanged. Qualification takes precedence
+  over a prefix rule; the upstream receives only `modelId`, with `@effort` handled as
+  before. Ingress-only declarations still cannot be outbound targets. Marker aliases,
+  including those derived from agent files, may name qualified ids. A bare duplicate
+  remains ambiguous: the refusal names the qualified alternatives rather than guessing
+  a provider or leaking the request to Anthropic. Effort ladders, windows and scores
+  follow the selected provider; usage records keep provider and original model id apart.
   Prefix rules stay useful for what no provider declares yet (`gpt-` catches a model
   released today). A model reaching a provider this way carries no per-model context
   window unless it is also in `cli.extraModels` or a slot — the same as a direct rule.
@@ -541,11 +552,21 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     resolved anywhere different**. Picker exposure stays what the operator ticked; it is
     routing that stopped needing to be said twice.
 - **Worker definitions derive from the same list (2026-09-20).** A ticked model is
-  also a subagent the operator can name: for every id exactly one non-ingress
-  provider declares, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
+  also a subagent the operator can name: for every non-ingress provider's declared
+  id, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
   `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
   `model:` = the exact id, `@high` when the provider offers any effort level —
-  `@medium` until 2026-10-02). It
+  `@medium` until 2026-10-02). For a duplicate id, the first outbound provider in
+  config key order keeps that name; later providers use `<name>-<provider>` (the
+  same filename sanitisation applies). **All** duplicate workers carry a qualified
+  `model:` (`google-gemini:gemini-4-argon@high`), including the one keeping its old
+  name; single-owner files stay byte-identical. This preserves existing ladder names
+  when a second provider adds the model, instead of deleting both workers (#94).
+  Name collisions and hand-written files retain their existing priority. Generated
+  worker metadata reports each actual provider with the original model id, and the
+  mod checks quota by that pair, so a spent Google API worker can fall through to
+  the OpenCode Go worker for the same model. The dashboard's existing provider groups
+  distinguish them without a second display convention. The router
   records what it wrote in `<home>/generated-agents.json` and touches **only**
   those files: a hand-written agent of the same name wins and is left alone, an
   unticked model removes its generated file and nothing else, identical content is
@@ -1838,7 +1859,7 @@ plan unless marked otherwise.
 | The DeepSeek `401` stayed unexplained for a day: a provider error was logged as a status code only (2026-09-15) | Upstream 4xx/5xx bodies are logged (first 300 characters, key-shaped strings masked) and kept in the request record. This is the same rule already required of the translator above. |
 | "Connect Claude subscription" from the tray/GUI failed with "setup-token failed": `claude setup-token` is an interactive terminal flow and neither place has a terminal (2026-09-15, Windows) | Without a TTY the error says to run `clauderipple claude-login` in a terminal and that an existing Claude Code login is reused anyway; other failures carry what `claude` printed. A button that cannot work where it is must say where it works. |
 | Closing Claude Desktop's window does not quit it; reopening hits `Not main instance, returning early` and the app silently keeps the OLD proxy setting. The user sees "I configured it and nothing happened" with no error anywhere (2026-09-14) | Tell the user that closing the window is not enough, and detect it: with picker mode on, the router knows whether the app is actually routing through it. Surface "configured, but the app has not restarted yet" rather than letting it fail silently. |
-| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`unroutableReason`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
+| A subagent prompt carried `[[ripple: deepseek@high]]` while `aliases` had no `deepseek`; the marker resolved to a model id nobody declared, `resolve()` returned null, and the request went to Anthropic as an ordinary `PASS` — 30 × `404 model: deepseek-v4.1-flash` over two days, read by the session as "the model stopped working" (2026-09-19/20) | A non-`claude-*` model this router cannot route is **refused here, by name**: `400 invalid_request_error "ClaudeRipple: <reason>"`, tag `REFUSE`, reason in the request record (`decide()`'s `refusal`: undeclared / declared by two providers / ingress-only owner / unknown marker alias / alias to an undeclared model). Native `claude-*` ids keep passing through untouched — Claude traffic is never hijacked to say no. And the marker alias table is derived from the agent files themselves (§4), so an agent that exists is an alias that resolves. |
 | A rejected Claude account remained quarantined after its access/refresh token was replaced, because runtime health used the durable account id; keying affinity on that same generation id would instead move a healthy conversation after every refresh (found during multi-account implementation, 2026-09-20) | Runtime health keys on `<local-owner>:<token-generation-digest>`, while conversation affinity and admin state key on the durable local owner. A refresh or re-login receives fresh health without losing its prompt-cache claim; compare-and-swap prevents an old rejection from marking the new generation. |
 | The worker registry was four places that did not know each other — `providers.*.models`, `aliases`, `~/.claude/agents/*.md`, and prose in CLAUDE.md — and every new provider needed all four edited by hand; the one left out was the one that failed (2026-09-19, DeepSeek) | One source: a ticked model *is* a worker. Agent files and marker aliases are generated from `config.json` (§4 "worker definitions"); nothing about a worker is written twice. |
 | ChatGPT prompt-cache hit fell from 93% (2026-09-13) to 9% (2026-09-20) with nothing in our request changing — the backend had started keying the cache on the conversation's identity (`session-id`/`thread-id`/`x-client-request-id`/`client_metadata`), which we never sent; `prompt_cache_key` alone no longer earned a write | The adapter states the conversation's identity the way the Codex CLI does (§4) and echoes `x-codex-turn-state`. The acceptance metric (≥90% on translated providers) is watched per day in `requests.jsonl`; a fall with an unchanged request means the wire changed under us, and the reference to diff against is the real CLI captured through a local proxy, not our own memory of the protocol. |

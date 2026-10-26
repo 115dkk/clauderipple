@@ -411,7 +411,7 @@ test("a marker naming an agent file resolves through the derived alias", () => {
   // The marker now resolves to a real id. `deepseek-v4-pro` is offered by two providers in
   // `declared`, so it is still ambiguous — the alias resolves, and the ambiguity is what stops it.
   const reason = decide("vendor-model", body("[[ripple: deepseek@high]] do it"), cfg, "turn").refusal;
-  assert.equal(reason, '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); add a route or direct rule');
+  assert.equal(reason, '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); use "opencode-go:deepseek-v4-pro" or "deepseek:deepseek-v4-pro", or add a route or direct rule');
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -429,7 +429,7 @@ test("decide: marker alias that resolves to an undeclared model", () => {
   const cfg: Config = { ...declared, aliases: { ...declared.aliases, deepseek: "deepseek-v4-pro" } };
   // Two providers declare it → the ambiguity message, not the "undeclared" one.
   assert.equal(decide("whatever", body("[[ripple: deepseek@high]]"), cfg, "turn").refusal,
-    '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); add a route or direct rule');
+    '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); use "opencode-go:deepseek-v4-pro" or "deepseek:deepseek-v4-pro", or add a route or direct rule');
   // An alias pointing at a model nobody has.
   const ghost: Config = { ...declared, aliases: { ...declared.aliases, ghost: "no-such-model" } };
   assert.equal(decide("whatever", body("[[ripple: ghost]]"), ghost, "turn").refusal,
@@ -443,7 +443,7 @@ test("decide: a marker name that is neither alias nor agent", () => {
 
 test("decide: two providers declare the named model", () => {
   assert.equal(decide("deepseek-v4-pro", body("hi"), declared, "turn").refusal,
-    '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); add a route or direct rule');
+    '"deepseek-v4-pro" is declared by two providers (opencode-go, deepseek); use "opencode-go:deepseek-v4-pro" or "deepseek:deepseek-v4-pro", or add a route or direct rule');
 });
 
 test("decide: no provider declares it, and an ingress-only provider is named", () => {
