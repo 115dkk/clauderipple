@@ -12,7 +12,8 @@ import * as systemd from "../src/systemd.ts";
 import * as schtasks from "../src/schtasks.ts";
 import { stopWindowsRouter, restartWindowsRouter, type WindowsRouterOps } from "../src/supervisor.ts";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-"));
+// Real path: macOS's TMPDIR is under /var, a link to /private/var, and the recorded home is resolved.
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-")));
 const keys = ["HOME", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
 const previous = keys.map(key => [key, process.env[key]] as const);
 after(() => {
