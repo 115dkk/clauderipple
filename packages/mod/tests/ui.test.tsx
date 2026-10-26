@@ -1063,6 +1063,27 @@ test('the log pane keeps its content', async ($, on) => {
   expect(calls).toEqual(['scope', 'scope'])
 })
 
+test('a request made on the Fast tier shows FAST beside its effort, and no other request does (#97)', async ($, on) => {
+  const base = { source: 'gpt-6-1-sol@high', target: 'gpt-6.1-sol', provider: 'chatgpt', status: 200, ok: true, ms: 2140, effort: 'high', mine: true }
+  const rows: StatusRequest[] = [
+    { ...base, at: '2026-10-10T13:19:10', requestedTier: 'priority', servedTier: 'default' } as StatusRequest,
+    { ...base, at: '2026-10-10T13:18:55' },
+    { ...base, at: '2026-10-10T13:18:40', requestedTier: 'flex' },
+  ]
+  drawPane(on, 'log-fast', (el, surface) => renderLog(el, frameOf(surface, 64), { rows, mineOnly: true }, { toggleScope: () => undefined }))
+  drawPane(on, 'log-fast-none', (el, surface) => renderLog(el, frameOf(surface, 64), { rows: rows.slice(1), mineOnly: true }, { toggleScope: () => undefined }))
+  for (const surface of SURFACES) {
+    const ui = await mount($, 'log-fast', surface, 64)
+    // One badge for the one priority request, on the effort line (the line after the model's).
+    expect((await ui.findAll({ type: 'Text', text: 'FAST' })).length, surface).toBe(1)
+    const efforts: string[][] = []
+    walk(await ui.drawn(), n => { if (n.type === 'Box' && (n.children ?? []).some(c => (c as Drawn).type === 'Text' && ((c as Drawn).children ?? []).join('') === 'high')) efforts.push(((n.children ?? []) as Drawn[]).map(c => (c.children ?? []).join(''))) })
+    expect(efforts.map(line => line.includes('FAST')), surface).toEqual([true, false, false])
+    const none = await mount($, 'log-fast-none', surface, 64)
+    expect(await none.find({ type: 'Text', text: 'FAST' }), surface).toBeUndefined()
+  }
+})
+
 // ---- Nothing cut, nothing reloaded (2026-10-10) -------------------------------------------------
 
 type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }

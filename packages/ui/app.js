@@ -5228,9 +5228,13 @@ function requestDetail(record) {
     [t("logs.detail.uncached"), record.usage ? formatNumber(record.usage.input) : t("logs.none")],
     [t("logs.detail.cacheRead"), record.usage && record.usage.cached ? formatNumber(record.usage.cached) : t("logs.none")],
     [t("logs.detail.cacheWrite"), record.usage && record.usage.cacheWrite ? formatNumber(record.usage.cacheWrite) : t("logs.none")],
-  ].map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
-  if (record.note) details.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
-  return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, details)])]);
+  ];
+  // Both tiers side by side: the ChatGPT sign-in often serves `default` for a request made on
+  // `priority` (#54), so the served tier cannot be the FAST badge's basis; the requested one is.
+  if (record.requestedTier || record.servedTier) details.push([t("logs.detail.tier"), `${record.requestedTier || t("logs.none")} / ${record.servedTier || t("logs.none")}`]);
+  const cells = details.map(([label, value]) => el("div", {}, [el("span", { class: "detail-label", text: label }), el("span", { class: "detail-value", text: value })]));
+  if (record.note) cells.push(el("div", { class: "request-note" }, [el("span", { class: "detail-label", text: t("logs.detail.note") }), el("span", { class: "detail-value", text: record.note })]));
+  return el("tr", { class: "request-detail" }, [el("td", { colspan: "7" }, [el("div", { class: "request-detail-grid" }, cells)])]);
 }
 function requestRow(record) {
   const row = el("tr", { class: "request-row", title: record.note || "", onclick: () => { expandedRequestId = expandedRequestId === record.id ? null : record.id; renderRequests(requestRows); } });
@@ -5243,6 +5247,8 @@ function requestRow(record) {
     source && source !== record.target ? el("span", { class: "small", text: `(${source})` }) : null,
     record.purpose === "web-search" ? el("span", { class: "purpose-tag", text: t("logs.webSearch"), title: t("logs.webSearchHelp") }) : null,
     el("span", { class: `provider-badge ${providerClass(record.provider)}`, text: providerLabel(record.provider) }),
+    // The requested tier, not the served one: the ChatGPT sign-in answers `default` to a Fast request (#54).
+    record.requestedTier === "priority" ? el("span", { class: "fast-tag", text: "FAST", title: t("logs.fastHelp") }) : null,
   ].filter(Boolean));
   // The whole input, not the uncached remainder: a fully cached Anthropic turn reports `input: 2`,
   // which read as a two-token request (2026-09-23). The split is in the detail row.

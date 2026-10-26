@@ -18,6 +18,8 @@ export type StatusRequest = {
   ok: boolean
   ms: number
   effort?: string
+  /** The service tier the request asked for ('priority' is Fast); the tier served often differs. */
+  requestedTier?: string
   usage?: { input: number; cached: number; cacheWrite?: number; output: number }
   note?: string
   /** Not ok, but the client sent it again on its own: not a failure. */

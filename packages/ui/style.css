@@ -589,6 +589,8 @@ tr:last-child td { border-bottom: 0; }
 .provider-badge { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; background: var(--fill); color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; white-space: nowrap; }
 /* Says what kind of side request a row is; the provider badge beside it stays the plain one. */
 .purpose-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--separator); color: var(--label-2); font-size: var(--fs-cap); font-weight: 500; white-space: nowrap; }
+/* A request made on the Fast tier: the accent as an outline and ink only, never a fill. */
+.fast-tag { flex: 0 0 auto; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--accent); color: var(--accent); font-size: var(--fs-cap); font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; }
 .token-cell { white-space: nowrap; }
 .cache-pill { margin-left: 6px; color: var(--label-2); font-size: var(--fs-cap); }
 .no-usage { color: var(--label-3); }
