@@ -16,6 +16,7 @@ import { BridgeClient, CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
+import { claudeAppData } from "./app-data.ts";
 
 const router = {
   status: async () => ({ ok: true, proxyEnv: { HTTPS_PROXY: "http://127.0.0.1:1" } }),
@@ -23,7 +24,7 @@ const router = {
   models: async () => [],
 } satisfies SessionsOptions["router"] & { models: () => Promise<never[]> };
 
-function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}) {
+function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; images?: boolean; thinking?: boolean; sendFile?: string; failure?: { text: string; as: "result" | "throw" } } = {}, sdkId = "sdk-1") {
   const options: Record<string, unknown>[] = [];
   const users: SdkUserMessage[] = [];
   const answers: PermissionAnswer[] = [];
@@ -36,7 +37,7 @@ function scriptedQuery(script: { permission?: boolean; toolOutput?: unknown; ima
         let turn = 0;
         for await (const user of params.prompt) {
           users.push(user);
-          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: "sdk-1" };
+          if (turn++ === 0) yield { type: "system", subtype: "init", session_id: sdkId };
           const id = `m${turn}`;
           yield { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: { id } } };
           if (script.thinking) {
@@ -110,7 +111,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -119,7 +120,7 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
   const fake = scriptedQuery(script);
   const events: { session: string; event: SessionEvent }[] = [];
   const sessions = new Sessions({ dir, router, permissions, queryFn: fake.queryFn, coalesceMs: 5, ...extra,
-    onEvent: (session, event) => events.push({ session, event }), onSessions: () => {},
+    onEvent: (session, event) => events.push({ session, event }), onSessions: extra.onSessions ?? (() => {}),
   });
   const instances = [sessions];
   t.after(async () => {
@@ -1119,6 +1120,46 @@ test("attention: a finished turn is marked unseen, cleared by seen, and restorab
   assert.equal(f.sessions.summaryOf(id)?.attention, null);
   assert.equal(f.sessions.markUnread(id).reason, "finished");
   assert.equal(f.sessions.summaryOf(id)?.attention?.reason, "finished");
+});
+
+test("a session read on the phone loses the app's unread dot until newer activity, and that survives a restart", async t => {
+  let now = 3_000_000;
+  const cliId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const app = claudeAppData(t, cliId);
+  const sends: number[] = [];
+  const f = fixture(t, {}, { queryFn: scriptedQuery({}, cliId).queryFn, now: () => now, desktopSidebar: { root: app.root }, onSessions: () => sends.push(now) });
+  const id = await f.create();
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const listed = (instance = f.sessions) => instance.list().find(s => s.id === id);
+  const listState = () => JSON.parse(fs.readFileSync(path.join(f.dir, "list-state.json"), "utf8")) as { readAt: Record<string, number> };
+  assert.equal(listed()?.unread, true, "the app lists the session as unread and nobody read it yet");
+  // A look after the last activity clears the dot and records the activity it covered, not a later clock.
+  const before = sends.length;
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(listed()?.unread, false);
+  assert.equal(listState().readAt[id], 3_000_000);
+  assert.ok(sends.length > before, "clearing the dot resends the list");
+  // A presence ping that finds nothing new neither rewrites the file nor resends the list.
+  const recorded = listState().readAt[id], resent = sends.length;
+  now += 1000;
+  assert.equal(f.sessions.markSeen(id), false);
+  assert.equal(listState().readAt[id], recorded);
+  assert.equal(sends.length, resent);
+  // A restart keeps what the phone read.
+  const restored = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: scriptedQuery({}, cliId).queryFn, now: () => now,
+    desktopSidebar: { root: app.root }, onEvent() {}, onSessions() {}, log() {} });
+  f.instances.push(restored);
+  assert.equal(listed(restored)?.unread, false, "the read record is durable");
+  // Newer activity in the app is unread again (the sidebar snapshot is cached for 3 s).
+  app.row(3_001_000); now += 3001;
+  assert.equal(listed(restored)?.unread, true);
+  assert.equal(listed()?.unread, true);
+  assert.equal(f.sessions.markSeen(id), true);
+  assert.equal(listed()?.unread, false);
+  // Mark unread forgets the record, so the app's unread set can show the dot again.
+  f.sessions.markUnread(id);
+  assert.equal(listed()?.unread, true);
+  assert.equal(Object.hasOwn(listState().readAt, id), false);
 });
 
 test("nextAttention maps a state change to the right reason", () => {
