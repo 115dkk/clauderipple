@@ -2337,6 +2337,19 @@ test('host survey wins; minimal layout renders through SessionMode', async ($, o
   expect(await footer.find({ type: 'Text', text: 'host drawing' })).toBeDefined()
 })
 
+test('a desktop survey draws over the band instead of blanking it', async ($, on) => {
+  boundaries(on)
+  http(on)
+  await start($)
+  const plain = await band($, 'desktop')
+  expect(await plain.find({ key: 'compact' }), 'band without a survey').toBeDefined()
+  await plain.unmount()
+  const survey = await band($, 'desktop', true)
+  expect(await survey.find({ type: 'Text', text: 'host drawing' }), 'host survey').toBeDefined()
+  expect(await survey.find({ key: 'compact' }), 'band under the survey').toBeDefined()
+  await survey.unmount()
+})
+
 test('log queries by session and reopening follows engine panes, not stale atoms', async ($, on) => {
   const b = boundaries(on)
   const urls = http(on)

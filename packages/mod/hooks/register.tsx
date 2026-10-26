@@ -2264,10 +2264,15 @@ export const register: Register = on => {
     try {
       language = await read($, lang)
       startTimers($)
-      if (e.props.hasSurvey) return next(e)
-      const which = await read($, panel)
-      const frame = await frameOf($, e)
       const el = $.ui.resolve(e)
+      // The terminal's survey needs the band's rows, so it gets them. The desktop draws its question
+      // box (a turn's next step, a question asked) as a card of its own, and yielding there blanked
+      // the band until the next prompt (2026-10-26): the band stays, the host's drawing over it.
+      const card = (e.surface === 'desktop' || e.surface === 'vscode') && 'Svg' in el
+      if (e.props.hasSurvey && !card) return next(e)
+      const which = await read($, panel)
+      if (e.props.hasSurvey && which !== null) return next(e)
+      const frame = await frameOf($, e)
       if (which === 'settings') return renderSettings(el, frame, await settingsView($), settingsActions($)) as RenderElement
       if (which === 'compact' || which === 'clear') {
         const choice = await alertView($, frame.now)
@@ -2279,19 +2284,21 @@ export const register: Register = on => {
       const { Box, Button, Text } = el
       // What the phone queued floats over whatever is here, only while something waits (ui/queue.tsx).
       const queued = await read($, phoneQueue)
-      const over = (node: RenderNode): RenderElement => (queued
-        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{renderPhoneQueue(el, frame, queued)}{node}</Box>
+      // The desktop's survey (above) sits under what the phone queued and over the band.
+      const survey = e.props.hasSurvey ? await next(e) : null
+      const over = (node: RenderNode | null): RenderElement => (queued || survey
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{queued ? renderPhoneQueue(el, frame, queued) : null}{survey}{node}</Box>
         : node) as RenderElement
       const below = queued ? { ...frame, maxRows: Math.max(1, frame.maxRows - PHONE_QUEUE_ROWS) } : frame
-      if (await read($, bandHidden)) return over(await next(e))
+      if (await read($, bandHidden)) return over(survey ? null : await next(e))
       const alert = await alertView($, frame.now)
       if (alert) return over(renderAlert(el, below, alert, alertActions($, alert)))
       const s = await currentSettings($)
-      if (s.layout === 'minimal') return over(await next(e))
+      if (s.layout === 'minimal') return over(survey ? null : await next(e))
       const actions = bandActions($, e.surface)
       // The desktop draws the band as one surface with its × inside; the terminal keeps the row
       // of facts and controls with the close control (and its effort button) after it.
-      if ((e.surface === 'desktop' || e.surface === 'vscode') && 'Svg' in el) {
+      if (card) {
         return over(renderBand(el, below, await dashboard($, e.props.isWorking), { ...actions, hide: () => { void toggleBar($) } }))
       }
       return over(
