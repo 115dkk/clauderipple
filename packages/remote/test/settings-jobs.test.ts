@@ -70,6 +70,23 @@ test("desktop session records map current CLI ids, refresh, and refuse ambiguous
   assert.equal(reader.appSessionIdFor("cli-3"), "local_fine", "and does not hide the others");
 });
 
+// 2026-10-27: on a Mac main.ts passes `desktopSidebar: {}` (no root: the app's default folder), and
+// a null reader there switched model/effort sync off in production while every test passed a root.
+test("Sessions reads the app's records from its default folder when the sidebar names no root", t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-settings-home-"));
+  const previous = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { process.env.HOME = previous; fs.rmSync(home, { recursive: true, force: true }); });
+  const scope = path.join(home, "Library", "Application Support", "Claude", "claude-code-sessions", "account", "org"); fs.mkdirSync(scope, { recursive: true });
+  fs.writeFileSync(path.join(scope, "local_target.json"), JSON.stringify({ cliSessionId: "cli-1", model: "old" }));
+  const dir = path.join(home, "host"); fs.mkdirSync(dir);
+  const sessions = new Sessions({ dir, desktopSidebar: {}, permissions: PermissionQueue.open(path.join(dir, "permissions.json")),
+    router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => ({ effort: null, cachePct: null, contextPct: null, fiveHourPct: null, fiveHourResetAt: null, workers: [], at: 0 }) },
+    queryFn: () => { throw new Error("must not launch"); }, onEvent() {}, onSessions() {} });
+  t.after(() => sessions.shutdown());
+  assert.equal(sessions.requestAppSettings("cli-1", { model: "new" }), true);
+});
+
 test("Sessions only queues explicitly requested fields for a mapped app record", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-settings-session-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

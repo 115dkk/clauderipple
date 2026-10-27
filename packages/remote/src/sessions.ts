@@ -519,8 +519,9 @@ export class Sessions {
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
     for (const id of listState?.archived ?? []) this.archived.add(id);
     for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
-    const settingsRoot = opts.desktopSidebar?.root ?? opts.environmentRoot;
-    this.desktopSettings = settingsRoot ? new DesktopSettings(settingsRoot, this.now) : null;
+    // On a Mac the sidebar option carries no root (the app's default folder is meant): a null here
+    // switched every model/effort sync off in production while the tests, which pass a root, passed.
+    this.desktopSettings = opts.desktopSidebar || opts.environmentRoot ? new DesktopSettings(opts.desktopSidebar?.root ?? opts.environmentRoot, this.now) : null;
     this.sidebar = opts.desktopSidebar ? new DesktopSidebar({ ...opts.desktopSidebar, now: this.now,
       onError: error => (opts.log ?? console.error)(`[desktop sidebar] ${error instanceof Error ? error.message : String(error)}`),
     }) : null;
