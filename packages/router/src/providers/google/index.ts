@@ -153,6 +153,7 @@ export function antigravityScopeKey(group: string, host: string): string {
 const GROUP_NAMES: Record<string, { spent: string; other: string }> = {
   "3p": { spent: "Claude/GPT", other: "Gemini" },
   gemini: { spent: "Gemini", other: "Claude/GPT" },
+  argon: { spent: "Gemini 4 Argon", other: "other Gemini and Claude/GPT" },
 };
 
 /**

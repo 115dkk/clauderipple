@@ -12,7 +12,7 @@
 // live** — this environment has no Antigravity subscription. See docs/ARCHITECTURE.md §4d.
 
 import type { GeminiRequest } from "./translate.ts";
-import { antigravityRequestId, antigravitySessionId, antigravityUserAgent, GOOGLE_OAUTH, resolveAntigravityWireModel } from "./antigravity.ts";
+import { antigravityRequestId, antigravitySessionId, antigravityUserAgentFor, GOOGLE_OAUTH, resolveAntigravityWireModel } from "./antigravity.ts";
 import { VERSION } from "../../version.ts";
 
 export type GoogleTransportRequest = { url: string; headers: Record<string, string>; body: string };
@@ -117,8 +117,9 @@ export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?
           headers: {
             "content-type": "application/json",
             accept: o.stream ? "text/event-stream" : "application/json",
-            // The IDE client family is required to unlock newer agent models. Never a giveaway literal.
-            "user-agent": antigravityUserAgent(),
+            // The IDE client family is required to unlock newer agent models, and Gemini 4 Argon is
+            // served to the CLI family only. Never a giveaway literal.
+            "user-agent": antigravityUserAgentFor(resolved.wire),
             authorization: `Bearer ${auth.accessToken}`,
           },
           body: JSON.stringify(envelope),

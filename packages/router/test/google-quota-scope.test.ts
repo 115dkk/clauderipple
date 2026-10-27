@@ -79,7 +79,8 @@ async function rig(t: TestContext, reply: (seen: { token: string | undefined; mo
 }
 
 test("models map onto the two measured quota groups; anything else has none", () => {
-  for (const model of ["gemini-3.8-flash", "gemini-3.8-flash@high", "Gemini-4-Pro"]) assert.equal(antigravityQuotaScope(model), "gemini", model);
+  for (const model of ["gemini-3.8-flash", "gemini-3.8-flash@high", "Gemini-4-Pro", "gemini-4-argonaut"]) assert.equal(antigravityQuotaScope(model), "gemini", model);
+  for (const model of ["gemini-4-argon", "gemini-4-argon-low", "gemini-4-argon@high"]) assert.equal(antigravityQuotaScope(model), "argon", model);
   for (const model of ["claude-opus-5-5-low", "claude-sonnet-5-5-high", "gpt-oss-120b", "gpt-oss"]) assert.equal(antigravityQuotaScope(model), "3p", model);
   for (const model of ["gpt-6-luna", "gpt-ossify", "deepseek-v4", ""]) assert.equal(antigravityQuotaScope(model), undefined, model);
 });
@@ -223,4 +224,42 @@ test("a group spent on one host still answers on the other: each Cloud Code Assi
 
   assert.equal((await call(GEMINI)).status, 429);
   assert.deepEqual(sent, [DAILY, PROD], "nothing sent for the group still resting on daily");
+});
+
+// Gemini 4 Argon has a quota of its own (usage.ts antigravityQuotaScope, measured 2026-10-27). No
+// spent Argon has been observed yet, so this body is the measured Claude 429 (THIRD_PARTY_429) with
+// Argon's wire id in `metadata.model`.
+const ARGON_429 = { error: { ...THIRD_PARTY_429.error, details: [
+  { ...THIRD_PARTY_429.error.details[0], metadata: { ...THIRD_PARTY_429.error.details[0]!.metadata, model: "gemini-4-argon-low" } },
+  THIRD_PARTY_429.error.details[1],
+] } };
+const ARGON = "gemini-4-argon";
+
+test("a spent Argon rests only Argon: Gemini Flash and Claude keep answering, and the refusal says so", async t => {
+  const r = await rig(t, ({ model }) => model.startsWith("gemini-4-argon-") ? { status: 429, body: ARGON_429 } : { status: 200, body: OK });
+
+  const spent = await r.call(ARGON);
+  assert.equal(spent.status, 429);
+  const [account] = r.adapter.accountStatus();
+  assert.equal(account!.state, "ready");
+  assert.deepEqual(groupsOf(account), ["argon"]);
+  assert.equal(r.adapter.hasUsable(ARGON), false);
+  assert.equal(r.adapter.hasUsable(GEMINI), true, "Flash's own quota is not Argon's");
+  assert.equal(r.adapter.hasUsable(OPUS), true);
+
+  assert.equal((await r.call(GEMINI)).status, 200);
+  assert.equal((await r.call(OPUS)).status, 200);
+  const refused = await r.call(ARGON);
+  assert.equal(refused.status, 429);
+  assert.match(JSON.parse(refused.text).error.message, /the Gemini 4 Argon quota is spent on every signed-in account; other Gemini and Claude\/GPT models still answer/);
+  assert.equal(r.seen.filter(s => s.model.startsWith("gemini-4-argon-")).length, 1, "the resting Argon is refused without an upstream call");
+});
+
+test("a spent Gemini group leaves Argon answering", async t => {
+  const FLASH_429 = { error: { ...ARGON_429.error, details: [{ ...ARGON_429.error.details[0], metadata: { ...ARGON_429.error.details[0]!.metadata, model: "gemini-3.8-flash-low" } }, ARGON_429.error.details[1]] } };
+  const r = await rig(t, ({ model }) => model.startsWith("gemini-3.8-flash") ? { status: 429, body: FLASH_429 } : { status: 200, body: OK });
+  assert.equal((await r.call(GEMINI)).status, 429);
+  assert.deepEqual(groupsOf(r.adapter.accountStatus()[0]), ["gemini"]);
+  assert.equal(r.adapter.hasUsable(ARGON), true);
+  assert.equal((await r.call(ARGON)).status, 200);
 });

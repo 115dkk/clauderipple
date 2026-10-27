@@ -1473,7 +1473,11 @@ They were not live-tested during the original implementation. Files are under `s
   `sessionId` (`adapters/google.ts:1145-1158`; `google-antigravity-wire.ts:53-77`). Headers:
   `Authorization: Bearer <token>` and `User-Agent: antigravity/ide/<ver> (os_type=…; arch=…;
   aidev_client; auth_method=oauth)` — the IDE client family is required, the backend 404s
-  CLI-shaped UAs (`adapters/client-fingerprint.ts:44-65`). Response frames nest the standard
+  CLI-shaped UAs (`adapters/client-fingerprint.ts:44-65`). The one exception is Gemini 4 Argon,
+  served to the CLI family only: its requests carry `antigravity/cli/1.3.4 (…)`
+  (`antigravityUserAgentFor`; measured 2026-10-27, one Google AI Pro account: Argon 404s under the IDE UA on
+  the daily host and answers 200 under the CLI one; opencodex `antigravityCliUserAgent`). The IDE
+  override env vars do not replace the CLI UA. Response frames nest the standard
   Gemini payload under `response` (`adapters/google.ts:1281,1591-1596`).
 - **Two hosts, different catalogues and separate quotas (measured 2026-10-20, user's account,
   `fetchAvailableModels` on the same OAuth token).** `daily-cloudcode-pa.googleapis.com` and
@@ -1507,13 +1511,16 @@ They were not live-tested during the original implementation. Files are under `s
   Resolution, from `providers/antigravity-models.ts`: `gemini-3.8-flash` → its suffix per
   effort (`…-low/medium/high`, no `thinkingLevel` beside it — the suffix IS the effort);
   `gemini-3.1-pro` → `gemini-3.1-pro-low` / `gemini-pro-agent` with `thinkingLevel`;
-  `gemini-3.7-flash` → `gemini-3.7-flash-tiered` with `thinkingLevel`; a `claude-*` id takes a
+  `gemini-3.7-flash` → `gemini-3.7-flash-tiered` with `thinkingLevel`; `gemini-4-argon` → its
+  suffix per effort (`…-low/medium/high`, default medium, no `thinkingLevel`); a `claude-*` id takes a
   `thinkingLevel` only (`resolveAntigravityThinkingLevel` clamps `xhigh/max/ultra`→`high`).
   CCA's own catalogue is `POST {host}/v1internal:fetchAvailableModels` with `{project}`, per host
-  (see "Two hosts" below), body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
+  (see "Two hosts" below) and per client family: the IDE answer gives every model, and a second ask
+  under the CLI UA adds only Argon's ids (which the IDE answer omits); an unreadable IDE answer leaves
+  the host unread as before. Body `{models:{<wireId>:{maxTokens,…}}, agentModelSorts:[{groups:[{modelIds:[…]}]}],
   tieredModelIds:{flash:[…]}}` (`providers/quota/antigravity.ts:166-168`,
   `providers/antigravity-models.ts:489-560`); when it cannot be read on any host we fall back to the
-  static collapsed list (`gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.1-pro`,
+  static collapsed list (`gemini-3.8-flash`, `gemini-4-argon`, `gemini-3.7-flash`, `gemini-3.1-pro`,
   `gemini-3.1-flash-image`, `claude-sonnet-4-6`, `claude-opus-4-6-thinking`,
   `gpt-oss-120b-medium`, context windows from CCA `maxTokens`).
 - Claude models on CCA force `toolConfig.functionCallingConfig.mode = "VALIDATED"`; a client
@@ -1536,7 +1543,10 @@ They were not live-tested during the original implementation. Files are under `s
   **A 429 that proves one quota group spent rests only that group** (`isGroupQuotaExhausted`:
   an ErrorInfo `reason: "QUOTA_EXHAUSTED"` whose `metadata.model` is in the turn's group;
   `antigravityQuotaScope`: `gemini` for gemini-*, `3p` for claude-*/gpt-oss*, the two groups
-  `retrieveUserQuotaSummary` reports, usage.ts). Measured 2026-10-23: one such 429 for
+  `retrieveUserQuotaSummary` reports, usage.ts; and `argon` for gemini-4-argon*, which draws on a
+  quota of its own — measured 2026-10-27, `fetchAvailableModels` gave Argon's tiers a remaining
+  fraction and reset that match neither Gemini bucket, and the summary lists no group for it, so it
+  has no limits-row window and no `hasRemainingQuota` evidence). Measured 2026-10-23: one such 429 for
   `claude-opus-5-5-low` ("Individual quota reached … Resets in 4h51m35s"), while the limits row read
   the 3P weekly window at 100% and Gemini's at 0.3%, rested the whole account, so every
   `gemini-3.8-flash` turn for the next five hours was refused "every signed-in account is at its
