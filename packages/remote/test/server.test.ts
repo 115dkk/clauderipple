@@ -1301,6 +1301,21 @@ test("a message in the same read as a setting change still waits for it", async 
   assert.equal(f.peer.frames.some(frame => frame.t === "ack"), true);
 });
 
+for (const stopped of [false, true]) test(`a queued message waits for a setting change, then ${stopped ? "stays queued after a Stop" : "goes out"}`, async t => {
+  const f = await memoryHost(t);
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: () => Promise<void> }).changeMode = () => new Promise<void>(resolve => { release = resolve; });
+  const delivered = () => f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "queued-1");
+  f.peer.receive({ t: "set_mode", reqId: "mode-1", sessionId: f.id, mode: "plan" });
+  f.peer.receive({ t: "req", reqId: "enqueue-1", op: { op: "enqueue", session: f.id, clientMsgId: "queued-1", text: "after the pick" } });
+  for (let i = 0; i < 5; i++) await nextTick();
+  assert.equal(delivered(), false, "the queue waits for the mode change before it");
+  if (stopped) f.sessions.holdQueue(f.id);
+  release();
+  for (let i = 0; i < 10; i++) await nextTick();
+  assert.equal(delivered(), !stopped);
+});
+
 test("session lists wait for a backed-up connection to drain and only the newest goes out", async t => {
   const f = await memoryHost(t);
   f.peer.frames.length = 0;

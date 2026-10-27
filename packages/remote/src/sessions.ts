@@ -1392,10 +1392,11 @@ export class Sessions {
     for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
     if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
-    // It runs with the settings picked before it, whoever takes it.
-    const settling = this.settingsSettled(id);
-    if (settling) {
+    // It runs with the settings picked before it, whoever takes it. Over the wait the person may have
+    // stopped the queue or removed the message, and another path may have taken it: then it stays.
+    for (let settling = this.settingsSettled(id); settling; settling = this.settingsSettled(id)) {
       await settling;
+      if (this.sendQueue.held(id) || this.draining.has(id) || this.sendQueue.items(id).some(queued => queued.claimedBy)) return id;
       if (!this.sendQueue.items(id).some(queued => queued.id === itemId)) return id;
     }
     // A send pressed on a queued message goes to the app too while it holds the session: run here,
@@ -1496,6 +1497,11 @@ export class Sessions {
       const summary = this.has(id) ? this.summaryOf(id) : undefined;
       if (!summary || BUSY.has(summary.state)) return;
     }
+    // A queued message runs with the settings picked before it, whoever takes it. Nothing is held
+    // across the wait: the drain starts over and checks everything afresh (a turn may have started,
+    // the queue been stopped or the item removed meanwhile).
+    const settling = this.settingsSettled(id);
+    if (settling) { void settling.then(() => this.drainQueue(id, registryIdle)); return; }
     const awaiting = this.sendQueue.awaiting(id);
     const record = this.records.get(id);
     const appIdle = !!record && !record.desktopBridge && this.canTailHandoff(record) && !this.appBusy(desktopId);
@@ -1503,12 +1509,6 @@ export class Sessions {
     this.draining.add(id);
     let claimed = false;
     try {
-      // A queued message runs with the settings picked before it, whoever takes it.
-      const settling = this.settingsSettled(id);
-      if (settling) {
-        await settling;
-        if (this.shuttingDown || this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
-      }
       if (this.modEligible(id, desktopId, head)) {
         const offer = this.offerMod(id, desktopId, head);
         const state = offer ? await offer : null;
@@ -1541,8 +1541,6 @@ export class Sessions {
   }
 
   private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean): Promise<string> {
-    const settling = this.settingsSettled(id);
-    if (settling) await settling;
     const attachments: Attachment[] = [];
     for (const a of item.attachments) {
       const data = this.sendQueue.data(a);

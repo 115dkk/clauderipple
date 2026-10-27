@@ -34,10 +34,12 @@ export class SessionSettings {
 
   private key(session: string, reqId: string): string { return JSON.stringify([session, reqId]); }
 
-  /** Answers still owed for a session's changes; each settles by the timeout at the latest. */
+  /** Answers still owed for a session's changes: neither answered nor timed out (a timed-out one
+   * stays in `waiting` for duplicates until its work ends, but no longer holds anything back). */
   pending(session: string): Promise<SettingsResult>[] {
-    return [...this.waiting].filter(([key]) => (JSON.parse(key) as [string, string])[0] === session).map(([, response]) => response);
+    return [...this.owed].filter(([key]) => (JSON.parse(key) as [string, string])[0] === session).map(([, response]) => response);
   }
+  private owed = new Map<string, Promise<SettingsResult>>();
 
   private save(key: string, record: Operation): void {
     const next = new Map(this.records);
@@ -75,6 +77,7 @@ export class SessionSettings {
     const unknown = new Promise<SettingsResult>(resolve => {
       timer = setTimeout(() => {
         timedOut = true;
+        this.owed.delete(key);
         const result: SettingsResult = { status: "unknown" };
         publish(result);
         resolve(result);
@@ -90,9 +93,10 @@ export class SessionSettings {
       this.save(key, { ...record, result });
       if (!timedOut || result.status !== "unknown") publish(result);
       return result;
-    }).finally(() => { clearTimeout(timer); this.waiting.delete(key); });
+    }).finally(() => { clearTimeout(timer); this.waiting.delete(key); this.owed.delete(key); });
     const response = Promise.race([finished, unknown]);
     this.waiting.set(key, response);
+    this.owed.set(key, response);
     return response;
   }
 }
