@@ -692,6 +692,28 @@ export class DesktopSessions {
 
   transcriptSize(id: string): number { return this.sources.get(id)?.size ?? 0; }
 
+  /** The current end of a known transcript, including writes newer than the discovery cache. */
+  transcriptEnd(id: string): number | undefined {
+    if (!UUID.test(id)) return undefined;
+    let source = this.sources.get(id);
+    if (!source) {
+      try {
+        for (const project of fs.readdirSync(this.projects, { withFileTypes: true })) {
+          if (!project.isDirectory()) continue;
+          const file = path.join(this.projects, project.name, `${id}.jsonl`);
+          let stat: fs.Stats;
+          try { stat = fs.lstatSync(file); } catch (error) { if (missing(error)) continue; throw error; }
+          if (!stat.isFile()) continue;
+          source = this.readSummary(id, file, stat) ?? undefined;
+          if (source) { this.sources.set(id, source); break; }
+        }
+      } catch (error) { if (!missing(error)) throw error; }
+    }
+    if (!source) return undefined;
+    const fd = this.open(source.file);
+    try { return fs.fstatSync(fd).size; } finally { fs.closeSync(fd); }
+  }
+
   /** Whether the transcript's newest turn ended ok, from the tail window; null when it holds no
    * result record at all. A Mac session the host is not tailing offers no other word on how its
    * turn ended, so this is what turns an alert's "finished" into "failed"; anything unreadable

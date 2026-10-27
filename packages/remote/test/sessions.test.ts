@@ -1535,12 +1535,12 @@ for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "
   }
 });
 
-async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100) {
+async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, waitForExit = false) {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "mod-inbox-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
   const registry = new Map<string, DesktopProcess>();
-  const boundary = controlledQueries();
+  const boundary = controlledQueries(true, waitForExit);
   const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs, modResultMs,
     handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" }); return "opened"; }, log() {} });
   const id = await f.create();
@@ -1549,9 +1549,119 @@ async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100) {
   fs.writeFileSync(path.join(projects, "project", `${sdkId}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
   boundary.queries[0]!.emit({ type: "system", subtype: "init", session_id: sdkId });
   boundary.queries[0]!.emit({ type: "result", subtype: "success" });
+  if (waitForExit) { await waitFor(() => boundary.queries[0]!.closed); boundary.queries[0]!.exitReply.resolve(); }
   await waitFor(() => registry.has(sdkId) && boundary.queries[0]!.closed);
   return { ...f, id, sdkId, boundary, registry, projects };
 }
+
+const transcriptLine = (value: unknown) => JSON.stringify(value) + "\n";
+
+test("an idle handed-off session tails app turns without a phone attached", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "app-user", cwd: f.cwd, message: { content: "From the app" } }) +
+    transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "App answer" }] } }));
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.ok(events.some(e => e.kind === "user" && e.text === "From the app"));
+  assert.ok(events.some(e => e.kind === "assistant" && e.text === "App answer"));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "App answer").length, 1);
+});
+
+for (const order of ["report-first", "transcript-first"] as const) test(`mod echo is shown once with ${order}`, async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "mod-echo", "same prompt");
+  assert.equal(f.sessions.modInbox.claim("mod-echo"), true);
+  const write = () => fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "different", cwd: f.cwd, message: { content: "different prompt" } }) +
+    transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "same prompt" } }));
+  if (order === "report-first") { f.sessions.modInbox.result("mod-echo", "submitted"); write(); await f.sessions.pollDesktop(); }
+  else { write(); await f.sessions.pollDesktop(); f.sessions.modInbox.result("mod-echo", "submitted"); }
+  const users = f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user");
+  assert.equal(users.filter(e => e.text === "same prompt").length, 1);
+  assert.equal(users.find(e => e.text === "same prompt")?.clientMsgId, "mod-echo");
+  assert.equal(users.filter(e => e.text === "different prompt").length, 1);
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "later", cwd: f.cwd, message: { content: "same prompt" } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "same prompt").length, 2, "a later genuine message is not an echo");
+});
+
+test("an app message with an attachment is not mistaken for a text-only mod echo", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "text-only", "same words");
+  assert.equal(f.sessions.modInbox.claim("text-only"), true);
+  assert.equal(f.sessions.modInbox.result("text-only", "submitted"), true);
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from("photo").toString("base64") } };
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "with-image", cwd: f.cwd, message: { content: [{ type: "text", text: "same words" }, image] } }) +
+    transcriptLine({ type: "user", uuid: "actual-echo", cwd: f.cwd, message: { content: "same words" } }));
+  await f.sessions.pollDesktop();
+  const users = f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "same words");
+  assert.equal(users.length, 2);
+  assert.ok(users.some(e => e.kind === "user" && e.images?.length === 1 && e.clientMsgId === "with-image"));
+  assert.ok(users.some(e => e.kind === "user" && e.clientMsgId === "text-only"));
+});
+
+test("an old handed-off record starts tailing at the current end", async t => {
+  const f = await modFixture(t);
+  f.sessions.shutdown();
+  const recordsFile = path.join(f.dir, "sessions.json");
+  const records = JSON.parse(fs.readFileSync(recordsFile, "utf8")) as { transcriptOffset?: number }[];
+  delete records[0]!.transcriptOffset;
+  fs.writeFileSync(recordsFile, JSON.stringify(records));
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "old", message: { model: "test", content: [{ type: "text", text: "old answer" }] } }));
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", onEvent() {}, onSessions() {} });
+  f.instances.push(active);
+  await active.pollDesktop();
+  assert.equal(active.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "old answer"), false);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "new", message: { model: "test", content: [{ type: "text", text: "new answer" }] } }));
+  await active.pollDesktop();
+  assert.equal(active.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "new answer").length, 1);
+});
+
+test("host turns are not tailed while running or replayed after the writer exits", async t => {
+  const f = await modFixture(t, 10, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "host-turn", "/help");
+  await waitFor(() => f.boundary.queries.length === 2);
+  const query = f.boundary.queries[1]!;
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "host-echo", cwd: f.cwd, message: { content: "/help" } }) +
+    transcriptLine({ type: "assistant", uuid: "host-answer", message: { model: "test", content: [{ type: "text", text: "host answer" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "host answer"), false);
+  query.emit({ type: "assistant", message: { id: "sdk-answer", model: "test", content: [{ type: "text", text: "host answer" }] } });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => query.closed);
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.equal(events.filter(e => e.kind === "assistant" && e.text === "host answer").length, 1);
+  assert.equal(events.filter(e => e.kind === "user" && e.text === "/help").length, 1);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "next", message: { model: "test", content: [{ type: "text", text: "next app answer" }] } }));
+  await f.sessions.pollDesktop();
+  assert.ok(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "next app answer"));
+});
+
+test("tailing waits for the SDK process exit and includes its final transcript write in the boundary", async t => {
+  const f = await modFixture(t, 500, 500, true);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "closing-turn", "/help");
+  await waitFor(() => f.boundary.queries.length === 2);
+  const query = f.boundary.queries[1]!;
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => query.closed);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "late-host", message: { model: "test", content: [{ type: "text", text: "late host write" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "late host write"), false);
+  query.exitReply.resolve();
+  await nextTick();
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "app-after-exit", message: { model: "test", content: [{ type: "text", text: "after exit" }] } }));
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.equal(events.some(e => e.kind === "assistant" && e.text === "late host write"), false);
+  assert.equal(events.filter(e => e.kind === "assistant" && e.text === "after exit").length, 1);
+});
 
 test("mod claim persists before success, refuses queue actions, and submitted is idempotent", async t => {
   const f = await modFixture(t, 500, 500);

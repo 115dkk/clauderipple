@@ -308,6 +308,9 @@ export class Sessions {
   private skippedRecords = new Map<string, SessionRecord>();
   private logs = new Map<string, EventLog>();
   private live = new Map<string, Live>();
+  /** A closed SDK may still be writing its transcript until its process exits. */
+  private closing = new Map<string, Live>();
+  private modEchoes = new Map<string, { id: string; text: string; expires: number }>();
   /** Slash commands per session (its init event), and the latest seen anywhere for sessions with none yet. */
   private commandLists = new Map<string, { at: number; list: string[] }>();
   private lastCommands: string[] = [];
@@ -479,7 +482,10 @@ export class Sessions {
       const id = this.modOwners.get(offer.itemId);
       if (!id || this.shuttingDown || this.sendQueue.held(id)) return false;
       const claimed = this.sendQueue.claimMod(id, offer.itemId);
-      if (claimed) this.opts.onSessions();
+      if (claimed) {
+        this.rememberModEcho(id, offer);
+        this.opts.onSessions();
+      }
       return claimed;
     }, (offer, outcome) => this.finishMod(offer, outcome), opts.modResultMs);
     this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", DESKTOP_WAITING);
@@ -614,7 +620,13 @@ export class Sessions {
           }
         }
       }
-      if (!r.desktopBridge) continue;
+      if (!r.desktopBridge) {
+        if (this.canTailHandoff(r)) {
+          try { this.watchDesktop(r.id); this.tailDesktop(r.id); }
+          catch (error) { (this.opts.log ?? console.error)(`[desktop tail] ${r.id}: ${String(error)}`); }
+        }
+        continue;
+      }
       try {
         this.tailBridge(r);
         // A folder move shows only in the app's registry, not as transcript growth: check every poll.
@@ -651,10 +663,15 @@ export class Sessions {
     for (const id of ids) { this.detachedWatches.delete(id); this.watchDesktop(id); }
   }
 
+  private canTailHandoff(r: SessionRecord): boolean {
+    return !!r.sdkSessionId && r.desktopHandoff === "attempted" && !r.desktopBridge && !r.environmentBridgeId && !r.environmentCreateUnknown &&
+      !this.live.has(r.id) && !this.closing.has(r.id) && !this.handingOff.has(r.id) && !this.desktop?.liveProcess(r.sdkSessionId)?.bridgeSessionId;
+  }
+
   private watchDesktop(id: string): void {
     const record = this.records.get(id);
     const desktopId = record?.sdkSessionId ?? id;
-    if (this.shuttingDown || this.detachedWatches.has(id) || this.transcriptWatches.has(id) || (record && !record.desktopBridge) || !this.desktop?.has(desktopId)) return;
+    if (this.shuttingDown || this.detachedWatches.has(id) || this.transcriptWatches.has(id) || (record && !record.desktopBridge && !this.canTailHandoff(record)) || !this.desktop?.has(desktopId)) return;
     if (record?.desktopBridge && !this.desktop.liveProcess(desktopId)?.bridgeSessionId) return;
     const entry = { close: null as (() => void) | null, timer: null as ReturnType<typeof setTimeout> | null };
     this.transcriptWatches.set(id, entry);
@@ -688,7 +705,13 @@ export class Sessions {
   private tailDesktop(id: string): void {
     const r = this.records.get(id);
     if (r?.desktopBridge) { this.tailBridge(r); return; }
-    if (r || !this.desktop?.has(id)) return;
+    if (r) {
+      if (!this.canTailHandoff(r) || !this.desktop?.has(r.sdkSessionId!)) return;
+      if (r.transcriptOffset === undefined) { this.markTranscriptEnd(r); return; }
+      this.tailBridge(r);
+      return;
+    }
+    if (!this.desktop?.has(id)) return;
     const before = this.desktop.snapshot(id);
     const log = this.desktop.log(id);
     if (before === log) return;
@@ -709,6 +732,17 @@ export class Sessions {
       }
       // Our own Remote Control echo: drop it from the bounded set and skip it, once.
       if (body.kind === "user" && (this.bridgeEchoes.delete(body.clientMsgId) || r.environmentBridgeId && body.clientMsgId === (UUID_RE.test(r.createdBy) ? r.createdBy : uuidFrom(r.createdBy)) && this.seen(r.id, r.createdBy))) return;
+      if (!r.desktopBridge && body.kind === "user" && !body.images?.length && !body.files?.length) {
+        const echo = this.takeModEcho(r.id, body.text);
+        if (echo) {
+          if (!this.seen(r.id, echo)) {
+            this.personMessage(r.id);
+            this.append(r.id, { ...body, clientMsgId: echo });
+            this.rememberClientMsgId(r.id, echo);
+          }
+          return;
+        }
+      }
       if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) {
         if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
         this.append(r.id, body);
@@ -716,9 +750,11 @@ export class Sessions {
     }, data => this.log(r.id).image(data));
     if (r.transcriptOffset !== before) {
       this.save();
-      this.refreshBridgeMeta(r);
-      const process = this.desktop.liveProcess(desktopId);
-      this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
+      if (r.desktopBridge) {
+        this.refreshBridgeMeta(r);
+        const process = this.desktop.liveProcess(desktopId);
+        this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
+      }
     }
   }
 
@@ -1258,7 +1294,7 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.handingOff.has(id) || this.closing.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head || head.claimedBy) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
@@ -1345,10 +1381,23 @@ export class Sessions {
     if (this.modOwners.get(itemId) === id) this.modInbox.withdraw(itemId);
   }
 
+  private rememberModEcho(id: string, offer: ModOffer): void {
+    while (this.modEchoes.size >= Sessions.ECHO_CAP) this.modEchoes.delete(this.modEchoes.keys().next().value!);
+    this.modEchoes.set(offer.itemId, { id, text: offer.text, expires: this.now() + 60_000 });
+  }
+
+  private takeModEcho(id: string, text: string): string | undefined {
+    for (const [itemId, echo] of this.modEchoes) {
+      if (echo.expires < this.now()) { this.modEchoes.delete(itemId); continue; }
+      if (echo.id === id && echo.text === text) { this.modEchoes.delete(itemId); return itemId; }
+    }
+    return undefined;
+  }
+
   private finishMod(offer: ModOffer, outcome: ModOutcome): void {
     const id = this.modOwners.get(offer.itemId);
     if (!id) throw new Error("Missing mod offer owner");
-    if (outcome === "failed") this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN);
+    if (outcome === "failed") { this.modEchoes.delete(offer.itemId); this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN); }
     else {
       const before = this.log(id).lastSeq;
       const key = `send:${id}:${offer.itemId}`;
@@ -1638,6 +1687,8 @@ export class Sessions {
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
     id = r.id;
+    if (this.closing.has(id)) throw new DesktopBusyError();
+    if (this.canTailHandoff(r)) this.tailDesktop(id);
     if (this.seen(id, clientMsgId)) return id;
     this.personMessage(id);
     const converted = attachmentContent(r.cwd, text, attachments, blob => this.blob(id, blob), data => this.log(id).image(data));
@@ -2273,13 +2324,31 @@ export class Sessions {
     return { status: "applied", model, effort };
   }
 
+  private markTranscriptEnd(r: SessionRecord): void {
+    if (!r.sdkSessionId || !this.desktop) return;
+    const end = this.desktop.transcriptEnd(r.sdkSessionId);
+    if (end !== undefined && r.transcriptOffset !== end) { r.transcriptOffset = end; this.save(); }
+  }
+
   stop(id: string, expected?: Live): void {
     const live = this.live.get(id);
     if (!live || (expected && live !== expected)) return;
+    const r = this.records.get(id);
+    const follow = r && !r.desktopBridge && !r.environmentBridgeId && r.desktopHandoff === "attempted";
+    if (follow) this.closing.set(id, live);
     this.live.delete(id);
     live.input.close();
     live.abort.abort();
-    try { live.query.close(); } catch { /* already ended */ }
+    try { live.query?.close(); } catch { /* already ended */ }
+    const finished = () => {
+      if (this.closing.get(id) !== live) return;
+      if (!this.shuttingDown) this.markTranscriptEnd(r!);
+      this.closing.delete(id);
+    };
+    if (follow && live.query?.processExited) void live.query.processExited.then(finished).catch(error => {
+      (this.opts.log ?? console.error)(`[desktop tail] ${id}: writer exit failed: ${String(error)}`);
+    });
+    else if (follow) finished();
   }
 
   shutdown(): void {
@@ -2357,6 +2426,12 @@ export class Sessions {
     }
     if (this.live.get(r.id) !== live) return;
     this.flush(r.id, live);
+    if (r.desktopHandoff === "attempted" && !r.desktopBridge && !r.environmentBridgeId) {
+      try { await live.query.processExited; }
+      catch (error) { (this.opts.log ?? console.error)(`[desktop tail] ${r.id}: writer exit failed: ${String(error)}`); return; }
+      if (this.live.get(r.id) !== live) return;
+      this.markTranscriptEnd(r);
+    }
     this.live.delete(r.id);
     this.opts.permissions.expireSession(r.id, "aborted");
     if (failure) {
@@ -2578,8 +2653,9 @@ export class Sessions {
     if (r.desktopHandoff !== "pending" && r.desktopHandoff !== "failed") return;
     // An app worker already owns it, even when RC is off: do not open another writer.
     if (this.desktop?.isOpen(r.sdkSessionId)) {
-      if (live) this.stop(r.id, live);
       r.desktopHandoff = "attempted";
+      if (live) this.stop(r.id, live);
+      else this.markTranscriptEnd(r);
       delete r.desktopHandoffRetryAt;
       delete r.desktopHandoffError;
       this.save();
@@ -2605,6 +2681,7 @@ export class Sessions {
         r.desktopHandoff = "attempted";
         delete r.desktopHandoffError;
         delete r.desktopHandoffRetryAt;
+        this.markTranscriptEnd(r);
         this.save();
         this.append(r.id, { kind: "notice", code: "desktop_handoff_requested" }, false);
         (this.opts.log ?? console.error)(`[desktop handoff ${r.id}] ${result}`);
