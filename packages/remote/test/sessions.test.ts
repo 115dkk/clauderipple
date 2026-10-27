@@ -111,7 +111,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -1455,6 +1455,84 @@ test("one message id keeps one content: a reused id with other words is refused,
   assert.equal(users().length, 1, "the refused reuse never becomes a second message");
   // An attachment change is a content change too.
   assert.throws(() => f.sessions.send(id, "same-id", "first words", [{ blob: "b", name: "photo.png", mediaType: "image/png" }]), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+});
+
+test("environment creation attaches once, sends once, and adopts the desktop CLI identity without duplicate rows", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
+  const projects = path.join(root, "projects"); fs.mkdirSync(projects);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const registry = new Map<string, DesktopProcess>();
+  const calls: string[] = [];
+  let reads = 0, handoffs = 0;
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    const target = String(url);
+    if (options?.method === "POST" && target.endsWith("/sessions")) { calls.push("create"); return Response.json({ session: { id: "cse_abc" } }); }
+    if (options?.method === "POST") { calls.push("send"); return Response.json({}); }
+    if (target.endsWith("/cse_abc")) { calls.push("read"); return Response.json(++reads < 3 ? {} : { worker_status: "idle" }); }
+    if (target.includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [] });
+  } });
+  client.control = async (_id, _requestId, request) => { calls.push(request.subtype); };
+  const f = fixture(t, {}, { environmentRoot: root, environmentWaitMs: 500, environmentPollMs: 1, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client, handoff: async () => { handoffs++; return "opened"; }, log() {} });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ lastKnownAccountUuid: "account" }));
+  fs.writeFileSync(path.join(root, "remote-control-state.json"), JSON.stringify({ identities: { "org:account": { serve: "on", folders: { [f.cwd]: { environmentId: "env_abc" } } } } }));
+  const id = await f.create();
+  assert.deepEqual(calls.filter(call => ["create", "read", "send"].includes(call)), ["create", "read", "read", "read", "send"]);
+  assert.ok(calls.includes("set_model") && calls.includes("apply_flag_settings") && calls.includes("set_permission_mode"));
+  assert.equal(f.fake.options.length, 0); assert.equal(handoffs, 0);
+  assert.equal(await f.create(), id);
+  assert.equal(await f.sessions.send(id, "create-1", "ping"), id);
+  assert.equal(calls.filter(call => call === "send").length, 1);
+  const cli = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${cli}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  registry.set(cli, { sessionId: cli, pid: 42, status: "idle", bridgeSessionId: "session_abc" });
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.list().length, 1);
+  assert.equal((JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { sdkSessionId: string }[])[0]!.sdkSessionId, cli);
+});
+
+for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "4xx", "5xx", "network", "timeout", "send-unknown"] as const) test(`environment ${outcome} follows the safe creation path`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
+  const projects = path.join(root, "projects"); fs.mkdirSync(projects);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let posts = 0, sends = 0, handoffs = 0;
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", ...(outcome === "account-mismatch" ? { accountUuid: "other" } : {}), expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    const target = String(url);
+    if (options?.method === "POST" && target.endsWith("/sessions")) {
+      posts++;
+      if (outcome === "network") throw new Error("network");
+      if (outcome === "4xx" || outcome === "5xx") return new Response(null, { status: outcome === "4xx" ? 400 : 503 });
+      return Response.json({ id: "cse_abc" });
+    }
+    if (options?.method === "POST") { sends++; if (outcome === "send-unknown") throw new Error("network"); return Response.json({}); }
+    if (target.endsWith("/cse_abc")) return Response.json(outcome === "timeout" ? {} : { worker_status: "idle" });
+    if (target.includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [] });
+  } });
+  client.control = async () => {};
+  const f = fixture(t, {}, { environmentRoot: root, environmentWaitMs: 5, environmentPollMs: 1, desktopProjects: projects, desktopRegistry: () => new Map(), desktopProcesses: () => "", bridgeClient: client, handoff: async () => { handoffs++; return "opened"; }, log() {} });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ lastKnownAccountUuid: "account" }));
+  if (outcome !== "missing") fs.writeFileSync(path.join(root, "remote-control-state.json"), JSON.stringify({ identities: { "org:account": { serve: "on", folders: { [outcome === "mismatch" ? `${f.cwd}-other` : f.cwd]: { environmentId: "env_abc" } } }, ...(outcome === "ambiguous" ? { "org:other": { serve: "on", folders: {} } } : {}) } }));
+  const id = await f.create();
+  if (["missing", "mismatch", "ambiguous", "account-mismatch", "4xx"].includes(outcome)) {
+    await waitFor(() => f.fake.options.length === 1);
+    assert.equal(posts, outcome === "4xx" ? 1 : 0);
+    assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  } else {
+    assert.equal(posts, 1); assert.equal(f.fake.options.length, 0); assert.equal(handoffs, 0);
+    assert.equal(f.sessions.summaryOf(id)?.state, "error");
+    assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "ping");
+    assert.equal(f.sessions.summaryOf(id)?.queueHeld, true);
+    assert.ok(f.sessions.log(id).tail().events.some(event => event.kind === "result" && !event.ok));
+    assert.equal(await f.create(), id);
+    assert.equal(posts, 1);
+    if (outcome === "send-unknown") {
+      assert.equal(sends, 1);
+      await assert.rejects(f.sessions.sendQueued(id, "create-1"), /전송 결과를 확인할 수 없음/);
+      assert.equal(sends, 1);
+    }
+  }
 });
 
 test("a new session keeps one idempotent create per content", async t => {

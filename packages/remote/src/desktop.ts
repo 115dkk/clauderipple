@@ -446,6 +446,14 @@ export class DesktopSessions {
     return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id);
   }
 
+  /** Find the CLI identity the app assigned to an environment-created bridge session. */
+  processForBridge(bridgeId: string): DesktopProcess | undefined {
+    const suffix = bridgeId.replace(/^(?:cse_|session_)/, "");
+    const registry = this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"));
+    const matches = [...registry.values()].filter(p => p.bridgeSessionId && p.bridgeSessionId.replace(/^(?:cse_|session_)/, "") === suffix);
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
   isOpen(id: string): boolean {
     return !!this.liveProcess(id) || processHasSession(this.opts.processes?.() ?? processCommands(), id);
   }

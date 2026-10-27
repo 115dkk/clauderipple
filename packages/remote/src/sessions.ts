@@ -5,7 +5,9 @@
 // phone may need later goes into the session's event log before it goes to any socket.
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { EventLog } from "./eventlog.ts";
 import { TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
@@ -17,7 +19,7 @@ import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeCreateNotCreated, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -77,6 +79,9 @@ interface SessionRecord {
   desktopHandoffAttempts?: number;
   desktopHandoffError?: string;
   desktopBridge?: boolean;
+  /** Environment-created sessions have a bridge identity before Desktop assigns a CLI id. */
+  environmentBridgeId?: string;
+  environmentCreateUnknown?: boolean;
   transcriptOffset?: number;
 }
 
@@ -125,6 +130,10 @@ export interface SessionsOptions {
   desktopProcesses?: () => string;
   desktopRegistry?: () => Map<string, DesktopProcess>;
   bridgeClient?: BridgeClient;
+  /** Test boundary for the app's data directory and bounded attachment wait. */
+  environmentRoot?: string;
+  environmentWaitMs?: number;
+  environmentPollMs?: number;
   /** Optional file-notification boundary; polling remains authoritative when unavailable. */
   watchTranscript?: (id: string, changed: () => void, failed: (error: unknown) => void) => (() => void) | null;
 }
@@ -242,6 +251,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** One id may only ever name one message. This is the content a receipt remembers, so a reused id
  * with other words or other files is refused instead of being answered with a success. */
 const SAME_ID_OTHER_CONTENT = "같은 메시지 ID에 다른 내용이 이미 접수되었습니다. 새 메시지로 다시 보내 주세요.";
+/** The first message of a session the app is starting through its folder environment (2026-10-27). */
+const ENVIRONMENT_STARTING = "Claude 앱에서 세션을 시작하고 있습니다.";
+const ENVIRONMENT_UNKNOWN = "Claude 앱의 세션 생성 또는 첫 메시지 전송 결과를 확인할 수 없습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 처리해 주세요.";
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -350,13 +362,20 @@ export class Sessions {
     return (process.status === "busy" || process.status === "shell") && state !== "running" && state !== "waiting";
   }
 
-  private bridgeState(process: DesktopProcess): SessionState {
-    const id = process.bridgeSessionId;
+  private bridgeState(process: DesktopProcess, bridgeId = process.bridgeSessionId): SessionState {
+    const id = bridgeId;
     const sent = id ? this.bridgeRunning.get(id) : undefined;
     if (sent !== undefined && this.now() - sent < 9000) return "running";
     if (id) this.bridgeRunning.delete(id);
     const cached = id ? this.bridgeStates.get(id)?.state : undefined;
     return cached ?? (process.status === "waiting" ? "waiting" : process.status === "idle" ? "idle" : "running");
+  }
+
+  private environmentState(r: SessionRecord): SessionState {
+    const id = r.environmentBridgeId!;
+    const sent = this.bridgeRunning.get(id);
+    if (sent !== undefined && this.now() - sent < 9000) return "running";
+    return this.bridgeStates.get(id)?.state ?? r.state;
   }
 
   private pollBridgeState(id: string): Promise<void> {
@@ -495,6 +514,10 @@ export class Sessions {
         this.save();
         if (r.desktopHandoff === "failed") this.append(r.id, { kind: "notice", code: "desktop_handoff_failed" }, false);
       }
+      // An environment creation the host exit cut short: its first message may or may not have gone.
+      if (r.environmentCreateUnknown || r.environmentBridgeId) {
+        for (const item of this.sendQueue.items(r.id)) if (item.error === ENVIRONMENT_STARTING) this.sendQueue.fail(r.id, item.id, ENVIRONMENT_UNKNOWN);
+      }
       if (r.state === "running" || r.state === "starting" || r.state === "waiting") {
         this.append(r.id, { kind: "notice", code: "host_restarted", text: "호스트가 다시 시작되어 이 턴이 중단되었습니다" }, false);
         this.setState(r, "stopped", undefined, false);
@@ -503,6 +526,7 @@ export class Sessions {
   }
 
   list(): SessionSummary[] {
+    this.adoptEnvironmentSessions();
     const host = Array.from(this.records.values()).sort((a, b) => b.updatedAt - a.updatedAt).map((r) => this.summary(r));
     const hostCliIds = new Set([...this.records.values(), ...this.skippedRecords.values()].flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id]));
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
@@ -510,7 +534,7 @@ export class Sessions {
       const status = this.statusLine(s.id);
       return { ...s, ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.sendQueue.summary(s.id) };
     })];
-    const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id) ?? sessions;
+    const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id, id => !!this.records.get(id)?.environmentBridgeId) ?? sessions;
     // A session the list no longer holds keeps no read record (this map must not outgrow the list).
     const present = new Set(listed.map(s => s.id));
     let pruned = false;
@@ -525,9 +549,18 @@ export class Sessions {
     return this.sidebar ? [...this.sidebar.read().groups.map(g => g.name), PHONE_GROUP] : undefined;
   }
 
+  private adoptEnvironmentSessions(): void {
+    for (const r of this.records.values()) {
+      if (!r.environmentBridgeId || r.sdkSessionId) continue;
+      const process = this.desktop?.processForBridge(r.environmentBridgeId);
+      if (process) { r.sdkSessionId = process.sessionId; this.save(); }
+    }
+  }
+
   async pollDesktop(): Promise<void> {
     if (this.shuttingDown) return;
     if (this.desktop?.poll()) this.opts.onSessions();
+    this.adoptEnvironmentSessions();
     this.refreshStatuses();
     const sessions = this.list();
     this.pollMacAlerts(sessions);
@@ -537,7 +570,8 @@ export class Sessions {
     }
     const ids = new Set(sessions.flatMap(s => {
       const process = this.desktop?.liveProcess(this.records.get(s.id)?.sdkSessionId ?? s.id);
-      return process?.bridgeSessionId ? [process.bridgeSessionId] : [];
+      const bridgeId = this.records.get(s.id)?.environmentBridgeId ?? process?.bridgeSessionId;
+      return bridgeId ? [bridgeId] : [];
     }));
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
@@ -571,8 +605,10 @@ export class Sessions {
         // A folder move shows only in the app's registry, not as transcript growth: check every poll.
         this.refreshBridgeMeta(r);
         const process = this.desktop.liveProcess(r.sdkSessionId ?? r.id);
-        this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
-        if (process?.bridgeSessionId) this.ensureBridge(r.id, process.bridgeSessionId);
+        const bridgeId = r.environmentBridgeId ?? process?.bridgeSessionId;
+        const state = process ? this.bridgeState(process, bridgeId) : r.environmentBridgeId ? this.environmentState(r) : "stopped";
+        if (!r.environmentBridgeId || r.state !== "error") this.setState(r, state, undefined, !!process);
+        if (bridgeId) this.ensureBridge(r.id, bridgeId);
         else this.closeBridge(r.id);
       } catch (error) { this.bridgeFailure(r.id, error); }
     }
@@ -581,7 +617,9 @@ export class Sessions {
     for (const r of this.records.values()) {
       if (!r.desktopBridge) continue;
       const process = this.desktop?.liveProcess(r.sdkSessionId ?? r.id);
-      this.setState(r, process ? this.bridgeState(process) : "stopped", undefined, !!process);
+      const bridgeId = r.environmentBridgeId;
+      const state = process ? this.bridgeState(process, bridgeId) : bridgeId ? this.environmentState(r) : "stopped";
+      if (!bridgeId || r.state !== "error") this.setState(r, state, undefined, !!process);
     }
     for (const id of this.attached) {
       this.watchDesktop(id);
@@ -651,11 +689,11 @@ export class Sessions {
     const before = r.transcriptOffset ?? 0;
     r.transcriptOffset = this.desktop.tail(desktopId, before, body => {
       if (body.kind === "result") {
-        const bridgeId = this.desktop?.liveProcess(desktopId)?.bridgeSessionId;
+        const bridgeId = r.environmentBridgeId ?? this.desktop?.liveProcess(desktopId)?.bridgeSessionId;
         if (bridgeId) this.bridgeRunning.delete(bridgeId);
       }
       // Our own Remote Control echo: drop it from the bounded set and skip it, once.
-      if (body.kind === "user" && this.bridgeEchoes.delete(body.clientMsgId)) return;
+      if (body.kind === "user" && (this.bridgeEchoes.delete(body.clientMsgId) || r.environmentBridgeId && body.clientMsgId === (UUID_RE.test(r.createdBy) ? r.createdBy : uuidFrom(r.createdBy)) && this.seen(r.id, r.createdBy))) return;
       if (body.kind !== "user" || !this.seen(r.id, body.clientMsgId)) {
         if (body.kind === "user") this.rememberClientMsgId(r.id, body.clientMsgId);
         this.append(r.id, body);
@@ -961,14 +999,14 @@ export class Sessions {
     const desktopId = r?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
     const desktop = r?.desktopBridge || this.desktop?.isOpen(desktopId);
-    const enabled = !desktop || !!process?.bridgeSessionId && !this.bridgeProblem && !this.bridges.get(id)?.failed;
+    const enabled = !desktop || !!(r?.environmentBridgeId ?? process?.bridgeSessionId) && !this.bridgeProblem && !this.bridges.get(id)?.failed;
     return { model: enabled, effort: enabled, permissionModes: enabled ? [...PERMISSION_MODES] : [] };
   }
 
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
-    const state = process ? this.bridgeState(process) : r.desktopBridge ? "stopped" : r.state;
+    const state = r.environmentBridgeId && r.state === "error" ? r.state : process ? this.bridgeState(process, r.environmentBridgeId ?? process.bridgeSessionId) : r.environmentBridgeId ? this.environmentState(r) : r.desktopBridge ? "stopped" : r.state;
     // Main-turn idleness does not finish background work. Keep transcript observations separate
     // from a complete engine inventory, which only the SDK Stop hook can confirm here.
     const working = process?.status === "busy" || process?.status === "shell";
@@ -1145,7 +1183,7 @@ export class Sessions {
     const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
     if (!item) throw new Error("That message is no longer queued.");
     this.sendQueue.resume(id);
-    if (this.handingOff.has(id)) { this.opts.onSessions(); return id; }
+    if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
     return this.dispatchQueued(id, item, false);
   }
 
@@ -1201,7 +1239,7 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.handingOff.has(id) || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
@@ -1303,6 +1341,26 @@ export class Sessions {
     return pending;
   }
 
+  /** Match both the bridge organization and the app's current account, never guess between identities. */
+  private environmentFor(cwd: string): string | null {
+    if (!this.opts.handoff || !this.desktop || (!this.opts.desktopSidebar && !this.opts.environmentRoot)) return null;
+    const root = this.opts.environmentRoot ?? this.opts.desktopSidebar?.root ?? path.join(os.homedir(), "Library", "Application Support", "Claude");
+    try {
+      const login = this.bridge.identity();
+      const config = object(JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8")));
+      const account = config?.lastKnownAccountUuid;
+      if (typeof account !== "string" || !account || login.accountUuid && login.accountUuid !== account) return null;
+      const state = object(JSON.parse(fs.readFileSync(path.join(root, "remote-control-state.json"), "utf8")));
+      const identities = object(state?.identities);
+      const matching = Object.keys(identities ?? {}).filter(key => key.startsWith(`${login.organizationUuid}:`));
+      if (!login.accountUuid && matching.length !== 1) return null;
+      const identity = object(identities?.[`${login.organizationUuid}:${account}`]);
+      if (identity?.serve !== "on") return null;
+      const folder = object(object(identity.folders)?.[cwd]);
+      return typeof folder?.environmentId === "string" && /^env_[\w-]+$/.test(folder.environmentId) ? folder.environmentId : null;
+    } catch { return null; } // Missing, unreadable or ambiguous app/login state cannot select an environment.
+  }
+
   private async createNew(req: { clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }, title?: string): Promise<string> {
     const mode = req.permissionMode ?? "auto";
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
@@ -1321,11 +1379,79 @@ export class Sessions {
     this.records.set(r.id, r);
     this.save();
     this.append(r.id, { kind: "state", state: "starting" });
+    const environment = isolation === "local" ? this.environmentFor(cwd) : null;
+    if (environment && await this.createInEnvironment(r, environment, req.text, req.clientMsgId, mode)) return r.id;
     if (this.opts.handoff) this.append(r.id, { kind: "notice", code: "desktop_handoff" });
     if (req.text.trim()) await this.send(r.id, req.clientMsgId, req.text);
     else this.setState(r, "idle");
     this.opts.onSessions();
     return r.id;
+  }
+
+  /** A durable held draft precedes the POST, so even a crash cannot trigger a second writer. */
+  private async createInEnvironment(r: SessionRecord, environment: string, text: string, clientMsgId: string, mode: PermissionMode): Promise<boolean> {
+    const failure = ENVIRONMENT_UNKNOWN;
+    if (text.trim()) {
+      this.sendQueue.add(r.id, { id: clientMsgId, text, attachments: [] }, this.now());
+      // Held under the starting line while this runs; a host restart turns it into the failure (constructor).
+      this.sendQueue.fail(r.id, clientMsgId, ENVIRONMENT_STARTING);
+    }
+    r.desktopHandoff = "excluded";
+    r.environmentCreateUnknown = true;
+    this.save();
+    let bridgeId: string;
+    try { bridgeId = await this.bridge.createEnvironmentSession(environment, r.title); }
+    catch (error) {
+      if (bridgeCreateNotCreated(error)) {
+        delete r.environmentCreateUnknown;
+        r.desktopHandoff = "pending";
+        if (text.trim()) this.sendQueue.remove(r.id, clientMsgId);
+        this.save();
+        return false;
+      }
+      // ARCHITECTURE.md:1760: a lost POST response cannot prove the server did nothing.
+      this.append(r.id, { kind: "result", ok: false, error: failure, ms: 0, turns: 0 });
+      this.setState(r, "error", failure);
+      return true;
+    }
+    delete r.environmentCreateUnknown;
+    r.environmentBridgeId = bridgeId;
+    r.desktopBridge = true;
+    this.save();
+    const deadline = performance.now() + (this.opts.environmentWaitMs ?? 30_000);
+    try {
+      for (;;) {
+        try {
+          const session = await this.bridge.session(bridgeId);
+          this.bridgeStates.set(bridgeId, { at: this.now(), state: session.worker_status === "requires_action" ? "waiting" : session.worker_status });
+          break;
+        } catch (error) {
+          if (performance.now() >= deadline || this.shuttingDown) throw error;
+          await delay(Math.min(this.opts.environmentPollMs ?? 1000, Math.max(0, deadline - performance.now())));
+        }
+      }
+      this.ensureBridge(r.id, bridgeId);
+      // Unsupported or unanswered controls leave the app's defaults; no unverified wire fields.
+      // Start all writes before the deadline: a late reply must not launch another control after send.
+      const model = modelArg(r.model, r.effort);
+      const controls = [
+        this.bridge.control(bridgeId, randomUUID(), { subtype: "set_model", model: model.model }),
+        this.bridge.control(bridgeId, randomUUID(), { subtype: "set_permission_mode", mode }),
+        ...(isClaudeModel(r.model) ? [this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: r.effort } })] : []),
+      ];
+      for (const control of controls) void control.catch(error => (this.opts.log ?? console.error)(`[environment settings] ${error instanceof Error ? error.message : String(error)}`));
+      await Promise.race([Promise.allSettled(controls), delay(2000)]);
+      if (text.trim()) {
+        const item = this.sendQueue.items(r.id).find(item => item.id === clientMsgId)!;
+        await this.dispatchQueued(r.id, item, false);
+      } else this.setState(r, "idle");
+    } catch (error) {
+      if (text.trim()) this.sendQueue.fail(r.id, clientMsgId, failure);
+      this.append(r.id, { kind: "result", ok: false, error: failure, ms: 0, turns: 0 });
+      this.setState(r, "error", failure);
+    }
+    this.opts.onSessions();
+    return true;
   }
 
   /** Idempotent on clientMsgId. Starts (or resumes) the query when none is live.
@@ -1368,6 +1494,10 @@ export class Sessions {
     if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
     // A Desktop handoff may finish before its RC transport exists. Acknowledge durable queue
     // ownership, not an in-memory transfer that would later fail despite the phone's ACK.
+    if (!queued && this.records.get(id)?.environmentBridgeId && this.creating.has(this.records.get(id)!.createdBy)) {
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
     if (!queued && this.handingOff.has(id) && this.records.get(id)?.desktopHandoff === "opening") {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
@@ -1394,7 +1524,7 @@ export class Sessions {
     if (typeof work === "string") { this.receipts.complete(key); return work; }
     const tracked = work.then(
       session => { this.receipts.complete(key, session); return session; },
-      (error: unknown) => { this.receipts.abandon(key); throw error; },
+      (error: unknown) => { if (!(error instanceof OutcomeUnknownError)) this.receipts.abandon(key); throw error; },
     );
     this.sending.set(key, tracked);
     void tracked.finally(() => { if (this.sending.get(key) === tracked) this.sending.delete(key); }).catch(() => {});
@@ -1406,6 +1536,8 @@ export class Sessions {
     // user/seen id or converting attachments, so a retry can enter the next query exactly once.
     if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
+    if (existing?.environmentCreateUnknown) throw new OutcomeUnknownError();
+    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId);
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
       const process = this.desktop.liveProcess(desktopId);
@@ -1484,7 +1616,8 @@ export class Sessions {
     try { await this.bridge.send(bridgeId, uuid, converted.content); }
     catch (error) {
       this.noteBridge(bridgeId, error, "bridge send");
-      throw new Error(error instanceof Error ? error.message : DESKTOP_BLOCKED);
+      if (bridgeWriteUnknown(error)) throw new OutcomeUnknownError();
+      throw error;
     }
     this.noteBridge(bridgeId, null);
     this.bridgeRunning.set(bridgeId, this.now());
@@ -1943,7 +2076,7 @@ export class Sessions {
     if (this.live.has(id) || this.handingOff.has(id)) return null;
     const r = this.records.get(id);
     const desktopId = r?.sdkSessionId ?? id;
-    const bridgeId = this.desktop?.liveProcess(desktopId)?.bridgeSessionId;
+    const bridgeId = r?.environmentBridgeId ?? this.desktop?.liveProcess(desktopId)?.bridgeSessionId;
     if (bridgeId) {
       this.log(id);
       if (r && !r.desktopBridge) this.rebaseDesktop(r);
