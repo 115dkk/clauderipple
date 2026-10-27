@@ -34,6 +34,11 @@ export class SessionSettings {
 
   private key(session: string, reqId: string): string { return JSON.stringify([session, reqId]); }
 
+  /** Answers still owed for a session's changes; each settles by the timeout at the latest. */
+  pending(session: string): Promise<SettingsResult>[] {
+    return [...this.waiting].filter(([key]) => (JSON.parse(key) as [string, string])[0] === session).map(([, response]) => response);
+  }
+
   private save(key: string, record: Operation): void {
     const next = new Map(this.records);
     next.set(key, record);

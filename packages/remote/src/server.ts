@@ -529,7 +529,8 @@ export class HostServer {
       case "send":
         try {
           // A pick sent just before this message runs first; /clear copies the settings it leaves.
-          await s.settingsSettled(msg.session);
+          const settling = s.settingsSettled(msg.session);
+          if (settling) await settling;
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
           const id = await s.send(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
           // A message the person sends after a Stop is them carrying on: the queue goes on after it.

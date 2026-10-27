@@ -1392,6 +1392,12 @@ export class Sessions {
     for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
     if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
+    // It runs with the settings picked before it, whoever takes it.
+    const settling = this.settingsSettled(id);
+    if (settling) {
+      await settling;
+      if (!this.sendQueue.items(id).some(queued => queued.id === itemId)) return id;
+    }
     // A send pressed on a queued message goes to the app too while it holds the session: run here,
     // the turn never showed in the app (2026-10-27).
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
@@ -1497,6 +1503,12 @@ export class Sessions {
     this.draining.add(id);
     let claimed = false;
     try {
+      // A queued message runs with the settings picked before it, whoever takes it.
+      const settling = this.settingsSettled(id);
+      if (settling) {
+        await settling;
+        if (this.shuttingDown || this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
+      }
       if (this.modEligible(id, desktopId, head)) {
         const offer = this.offerMod(id, desktopId, head);
         const state = offer ? await offer : null;
@@ -1529,6 +1541,8 @@ export class Sessions {
   }
 
   private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean): Promise<string> {
+    const settling = this.settingsSettled(id);
+    if (settling) await settling;
     const attachments: Attachment[] = [];
     for (const a of item.attachments) {
       const data = this.sendQueue.data(a);
@@ -2405,13 +2419,18 @@ export class Sessions {
    * hangs holds messages no longer than `ms` after it was asked for; the phone's own answer for it
    * has said "not confirmed" by then.
    */
-  settingsSettled(id: string, ms = 15_000): Promise<void> {
-    const pending = this.modeChanges.get(id);
-    const left = (this.modeChangeAt.get(id) ?? 0) + ms - Date.now();
-    if (!pending || left <= 0) return Promise.resolve();
+  settingsSettled(id: string, ms = 15_000): Promise<void> | undefined {
+    // A request registers with `settings` as it arrives and joins the lane a microtask later; frames
+    // that came in one read are handled back to back, so the message may see only the former.
+    const asked = this.settings.pending(id);
+    const lane = this.modeChanges.get(id);
+    const pending = [...asked, ...lane ? [lane] : []];
+    const left = asked.length ? ms : (this.modeChangeAt.get(id) ?? 0) + ms - Date.now();
+    // Nothing to wait for: no await either, so the queue's own timing is unchanged.
+    if (!pending.length || left <= 0) return undefined;
     return new Promise(resolve => {
       const timer = setTimeout(resolve, left);
-      void pending.catch(() => {}).then(() => { clearTimeout(timer); resolve(); });
+      void Promise.allSettled(pending).then(() => { clearTimeout(timer); resolve(); });
     });
   }
 

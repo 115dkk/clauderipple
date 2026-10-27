@@ -1266,7 +1266,7 @@ test("a message waits for the setting change that reached the host before it, bu
   let release!: () => void;
   void lane.scheduleModeChange(f.id, () => new Promise<void>(resolve => { release = resolve; }));
   let settled = false;
-  void f.sessions.settingsSettled(f.id).then(() => { settled = true; });
+  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { settled = true; });
   await nextTick();
   assert.equal(settled, false);
   f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-pick", text: "hello", behavior: "steer" });
@@ -1277,14 +1277,28 @@ test("a message waits for the setting change that reached the host before it, bu
   assert.equal(settled, true);
   void lane.scheduleModeChange(f.id, () => new Promise<void>(() => {}));
   let late = false;
-  void f.sessions.settingsSettled(f.id).then(() => { late = true; });
+  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { late = true; });
   t.mock.timers.tick(15_000);
   await nextTick();
   assert.equal(late, true, "a change that hangs holds messages no longer than the limit");
   let after = false;
-  void f.sessions.settingsSettled(f.id).then(() => { after = true; });
+  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { after = true; });
   await nextTick();
   assert.equal(after, true, "nor does it hold later ones");
+});
+
+test("a message in the same read as a setting change still waits for it", async t => {
+  const f = await memoryHost(t);
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: () => Promise<void> }).changeMode = () => new Promise<void>(resolve => { release = resolve; });
+  f.peer.frames.length = 0;
+  f.peer.receive({ t: "set_mode", reqId: "mode-1", sessionId: f.id, mode: "plan" });
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "same-read", text: "hello", behavior: "steer" });
+  await nextTick(); await nextTick();
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false, "the message waits for the mode change before it");
+  release();
+  for (let i = 0; i < 5 && !f.peer.frames.some(frame => frame.t === "ack"); i++) await nextTick();
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), true);
 });
 
 test("session lists wait for a backed-up connection to drain and only the newest goes out", async t => {
