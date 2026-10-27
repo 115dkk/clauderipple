@@ -12,7 +12,7 @@ import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
-import { BridgeClient, CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
+import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
@@ -946,7 +946,7 @@ test("handoff closes an idle SDK writer and waits for real process exit before i
   assert.equal(calls, 1);
 });
 
-for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "waits durably for the app bridge"}, never a second SDK writer`, async t => {
+for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "resumes through the SDK once the app is idle"}, never a second concurrent writer`, async t => {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-app-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -979,34 +979,64 @@ for (const reachable of [true, false]) test(`input accepted during handoff ${rea
   assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-app-handoff`), null, "queued acceptance does not pretend the input reached a worker");
   registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(reachable ? { bridgeSessionId: "bridge" } : {}) });
   finish.resolve();
-  await waitFor(() => reachable ? posts.length === 1 : !!f.sessions.summaryOf(id)?.queue?.[0]?.error);
+  if (!reachable) {
+    // Issue #102: the app only holds the handed-off session open, so the host resumes it itself.
+    await waitFor(() => boundary.queries.length === 2 && boundary.queries[1]!.users.length === 1);
+    assert.equal(first.closed, true, "the first writer exited before the resume");
+    assert.equal(boundary.queries[1]!.options.resume, sdkId);
+    assert.ok(JSON.stringify(boundary.queries[1]!.users[0]).includes(photo), "queue-owned photo bytes reach the resumed turn");
+    assert.equal(posts.length, 0);
+    await waitFor(() => f.sessions.summaryOf(id)?.queue === undefined);
+    await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments);
+    assert.equal(boundary.queries[1]!.users.length, 1, "the original phone id completes exactly once");
+    return;
+  }
+  await waitFor(() => posts.length === 1);
   assert.equal(first.closed, true);
   assert.equal(boundary.queries.length, 1);
-  let active = f.sessions;
-  if (reachable) {
-    assert.match(posts[0]!, /accepted during handoff/);
-    assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
-    assert.equal(f.sessions.list().length, 1);
-  } else {
-    assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
-    assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "accepted during handoff");
-    f.sessions.shutdown();
-    fs.rmSync(path.join(f.dir, "sessions", id, "blobs"), { recursive: true, force: true });
-    active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
-      desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient, onEvent() {}, onSessions() {}, log() {} });
-    f.instances.push(active);
-    active.recover();
-    assert.equal(await active.send(id, "during-app-handoff", "accepted during handoff", attachments), id, "a resend after restart still belongs to the saved queue");
-    registry.get(sdkId)!.bridgeSessionId = "bridge";
-    active.pollQueued();
-    await waitFor(() => posts.length === 1);
-    assert.equal(active.summaryOf(id)?.queue, undefined);
-  }
-  await active.send(id, "during-app-handoff", "accepted during handoff", attachments);
-  await active.pollDesktop();
+  assert.match(posts[0]!, /accepted during handoff/);
+  assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
+  assert.equal(f.sessions.list().length, 1);
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments);
+  await f.sessions.pollDesktop();
   assert.ok(posts[0]!.includes(photo), "queue-owned photo bytes survive the Desktop log rebase");
   assert.equal(posts.length, 1, "the original phone id completes exactly once");
   assert.equal(boundary.queries.length, 1);
+});
+
+test("a handed-off session waits while the app runs a turn, across a host restart, then resumes once", async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-busy-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "",
+    handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 7, status: "busy" }); return "opened"; }, log: () => {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${sdkId}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  boundary.queries[0]!.emit({ type: "system", subtype: "init", session_id: sdkId });
+  boundary.queries[0]!.emit({ type: "result", subtype: "success" });
+  await waitFor(() => registry.has(sdkId) && boundary.queries[0]!.closed);
+  await f.sessions.send(id, "while-app-works", "sent while the app works");
+  f.sessions.pollQueued();
+  await waitFor(() => f.sessions.summaryOf(id)?.queue?.[0]?.error === DESKTOP_BUSY);
+  assert.equal(boundary.queries.length, 1, "no second writer while the app is busy");
+  f.sessions.shutdown();
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
+    desktopRegistry: () => registry, desktopProcesses: () => "", onEvent() {}, onSessions() {}, log() {} });
+  f.instances.push(active);
+  active.recover();
+  active.pollQueued();
+  assert.equal(boundary.queries.length, 1, "still busy after the restart");
+  registry.get(sdkId)!.status = "idle";
+  active.pollQueued();
+  await waitFor(() => boundary.queries.length === 2 && boundary.queries[1]!.users.length === 1);
+  assert.equal(boundary.queries[1]!.options.resume, sdkId);
+  active.pollQueued();
+  await waitFor(() => active.summaryOf(id)?.queue === undefined);
+  assert.equal(boundary.queries.length, 2, "sent exactly once");
 });
 
 test("a successful later handoff clears the durable failure and is not attempted again", async t => {
@@ -1041,7 +1071,8 @@ test("handoff does not reopen a conversation already owned by Desktop with RC of
   await f.sessions.pollDesktop();
   assert.equal(calls, 0);
   assert.equal(f.fake.spies.close, 1, "the idle SDK stops rather than remaining a second writer");
-  assert.throws(() => f.sessions.send(id, "blocked-after-adoption", "do not start another writer"), /Remote Control/);
+  await f.sessions.send(id, "after-adoption", "the phone keeps going while the app is idle");
+  await waitFor(() => f.fake.users.length === 2);
 });
 
 for (const status of ["pending", "opening"]) test(`a ${status} Desktop handoff recovers and retries without a new phone turn`, async t => {

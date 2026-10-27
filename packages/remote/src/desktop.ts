@@ -442,8 +442,8 @@ export class DesktopSessions {
     return this.sources.has(id);
   }
 
-  liveProcess(id: string): DesktopProcess | undefined {
-    return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"))).get(id);
+  liveProcess(id: string, maxAgeMs = 1000): DesktopProcess | undefined {
+    return (this.opts.registry?.() ?? liveDesktopProcesses(path.join(path.dirname(this.projects), "sessions"), maxAgeMs)).get(id);
   }
 
   isOpen(id: string): boolean {

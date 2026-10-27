@@ -17,7 +17,7 @@ import { ATTACHMENT_CAP, ATTACHMENT_COUNT, type Attachment, type ImagePart, type
 import { DesktopSessions, type DesktopProcess, type TurnWrapUp } from "./desktop.ts";
 import { firstSentence, STATUS_CAP } from "./wrap-up.ts";
 import { DesktopSidebar, PHONE_GROUP, type SidebarOptions } from "./sidebar.ts";
-import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_WAITING, DesktopBlockedError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
+import { BridgeAuthError, BridgeClient, bridgeWriteUnknown, CLI_NOT_LOGGED_IN, DESKTOP_BLOCKED, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError, DesktopBusyError, isCliNotLoggedIn, object, permissionSuppression, slashCommands, type BridgeFrame } from "./bridge-client.ts";
 import type { HandoffRunner } from "./handoff.ts";
 import { isDirectory, macConsent, readableFolder } from "./folders.ts";
 import { readJson, writeFileAtomic } from "./fsutil.ts";
@@ -1207,8 +1207,13 @@ export class Sessions {
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
     if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
-      if (this.sendQueue.wait(id, head.id, DESKTOP_WAITING)) this.opts.onSessions();
-      return;
+      // A session this host started keeps going from the phone while the app only holds it open;
+      // one the app opened itself still needs its Remote Control (issue #102).
+      const ours = this.handedOff(id);
+      if (!ours || this.appBusy(desktopId)) {
+        if (this.sendQueue.wait(id, head.id, ours ? DESKTOP_BUSY : DESKTOP_WAITING)) this.opts.onSessions();
+        return;
+      }
     }
     // Registry idle can precede the accepted bridge turn actually starting.
     const sent = process?.bridgeSessionId ? this.bridgeRunning.get(process.bridgeSessionId) : undefined;
@@ -1256,7 +1261,8 @@ export class Sessions {
       this.opts.onSessions();
       return sent;
     } catch (error) {
-      if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, DESKTOP_WAITING);
+      if (error instanceof DesktopBusyError) this.sendQueue.wait(id, item.id, DESKTOP_BUSY);
+      else if (error instanceof DesktopBlockedError) this.sendQueue.wait(id, item.id, DESKTOP_WAITING);
       else this.sendQueue.fail(id, item.id, error instanceof Error ? error.message : String(error));
       this.opts.onSessions();
       throw error;
@@ -1366,6 +1372,14 @@ export class Sessions {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
+    // The same for a handed-off session while the app runs a turn in it: queue it, send it after.
+    const desktopId = this.records.get(id)?.sdkSessionId;
+    if (!queued && desktopId && !this.live.has(id) && this.handedOff(id) && !this.desktop?.liveProcess(desktopId)?.bridgeSessionId && this.appBusy(desktopId)) {
+      this.enqueue(id, clientMsgId, text, attachments);
+      const head = this.sendQueue.items(id)[0];
+      if (head && this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
+      return id;
+    }
     this.receipts.begin(key, id, fingerprint);
     try {
       return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
@@ -1403,7 +1417,10 @@ export class Sessions {
         this.bridgeSends.set(key, sending);
         return sending;
       }
-      if (process || this.desktop.isOpen(desktopId)) throw new DesktopBlockedError();
+      if (process || this.desktop.isOpen(desktopId)) {
+        if (!this.handedOff(id)) throw new DesktopBlockedError();
+        if (this.appBusy(desktopId)) throw new DesktopBusyError();
+      }
       if (existing?.desktopBridge) { this.closeBridge(id); existing.desktopBridge = false; this.save(); }
     }
     const r = this.records.get(id) ?? this.continueDesktop(id, clientMsgId);
@@ -2066,7 +2083,10 @@ export class Sessions {
   // ---- the query ----------------------------------------------------------------------------
 
   private start(r: SessionRecord): Live {
-    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) throw new DesktopBlockedError();
+    if (r.sdkSessionId && this.desktop?.isOpen(r.sdkSessionId)) {
+      if (!this.handedOff(r.id)) throw new DesktopBlockedError();
+      if (this.appBusy(r.sdkSessionId)) throw new DesktopBusyError();
+    }
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};
@@ -2280,6 +2300,11 @@ export class Sessions {
         if (live.restartAfterTurn) this.restartSettings(r, live);
         this.setState(r, live.pendingMessages.length > 0 ? "running" : ok ? "idle" : "error");
         if (live.pendingMessages.length === 0) this.handoff(r, live);
+        // While the app holds this conversation, a process kept between turns would answer from its
+        // own last line: on 2026-10-25 a phone turn skipped the desktop's turn that way. Let it go,
+        // so the next phone turn resumes from the transcript (issue #102). Background work keeps it.
+        if (this.live.get(r.id) === live && live.pendingMessages.length === 0 && this.handedOff(r.id) && r.sdkSessionId &&
+          this.desktop?.isOpen(r.sdkSessionId) && this.taskState(r.id).activity.active.length === 0) this.stop(r.id, live);
         void this.refreshFigures(r, true);
         return;
       }
@@ -2309,6 +2334,25 @@ export class Sessions {
   }
 
   /** Shared with app-bridge adoption: never stop a query still owed an accepted turn. */
+  /** A phone session this host started and gave to the app for its list, with no Remote Control. */
+  private handedOff(id: string): boolean {
+    const r = this.records.get(id);
+    return !!r && !r.desktopBridge && r.desktopHandoff !== undefined;
+  }
+
+  /**
+   * Whether the app is running a turn in this conversation now, from a fresh registry read (the
+   * cached one is up to a second old). A holder with no registry status is taken as working. While
+   * the app is idle the host may resume the session: the app reads the transcript afresh at its next
+   * turn, so its turn follows the phone's (2026-10-25, session 0cac4b9b). The router lookup in
+   * start() still runs between this check and the SDK spawn; that window is milliseconds.
+   */
+  private appBusy(desktopId: string): boolean {
+    if (!this.desktop) return false;
+    const process = this.desktop.liveProcess(desktopId, 0);
+    return process ? process.status !== "idle" : this.desktop.isOpen(desktopId);
+  }
+
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
     return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
   }

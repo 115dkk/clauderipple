@@ -32,6 +32,11 @@ export const DESKTOP_WAITING = "Claude 앱에서 이 세션의 Remote Control을
 export class DesktopBlockedError extends Error {
   constructor() { super(DESKTOP_BLOCKED); }
 }
+export const DESKTOP_BUSY = "Claude 앱에서 이 세션이 작업 중입니다. 작업이 끝나면 대기 중인 메시지가 자동으로 전송됩니다.";
+/** The app is running a turn in a session the host may otherwise resume: wait, never write beside it. */
+export class DesktopBusyError extends DesktopBlockedError {
+  constructor() { super(); this.message = DESKTOP_BUSY; }
+}
 export const LOGIN_EXPIRED = "이 컴퓨터의 Claude 로그인이 만료되었습니다. Claude 앱을 한 번 열어 주십시오.";
 export const LOGIN_REFUSED = "이 컴퓨터의 Claude 로그인이 거절되었습니다 (401). Claude 앱을 한 번 열어 주십시오.";
 // The Claude Code CLI has no login of its own. The host starts the CLI through the Agent SDK and

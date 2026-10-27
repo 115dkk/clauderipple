@@ -286,6 +286,19 @@ test("large timeline outputs are blobs and paged below the frame cap", t => {
   assert.equal(count, 22);
 });
 
+test("a fresh desktop process read bypasses the registry cache", { skip: process.platform !== "darwin" }, t => {
+  const f = fixture(t);
+  const registry = path.join(f.root, "sessions");
+  fs.mkdirSync(registry);
+  const file = path.join(registry, `${process.pid}.json`);
+  const write = (status: string) => fs.writeFileSync(file, JSON.stringify({ pid: process.pid, entrypoint: "claude-desktop", sessionId: id, status }));
+  write("idle");
+  assert.equal(f.desktop.liveProcess(id)?.status, "idle");
+  write("busy");
+  assert.equal(f.desktop.liveProcess(id)?.status, "idle", "the normal read uses the cached snapshot");
+  assert.equal(f.desktop.liveProcess(id, 0)?.status, "busy", "the fresh read observes the changed registry");
+});
+
 test("open detection matches exact session flags in fake ps output", () => {
   for (const flag of [`--resume=${id}`, `--session-id ${id}`, `--session-id=${id}`, `--resume ${id}`]) {
     assert.equal(processHasSession(` PID COMMAND\n 42 /path with spaces/claude ${flag} --model test\n`, id), true);
