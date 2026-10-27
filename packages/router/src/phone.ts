@@ -50,14 +50,14 @@ export async function phoneRequest(route: string, method: string, body: string |
       return { status: 200, body: { ok: true } };
     } catch { return { status: 502, body: { error: "host restart failed", command } }; }
   }
-  const inbox = route === "inbox" || route === "inbox/claim" || route === "inbox/result";
-  if (!((method === "GET" && (route === "status" || route === "pairing" || route === "inbox" && typeof session === "string" && session.length > 0 && session.length <= 200)) || (method === "POST" && (route === "settings" || route === "rotate" || route === "inbox/claim" || route === "inbox/result")))) {
+  const inbox = route === "inbox" || route === "inbox/claim" || route === "inbox/result" || route === "settings-jobs" || route === "settings-jobs/claim" || route === "settings-jobs/result";
+  if (!((method === "GET" && (route === "status" || route === "pairing" || (route === "inbox" || route === "settings-jobs") && typeof session === "string" && session.length > 0 && session.length <= 200)) || (method === "POST" && (route === "settings" || route === "rotate" || route === "inbox/claim" || route === "inbox/result" || route === "settings-jobs/claim" || route === "settings-jobs/result")))) {
     return { status: 404, body: { error: "unknown phone endpoint or method" } };
   }
   let response: Response;
   try {
     const { port, secret } = target(deps.home ?? remoteHome());
-    const query = route === "inbox" ? `?session=${encodeURIComponent(session!)}` : "";
+    const query = route === "inbox" ? `?session=${encodeURIComponent(session!)}` : route === "settings-jobs" ? `?exclude=${encodeURIComponent(session!)}` : "";
     response = await (deps.fetch ?? fetch)(`http://127.0.0.1:${port}/local/${route}${query}`, {
       method, headers: { "x-ripple-local": secret, "content-type": "application/json" },
       ...(body !== undefined ? { body } : {}), redirect: "error", signal: AbortSignal.timeout(5000),

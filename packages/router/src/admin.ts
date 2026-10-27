@@ -21,6 +21,7 @@
 
 import crypto from "node:crypto";
 import { phoneRequest } from "./phone.ts";
+import { settingsId, validSettingsJobAction } from "../../remote/src/settings-jobs.ts";
 import type { PhoneDeps } from "./phone.ts";
 import fs from "node:fs";
 import net from "node:net";
@@ -1994,6 +1995,27 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
         sendJson(res, 403, { error: "cross-site request refused" });
         return;
+      }
+      if (pathname === "/api/settings-jobs" || pathname === "/api/settings-jobs/claim" || pathname === "/api/settings-jobs/result") {
+        res.setHeader("cache-control", "no-store");
+        if (crossSiteOrigin(req) || req.headers["sec-fetch-site"] === "cross-site") { sendJson(res, 403, { error: "same-origin phone control required" }); return; }
+        const isList = pathname === "/api/settings-jobs";
+        if (method !== (isList ? "GET" : "POST")) { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
+        let body: string | undefined, exclude: string | undefined;
+        if (isList) {
+          const query = new URL(url, "http://127.0.0.1").searchParams;
+          exclude = query.get("exclude") ?? undefined;
+          if (!settingsId(exclude) || query.getAll("exclude").length !== 1) { sendJson(res, 400, { error: "invalid helper" }); return; }
+        } else {
+          try { body = (await readBody(req, 4096, new Error("settings job body too large"))).toString("utf8"); }
+          catch { sendJson(res, 400, { error: "invalid settings job request" }); return; }
+          let raw: unknown;
+          try { raw = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid settings job request" }); return; }
+          if (!validSettingsJobAction(raw, pathname.endsWith("/result"))) { sendJson(res, 400, { error: "invalid settings job request" }); return; }
+        }
+        const route = isList ? "settings-jobs" : `settings-jobs/${pathname.endsWith("/claim") ? "claim" : "result"}`;
+        const result = await phoneRequest(route, method, body, deps.phone, exclude);
+        sendJson(res, result.status, result.body); return;
       }
       if (pathname === "/api/phone-inbox" || pathname === "/api/phone-inbox/claim" || pathname === "/api/phone-inbox/result") {
         res.setHeader("cache-control", "no-store");

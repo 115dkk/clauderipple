@@ -35,6 +35,8 @@ interface BridgePending {
 }
 import { SendQueue, type QueueItem } from "./queue.ts";
 import { ModInbox, type ModOffer, type ModOutcome } from "./mod-inbox.ts";
+import { SettingsJobs } from "./settings-jobs.ts";
+import { DesktopSettings } from "./desktop-settings.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
 import { PERMISSION_MODES, type AlertBody, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
@@ -345,6 +347,8 @@ export class Sessions {
   private permissionRules = new Map<string, ReturnType<typeof sessionPermissionRules>>();
   private sendQueue: SendQueue;
   readonly modInbox: ModInbox;
+  readonly settingsJobs = new SettingsJobs();
+  private desktopSettings: DesktopSettings | null;
   private modOwners = new Map<string, string>();
   /** In-flight turns keyed by receipt key, so a concurrent resend rides the first attempt. */
   private sending = new Map<string, Promise<string>>();
@@ -500,6 +504,7 @@ export class Sessions {
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
     for (const id of listState?.archived ?? []) this.archived.add(id);
     for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
+    this.desktopSettings = opts.desktopSidebar ? new DesktopSettings(opts.desktopSidebar.root, this.now) : null;
     this.sidebar = opts.desktopSidebar ? new DesktopSidebar({ ...opts.desktopSidebar, now: this.now,
       onError: error => (opts.log ?? console.error)(`[desktop sidebar] ${error instanceof Error ? error.message : String(error)}`),
     }) : null;
@@ -512,6 +517,14 @@ export class Sessions {
       // (a record the host once resumed is rebased onto Remote Control from here).
       excluded: () => new Set(Array.from(this.records.values()).filter(r => !r.desktopBridge && (this.live.has(r.id) || r.desktopHandoff === "pending" || r.desktopHandoff === "failed")).flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id])),
     });
+  }
+
+  requestAppSettings(cliSessionId: string, settings: { model?: string; effort?: Effort }): boolean {
+    const appSessionId = this.desktopSettings?.appSessionIdFor(cliSessionId);
+    if (!appSessionId) return false;
+    this.settingsJobs.request({ jobId: randomUUID(), appSessionId, cliSessionId, ...(settings.model === undefined ? {} : { model: settings.model }),
+      ...(settings.effort === undefined ? {} : { effort: settings.effort }), createdAt: this.now() });
+    return true;
   }
 
   /** After a host restart: no query survived, so say so in every session that was mid-turn, and close what it was asking. */
@@ -2405,6 +2418,7 @@ export class Sessions {
   shutdown(): void {
     this.shuttingDown = true;
     this.modInbox.close();
+    this.settingsJobs.close();
     this.closeQueueWatch();
     for (const id of this.transcriptWatches.keys()) this.unwatchDesktop(id);
     this.bridgeRunning.clear();

@@ -6,6 +6,7 @@ import qrcode from "qrcode-generator";
 import { DEFAULT_RELAY, loadConfig, newToken, normalizeRelay, pairingUrl, relayPairingUrl, resolveBind, saveConfig, tokenMatches } from "./config.ts";
 import type { HostConfig } from "./config.ts";
 import type { ModInbox } from "./mod-inbox.ts";
+import { settingsId, validSettingsJobAction, type SettingsJobs } from "./settings-jobs.ts";
 
 export interface Phone { clientId: string; connected: boolean; lastSeen: number | null; push: boolean }
 export interface LocalControlOptions {
@@ -21,6 +22,7 @@ export interface LocalControlOptions {
   prepareRefresh?(): boolean;
   refresh?(): void;
   inbox?: ModInbox;
+  settingsJobs?: SettingsJobs;
 }
 
 export function isLoopback(address: string | undefined): boolean {
@@ -76,6 +78,19 @@ export class LocalControl {
     const url = new URL(req.url ?? "/", "http://local");
     const route = url.pathname;
     try {
+      if (route === "/local/settings-jobs" && req.method === "GET" && this.opts.settingsJobs) {
+        const exclude = url.searchParams.get("exclude");
+        if (!settingsId(exclude) || url.searchParams.getAll("exclude").length !== 1) { json(res, 400, { error: "invalid helper" }); return; }
+        json(res, 200, { jobs: this.opts.settingsJobs.pending(exclude) }); return;
+      }
+      if ((route === "/local/settings-jobs/claim" || route === "/local/settings-jobs/result") && req.method === "POST" && this.opts.settingsJobs) {
+        let raw: unknown;
+        try { raw = await settingsBody(req); } catch { json(res, 400, { error: "invalid settings job request" }); return; }
+        const result = route.endsWith("/result");
+        if (!validSettingsJobAction(raw, result)) { json(res, 400, { error: "invalid settings job request" }); return; }
+        const ok = "outcome" in raw ? this.opts.settingsJobs.result(raw.jobId, raw.outcome, raw.detail) : this.opts.settingsJobs.claim(raw.jobId, raw.helper);
+        json(res, ok ? 200 : 409, ok ? { ok: true } : { error: "job unavailable" }); return;
+      }
       if (route === "/local/inbox" && req.method === "GET" && this.opts.inbox) {
         const session = url.searchParams.get("session");
         if (!session || session.length > 200 || url.searchParams.getAll("session").length !== 1) { json(res, 400, { error: "invalid session" }); return; }
