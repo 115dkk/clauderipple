@@ -12,7 +12,7 @@ import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
 import { BridgeClient } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
-import { MessageReceipts } from "../src/receipts.ts";
+import { MessageReceipts, OutcomeUnknownError } from "../src/receipts.ts";
 import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { FrameAssembler } from "../src/chunks.ts";
@@ -1414,6 +1414,65 @@ test("a setting change that hangs lets the ones after it run once its hold is ov
   t.mock.timers.tick(1_000);
   await nextTick(); await nextTick();
   assert.equal(ran, true);
+});
+
+test("a setting change overtaken while it hung records nothing when its answer comes", async t => {
+  const f = await memoryHost(t);
+  const lane = f.sessions as unknown as {
+    scheduleModeChange(id: string, work: (turn: number) => Promise<void>): Promise<void>;
+    stillCurrent(id: string, turn: number): void;
+  };
+  let answer!: () => void;
+  const hung = lane.scheduleModeChange(f.id, async turn => {
+    await new Promise<void>(resolve => { answer = resolve; });
+    lane.stillCurrent(f.id, turn);
+  });
+  void lane.scheduleModeChange(f.id, async turn => { lane.stillCurrent(f.id, turn); });
+  t.mock.timers.tick(15_000);
+  await nextTick(); await nextTick();
+  answer();
+  await assert.rejects(hung, OutcomeUnknownError, "the later pick is the one asked for last");
+});
+
+test("\"send now\" claimed by the app keeps its place until the app reports", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  const host = f.sessions as unknown as {
+    changeMode: (id: string, mode: string) => Promise<void>;
+    modEligible: () => boolean;
+    offerMod: () => Promise<"claimed">;
+    modOwners: Map<string, string>;
+    finishMod: (offer: { sessionId: string; itemId: string; text: string; offeredAt: number }, outcome: "submitted") => void;
+    sendQueue: { add(session: string, item: { id: string; text: string; attachments: [] }, at: number): boolean };
+  };
+  host.changeMode = async (_id, mode) => { order.push(`mode:${mode}`); };
+  host.modEligible = () => true;
+  host.offerMod = async () => { host.modOwners.set("claimed-now", f.id); return "claimed"; };
+  host.sendQueue.add(f.id, { id: "claimed-now", text: "now", attachments: [] }, Date.now());
+  f.sessions.holdQueue(f.id);
+  await f.sessions.sendQueued(f.id, "claimed-now");
+  f.peer.receive({ t: "set_mode", reqId: "mode-after-claim", sessionId: f.id, mode: "plan" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  assert.deepEqual(order, [], "the app has not submitted it yet");
+  host.finishMod({ sessionId: f.id, itemId: "claimed-now", text: "now", offeredAt: 0 }, "submitted");
+  for (let i = 0; i < 10 && !order.length; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan"]);
+});
+
+test("queuing an id still being sent answers with that send", async t => {
+  const f = await memoryHost(t);
+  const host = f.sessions as unknown as {
+    receipts: { begin(key: string, session: string): void };
+    sending: Map<string, Promise<string>>;
+  };
+  let fail!: (error: Error) => void;
+  const send = new Promise<string>((_, reject) => { fail = reject; });
+  host.receipts.begin(`send:${f.id}:in-flight`, f.id);
+  host.sending.set(`send:${f.id}:in-flight`, send);
+  const queued = f.sessions.enqueue(f.id, "in-flight", "hello");
+  assert.ok(queued, "not an \"it is queued\" while nothing holds it");
+  fail(new Error("upstream refused"));
+  await assert.rejects(queued, /upstream refused/);
 });
 
 test("a message id already sent is not queued again", async t => {

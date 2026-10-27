@@ -645,7 +645,7 @@ export class HostServer {
         if (typeof op.path !== "string" || !op.path || op.path.length > 512) throw new Error("Invalid folder path.");
         return macConsent(summary.cwd, () => readSessionFolderFile(summary.cwd, op.path), { wait: 2500 });
       }
-      case "enqueue": s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
+      case "enqueue": await s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
       case "queue_remove": return s.removeQueued(op.session, op.id);
       case "queue_send": return { session: await s.sendQueued(op.session, op.id) };
       case "queue_resume": s.resumeQueue(op.session); return null;

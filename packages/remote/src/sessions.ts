@@ -1353,8 +1353,9 @@ export class Sessions {
 
   // ---- the queue: messages a phone left for when the turn ends (queue.ts) ---------------------
 
-  /** Queue a message; a session that is not busy takes it at once. */
-  enqueue(id: string, clientMsgId: string, text: string, attachments: Attachment[] = []): void {
+  /** Queue a message; a session that is not busy takes it at once. An id still being sent answers
+   * with that send, so its failure reaches the phone rather than an "it is queued". */
+  enqueue(id: string, clientMsgId: string, text: string, attachments: Attachment[] = []): Promise<void> | undefined {
     if (!this.has(id)) throw new Error("no such session");
     if (!/^[\w-]{1,100}$/.test(clientMsgId)) throw new Error("Invalid message id.");
     if (typeof text !== "string" || (!text.trim() && !attachments.length)) throw new Error("Nothing to queue.");
@@ -1371,8 +1372,10 @@ export class Sessions {
     const receipt = this.receipts.status(key);
     if (receipt !== null) {
       if (this.receipts.conflict(key, sendFingerprint(text, attachments))) throw new Error(SAME_ID_OTHER_CONTENT);
-      if (receipt === "pending" && !this.sending.has(key) && !this.bridgeSends.has(`${id}/${clientMsgId}`)) throw new OutcomeUnknownError();
-      return;
+      if (receipt === "completed") return;
+      const riding = this.sending.get(key) ?? this.bridgeSends.get(`${id}/${clientMsgId}`);
+      if (!riding) throw new OutcomeUnknownError();
+      return Promise.resolve(riding).then(() => {});
     }
     if (this.seen(id, clientMsgId)) return;
     if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
@@ -1428,6 +1431,7 @@ export class Sessions {
       if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
       return !(this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId);
     };
+    let handed = false;
     try {
       if (order.ready) {
         await order.ready;
@@ -1440,13 +1444,18 @@ export class Sessions {
       const desktopId = this.records.get(id)?.sdkSessionId ?? id;
       if (this.modEligible(id, desktopId, item)) {
         const offer = this.offerMod(id, desktopId, item);
-        if (offer && await offer !== "expired") return id;
+        const state = offer ? await offer : null;
+        // Claimed, the app submits it later: the place is kept until it says how that went.
+        if (state === "claimed") { this.modLanes.set(item.id, order.done); handed = true; }
+        if (state && state !== "expired") return id;
         // The offer may have waited seconds: everything is checked again before sending here.
         if (offer && !mayGo()) return id;
       }
       return await this.dispatchQueued(id, item, false);
-    } finally { order.done(); }
+    } finally { if (!handed) order.done(); }
   }
+  /** "Send now" places held for messages the app claimed, by item, until it reports on them. */
+  private modLanes = new Map<string, () => void>();
 
   /** A message on its way into the app (offered to or claimed by the mod) is not shown as queued: it
    * flashed in the queue for a moment before the chat (2026-10-27). A failure shows it again. */
@@ -1669,6 +1678,8 @@ export class Sessions {
   private finishMod(offer: ModOffer, outcome: ModOutcome): void {
     const id = this.modOwners.get(offer.itemId);
     if (!id) throw new Error("Missing mod offer owner");
+    this.modLanes.get(offer.itemId)?.();
+    this.modLanes.delete(offer.itemId);
     if (outcome === "failed") { this.modEchoes.delete(offer.itemId); this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN); }
     else {
       const key = `send:${id}:${offer.itemId}`;
@@ -2360,12 +2371,12 @@ export class Sessions {
   private implementPlan(id: string, permId: string): Promise<boolean> {
     const pending = this.planDecisions.get(permId);
     if (pending) return pending;
-    const change = this.scheduleModeChange(id, async () => {
+    const change = this.scheduleModeChange(id, async turn => {
       if (this.opts.permissions.get(permId)?.state !== "pending") return false;
       const r = this.records.get(id)!;
       const previousMode = r.permissionMode ?? "auto";
       const previousPrePlanMode = r.prePlanMode;
-      await this.changeMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits");
+      await this.changeMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits", turn);
       let approved = false;
       try {
         approved = this.opts.permissions.decide(permId, "allow") !== null;
@@ -2375,7 +2386,7 @@ export class Sessions {
         if (!approved) {
           // Cancellation/expiry or a failed durable decision can win during the SDK request.
           // Roll back in this lane before a later user mode change runs.
-          await this.changeMode(id, previousMode);
+          await this.changeMode(id, previousMode, turn);
           if (previousPrePlanMode === undefined) delete r.prePlanMode;
           else r.prePlanMode = previousPrePlanMode;
           this.save();
@@ -2512,8 +2523,8 @@ export class Sessions {
 
   setMode(id: string, mode: PermissionMode, reqId: string = randomUUID()): Promise<SettingsResult> {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
-    return this.settings.run(id, reqId, JSON.stringify(["mode", mode]), "permissionMode", () => this.scheduleModeChange(id, async () => {
-      await this.changeMode(id, mode);
+    return this.settings.run(id, reqId, JSON.stringify(["mode", mode]), "permissionMode", () => this.scheduleModeChange(id, async turn => {
+      await this.changeMode(id, mode, turn);
       return { status: "applied", permissionMode: mode };
     }), result => { if (!this.shuttingDown) this.append(id, { kind: "settings", reqId, ...result }); });
   }
@@ -2537,29 +2548,42 @@ export class Sessions {
     return null;
   }
 
-  private scheduleModeChange<T>(id: string, work: () => Promise<T>, holdsFor = 15_000): Promise<T> {
+  private scheduleModeChange<T>(id: string, work: (turn: number) => Promise<T>, holdsFor = 15_000): Promise<T> {
     // A change that hangs holds the ones behind it no longer than it holds messages: its answer has
-    // said "not confirmed" by then, and every pick after it would otherwise never run.
+    // said "not confirmed" by then, and every pick after it would otherwise never run. Its late
+    // answer then records nothing (`stillCurrent`): the newer pick is what was asked for last.
     const previous = this.modeChanges.get(id);
     const left = (this.modeChangeUntil.get(id) ?? 0) - Date.now();
     const before = !previous ? Promise.resolve() : new Promise<void>(resolve => {
       const timer = setTimeout(resolve, Math.max(0, left));
       void previous.catch(() => {}).then(() => { clearTimeout(timer); resolve(); });
     });
-    const change = before.then(work);
+    const change = before.then(() => {
+      const turn = (this.modeTurns.get(id) ?? 0) + 1;
+      this.modeTurns.set(id, turn);
+      return work(turn);
+    });
     this.modeChanges.set(id, change);
     this.modeChangeUntil.set(id, Math.max(this.modeChangeUntil.get(id) ?? 0, Date.now() + holdsFor));
     void change.finally(() => { if (this.modeChanges.get(id) === change) { this.modeChanges.delete(id); this.modeChangeUntil.delete(id); } }).catch(() => {});
     return change;
   }
 
-  private async changeMode(id: string, mode: PermissionMode): Promise<void> {
+  /** Lane entries started per session, so a change can tell a later one ran past it. */
+  private modeTurns = new Map<string, number>();
+  /** After a change's await: one the host cannot follow up any more, or that a later change overtook
+   * while it hung, records nothing and says "not confirmed". */
+  private stillCurrent(id: string, turn: number): void {
+    if (this.shuttingDown || this.modeTurns.get(id) !== turn) throw new OutcomeUnknownError();
+  }
+
+  private async changeMode(id: string, mode: PermissionMode, turn: number): Promise<void> {
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const bridgeId = this.settingsBridge(id);
     const r = this.records.get(id) ?? this.continueDesktop(id, "");
     if (bridgeId) {
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_permission_mode", mode });
-      if (this.shuttingDown) throw new OutcomeUnknownError();
+      this.stillCurrent(id, turn);
       this.recordMode(r, mode);
       return;
     }
@@ -2569,6 +2593,7 @@ export class Sessions {
       await live.ready;
       if (this.live.get(id) !== live) throw new Error("The session stopped before its mode changed. Try again.");
       await live.query.setPermissionMode(mode);
+      this.stillCurrent(id, turn);
     }
     this.recordMode(r, mode);
   }
@@ -2588,17 +2613,17 @@ export class Sessions {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
     if (typeof model !== "string" || !model.trim() || model.length > 300 || /[@\s]/.test(model)) return Promise.reject(new Error("Invalid model"));
     if (effort !== null && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) return Promise.reject(new Error("Invalid effort"));
-    return this.settings.run(id, reqId, JSON.stringify(["model", model, effort]), "model", () => this.scheduleModeChange(id, () => this.changeModel(id, model, effort)),
+    return this.settings.run(id, reqId, JSON.stringify(["model", model, effort]), "model", () => this.scheduleModeChange(id, turn => this.changeModel(id, model, effort, turn)),
       result => { if (!this.shuttingDown) this.append(id, { kind: "settings", reqId, ...result }); });
   }
 
-  private async changeModel(id: string, model: string, effort: Effort | null): Promise<SettingsResult> {
+  private async changeModel(id: string, model: string, effort: Effort | null, turn: number): Promise<SettingsResult> {
     const bridgeId = this.settingsBridge(id, true);
     const m = modelArg(model, effort);
     if (bridgeId) {
       const r = this.records.get(id)!;
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_model", model: m.model });
-      if (this.shuttingDown) throw new OutcomeUnknownError();
+      this.stillCurrent(id, turn);
       if (r.model !== model) r.contextWindow = null;
       r.model = model;
       r.confirmedSettings = { ...r.confirmedSettings, model };
@@ -2610,11 +2635,12 @@ export class Sessions {
         try { await this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: effort } }); }
         catch (error) {
           if (error instanceof OutcomeUnknownError) throw error;
+          this.stillCurrent(id, turn);
           if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, r.effort);
           return { status: "partial", model, errors: { effort: error instanceof Error ? error.message : String(error) } };
         }
       }
-      if (this.shuttingDown) throw new OutcomeUnknownError();
+      this.stillCurrent(id, turn);
       r.effort = effort;
       r.confirmedSettings = { ...r.confirmedSettings, effort };
       this.save();
@@ -2644,6 +2670,7 @@ export class Sessions {
       await live.ready;
       if (this.live.get(id) !== live) throw new Error("The session stopped before its model changed. Try again.");
       await live.query.setModel(m.model);
+      this.stillCurrent(id, turn);
     }
     if (changedModel) r.contextWindow = null;
     r.model = model;
