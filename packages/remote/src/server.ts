@@ -23,7 +23,7 @@ import type { Notifier } from "./push.ts";
 import { OutcomeUnknownError } from "./receipts.ts";
 import { rippleStatus } from "./router.ts";
 import type { RouterClient } from "./router.ts";
-import type { Sessions } from "./sessions.ts";
+import { StoppedBeforeSendError, type Sessions } from "./sessions.ts";
 
 /** Stop writing to a client whose socket has this much queued; its pump resumes when it drains. */
 const HIGH_WATER = 1024 * 1024;
@@ -529,11 +529,11 @@ export class HostServer {
           }
         }
         return;
-      case "send":
+      case "send": {
+        // A pick sent just before this message runs first; /clear copies the settings it leaves.
+        const order = s.beforeSend(msg.session);
         try {
-          // A pick sent just before this message runs first; /clear copies the settings it leaves.
-          const waiting = s.beforeSend(msg.session);
-          if (waiting) await waiting;
+          if (order.ready) await order.ready;
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
           const id = await s.send(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
           // A message the person sends after a Stop is them carrying on: the queue goes on after it.
@@ -544,10 +544,12 @@ export class HostServer {
           if (e instanceof OutcomeUnknownError) {
             this.send(c, { t: "error", code: "outcome_unknown", message: e.message, clientMsgId: msg.clientMsgId, session: msg.session });
           } else {
-            this.send(c, { t: "error", code: "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
+            // "stopped": the phone keeps the message held rather than handing it on by itself.
+            this.send(c, { t: "error", code: e instanceof StoppedBeforeSendError ? "stopped" : "send", message: (e as Error).message, clientMsgId: msg.clientMsgId, session: msg.session });
           }
-        }
+        } finally { order.done(); }
         return;
+      }
       case "decide":
         try {
           if (msg.decision !== "allow" && msg.decision !== "allow_always" && msg.decision !== "deny") throw new Error("invalid decision");

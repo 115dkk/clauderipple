@@ -83,7 +83,9 @@ export class SessionSettings {
         resolve(result);
       }, this.timeoutMs);
     });
-    const finished = Promise.resolve().then(work).catch((error: unknown) => {
+    // The work starts now, not a microtask later: a change joins its session's lane as it arrives,
+    // so a message right behind it (even in the same read) is ordered after it.
+    const finished = (async () => work())().catch((error: unknown) => {
       if (error instanceof OutcomeUnknownError) return { status: "unknown" } satisfies SettingsResult;
       const message = error instanceof Error ? error.message : String(error);
       this.save(key, { ...record, error: message });

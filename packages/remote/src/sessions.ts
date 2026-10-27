@@ -282,6 +282,10 @@ const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. �
 /** A send that waited for a settings change, during which the session was stopped. */
 const QUEUE_STOPPED = "대기열이 멈춰 메시지를 보내지 않았습니다. 대기열을 다시 시작한 후 보내 주세요.";
 const STOPPED_BEFORE_SEND = "메시지를 보내기 전에 작업이 중지되어 보내지 않았습니다. 필요하면 다시 보내 주세요.";
+/** A message refused because a Stop came while it waited; the phone holds it instead of resending. */
+export class StoppedBeforeSendError extends Error {}
+/** The longest a waiting message holds back the setting changes that arrived after it. */
+const SEND_HOLD_MS = 30_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -1398,12 +1402,17 @@ export class Sessions {
     // It runs with the settings picked before it, whoever takes it. Over the wait the host may be
     // shutting down, the person may have stopped the queue or removed the message, or the app may
     // have taken one; the drain may be sending this very message. Then it is not sent from here.
+    // A Stop and a resume both inside the wait still count as a Stop; a message removed and queued
+    // again under the same id is another message.
+    const stops = this.stops.get(id) ?? 0;
     for (let settling = this.settingsSettled(id); settling; settling = this.settingsSettled(id)) {
       await settling;
       if (this.shuttingDown) throw new OutcomeUnknownError();
-      if (!this.sendQueue.items(id).some(queued => queued.id === itemId)) return id;
+      const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
+      if (!now) return id;
+      if (now.at !== item.at || now.text !== item.text) throw new Error("That message is no longer queued.");
       if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
-      if (this.sendQueue.held(id)) throw new Error(QUEUE_STOPPED);
+      if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
       if (this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId) return id;
     }
     // A send pressed on a queued message goes to the app too while it holds the session: run here,
@@ -1448,15 +1457,22 @@ export class Sessions {
    * message may still run: a Stop from any phone during the wait cancels it (it was not running
    * yet), and a host shutting down cannot say what became of it.
    */
-  beforeSend(id: string): Promise<void> | undefined {
+  beforeSend(id: string): { ready?: Promise<void>; done: () => void } {
     const settling = this.settingsSettled(id);
     // Nothing to wait for: no await either, so a Stop right behind this message still comes after it.
-    if (!settling) return undefined;
+    if (!settling) return { done: () => {} };
     const stops = this.stops.get(id) ?? 0;
-    return settling.then(() => {
+    // A change that arrives after this message waits for it in the lane, as the message waits for
+    // the ones before it. The caller ends the hold once the message is handed on (or refused); a
+    // hold that is never ended lets go after SEND_HOLD_MS rather than stall the session's settings.
+    let done!: () => void;
+    const hold = new Promise<void>(resolve => { done = resolve; setTimeout(resolve, SEND_HOLD_MS); });
+    void this.scheduleModeChange(id, () => hold);
+    const ready = settling.then(() => {
       if (this.shuttingDown) throw new OutcomeUnknownError();
-      if ((this.stops.get(id) ?? 0) !== stops) throw new Error(STOPPED_BEFORE_SEND);
+      if ((this.stops.get(id) ?? 0) !== stops) throw new StoppedBeforeSendError(STOPPED_BEFORE_SEND);
     });
+    return { ready, done };
   }
 
   private draining = new Set<string>();

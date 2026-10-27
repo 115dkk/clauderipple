@@ -1316,6 +1316,26 @@ for (const stopped of [false, true]) test(`a queued message waits for a setting 
   assert.equal(delivered(), !stopped);
 });
 
+test("a setting change that arrives after a waiting message runs after it", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: (id: string, mode: string) => Promise<void> }).changeMode = (_id, mode) => {
+    order.push(`mode:${mode}`);
+    return mode === "plan" ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+  };
+  const send = f.sessions.send.bind(f.sessions);
+  f.sessions.send = ((...args: Parameters<typeof send>) => { order.push("send"); return send(...args); }) as typeof send;
+  f.peer.receive({ t: "set_mode", reqId: "mode-a", sessionId: f.id, mode: "plan" });
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "between", text: "hello", behavior: "steer" });
+  f.peer.receive({ t: "set_mode", reqId: "mode-b", sessionId: f.id, mode: "default" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan"]);
+  release();
+  for (let i = 0; i < 20 && order.length < 3; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan", "send", "mode:default"], "the message runs in plan mode, as picked when it was sent");
+});
+
 test("a Stop while a message waits for settings cancels the message and keeps the queue stopped", async t => {
   const f = await memoryHost(t);
   let release!: () => void;
