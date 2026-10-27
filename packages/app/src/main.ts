@@ -263,7 +263,7 @@ const STRINGS = {
     awakeOn: "계속 켜 두기",
     tetherItem: "와이파이가 끊기면 휴대폰 핫스팟으로",
     laptopOpen: "노트북 관리 열기…",
-    laptopSetup: "노트북 기능 설정하기…",
+    laptopSetup: "노트북 기능 설정…",
   },
   zh: {
     healthy: "运行正常",
