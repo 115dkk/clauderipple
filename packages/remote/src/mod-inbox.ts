@@ -10,7 +10,8 @@ export class ModInbox {
   private finish: (offer: ModOffer, outcome: ModOutcome) => void;
   private resultMs: number;
   private onError: (error: unknown) => void;
-  constructor(persist: (offer: ModOffer) => boolean, finish: (offer: ModOffer, outcome: ModOutcome) => void, resultMs = 15_000, onError: (error: unknown) => void = console.error) {
+  /** Two minutes: a slow submit hook reported failed while it still runs would invite a resend (2026-10-27). */
+  constructor(persist: (offer: ModOffer) => boolean, finish: (offer: ModOffer, outcome: ModOutcome) => void, resultMs = 120_000, onError: (error: unknown) => void = console.error) {
     this.persist = persist; this.finish = finish; this.resultMs = resultMs; this.onError = onError;
   }
 

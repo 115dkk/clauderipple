@@ -135,6 +135,7 @@ export interface SessionsOptions {
   environmentRoot?: string;
   environmentWaitMs?: number;
   environmentPollMs?: number;
+  environmentModeMs?: number;
   modOfferMs?: number;
   modResultMs?: number;
   /** Optional file-notification boundary; polling remains authoritative when unavailable. */
@@ -258,6 +259,10 @@ const SAME_ID_OTHER_CONTENT = "같은 메시지 ID에 다른 내용이 이미 �
 const ENVIRONMENT_STARTING = "Claude 앱에서 세션을 시작하고 있습니다.";
 const ENVIRONMENT_UNKNOWN = "Claude 앱의 세션 생성 또는 첫 메시지 전송 결과를 확인할 수 없습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 처리해 주세요.";
 const MOD_UNKNOWN = "Claude 앱에 메시지가 전송되었는지 확인할 수 없습니다. Claude 앱에서 확인한 뒤 다시 보내 주세요.";
+const ENVIRONMENT_MODE = "선택한 권한 모드를 Claude 앱에 적용하지 못해 첫 메시지를 보내지 않았습니다. Claude 앱에서 권한 모드를 확인한 뒤 다시 보내 주세요.";
+const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱에서 중지해 주세요.";
+/** The stricter permission mode the person picked was not confirmed by the app's worker. */
+class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 끝난 뒤 다시 시도해 주세요.";
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
@@ -1057,7 +1062,10 @@ export class Sessions {
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
-    const state = r.environmentBridgeId && r.state === "error" ? r.state : process ? this.bridgeState(process, r.environmentBridgeId ?? process.bridgeSessionId) : r.environmentBridgeId ? this.environmentState(r) : r.desktopBridge ? "stopped" : r.state;
+    // A handed-off session the app is running (a mod-typed or app-typed turn): its state is the app's.
+    const appRun = !r.desktopBridge && this.canTailHandoff(r) ? this.desktop?.liveProcess(r.sdkSessionId!) : undefined;
+    const appState: SessionState | undefined = appRun && appRun.status !== "idle" ? (appRun.status === "waiting" ? "waiting" : "running") : undefined;
+    const state = r.environmentBridgeId && r.state === "error" ? r.state : process ? this.bridgeState(process, r.environmentBridgeId ?? process.bridgeSessionId) : r.environmentBridgeId ? this.environmentState(r) : r.desktopBridge ? "stopped" : appState ?? r.state;
     // Main-turn idleness does not finish background work. Keep transcript observations separate
     // from a complete engine inventory, which only the SDK Stop hook can confirm here.
     const working = process?.status === "busy" || process?.status === "shell";
@@ -1548,15 +1556,22 @@ export class Sessions {
         ...(isClaudeModel(r.model) ? [this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: r.effort } })] : []),
       ];
       for (const control of controls) void control.catch(error => (this.opts.log ?? console.error)(`[environment settings] ${error instanceof Error ? error.message : String(error)}`));
+      // The app starts these sessions in acceptEdits. A stricter mode the person picked must be
+      // confirmed before the first message, or that message could edit files they meant to review.
+      if (mode === "plan" || mode === "default") {
+        const applied = await Promise.race([controls[1]!.then(() => true, () => false), delay(this.opts.environmentModeMs ?? 10_000).then(() => false)]);
+        if (!applied) throw new EnvironmentModeError();
+      }
       await Promise.race([Promise.allSettled(controls), delay(2000)]);
       if (text.trim()) {
         const item = this.sendQueue.items(r.id).find(item => item.id === clientMsgId)!;
         await this.dispatchQueued(r.id, item, false);
       } else this.setState(r, "idle");
     } catch (error) {
-      if (text.trim()) this.sendQueue.fail(r.id, clientMsgId, failure);
-      this.append(r.id, { kind: "result", ok: false, error: failure, ms: 0, turns: 0 });
-      this.setState(r, "error", failure);
+      const reason = error instanceof EnvironmentModeError ? ENVIRONMENT_MODE : failure;
+      if (text.trim()) this.sendQueue.fail(r.id, clientMsgId, reason);
+      this.append(r.id, { kind: "result", ok: false, error: reason, ms: 0, turns: 0 });
+      this.setState(r, "error", reason);
     }
     this.opts.onSessions();
     return true;
@@ -2167,7 +2182,13 @@ export class Sessions {
       return;
     }
     const live = this.live.get(id);
-    if (!live) return;
+    if (!live) {
+      // The app runs this turn and no channel here can stop it: say so rather than report a stop.
+      const r = this.records.get(id);
+      const appRun = r && !r.desktopBridge && this.canTailHandoff(r) ? this.desktop?.liveProcess(r.sdkSessionId!) : undefined;
+      if (appRun && appRun.status !== "idle") throw new Error(APP_STOP);
+      return;
+    }
     // Open requests resolve as expired; their canUseTool continuation writes the event.
     this.opts.permissions.expireSession(id, "aborted");
     const r = this.records.get(id);

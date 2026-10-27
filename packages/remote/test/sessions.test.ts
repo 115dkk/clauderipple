@@ -111,7 +111,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "modOfferMs" | "modResultMs">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -1492,6 +1492,33 @@ test("environment creation attaches once, sends once, and adopts the desktop CLI
   assert.equal((JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { sdkSessionId: string }[])[0]!.sdkSessionId, cli);
 });
 
+// The app starts these sessions in acceptEdits: a stricter mode must be confirmed before the first message.
+for (const applied of [false, true]) test(`environment plan mode ${applied ? "confirmed sends" : "unconfirmed holds"} the first message`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
+  const projects = path.join(root, "projects"); fs.mkdirSync(projects);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let sends = 0;
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    const target = String(url);
+    if (options?.method === "POST" && target.endsWith("/sessions")) return Response.json({ session: { id: "cse_abc" } });
+    if (options?.method === "POST") { sends++; return Response.json({}); }
+    if (target.endsWith("/cse_abc")) return Response.json({ worker_status: "idle" });
+    if (target.includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [] });
+  } });
+  client.control = async (_id, _requestId, request) => {
+    if (request.subtype === "set_permission_mode" && !applied) throw new Error("refused");
+  };
+  const f = fixture(t, {}, { environmentRoot: root, environmentWaitMs: 500, environmentPollMs: 1, environmentModeMs: 50, desktopProjects: projects, desktopRegistry: () => new Map(), desktopProcesses: () => "", bridgeClient: client, handoff: async () => "opened", log() {} });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ lastKnownAccountUuid: "account" }));
+  fs.writeFileSync(path.join(root, "remote-control-state.json"), JSON.stringify({ identities: { "org:account": { serve: "on", folders: { [f.cwd]: { environmentId: "env_abc" } } } } }));
+  const id = await f.sessions.create({ clientMsgId: "create-1", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping", permissionMode: "plan" });
+  assert.equal(sends, applied ? 1 : 0);
+  const queued = f.sessions.summaryOf(id)?.queue ?? [];
+  if (applied) assert.equal(queued.length, 0);
+  else assert.match(queued[0]?.error ?? "", /권한 모드를 Claude 앱에 적용하지 못해/);
+});
+
 for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "4xx", "5xx", "network", "timeout", "send-unknown"] as const) test(`environment ${outcome} follows the safe creation path`, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
   const projects = path.join(root, "projects"); fs.mkdirSync(projects);
@@ -1567,6 +1594,17 @@ test("an idle handed-off session tails app turns without a phone attached", asyn
   assert.ok(events.some(e => e.kind === "assistant" && e.text === "App answer"));
   await f.sessions.pollDesktop();
   assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "App answer").length, 1);
+});
+
+test("a handed-off session the app is running shows the app's state, and a stop says to use the app", async t => {
+  const f = await modFixture(t, 500, 500);
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
+  await f.sessions.interrupt(f.id);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+  await assert.rejects(f.sessions.interrupt(f.id), /Claude 앱에서 중지해 주세요/);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "waiting" });
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "waiting");
 });
 
 for (const order of ["report-first", "transcript-first"] as const) test(`mod echo is shown once with ${order}`, async t => {

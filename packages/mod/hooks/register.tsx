@@ -1485,7 +1485,7 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
       let outcome: 'submitted' | 'failed' = 'failed'
       try {
         const now = await $.clock.now()
-        // The host expires a claim after 15s; a late answer must not submit after that failure.
+        // A claim answered this late is not submitted: the host may be close to giving up on it.
         if (now >= claimAt && now - claimAt < 10_000 && await $.session.id() === session) {
           const sent = await $.prompt.submit({ text: offer.text, asUser: true })
           if (!('drop' in sent)) outcome = 'submitted'
