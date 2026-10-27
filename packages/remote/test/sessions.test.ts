@@ -1721,6 +1721,34 @@ test("mod claim persists before success, refuses queue actions, and submitted is
   assert.equal(f.sessions.log(f.id).tail().events.filter(e => e.kind === "user" && e.clientMsgId === "mod-one").length, 1);
 });
 
+// 2026-10-27 on the person's Mac: the message after a mod-delivered turn sat in the queue with the app idle
+// (an app-run turn writes no result here to settle on), and the queue showed each message on its way in.
+test("after a mod-delivered turn the next message is offered at once, and offered messages are not shown as queued", async t => {
+  const f = await modFixture(t, 500, 500);
+  await f.sessions.send(f.id, "first", "first words");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined, "an offered message is not listed as queued");
+  assert.equal(f.sessions.modInbox.claim("first"), true);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined, "a claimed message is not listed as queued");
+  assert.equal(f.sessions.modInbox.result("first", "submitted"), true);
+  await f.sessions.send(f.id, "second", "second words");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "second"));
+  assert.equal(f.boundary.queries.length, 1, "the host did not run either message");
+});
+
+test("pressing send on a queued message offers it to the app's mod first", async t => {
+  const f = await modFixture(t, 500, 500);
+  // Queued while the app was busy, then the app went idle and the person pressed send.
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  f.sessions.enqueue(f.id, "held", "held words");
+  assert.equal(f.sessions.modInbox.pending(f.sdkId).length, 0);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "idle" });
+  const sending = f.sessions.sendQueued(f.id, "held");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "held"));
+  assert.equal(f.sessions.modInbox.claim("held"), true);
+  assert.equal(await sending, f.id);
+  assert.equal(f.boundary.queries.length, 1, "the host did not run it");
+});
+
 test("an unclaimed offer expires before the host runs it; late claims lose", async t => {
   const f = await modFixture(t, 20);
   await f.sessions.send(f.id, "fallback", "fallback text");

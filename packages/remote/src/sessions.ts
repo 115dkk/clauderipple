@@ -558,7 +558,7 @@ export class Sessions {
     const sessions = [...host, ...(this.desktop?.list() ?? []).filter(s => !this.records.has(s.id) && !hostCliIds.has(s.id)).map(s => {
       const process = this.desktop?.liveProcess(s.id);
       const status = this.statusLine(s.id);
-      return { ...s, ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.sendQueue.summary(s.id) };
+      return { ...s, ...this.desktopModels.get(s.id), controls: this.sessionControls(s.id), ...(process?.bridgeSessionId ? { state: this.bridgeState(process), desktopBridge: true, background: this.background(process) } : {}), ...(this.archived.has(s.id) ? { archived: true } : {}), attention: this.attention.get(s.id) ?? null, ...(status ? { status } : {}), ...this.queueSummary(s.id) };
     })];
     const listed = this.sidebar?.join(sessions, id => this.records.get(id)?.sdkSessionId ?? id, id => !!this.records.get(id)?.environmentBridgeId) ?? sessions;
     // A session the list no longer holds keeps no read record (this map must not outgrow the list).
@@ -1077,7 +1077,7 @@ export class Sessions {
     // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
     const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
-    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.sendQueue.summary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -1247,7 +1247,29 @@ export class Sessions {
     for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
     if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
+    // A send pressed on a queued message goes to the app too while it holds the session: run here,
+    // the turn never showed in the app (2026-10-27).
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (this.modEligible(id, desktopId, item)) {
+      const offer = this.offerMod(id, desktopId, item);
+      if (offer && await offer !== "expired") return id;
+    }
     return this.dispatchQueued(id, item, false);
+  }
+
+  /** A message on its way into the app (offered to or claimed by the mod) is not shown as queued: it
+   * flashed in the queue for a moment before the chat (2026-10-27). A failure shows it again. */
+  private queueSummary(id: string): ReturnType<SendQueue["summary"]> {
+    const summary = this.sendQueue.summary(id);
+    if (!summary.queue) return summary;
+    const queue = summary.queue.filter(item => item.error || !this.modOwners.has(item.id) && !this.sendQueue.items(id).find(q => q.id === item.id)?.claimedBy);
+    return queue.length ? { ...summary, queue } : {};
+  }
+
+  /** The app holds this handed-off session without Remote Control and is idle: its mod can type it in. */
+  private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
+    const process = this.desktop?.liveProcess(desktopId);
+    return !!process && !process.bridgeSessionId && !this.live.has(id) && this.handedOff(id) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
   }
 
   resumeQueue(id: string): void {
@@ -1326,16 +1348,23 @@ export class Sessions {
     const awaiting = this.sendQueue.awaiting(id);
     if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now())) return;
     this.draining.add(id);
+    let claimed = false;
     try {
-      if (process && !process.bridgeSessionId && !this.live.has(id) && this.handedOff(id) && !this.appBusy(desktopId) && !head.attachments.length && !head.text.trimStart().startsWith("/")) {
+      if (this.modEligible(id, desktopId, head)) {
         const offer = this.offerMod(id, desktopId, head);
-        if (offer && await offer !== "expired") return;
+        const state = offer ? await offer : null;
+        if (state === "claimed") claimed = true;
+        if (state && state !== "expired") return;
         if (this.shuttingDown || this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
       }
       await this.dispatchQueued(id, head, true);
     }
     catch { /* recorded on the item by dispatchQueued */ }
-    finally { this.draining.delete(id); }
+    finally {
+      this.draining.delete(id);
+      // A message that arrived while this one was being offered was turned away by `draining`.
+      if (claimed) void this.drainQueue(id);
+    }
   }
 
   private eventsAfter(id: string, seq: number): SessionEvent[] {
@@ -1407,7 +1436,6 @@ export class Sessions {
     if (!id) throw new Error("Missing mod offer owner");
     if (outcome === "failed") { this.modEchoes.delete(offer.itemId); this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN); }
     else {
-      const before = this.log(id).lastSeq;
       const key = `send:${id}:${offer.itemId}`;
       if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
       if (!this.seen(id, offer.itemId)) {
@@ -1416,7 +1444,9 @@ export class Sessions {
         this.rememberClientMsgId(id, offer.itemId);
       }
       this.receipts.complete(key, id);
-      this.sendQueue.sent(id, before, this.now());
+      // No "awaiting" settle: an app-run turn leaves no result in this log (the tail does not write
+      // one), so the next message stuck in the queue until a manual send (2026-10-27). The app's
+      // registry status (appBusy) already holds the next message while this turn runs.
       this.sendQueue.remove(id, offer.itemId);
     }
     this.modOwners.delete(offer.itemId);
