@@ -32,7 +32,7 @@ export const DESKTOP_WAITING = "Claude 앱에서 이 세션의 Remote Control을
 export class DesktopBlockedError extends Error {
   constructor() { super(DESKTOP_BLOCKED); }
 }
-export const DESKTOP_BUSY = "Claude 앱에서 이 세션이 작업 중입니다. 작업이 끝나면 대기 중인 메시지가 자동으로 전송됩니다.";
+export const DESKTOP_BUSY = "Claude 앱에서 이 세션의 작업이 진행 중입니다. 작업이 완료되면 대기 중인 메시지가 자동으로 전송됩니다.";
 /** The app is running a turn in a session the host may otherwise resume: wait, never write beside it. */
 export class DesktopBusyError extends DesktopBlockedError {
   constructor() { super(); this.message = DESKTOP_BUSY; }
