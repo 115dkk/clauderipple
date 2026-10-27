@@ -14,7 +14,7 @@ interface AppBoundary {
   loadOlder(retry?: boolean): void;
   ui: { link: { state: string }; models: unknown[] };
   link: FakeLink;
-  caches: Map<string, { scroll: "bottom" | { key: string; inset: number } | null }>;
+  caches: Map<string, { scroll: "bottom" | { key: string; inset: number } | null; epoch: string | null; events: { seq: number; text: string }[]; hasOlder: boolean }>;
   /** Where the reader is: at the newest message, or reading above it. */
   pinned: boolean;
 }
@@ -77,6 +77,28 @@ test("the oldest loaded page is asked for one at a time, and a page that failed 
   assert.equal(browser.el("#older").hidden, true, "an empty page leaves no edge");
   app.loadOlder();
   assert.equal(asks(app).length, 2);
+});
+
+test("a new epoch tail replaces the old timeline and its older pages remain accessible", async () => {
+  install(new Storage());
+  const app = await start();
+  app.go({ name: "session", id: "s1" });
+  app.onHost({ t: "events", session: "s1", epoch: "old", events: [words(100)], more: false, tail: { hasOlder: false } });
+  app.go({ name: "home" });
+  app.go({ name: "session", id: "s1" });
+  assert.deepEqual(app.link.sent.filter(message => message.t === "attach").at(-1), { t: "attach", session: "s1", epoch: "old", afterSeq: 100 });
+
+  app.onHost({ t: "events", session: "s1", epoch: "new", events: [words(101), words(120)], more: false, tail: { hasOlder: true } });
+  const cache = app.caches.get("s1")!;
+  assert.equal(cache.epoch, "new");
+  assert.deepEqual(cache.events.map(item => item.seq), [101, 120]);
+  assert.equal(cache.hasOlder, true);
+  app.loadOlder();
+  const request = asks(app).at(-1)!;
+  assert.equal(request.beforeSeq, 101);
+  app.onHost({ t: "history", session: "s1", reqId: request.reqId, events: [words(1), words(100)], hasOlder: false });
+  assert.deepEqual(cache.events.map(item => item.seq), [1, 100, 101, 120]);
+  assert.equal(cache.hasOlder, false);
 });
 
 test("a conversation opens where the reader left it, and at its newest message when they left it there", async () => {

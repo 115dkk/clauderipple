@@ -92,8 +92,8 @@ interface Client {
   /** last time this client said the app is visible; 0 once it said hidden */
   visibleAt: number;
   lastRx: number;
-  /** session → last seq sent to this client */
-  attached: Map<string, number>;
+  /** session → log epoch and last seq sent to this client */
+  attached: Map<string, { epoch: string; seq: number }>;
   pumping: Set<string>;
   features: ReturnType<typeof clientFeatures>;
 }
@@ -281,7 +281,15 @@ export class HostServer {
       this.sessionsTimer = null;
       try {
         const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
-        for (const c of this.clients) if (c.authed) this.send(c, msg);
+        for (const c of this.clients) {
+          if (!c.authed) continue;
+          this.send(c, msg);
+          // A rebase can replace the log without appending an event afterward.
+          for (const [id, cursor] of c.attached) {
+            const epoch = msg.sessions.find(session => session.id === id)?.epoch;
+            if (epoch && epoch !== cursor.epoch) this.pump(c, id);
+          }
+        }
       } catch (error) {
         this.opts.log?.(`session list failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -294,13 +302,15 @@ export class HostServer {
     try {
       const log = this.opts.sessions.log(session);
       for (;;) {
-        const after = c.attached.get(session);
-        if (after === undefined || after >= log.lastSeq) break;
+        const cursor = c.attached.get(session);
+        if (!cursor) break;
+        if (cursor.epoch !== log.epoch) { this.sendTail(c, session, log); break; }
+        if (cursor.seq >= log.lastSeq) break;
         if (c.ws.bufferedAmount > HIGH_WATER) { setTimeout(() => this.pump(c, session), 200); break; }
-        const page = log.readAfter(after);
+        const page = log.readAfter(cursor.seq);
         // Skipped (superseded) deltas can leave a page empty; the cursor still moves to the end.
         const last = page.events.length ? page.events[page.events.length - 1]!.seq : log.lastSeq;
-        c.attached.set(session, page.more ? last : Math.max(last, log.lastSeq));
+        c.attached.set(session, { epoch: log.epoch, seq: page.more ? last : Math.max(last, log.lastSeq) });
         if (page.events.length) this.send(c, { t: "events", session, epoch: log.epoch, events: page.events, more: page.more });
         if (!page.more) break;
       }
@@ -318,7 +328,7 @@ export class HostServer {
       this.opts.log?.(`bridge sync failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     const log = this.opts.sessions.log(session);
-    c.attached.set(session, c.attached.get(session) ?? 0);
+    c.attached.set(session, c.attached.get(session) ?? { epoch: log.epoch, seq: 0 });
     this.syncWatches();
     if (epoch === log.epoch && afterSeq !== undefined && afterSeq > 0 && afterSeq <= log.lastSeq) {
       // Resume by seq, unless the gap is so large that replaying it would be slower than starting from the tail.
@@ -330,13 +340,17 @@ export class HostServer {
         cursor = page.events.length ? page.events[page.events.length - 1]!.seq : log.lastSeq;
       }
       if (frames < CATCHUP_FRAMES) {
-        c.attached.set(session, afterSeq);
+        c.attached.set(session, { epoch: log.epoch, seq: afterSeq });
         this.pump(c, session);
         return;
       }
     }
+    this.sendTail(c, session, log);
+  }
+
+  private sendTail(c: Client, session: string, log: ReturnType<Sessions["log"]>): void {
     const tail = log.tail();
-    c.attached.set(session, log.lastSeq);
+    c.attached.set(session, { epoch: log.epoch, seq: log.lastSeq });
     this.send(c, { t: "events", session, epoch: log.epoch, events: tail.events, more: false, tail: { hasOlder: tail.hasOlder } });
   }
 

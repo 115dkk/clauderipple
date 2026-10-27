@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
+import { BridgeClient } from "../src/bridge-client.ts";
+import type { DesktopProcess } from "../src/desktop.ts";
 import { MessageReceipts } from "../src/receipts.ts";
 import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
@@ -1134,6 +1136,72 @@ test("attach tails without a cursor, replays exactly after epoch/seq, and tails 
   assert.equal(wrongEpoch.epoch, tail.epoch);
   assert.deepEqual(wrongEpoch.tail, { hasOlder: false });
   assert.deepEqual(wrongEpoch.events, readAll(f.sessions, id));
+});
+
+for (const { textSize, count, poll } of [{ textSize: 20, count: 120, poll: false }, { textSize: 3000, count: 120, poll: false }, { textSize: 20, count: 20, poll: true }]) test(`connected clients receive the rebuilt desktop epoch as a tail (${count} events, ${textSize} characters, ${poll ? "poll" : "send"})`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "epoch-rebase-wire-"));
+  const projects = path.join(root, "projects", "project");
+  const dir = path.join(root, "host");
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  fs.mkdirSync(projects, { recursive: true });
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(projects, `${id}.jsonl`), Array.from({ length: count }, (_, i) =>
+    JSON.stringify({ type: "user", uuid: `desktop-${i}`, cwd: root, message: { content: `${i}:` + "x".repeat(textSize) } }) + "\n").join(""));
+  fs.writeFileSync(path.join(dir, "sessions.json"), JSON.stringify([{ id, sdkSessionId: id, cwd: root, model: "test", effort: null,
+    title: "test", createdAt: 1, updatedAt: 1, state: "idle", createdBy: "old", contextWindow: null, desktopHandoff: "excluded" }]));
+  const registry = new Map<string, DesktopProcess>([[id, { sessionId: id, pid: 42, status: "idle" }]]);
+  const bridge = new BridgeClient({ auth: () => ({ accessToken: "test", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (options?.method === "POST") return Response.json({});
+    if (String(url).includes("/events/stream")) return new Response(new ReadableStream<Uint8Array>({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    if (String(url).includes("/events?")) return Response.json({ data: [] });
+    return Response.json({ worker_status: "idle" });
+  } });
+  let server: HostServer;
+  const sessions = new Sessions({ dir, desktopProjects: path.dirname(projects), desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: bridge,
+    permissions: PermissionQueue.open(path.join(root, "permissions.json")), router, queryFn: () => { throw new Error("unexpected SDK query"); },
+    onEvent: session => server.onEvent(session), onSessions: () => server.onSessions() });
+  server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router, hostName: "test", version: "test", recentCli: async () => [] });
+  const peers = [new MemoryPeer(), new MemoryPeer()];
+  t.after(async () => { await server.close(); sessions.shutdown(); await nextTick(); fs.rmSync(root, { recursive: true, force: true }); });
+  const oldLog = sessions.log(id);
+  for (let i = 0; i < 100; i++) oldLog.append({ kind: "user", text: `old-${i}`, clientMsgId: `old-${i}` });
+  for (const peer of peers) {
+    server.connected(peer);
+    peer.receive({ t: "hello", token, clientId: "epoch-phone" });
+    await peer.take("ready");
+    peer.receive({ t: "attach", session: id });
+    assert.equal((await peer.take("events")).events.at(-1)?.seq, 100);
+  }
+  registry.get(id)!.bridgeSessionId = "bridge";
+  if (poll) await sessions.pollDesktop();
+  else await sessions.send(id, "new-phone-message", "continue");
+  const log = sessions.log(id);
+  assert.notEqual(log.epoch, oldLog.epoch);
+  assert.ok(log.lastSeq >= count);
+  if (poll) await waitFor(() => peers.every(peer => peer.frames.some(frame => frame.t === "events")));
+  for (const peer of peers) {
+    const frame = await peer.take("events");
+    assert.equal(frame.epoch, log.epoch);
+    assert.deepEqual(frame.tail, { hasOlder: textSize === 3000 });
+    assert.deepEqual(frame.events, log.before(frame.events.at(-1)!.seq + 1).events);
+    let events = frame.events;
+    let hasOlder = frame.tail!.hasOlder;
+    while (hasOlder) {
+      peer.receive({ t: "history", session: id, beforeSeq: events[0]!.seq, reqId: `older-${events[0]!.seq}` });
+      const page = await peer.take("history");
+      events = [...page.events, ...events];
+      hasOlder = page.hasOlder;
+    }
+    assert.deepEqual(events, readAll(sessions, id).filter(event => event.seq <= frame.events.at(-1)!.seq));
+    assert.deepEqual(events.map(event => event.seq), Array.from({ length: frame.events.at(-1)!.seq }, (_, i) => i + 1));
+  }
+  const appended = log.append({ kind: "user", text: "same epoch", clientMsgId: "same-epoch" });
+  server.onEvent(id);
+  for (const peer of peers) {
+    const frames = peer.frames.filter((frame): frame is Extract<HostMsg, { t: "events" }> => frame.t === "events");
+    assert.ok(frames.every(frame => frame.epoch === log.epoch && !frame.tail));
+    assert.equal(frames.flatMap(frame => frame.events).filter(event => event.seq === appended.seq).length, 1);
+  }
 });
 
 test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: 4500 }, async t => {
