@@ -111,7 +111,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "modOfferMs" | "modResultMs">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -1025,7 +1025,7 @@ test("a handed-off session waits while the app runs a turn, across a host restar
   assert.equal(boundary.queries.length, 1, "no second writer while the app is busy");
   f.sessions.shutdown();
   const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
-    desktopRegistry: () => registry, desktopProcesses: () => "", onEvent() {}, onSessions() {}, log() {} });
+    desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs: 5, onEvent() {}, onSessions() {}, log() {} });
   f.instances.push(active);
   active.recover();
   active.pollQueued();
@@ -1062,7 +1062,7 @@ test("handoff does not reopen a conversation already owned by Desktop with RC of
   const registry = new Map<string, DesktopProcess>();
   let calls = 0;
   const f = fixture(t, { permission: true }, { desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "",
-    handoff: async () => { calls++; return "opened"; }, log() {} });
+    handoff: async () => { calls++; return "opened"; }, modOfferMs: 5, log() {} });
   const id = await f.create();
   await waitFor(() => f.permissions.pending(id).length === 1);
   registry.set("sdk-1", { sessionId: "sdk-1", pid: 42, status: "idle" });
@@ -1533,6 +1533,94 @@ for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "
       assert.equal(sends, 1);
     }
   }
+});
+
+async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100) {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "mod-inbox-projects-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs, modResultMs,
+    handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" }); return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${sdkId}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  boundary.queries[0]!.emit({ type: "system", subtype: "init", session_id: sdkId });
+  boundary.queries[0]!.emit({ type: "result", subtype: "success" });
+  await waitFor(() => registry.has(sdkId) && boundary.queries[0]!.closed);
+  return { ...f, id, sdkId, boundary, registry, projects };
+}
+
+test("mod claim persists before success, refuses queue actions, and submitted is idempotent", async t => {
+  const f = await modFixture(t, 500, 500);
+  await f.sessions.send(f.id, "mod-one", "private message");
+  assert.equal(f.sessions.modInbox.pending("other").length, 0);
+  assert.deepEqual(f.sessions.modInbox.pending(f.sdkId).map(offer => [offer.itemId, offer.text]), [["mod-one", "private message"]]);
+  assert.equal(f.sessions.modInbox.claim("mod-one"), true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, "queue.json"), "utf8"))[f.id].items[0].claimedBy, "mod");
+  assert.equal(f.sessions.modInbox.claim("mod-one"), false);
+  assert.throws(() => f.sessions.removeQueued(f.id, "mod-one"), /처리하고 있습니다/);
+  await assert.rejects(f.sessions.sendQueued(f.id, "mod-one"), /처리하고 있습니다/);
+  f.sessions.resumeQueue(f.id); f.sessions.pollQueued();
+  assert.equal(f.boundary.queries.length, 1);
+  assert.equal(f.sessions.modInbox.result("mod-one", "submitted"), true);
+  assert.equal(f.sessions.modInbox.result("mod-one", "submitted"), false);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+  assert.equal(await f.sessions.send(f.id, "mod-one", "private message"), f.id);
+  assert.equal(f.boundary.queries.length, 1);
+  assert.equal(f.sessions.log(f.id).tail().events.filter(e => e.kind === "user" && e.clientMsgId === "mod-one").length, 1);
+});
+
+test("an unclaimed offer expires before the host runs it; late claims lose", async t => {
+  const f = await modFixture(t, 20);
+  await f.sessions.send(f.id, "fallback", "fallback text");
+  await waitFor(() => f.boundary.queries.length === 2 && f.boundary.queries[1]!.users.length === 1);
+  assert.equal(f.sessions.modInbox.claim("fallback"), false);
+  assert.equal(f.boundary.queries[1]!.users[0]!.message.content, "fallback text");
+});
+
+for (const outcome of ["failed", "timeout", "restart"] as const) test(`a mod claim with ${outcome} is held as uncertain and never runs on the host`, async t => {
+  const f = await modFixture(t, 100, 30);
+  await f.sessions.send(f.id, "uncertain", "check first");
+  assert.equal(f.sessions.modInbox.claim("uncertain"), true);
+  let active = f.sessions;
+  if (outcome === "failed") assert.equal(active.modInbox.result("uncertain", "failed"), true);
+  if (outcome === "timeout") await waitFor(() => !!active.summaryOf(f.id)?.queueHeld);
+  if (outcome === "restart") {
+    active.shutdown();
+    active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", modOfferMs: 10, onEvent() {}, onSessions() {} });
+    f.instances.push(active); active.recover();
+  }
+  assert.equal(active.summaryOf(f.id)?.queueHeld, true);
+  assert.match(active.summaryOf(f.id)?.queue?.[0]?.error ?? "", /전송되었는지 확인할 수 없습니다/);
+  active.pollQueued(); await delay(40);
+  assert.equal(f.boundary.queries.length, 1);
+  assert.equal(active.modInbox.result("uncertain", "submitted"), false);
+});
+
+test("withdrawing an offer for editing or send-now never runs the original offer", async t => {
+  const f = await modFixture(t, 100);
+  await f.sessions.send(f.id, "edit", "edit me");
+  assert.equal(f.sessions.removeQueued(f.id, "edit")?.text, "edit me");
+  assert.equal(f.sessions.modInbox.claim("edit"), false);
+  await delay(110);
+  assert.equal(f.boundary.queries.length, 1);
+  await f.sessions.send(f.id, "now", "send now");
+  await f.sessions.sendQueued(f.id, "now");
+  await waitFor(() => f.boundary.queries.length === 2 && f.boundary.queries[1]!.users.length === 1);
+  await delay(110);
+  assert.equal(f.boundary.queries.length, 2);
+  assert.equal(f.sessions.modInbox.claim("now"), false);
+});
+
+for (const kind of ["attachment", "slash", "steer", "interrupt"] as const) test(`${kind} bypasses the mod inbox`, async t => {
+  const f = await modFixture(t, 100);
+  const attachments = kind === "attachment" ? [{ blob: f.sessions.log(f.id).image(Buffer.from("photo").toString("base64")), name: "photo.png", mediaType: "image/png" }] : [];
+  await f.sessions.send(f.id, `bypass-${kind}`, kind === "slash" ? "/help" : "direct", attachments, kind === "steer" || kind === "interrupt" ? kind : undefined);
+  await waitFor(() => f.boundary.queries.length === 2);
+  assert.deepEqual(f.sessions.modInbox.pending(f.sdkId), []);
 });
 
 test("a new session keeps one idempotent create per content", async t => {

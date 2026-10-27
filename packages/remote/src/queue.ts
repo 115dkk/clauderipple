@@ -13,7 +13,7 @@ import type { Attachment, QueuedMessage, SessionEvent } from "./protocol.ts";
 export const QUEUE_CAP = 20;
 
 export interface QueueAttachment { name: string; mediaType: string; file: string }
-export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; error?: string }
+export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; error?: string; claimedBy?: "mod" }
 interface Entry {
   items: QueueItem[];
   /** Attachments taken back to the composer; retained outside the timeline's rebase lifecycle. */
@@ -121,6 +121,28 @@ export class SendQueue {
     this.entries.get(session)!.held = true;
     this.entries.get(session)!.heldBy ??= "failure";
     this.save();
+  }
+
+  claimMod(session: string, id: string): boolean {
+    const item = this.entries.get(session)?.items.find(queued => queued.id === id);
+    if (!item || item.claimedBy) return false;
+    item.claimedBy = "mod";
+    this.save();
+    return true;
+  }
+
+  failMod(session: string, id: string, reason: string): void {
+    const item = this.entries.get(session)?.items.find(queued => queued.id === id);
+    if (!item?.claimedBy) return;
+    delete item.claimedBy;
+    try { this.fail(session, id, reason); }
+    catch (error) { item.claimedBy = "mod"; throw error; }
+  }
+
+  recoverMod(reason: string): void {
+    for (const [session, entry] of this.entries) {
+      for (const item of entry.items) if (item.claimedBy === "mod") this.failMod(session, item.id, reason);
+    }
   }
 
   /** A known pre-send obstacle is not a failed write: keep watching, with the reason visible. */

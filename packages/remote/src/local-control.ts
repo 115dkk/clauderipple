@@ -5,6 +5,7 @@ import type http from "node:http";
 import qrcode from "qrcode-generator";
 import { DEFAULT_RELAY, loadConfig, newToken, normalizeRelay, pairingUrl, relayPairingUrl, resolveBind, saveConfig, tokenMatches } from "./config.ts";
 import type { HostConfig } from "./config.ts";
+import type { ModInbox } from "./mod-inbox.ts";
 
 export interface Phone { clientId: string; connected: boolean; lastSeen: number | null; push: boolean }
 export interface LocalControlOptions {
@@ -19,6 +20,7 @@ export interface LocalControlOptions {
   busy?(): boolean;
   prepareRefresh?(): boolean;
   refresh?(): void;
+  inbox?: ModInbox;
 }
 
 export function isLoopback(address: string | undefined): boolean {
@@ -71,8 +73,28 @@ export class LocalControl {
       json(res, 403, { error: "local control authentication required" });
       return;
     }
-    const route = new URL(req.url ?? "/", "http://local").pathname;
+    const url = new URL(req.url ?? "/", "http://local");
+    const route = url.pathname;
     try {
+      if (route === "/local/inbox" && req.method === "GET" && this.opts.inbox) {
+        const session = url.searchParams.get("session");
+        if (!session || session.length > 200 || url.searchParams.getAll("session").length !== 1) { json(res, 400, { error: "invalid session" }); return; }
+        json(res, 200, { offers: this.opts.inbox.pending(session) });
+        return;
+      }
+      if ((route === "/local/inbox/claim" || route === "/local/inbox/result") && req.method === "POST" && this.opts.inbox) {
+        let raw: unknown;
+        try { raw = await settingsBody(req); } catch { json(res, 400, { error: "invalid inbox request" }); return; }
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) { json(res, 400, { error: "invalid inbox request" }); return; }
+        const body = raw as Record<string, unknown>;
+        const result = route.endsWith("/result");
+        if (typeof body.itemId !== "string" || !/^[\w-]{1,100}$/.test(body.itemId) || Object.keys(body).some(key => key !== "itemId" && (!result || key !== "outcome")) || result && body.outcome !== "submitted" && body.outcome !== "failed") {
+          json(res, 400, { error: "invalid inbox request" }); return;
+        }
+        const ok = result ? this.opts.inbox.result(body.itemId, body.outcome as "submitted" | "failed") : this.opts.inbox.claim(body.itemId);
+        json(res, ok ? 200 : 409, ok ? { ok: true } : { error: "offer unavailable" });
+        return;
+      }
       if (route === "/local/status" && req.method === "GET") {
         const cfg = this.running;
         const saved = loadConfig(this.opts.dir, false);

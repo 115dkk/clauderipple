@@ -34,6 +34,7 @@ interface BridgePending {
   rules: ReturnType<typeof sessionPermissionRules>;
 }
 import { SendQueue, type QueueItem } from "./queue.ts";
+import { ModInbox, type ModOffer, type ModOutcome } from "./mod-inbox.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
 import { PERMISSION_MODES, type AlertBody, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
@@ -134,6 +135,8 @@ export interface SessionsOptions {
   environmentRoot?: string;
   environmentWaitMs?: number;
   environmentPollMs?: number;
+  modOfferMs?: number;
+  modResultMs?: number;
   /** Optional file-notification boundary; polling remains authoritative when unavailable. */
   watchTranscript?: (id: string, changed: () => void, failed: (error: unknown) => void) => (() => void) | null;
 }
@@ -254,6 +257,8 @@ const SAME_ID_OTHER_CONTENT = "같은 메시지 ID에 다른 내용이 이미 �
 /** The first message of a session the app is starting through its folder environment (2026-10-27). */
 const ENVIRONMENT_STARTING = "Claude 앱에서 세션을 시작하고 있습니다.";
 const ENVIRONMENT_UNKNOWN = "Claude 앱의 세션 생성 또는 첫 메시지 전송 결과를 확인할 수 없습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 처리해 주세요.";
+const MOD_UNKNOWN = "Claude 앱에 메시지가 전송되었는지 확인할 수 없습니다. Claude 앱에서 확인한 뒤 다시 보내 주세요.";
+const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 끝난 뒤 다시 시도해 주세요.";
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -331,6 +336,8 @@ export class Sessions {
   private settings: SessionSettings;
   private permissionRules = new Map<string, ReturnType<typeof sessionPermissionRules>>();
   private sendQueue: SendQueue;
+  readonly modInbox: ModInbox;
+  private modOwners = new Map<string, string>();
   /** In-flight turns keyed by receipt key, so a concurrent resend rides the first attempt. */
   private sending = new Map<string, Promise<string>>();
   private desktop: DesktopSessions | null;
@@ -468,6 +475,13 @@ export class Sessions {
     this.receipts = MessageReceipts.open(path.join(opts.dir, "receipts.json"), this.now);
     this.settings = new SessionSettings(path.join(opts.dir, "settings-operations.json"));
     this.sendQueue = SendQueue.open(opts.dir);
+    this.modInbox = new ModInbox(offer => {
+      const id = this.modOwners.get(offer.itemId);
+      if (!id || this.shuttingDown || this.sendQueue.held(id)) return false;
+      const claimed = this.sendQueue.claimMod(id, offer.itemId);
+      if (claimed) this.opts.onSessions();
+      return claimed;
+    }, (offer, outcome) => this.finishMod(offer, outcome), opts.modResultMs);
     this.sendQueue.retryFailures("Claude 앱에서 열려 있는 세션에 지금은 보낼 수 없습니다.", DESKTOP_WAITING);
     this.sendQueue.retryFailures(DESKTOP_BLOCKED, DESKTOP_WAITING);
     for (const r of readJson<SessionRecord[]>(this.file) ?? []) this.records.set(r.id, r);
@@ -491,6 +505,7 @@ export class Sessions {
 
   /** After a host restart: no query survived, so say so in every session that was mid-turn, and close what it was asking. */
   recover(): void {
+    this.sendQueue.recoverMod(MOD_UNKNOWN);
     // Validate even idle sessions: listing one also opens its log. Isolate failures before
     // recovery appends anything, and retain their records when healthy sessions are saved.
     for (const r of this.records.values()) {
@@ -1164,6 +1179,8 @@ export class Sessions {
   removeQueued(id: string, itemId: string): { text: string; attachments: Attachment[] } | null {
     const item = this.sendQueue.items(id).find(item => item.id === itemId);
     if (!item) return null;
+    if (item.claimedBy) throw new Error(MOD_CLAIMED);
+    this.withdrawMod(id, itemId);
     const attachments = this.restoreQueuedAttachments(id, item);
     this.sendQueue.remove(id, itemId, attachments);
     this.opts.onSessions();
@@ -1182,6 +1199,8 @@ export class Sessions {
   async sendQueued(id: string, itemId: string): Promise<string> {
     const item = this.sendQueue.items(id).find(queued => queued.id === itemId);
     if (!item) throw new Error("That message is no longer queued.");
+    if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
+    for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
     if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
     return this.dispatchQueued(id, item, false);
@@ -1241,7 +1260,7 @@ export class Sessions {
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
     if (this.shuttingDown || this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.draining.has(id) || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
-    if (!head) return;
+    if (!head || head.claimedBy) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
     if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
@@ -1263,7 +1282,14 @@ export class Sessions {
     const awaiting = this.sendQueue.awaiting(id);
     if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now())) return;
     this.draining.add(id);
-    try { await this.dispatchQueued(id, head, true); }
+    try {
+      if (process && !process.bridgeSessionId && !this.live.has(id) && this.handedOff(id) && !this.appBusy(desktopId) && !head.attachments.length && !head.text.trimStart().startsWith("/")) {
+        const offer = this.offerMod(id, desktopId, head);
+        if (offer && await offer !== "expired") return;
+        if (this.shuttingDown || this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
+      }
+      await this.dispatchQueued(id, head, true);
+    }
     catch { /* recorded on the item by dispatchQueued */ }
     finally { this.draining.delete(id); }
   }
@@ -1305,6 +1331,39 @@ export class Sessions {
       this.opts.onSessions();
       throw error;
     }
+  }
+
+  private offerMod(id: string, sessionId: string, item: QueueItem): Promise<"claimed" | "withdrawn" | "expired"> | null {
+    if (this.modOwners.has(item.id)) return null;
+    this.modOwners.set(item.id, id);
+    const offered = this.modInbox.offer({ sessionId, itemId: item.id, text: item.text, offeredAt: this.now() }, this.opts.modOfferMs ?? 6000);
+    if (!offered) { this.modOwners.delete(item.id); return null; }
+    return offered.then(state => { if (state !== "claimed") this.modOwners.delete(item.id); return state; });
+  }
+
+  private withdrawMod(id: string, itemId: string): void {
+    if (this.modOwners.get(itemId) === id) this.modInbox.withdraw(itemId);
+  }
+
+  private finishMod(offer: ModOffer, outcome: ModOutcome): void {
+    const id = this.modOwners.get(offer.itemId);
+    if (!id) throw new Error("Missing mod offer owner");
+    if (outcome === "failed") this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN);
+    else {
+      const before = this.log(id).lastSeq;
+      const key = `send:${id}:${offer.itemId}`;
+      if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
+      if (!this.seen(id, offer.itemId)) {
+        this.personMessage(id);
+        this.append(id, { kind: "user", text: offer.text, clientMsgId: offer.itemId, images: [] });
+        this.rememberClientMsgId(id, offer.itemId);
+      }
+      this.receipts.complete(key, id);
+      this.sendQueue.sent(id, before, this.now());
+      this.sendQueue.remove(id, offer.itemId);
+    }
+    this.modOwners.delete(offer.itemId);
+    this.opts.onSessions();
   }
 
   // ---- what the phone asks for --------------------------------------------------------------
@@ -1459,8 +1518,30 @@ export class Sessions {
    * has accepted it; a resend of a completed id returns without running again, and a resend that
    * finds a pending receipt from before a host restart throws OutcomeUnknownError.
    * During Desktop handoff, ACK means durable queue ownership; its send receipt starts only at dispatch. */
-  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior: SendBehavior = "steer"): string | Promise<string> {
-    return this.deliver(id, clientMsgId, text, attachments, behavior);
+  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior?: SendBehavior): string | Promise<string> {
+    const key = `send:${id}:${clientMsgId}`;
+    if (this.receipts.status(key) !== null) return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer");
+    const existing = this.sendQueue.items(id).find(item => item.id === clientMsgId);
+    if (existing) {
+      if (existing.text !== text || existing.attachments.length !== attachments.length) throw new Error(SAME_ID_OTHER_CONTENT);
+      return id;
+    }
+    const desktopId = this.records.get(id)?.sdkSessionId;
+    const process = desktopId ? this.desktop?.liveProcess(desktopId) : undefined;
+    const eligible = desktopId && process && !process.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id) && this.handedOff(id);
+    if (eligible && this.seen(id, clientMsgId)) return id;
+    if (eligible && this.sendQueue.items(id).some(item => item.claimedBy || this.modOwners.get(item.id) === id)) {
+      if (this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
+      if (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/")) throw new Error(MOD_CLAIMED);
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
+    // The phone sends "steer" on every send (composer.tsx); with nothing running here it is a plain send.
+    if (eligible && behavior !== "interrupt" && !attachments.length && text.trim() && !text.trimStart().startsWith("/") && !this.appBusy(desktopId)) {
+      this.enqueue(id, clientMsgId, text, attachments);
+      return id;
+    }
+    return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer");
   }
 
   private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false): string | Promise<string> {
@@ -2203,6 +2284,7 @@ export class Sessions {
 
   shutdown(): void {
     this.shuttingDown = true;
+    this.modInbox.close();
     this.closeQueueWatch();
     for (const id of this.transcriptWatches.keys()) this.unwatchDesktop(id);
     this.bridgeRunning.clear();
