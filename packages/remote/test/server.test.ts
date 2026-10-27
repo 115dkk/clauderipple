@@ -1260,6 +1260,33 @@ test("backpressured tail updates coalesce and deliver the latest snapshot after 
   assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
 });
 
+test("a message waits for the setting change that reached the host before it, but not past the limit", async t => {
+  const f = await memoryHost(t);
+  const lane = f.sessions as unknown as { scheduleModeChange(id: string, work: () => Promise<void>): Promise<void> };
+  let release!: () => void;
+  void lane.scheduleModeChange(f.id, () => new Promise<void>(resolve => { release = resolve; }));
+  let settled = false;
+  void f.sessions.settingsSettled(f.id).then(() => { settled = true; });
+  await nextTick();
+  assert.equal(settled, false);
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-pick", text: "hello", behavior: "steer" });
+  await nextTick();
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false, "the message waits for the pick");
+  release();
+  await nextTick(); await nextTick();
+  assert.equal(settled, true);
+  void lane.scheduleModeChange(f.id, () => new Promise<void>(() => {}));
+  let late = false;
+  void f.sessions.settingsSettled(f.id).then(() => { late = true; });
+  t.mock.timers.tick(15_000);
+  await nextTick();
+  assert.equal(late, true, "a change that hangs holds messages no longer than the limit");
+  let after = false;
+  void f.sessions.settingsSettled(f.id).then(() => { after = true; });
+  await nextTick();
+  assert.equal(after, true, "nor does it hold later ones");
+});
+
 test("session lists wait for a backed-up connection to drain and only the newest goes out", async t => {
   const f = await memoryHost(t);
   f.peer.frames.length = 0;

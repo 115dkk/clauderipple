@@ -2396,6 +2396,24 @@ export class Sessions {
   }
 
   private modeChanges = new Map<string, Promise<unknown>>();
+  /** When the newest change in a session's lane was scheduled. */
+  private modeChangeAt = new Map<string, number>();
+
+  /**
+   * Resolves once the model, effort and mode changes that reached this session before now have
+   * run, so a message sent right after a pick runs with it (and /clear copies it). A change that
+   * hangs holds messages no longer than `ms` after it was asked for; the phone's own answer for it
+   * has said "not confirmed" by then.
+   */
+  settingsSettled(id: string, ms = 15_000): Promise<void> {
+    const pending = this.modeChanges.get(id);
+    const left = (this.modeChangeAt.get(id) ?? 0) + ms - Date.now();
+    if (!pending || left <= 0) return Promise.resolve();
+    return new Promise(resolve => {
+      const timer = setTimeout(resolve, left);
+      void pending.catch(() => {}).then(() => { clearTimeout(timer); resolve(); });
+    });
+  }
 
   setMode(id: string, mode: PermissionMode, reqId: string = randomUUID()): Promise<SettingsResult> {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
@@ -2428,7 +2446,8 @@ export class Sessions {
     const previous = this.modeChanges.get(id) ?? Promise.resolve();
     const change = previous.catch(() => {}).then(work);
     this.modeChanges.set(id, change);
-    void change.finally(() => { if (this.modeChanges.get(id) === change) this.modeChanges.delete(id); }).catch(() => {});
+    this.modeChangeAt.set(id, Date.now());
+    void change.finally(() => { if (this.modeChanges.get(id) === change) { this.modeChanges.delete(id); this.modeChangeAt.delete(id); } }).catch(() => {});
     return change;
   }
 
