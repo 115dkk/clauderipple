@@ -1602,7 +1602,7 @@ test("a handed-off session the app is running shows the app's state, and a stop 
   await f.sessions.interrupt(f.id);
   f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
   assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
-  await assert.rejects(f.sessions.interrupt(f.id), /Claude 앱에서 중지해 주세요/);
+  await assert.rejects(f.sessions.interrupt(f.id), /Claude 앱에서 직접 중지해 주세요/);
   f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "waiting" });
   assert.equal(f.sessions.summaryOf(f.id)?.state, "waiting");
 });

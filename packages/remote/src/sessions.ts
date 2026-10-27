@@ -257,13 +257,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SAME_ID_OTHER_CONTENT = "같은 메시지 ID에 다른 내용이 이미 접수되었습니다. 새 메시지로 다시 보내 주세요.";
 /** The first message of a session the app is starting through its folder environment (2026-10-27). */
 const ENVIRONMENT_STARTING = "Claude 앱에서 세션을 시작하고 있습니다.";
-const ENVIRONMENT_UNKNOWN = "Claude 앱의 세션 생성 또는 첫 메시지 전송 결과를 확인할 수 없습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 처리해 주세요.";
-const MOD_UNKNOWN = "Claude 앱에 메시지가 전송되었는지 확인할 수 없습니다. Claude 앱에서 확인한 뒤 다시 보내 주세요.";
-const ENVIRONMENT_MODE = "선택한 권한 모드를 Claude 앱에 적용하지 못해 첫 메시지를 보내지 않았습니다. Claude 앱에서 권한 모드를 확인한 뒤 다시 보내 주세요.";
-const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱에서 중지해 주세요.";
+const ENVIRONMENT_UNKNOWN = "Claude 앱에서 세션 생성이나 첫 메시지 전송 결과를 확인할 수 없습니다. Claude 앱에서 확인한 뒤 대기 중인 메시지를 다시 보내거나 삭제해 주세요.";
+const MOD_UNKNOWN = "Claude 앱에 메시지가 전송되었는지 확인할 수 없습니다. Claude 앱에서 확인한 뒤 필요하면 다시 보내 주세요.";
+const ENVIRONMENT_MODE = "선택한 권한 모드를 Claude 앱에 적용하지 못해 첫 메시지를 전송하지 않았습니다. Claude 앱에서 권한 모드를 확인한 뒤 다시 보내 주세요.";
+const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱에서 직접 중지해 주세요.";
 /** The stricter permission mode the person picked was not confirmed by the app's worker. */
 class EnvironmentModeError extends Error {}
-const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 끝난 뒤 다시 시도해 주세요.";
+const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
