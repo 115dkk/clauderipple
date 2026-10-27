@@ -1365,6 +1365,16 @@ export class Sessions {
       if (!data || typeof a.name !== "string" || typeof a.mediaType !== "string") throw new Error("Attachment missing or too large (8 MB limit).");
       return { name: a.name, mediaType: a.mediaType, data };
     });
+    // An id already sent, by the app or from here, is not queued again: whoever takes it from the
+    // queue would run it twice (a phone that lost the answer queues it again).
+    const key = `send:${id}:${clientMsgId}`;
+    const receipt = this.receipts.status(key);
+    if (receipt !== null) {
+      if (this.receipts.conflict(key, sendFingerprint(text, attachments))) throw new Error(SAME_ID_OTHER_CONTENT);
+      if (receipt === "pending" && !this.sending.has(key) && !this.bridgeSends.has(`${id}/${clientMsgId}`)) throw new OutcomeUnknownError();
+      return;
+    }
+    if (this.seen(id, clientMsgId)) return;
     if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
     this.watchQueueRegistry();
     this.opts.onSessions();
@@ -1405,8 +1415,9 @@ export class Sessions {
     // A Stop and a resume both inside the wait still count as a Stop; a message removed and queued
     // again under the same id is another message.
     // Its place among the setting changes is taken now, as for a send: one picked after it waits.
+    // It is taken even with nothing before it, since the app's answer to the offer can take seconds.
     const stops = this.stops.get(id) ?? 0;
-    const order = this.inLane(id);
+    const order = this.inLane(id, true);
     /** After any wait: false when the drain is already sending this message; throws when it may no
      * longer go (shutting down, stopped, removed or replaced, or taken by the app). */
     const mayGo = (): boolean => {
@@ -1484,16 +1495,17 @@ export class Sessions {
    * A message's place among the session's setting changes, taken as it arrives: `ready` once the
    * ones before it have run. A change (or message) that arrives after it waits in the lane until
    * the caller calls `done`, when the message has been handed on or refused; a place never given
-   * up lets go after SEND_HOLD_MS rather than stall the session's settings.
+   * up lets go after SEND_HOLD_MS rather than stall the session's settings. `always` takes the place
+   * with nothing to wait for too, for a message that is handed on asynchronously.
    */
-  private inLane(id: string): { ready?: Promise<void>; done: () => void } {
+  private inLane(id: string, always = false): { ready?: Promise<void>; done: () => void } {
     const settling = this.settingsSettled(id);
     // Nothing to wait for: no await either, so a Stop right behind this message still comes after it.
-    if (!settling) return { done: () => {} };
+    if (!settling && !always) return { done: () => {} };
     let done!: () => void;
     const hold = new Promise<void>(resolve => { done = resolve; setTimeout(resolve, SEND_HOLD_MS); });
     void this.scheduleModeChange(id, () => hold, SEND_HOLD_MS);
-    return { ready: settling, done };
+    return { ...settling ? { ready: settling } : {}, done };
   }
 
   private draining = new Set<string>();
@@ -2526,8 +2538,15 @@ export class Sessions {
   }
 
   private scheduleModeChange<T>(id: string, work: () => Promise<T>, holdsFor = 15_000): Promise<T> {
-    const previous = this.modeChanges.get(id) ?? Promise.resolve();
-    const change = previous.catch(() => {}).then(work);
+    // A change that hangs holds the ones behind it no longer than it holds messages: its answer has
+    // said "not confirmed" by then, and every pick after it would otherwise never run.
+    const previous = this.modeChanges.get(id);
+    const left = (this.modeChangeUntil.get(id) ?? 0) - Date.now();
+    const before = !previous ? Promise.resolve() : new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, Math.max(0, left));
+      void previous.catch(() => {}).then(() => { clearTimeout(timer); resolve(); });
+    });
+    const change = before.then(work);
     this.modeChanges.set(id, change);
     this.modeChangeUntil.set(id, Math.max(this.modeChangeUntil.get(id) ?? 0, Date.now() + holdsFor));
     void change.finally(() => { if (this.modeChanges.get(id) === change) { this.modeChanges.delete(id); this.modeChangeUntil.delete(id); } }).catch(() => {});

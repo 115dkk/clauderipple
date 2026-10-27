@@ -1374,6 +1374,64 @@ test("a message waiting behind another's place is held as long as that place", a
   assert.equal(settled, true);
 });
 
+test("\"send now\" holds its place while the app considers it, with nothing before it", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  const host = f.sessions as unknown as {
+    changeMode: (id: string, mode: string) => Promise<void>;
+    modEligible: () => boolean;
+    offerMod: () => Promise<"expired">;
+    deliver: (...args: unknown[]) => unknown;
+  };
+  host.changeMode = async (_id, mode) => { order.push(`mode:${mode}`); };
+  let lapse!: () => void;
+  host.modEligible = () => true;
+  host.offerMod = () => new Promise(resolve => { lapse = () => resolve("expired"); });
+  const deliver = host.deliver.bind(f.sessions);
+  host.deliver = (...args) => { order.push("send"); return deliver(...args); };
+  // Left in the queue while a turn ran (as the drain would, it skips one that is held).
+  (f.sessions as unknown as { sendQueue: { add(session: string, item: { id: string; text: string; attachments: [] }, at: number): boolean } }).sendQueue.add(f.id, { id: "queued-now", text: "now", attachments: [] }, Date.now());
+  f.sessions.holdQueue(f.id);
+  const sent = f.sessions.sendQueued(f.id, "queued-now");
+  f.peer.receive({ t: "set_mode", reqId: "mode-after", sessionId: f.id, mode: "plan" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  assert.deepEqual(order, [], "the pick made after it waits while the app has the offer");
+  lapse();
+  await sent;
+  for (let i = 0; i < 10 && order.length < 2; i++) await nextTick();
+  assert.deepEqual(order, ["send", "mode:plan"]);
+});
+
+test("a setting change that hangs lets the ones after it run once its hold is over", async t => {
+  const f = await memoryHost(t);
+  const lane = f.sessions as unknown as { scheduleModeChange(id: string, work: () => Promise<void>, holdsFor?: number): Promise<void> };
+  void lane.scheduleModeChange(f.id, () => new Promise<void>(() => {}));
+  let ran = false;
+  void lane.scheduleModeChange(f.id, async () => { ran = true; });
+  t.mock.timers.tick(14_000);
+  await nextTick();
+  assert.equal(ran, false, "the one before it still holds the lane");
+  t.mock.timers.tick(1_000);
+  await nextTick(); await nextTick();
+  assert.equal(ran, true);
+});
+
+test("a message id already sent is not queued again", async t => {
+  const f = await memoryHost(t);
+  const receipts = (f.sessions as unknown as { receipts: { begin(key: string, session: string): void; complete(key: string, session?: string): void } }).receipts;
+  receipts.begin(`send:${f.id}:taken`, f.id);
+  receipts.complete(`send:${f.id}:taken`, f.id);
+  // The app took it last time; it would take this one too, with no receipt check on its way.
+  const offered: string[] = [];
+  const host = f.sessions as unknown as { modEligible: () => boolean; offerMod: (id: string, desktopId: string, item: { id: string }) => null };
+  host.modEligible = () => true;
+  host.offerMod = (_id, _desktopId, item) => { offered.push(item.id); return null; };
+  f.sessions.enqueue(f.id, "taken", "hello");
+  await nextTick();
+  assert.deepEqual(offered, [], "the app would run it a second time");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+});
+
 test("a Stop while a message waits for settings cancels the message and keeps the queue stopped", async t => {
   const f = await memoryHost(t);
   let release!: () => void;
