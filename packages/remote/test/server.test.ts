@@ -1260,6 +1260,21 @@ test("backpressured tail updates coalesce and deliver the latest snapshot after 
   assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
 });
 
+test("session lists wait for a backed-up connection to drain and only the newest goes out", async t => {
+  const f = await memoryHost(t);
+  f.peer.frames.length = 0;
+  f.peer.bufferedAmount = 2 * 1024 * 1024;
+  for (let i = 0; i < 8; i++) {
+    f.server.onSessions();
+    t.mock.timers.tick(150);
+  }
+  t.mock.timers.tick(1000);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "sessions").length, 0);
+  f.peer.bufferedAmount = 0;
+  t.mock.timers.tick(200);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "sessions").length, 1);
+});
+
 test("desktop snapshot updates wait for drain and send only the newest tail", async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-tail-pressure-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

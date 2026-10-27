@@ -97,6 +97,8 @@ interface Client {
   pumping: Set<string>;
   pendingTail: Set<string>;
   retries: Map<string, ReturnType<typeof setTimeout>>;
+  /** The session list waiting for a backed-up connection to drain. */
+  sessionsRetry: ReturnType<typeof setTimeout> | null;
   features: ReturnType<typeof clientFeatures>;
 }
 
@@ -281,21 +283,37 @@ export class HostServer {
     if (this.sessionsTimer) return;
     this.sessionsTimer = setTimeout(() => {
       this.sessionsTimer = null;
-      try {
-        const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
-        for (const c of this.clients) {
-          if (!c.authed) continue;
-          this.send(c, msg);
-          // A rebase can replace the log without appending an event afterward.
-          for (const [id, cursor] of c.attached) {
-            const epoch = msg.sessions.find(session => session.id === id)?.epoch;
-            if (epoch && epoch !== cursor.epoch) this.pump(c, id);
-          }
-        }
-      } catch (error) {
-        this.opts.log?.(`session list failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      const msg = this.sessionList();
+      if (!msg) return;
+      for (const c of this.clients) if (c.authed) this.sendSessions(c, msg);
     }, 150);
+  }
+
+  private sessionList(): Extract<HostMsg, { t: "sessions" }> | null {
+    try {
+      return { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
+    } catch (error) {
+      this.opts.log?.(`session list failed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /** A backed-up connection gets the list once it drains, and then only the newest one: a list per
+   * change would keep the buffer full and hold the conversation's own frames behind it. */
+  private sendSessions(c: Client, msg: Extract<HostMsg, { t: "sessions" }>): void {
+    if (c.ws.readyState !== c.ws.OPEN) return;
+    if (c.ws.bufferedAmount >= HIGH_WATER) {
+      c.sessionsRetry ??= setTimeout(() => {
+        c.sessionsRetry = null;
+        const latest = this.sessionList();
+        if (latest) this.sendSessions(c, latest);
+      }, 200);
+    } else this.send(c, msg);
+    // A rebase can replace the log without appending an event afterward.
+    for (const [id, cursor] of c.attached) {
+      const epoch = msg.sessions.find(session => session.id === id)?.epoch;
+      if (epoch && epoch !== cursor.epoch) this.pump(c, id);
+    }
   }
 
   private pump(c: Client, session: string): void {
@@ -376,7 +394,7 @@ export class HostServer {
 
   /** A phone connected, directly or through the relay; it must say hello with the token within 10 s. */
   connected(ws: Peer): void {
-    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), pendingTail: new Set(), retries: new Map(), features: new Set() };
+    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), pendingTail: new Set(), retries: new Map(), sessionsRetry: null, features: new Set() };
     this.clients.add(c);
     const helloTimer = setTimeout(() => { if (!c.authed) ws.close(4001, "hello"); }, 10_000);
     ws.on("message", (data) => {
@@ -392,6 +410,8 @@ export class HostServer {
       for (const timer of c.retries.values()) clearTimeout(timer);
       c.retries.clear();
       c.pendingTail.clear();
+      if (c.sessionsRetry) clearTimeout(c.sessionsRetry);
+      c.sessionsRetry = null;
       if (c.authed && c.clientId) this.lastSeen.set(c.clientId, c.lastRx);
       this.clients.delete(c);
       this.syncWatches();
