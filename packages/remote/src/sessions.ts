@@ -1491,7 +1491,9 @@ export class Sessions {
       if (!summary || BUSY.has(summary.state)) return;
     }
     const awaiting = this.sendQueue.awaiting(id);
-    if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now())) return;
+    const record = this.records.get(id);
+    const appIdle = !!record && !record.desktopBridge && this.canTailHandoff(record) && !this.appBusy(desktopId);
+    if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now(), appIdle)) return;
     this.draining.add(id);
     let claimed = false;
     try {

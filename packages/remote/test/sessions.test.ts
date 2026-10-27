@@ -1746,17 +1746,24 @@ test("an awaiting mark left by an app-run turn settles once the app is idle, and
   const f = await modFixture(t, 500, 500);
   const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
   (f.sessions as unknown as { sendQueue: { sent(id: string, seq: number, at: number): void } }).sendQueue.sent(f.id, f.sessions.log(f.id).lastSeq, Date.now());
-  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  // The app's turn starts and ends between two polls: the host never sees it busy.
   fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "app-turn", cwd: f.cwd, message: { content: "earlier" } }) +
     transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "earlier answer" }] } }));
-  await f.sessions.pollDesktop();
-  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
-  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "idle" });
   await f.sessions.pollDesktop();
   assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
   await f.sessions.send(f.id, "next", "next words");
   await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "next"));
   assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+});
+
+test("the app's busy and idle show on the phone for a handed-off session the host follows", async t => {
+  const f = await modFixture(t, 500, 500);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "idle" });
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
 });
 
 test("pressing send on a queued message offers it to the app's mod first", async t => {
