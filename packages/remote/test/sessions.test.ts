@@ -1485,11 +1485,15 @@ test("environment creation attaches once, sends once, and adopts the desktop CLI
   assert.equal(calls.filter(call => call === "send").length, 1);
   const cli = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
   fs.mkdirSync(path.join(projects, "project"));
-  fs.writeFileSync(path.join(projects, "project", `${cli}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  fs.writeFileSync(path.join(projects, "project", `${cli}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n" +
+    JSON.stringify({ type: "assistant", uuid: "first-answer", message: { model: "claude-test", content: [{ type: "text", text: "first answer" }] } }) + "\n");
+  const scope = path.join(root, "claude-code-sessions", "account", "org"); fs.mkdirSync(scope, { recursive: true });
+  fs.writeFileSync(path.join(scope, "local_target.json"), JSON.stringify({ cliSessionId: cli, model: "sonnet", effort: "xhigh" }));
   registry.set(cli, { sessionId: cli, pid: 42, status: "idle", bridgeSessionId: "session_abc" });
-  await f.sessions.pollDesktop();
+  await waitFor(() => f.events.some(row => row.session === id && row.event.kind === "assistant" && row.event.text === "first answer"));
   assert.equal(f.sessions.list().length, 1);
   assert.equal((JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { sdkSessionId: string }[])[0]!.sdkSessionId, cli);
+  assert.deepEqual(f.sessions.settingsJobs.pending("local_helper").map(job => [job.model, job.effort]), [["claude-test", "high"]]);
 });
 
 // The app starts these sessions in acceptEdits: a stricter mode must be confirmed before the first message.

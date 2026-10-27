@@ -35,8 +35,8 @@ interface BridgePending {
 }
 import { SendQueue, type QueueItem } from "./queue.ts";
 import { ModInbox, type ModOffer, type ModOutcome } from "./mod-inbox.ts";
-import { SettingsJobs } from "./settings-jobs.ts";
-import { DesktopSettings } from "./desktop-settings.ts";
+import { SettingsJobs, settingsEffort, settingsModel, type SettingsJob, type SettingsJobOutcome } from "./settings-jobs.ts";
+import { DesktopSettings, type AppSettings } from "./desktop-settings.ts";
 import type { Decision, PermissionQueue } from "./permissions.ts";
 import { PERMISSION_MODES, type AlertBody, type Attention, type AttentionReason, type PermissionMode, type Question, type Effort, type EventBody, type Figures, type Isolation, type SessionEvent, type SessionState, type SessionSummary, type ToolCall } from "./protocol.ts";
 import type { RouterClient } from "./router.ts";
@@ -57,6 +57,16 @@ export type PermissionAnswer =
   | { behavior: "deny"; message: string; interrupt?: boolean };
 export type CanUseTool = (tool: string, input: Record<string, unknown>, opts: { signal: AbortSignal; suggestions?: unknown[]; suppressAlwaysAllowRule?: boolean; title?: string; decisionReason?: string; toolUseID?: string }) => Promise<PermissionAnswer>;
 export type QueryFn = (params: { prompt: AsyncIterable<SdkUserMessage>; options: Record<string, unknown> }) => SdkQuery;
+
+interface AppSettingsGuard {
+  jobId: string;
+  model: string;
+  effort: Effort | null;
+  baselineEffort: string | undefined;
+  outcome: "pending" | "applied" | "failed";
+  modelObserved?: boolean;
+  effortObserved?: boolean;
+}
 
 interface SessionRecord {
   id: string;
@@ -85,6 +95,8 @@ interface SessionRecord {
   /** Environment-created sessions have a bridge identity before Desktop assigns a CLI id. */
   environmentBridgeId?: string;
   environmentCreateUnknown?: boolean;
+  appSettingsBirthRequested?: boolean;
+  appSettingsGuard?: AppSettingsGuard;
   transcriptOffset?: number;
 }
 
@@ -140,6 +152,7 @@ export interface SessionsOptions {
   environmentModeMs?: number;
   modOfferMs?: number;
   modResultMs?: number;
+  settingsJobExpiryMs?: number;
   /** Optional file-notification boundary; polling remains authoritative when unavailable. */
   watchTranscript?: (id: string, changed: () => void, failed: (error: unknown) => void) => (() => void) | null;
 }
@@ -347,8 +360,9 @@ export class Sessions {
   private permissionRules = new Map<string, ReturnType<typeof sessionPermissionRules>>();
   private sendQueue: SendQueue;
   readonly modInbox: ModInbox;
-  readonly settingsJobs = new SettingsJobs();
+  readonly settingsJobs: SettingsJobs;
   private desktopSettings: DesktopSettings | null;
+  private adoptionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private modOwners = new Map<string, string>();
   /** In-flight turns keyed by receipt key, so a concurrent resend rides the first attempt. */
   private sending = new Map<string, Promise<string>>();
@@ -476,6 +490,7 @@ export class Sessions {
 
   constructor(opts: SessionsOptions) {
     this.opts = opts;
+    this.settingsJobs = new SettingsJobs(30_000, opts.settingsJobExpiryMs ?? 600_000, (job, outcome) => this.finishAppSettings(job, outcome));
     this.bridge = opts.bridgeClient ?? new BridgeClient();
     this.now = opts.now ?? Date.now;
     this.file = path.join(opts.dir, "sessions.json");
@@ -504,7 +519,8 @@ export class Sessions {
     for (const [id, attention] of Object.entries(listState?.attention ?? {})) if (attention?.reason) this.attention.set(id, attention);
     for (const id of listState?.archived ?? []) this.archived.add(id);
     for (const [id, at] of Object.entries(listState?.readAt ?? {})) if (typeof at === "number" && Number.isFinite(at)) this.readAt.set(id, at);
-    this.desktopSettings = opts.desktopSidebar ? new DesktopSettings(opts.desktopSidebar.root, this.now) : null;
+    const settingsRoot = opts.desktopSidebar?.root ?? opts.environmentRoot;
+    this.desktopSettings = settingsRoot ? new DesktopSettings(settingsRoot, this.now) : null;
     this.sidebar = opts.desktopSidebar ? new DesktopSidebar({ ...opts.desktopSidebar, now: this.now,
       onError: error => (opts.log ?? console.error)(`[desktop sidebar] ${error instanceof Error ? error.message : String(error)}`),
     }) : null;
@@ -525,6 +541,90 @@ export class Sessions {
     this.settingsJobs.request({ jobId: randomUUID(), appSessionId, cliSessionId, ...(settings.model === undefined ? {} : { model: settings.model }),
       ...(settings.effort === undefined ? {} : { effort: settings.effort }), createdAt: this.now() });
     return true;
+  }
+
+  private queueAppChoice(id: string, cliId: string, model: string, effort: Effort | null): boolean {
+    const app = this.desktopSettings?.appSettingsFor(cliId);
+    const record = this.records.get(id);
+    if (!app || !record) return false;
+    const valid = settingsModel(model);
+    if (valid && !this.requestAppSettings(cliId, { model, ...(settingsEffort(effort) ? { effort } : {}) })) return false;
+    const jobId = valid ? this.settingsJobs.status(app.appSessionId)!.jobId : randomUUID();
+    const guard: AppSettingsGuard = { jobId, model, effort, baselineEffort: app.effort, outcome: valid ? "pending" : "failed" };
+    record.appSettingsGuard = guard; record.appSettingsBirthRequested = true; this.save();
+    if (!valid) this.finishAppSettings({ jobId, appSessionId: app.appSessionId, cliSessionId: cliId, createdAt: this.now() }, "failed");
+    return true;
+  }
+
+  private finishAppSettings(job: SettingsJob, outcome: SettingsJobOutcome): void {
+    if (this.shuttingDown) return;
+    const record = [...this.records.values()].find(r => r.sdkSessionId === job.cliSessionId);
+    const id = record?.id ?? job.cliSessionId;
+    const guard = record?.appSettingsGuard;
+    if (guard?.jobId === job.jobId) {
+      guard.outcome = outcome === "applied" ? "applied" : "failed";
+      if (record) this.save();
+    }
+    if ((outcome === "failed" || outcome === "no-helper") && this.has(id)) {
+      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: "Mac의 Claude 앱에 모델 또는 추론 강도 설정을 적용하지 못했습니다." }, false);
+      this.opts.onSessions();
+    }
+  }
+
+  private syncAppSettings(id: string, app: AppSettings): void {
+    const record = this.records.get(id);
+    const guard = record?.appSettingsGuard;
+    if (this.settingsJobs.hasPending(app.appSessionId) || this.modeChanges.has(id)) return;
+    // A restarted host lost its in-memory job; it cannot know whether the helper applied it.
+    if (guard?.outcome === "pending") {
+      guard.outcome = "failed";
+      if (record) this.save();
+      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: "Mac의 Claude 앱에 모델 또는 추론 강도 설정이 적용되었는지 확인할 수 없습니다." }, false);
+      this.opts.onSessions();
+    }
+    const modelAllowed = !guard || guard.modelObserved || app.model === guard.model;
+    const effortAllowed = !guard || guard.effortObserved || settingsEffort(guard.effort) && app.effort === guard.effort ||
+      !settingsEffort(guard.effort) && settingsEffort(app.effort) && app.effort !== guard.baselineEffort;
+    const current = record ?? this.desktopModels.get(id) ?? this.desktop?.list().find(s => s.id === id);
+    if (!current) return;
+    const model = modelAllowed && app.model ? app.model : current.model;
+    const effort = effortAllowed && settingsEffort(app.effort) ? app.effort : current.effort;
+    if (guard) {
+      const changed = !!app.model && !!modelAllowed && !guard.modelObserved || settingsEffort(app.effort) && !!effortAllowed && !guard.effortObserved;
+      if (app.model && modelAllowed) guard.modelObserved = true;
+      if (settingsEffort(app.effort) && effortAllowed) guard.effortObserved = true;
+      if (guard.modelObserved && guard.effortObserved) {
+        if (record) delete record.appSettingsGuard;
+      }
+      if (record && changed) this.save();
+    }
+    if (model === current.model && effort === current.effort) return;
+    if (record) {
+      if (model !== record.model) record.contextWindow = null;
+      record.model = model; record.effort = effort;
+      record.confirmedSettings = { ...record.confirmedSettings, model, effort };
+      this.save();
+    } else this.desktopModels.set(id, { model, effort });
+    this.opts.onSessions();
+  }
+
+  private syncDesktopSettings(): void {
+    for (const record of this.records.values()) {
+      const cliId = record.sdkSessionId;
+      if (!cliId) continue;
+      const app = this.desktopSettings?.appSettingsFor(cliId);
+      if (!app) continue;
+      if (!record.appSettingsBirthRequested && (record.environmentBridgeId || record.desktopHandoff === "attempted")) {
+        this.queueAppChoice(record.id, cliId, record.model, record.effort);
+      }
+      this.syncAppSettings(record.id, app);
+    }
+    const hostIds = new Set([...this.records.values()].flatMap(r => r.sdkSessionId ? [r.id, r.sdkSessionId] : [r.id]));
+    for (const session of this.desktop?.list() ?? []) {
+      if (hostIds.has(session.id)) continue;
+      const app = this.desktopSettings?.appSettingsFor(session.id);
+      if (app) this.syncAppSettings(session.id, app);
+    }
   }
 
   /** After a host restart: no query survived, so say so in every session that was mid-turn, and close what it was asking. */
@@ -596,10 +696,34 @@ export class Sessions {
     }
   }
 
+  private pollEnvironmentAdoption(r: SessionRecord): void {
+    if (this.adoptionTimers.has(r.id) || this.shuttingDown) return;
+    const deadline = performance.now() + 30_000;
+    const tick = () => {
+      this.adoptionTimers.delete(r.id);
+      if (this.shuttingDown || performance.now() >= deadline) return;
+      try {
+        this.adoptEnvironmentSessions();
+        if (r.sdkSessionId && this.desktop?.transcriptEnd(r.sdkSessionId) !== undefined) {
+          this.syncDesktopSettings();
+          this.watchDesktop(r.id);
+          this.tailBridge(r);
+          this.opts.onSessions();
+          return;
+        }
+      } catch (error) { (this.opts.log ?? console.error)(`[environment adoption] ${r.id}: ${String(error)}`); }
+      const timer = setTimeout(tick, 300);
+      timer.unref();
+      this.adoptionTimers.set(r.id, timer);
+    };
+    tick();
+  }
+
   async pollDesktop(): Promise<void> {
     if (this.shuttingDown) return;
     if (this.desktop?.poll()) this.opts.onSessions();
     this.adoptEnvironmentSessions();
+    this.syncDesktopSettings();
     this.refreshStatuses();
     const sessions = this.list();
     this.pollMacAlerts(sessions);
@@ -998,7 +1122,7 @@ export class Sessions {
     return cached?.list ?? this.lastCommands;
   }
 
-  private continueDesktop(id: string, clientMsgId: string, bridgeMode = false): SessionRecord {
+  private continueDesktop(id: string, clientMsgId: string, bridgeMode = false, settingsOnly = false): SessionRecord {
     if (!this.desktop) throw new Error("no such session");
     const { summary: s, open } = this.desktop.continuation(id);
     if (open && !bridgeMode) throw new DesktopBlockedError();
@@ -1013,7 +1137,7 @@ export class Sessions {
     this.logs.set(id, log);
     this.records.set(id, r);
     this.save();
-    this.append(id, { kind: "notice", code: bridgeMode ? "desktop_bridge" : "desktop_resumed" });
+    if (!settingsOnly) this.append(id, { kind: "notice", code: bridgeMode ? "desktop_bridge" : "desktop_resumed" });
     this.opts.onSessions();
     return r;
   }
@@ -1069,7 +1193,8 @@ export class Sessions {
     const process = this.desktop?.liveProcess(desktopId);
     const desktop = r?.desktopBridge || this.desktop?.isOpen(desktopId);
     const enabled = !desktop || !!(r?.environmentBridgeId ?? process?.bridgeSessionId) && !this.bridgeProblem && !this.bridges.get(id)?.failed;
-    return { model: enabled, effort: enabled, permissionModes: enabled ? [...PERMISSION_MODES] : [] };
+    const appSettings = !!this.desktopSettings?.appSessionIdFor(desktopId);
+    return { model: enabled || appSettings, effort: enabled || appSettings, permissionModes: enabled ? [...PERMISSION_MODES] : [] };
   }
 
   private summary(r: SessionRecord): SessionSummary {
@@ -1609,6 +1734,7 @@ export class Sessions {
       if (text.trim()) {
         const item = this.sendQueue.items(r.id).find(item => item.id === clientMsgId)!;
         await this.dispatchQueued(r.id, item, false);
+        this.pollEnvironmentAdoption(r);
       } else this.setState(r, "idle");
     } catch (error) {
       const reason = error instanceof EnvironmentModeError ? ENVIRONMENT_MODE : failure;
@@ -1725,7 +1851,10 @@ export class Sessions {
     if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
     if (existing?.environmentCreateUnknown) throw new OutcomeUnknownError();
-    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId);
+    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId).then(sent => {
+      if (!existing.sdkSessionId) this.pollEnvironmentAdoption(existing);
+      return sent;
+    });
     const desktopId = existing?.sdkSessionId ?? id;
     if (this.desktop && !this.live.has(id) && !this.handingOff.has(id) && (existing?.sdkSessionId || this.desktop.has(id))) {
       const process = this.desktop.liveProcess(desktopId);
@@ -1863,9 +1992,10 @@ export class Sessions {
       if (size === this.bridgeTitleSize.get(r.id)) return;
       this.bridgeTitleSize.set(r.id, size);
       const meta = this.desktop.metadataOf(transcript);
-      if (meta && (meta.title !== r.title || meta.model && meta.model !== r.model)) {
+      const transcriptModelAllowed = !r.confirmedSettings?.model && !this.desktopSettings?.appSettingsFor(transcript) && !r.appSettingsGuard;
+      if (meta && (meta.title !== r.title || transcriptModelAllowed && meta.model && meta.model !== r.model)) {
         r.title = meta.title;
-        if (meta.model && !r.confirmedSettings?.model) {
+        if (meta.model && transcriptModelAllowed) {
           if (r.model !== meta.model) r.contextWindow = null;
           r.model = meta.model;
         }
@@ -2265,7 +2395,7 @@ export class Sessions {
   }
 
   /** Import the desktop log before controlling it, but never start or restart its worker. */
-  private settingsBridge(id: string): string | null {
+  private settingsBridge(id: string, allowAppSettings = false): string | null {
     if (this.shuttingDown) throw new OutcomeUnknownError();
     // Adoption waits for the SDK's accepted turns to finish (pollDesktop). A settings
     // change cannot rebase its log out from under that still-active transcript writer.
@@ -2279,7 +2409,7 @@ export class Sessions {
       this.ensureBridge(id, bridgeId);
       return bridgeId;
     }
-    if (r?.desktopBridge || this.desktop?.isOpen(desktopId)) throw new DesktopBlockedError();
+    if ((r?.desktopBridge || this.desktop?.isOpen(desktopId)) && !(allowAppSettings && this.desktopSettings?.appSessionIdFor(desktopId))) throw new DesktopBlockedError();
     return null;
   }
 
@@ -2331,7 +2461,7 @@ export class Sessions {
   }
 
   private async changeModel(id: string, model: string, effort: Effort | null): Promise<SettingsResult> {
-    const bridgeId = this.settingsBridge(id);
+    const bridgeId = this.settingsBridge(id, true);
     const m = modelArg(model, effort);
     if (bridgeId) {
       const r = this.records.get(id)!;
@@ -2348,6 +2478,7 @@ export class Sessions {
         try { await this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: effort } }); }
         catch (error) {
           if (error instanceof OutcomeUnknownError) throw error;
+          if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, r.effort);
           return { status: "partial", model, errors: { effort: error instanceof Error ? error.message : String(error) } };
         }
       }
@@ -2355,12 +2486,20 @@ export class Sessions {
       r.effort = effort;
       r.confirmedSettings = { ...r.confirmedSettings, effort };
       this.save();
+      if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, effort);
       this.opts.onSessions();
       return { status: "applied", model, effort };
     }
     if (isClaudeModel(model) && effort !== null && m.effort === undefined) throw new Error("이 SDK 경로에서는 해당 Claude 추론 강도를 지원하지 않습니다");
     if (!this.records.has(id) && this.desktop?.has(id)) {
-      this.desktopModels.set(id, { model, effort });
+      if (this.desktopSettings?.appSessionIdFor(id)) {
+        // A settings-only import keeps the phone's choice and failure notices across restarts.
+        const record = this.continueDesktop(id, "", true, true);
+        record.model = model; record.effort = effort;
+        record.confirmedSettings = { ...record.confirmedSettings, model, effort };
+        this.save();
+        this.queueAppChoice(id, id, model, effort);
+      } else this.desktopModels.set(id, { model, effort });
       this.opts.onSessions();
       return { status: "applied", model, effort };
     }
@@ -2378,6 +2517,7 @@ export class Sessions {
     r.model = model;
     r.effort = effort;
     this.save();
+    if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, effort);
     this.append(id, { kind: "notice", code: "model_changed", text: effort ? `${model} · ${effort}` : model });
     if (live) {
       // Even when the model also changed, Claude's effort must reach a fresh SDK query.
@@ -2419,6 +2559,8 @@ export class Sessions {
     this.shuttingDown = true;
     this.modInbox.close();
     this.settingsJobs.close();
+    for (const timer of this.adoptionTimers.values()) clearTimeout(timer);
+    this.adoptionTimers.clear();
     this.closeQueueWatch();
     for (const id of this.transcriptWatches.keys()) this.unwatchDesktop(id);
     this.bridgeRunning.clear();

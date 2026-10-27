@@ -8,6 +8,9 @@ import { SettingsJobs, type SettingsJob } from "../src/settings-jobs.ts";
 import { DesktopSettings } from "../src/desktop-settings.ts";
 import { Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
+import { BridgeClient } from "../src/bridge-client.ts";
+import type { DesktopProcess } from "../src/desktop.ts";
+import type { SessionEvent } from "../src/protocol.ts";
 
 const job = (jobId: string, appSessionId = "local_target"): SettingsJob => ({ jobId, appSessionId, cliSessionId: "cli-1", model: "provider:model@high", createdAt: 1 });
 
@@ -82,4 +85,150 @@ test("Sessions only queues explicitly requested fields for a mapped app record",
   assert.equal(sessions.requestAppSettings("cli-1", requested), true);
   const [queued] = sessions.settingsJobs.pending("local_helper");
   assert.equal(queued?.appSessionId, "local_target"); assert.equal(queued?.effort, "high"); assert.equal(queued?.model, undefined);
+});
+
+const cli = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const line = (value: unknown) => JSON.stringify(value) + "\n";
+
+function syncFixture(t: import("node:test").TestContext, kind: "env" | "handoff" | "app", recordExists = true) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "settings-sync-"));
+  const host = path.join(root, "host"), app = path.join(root, "app"), projects = path.join(root, "projects");
+  const scope = path.join(app, "claude-code-sessions", "account", "org");
+  fs.mkdirSync(scope, { recursive: true }); fs.mkdirSync(path.join(projects, "project"), { recursive: true }); fs.mkdirSync(host);
+  const transcript = path.join(projects, "project", `${cli}.jsonl`);
+  fs.writeFileSync(transcript, line({ type: "user", uuid: "old", cwd: root, message: { content: "hello" } }));
+  const appFile = path.join(scope, "local_target.json");
+  const writeApp = (model = "sonnet", effort = "xhigh") => fs.writeFileSync(appFile, JSON.stringify({ cliSessionId: cli, model, effort }));
+  if (recordExists) writeApp();
+  const id = kind === "app" ? cli : "phone-session";
+  if (kind !== "app") fs.writeFileSync(path.join(host, "sessions.json"), JSON.stringify([{ id, sdkSessionId: kind === "env" && !recordExists ? null : cli,
+    cwd: root, model: "gpt-luna", effort: "high", title: "hello", createdAt: 1, updatedAt: 1, state: "idle", createdBy: "phone", contextWindow: null,
+    desktopHandoff: kind === "handoff" ? "attempted" : "excluded", ...(kind === "env" ? { desktopBridge: true, environmentBridgeId: "cse_abc" } : {}) }]));
+  const registry = new Map<string, DesktopProcess>();
+  if (kind === "env" && recordExists) registry.set(cli, { sessionId: cli, pid: 1, status: "idle", bridgeSessionId: "session_abc" });
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (String(url).includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [], worker_status: "idle" });
+  } });
+  client.control = async () => {};
+  let now = Date.now(); const events: SessionEvent[] = [];
+  const sessions = new Sessions({ dir: host, desktopSidebar: { root: app }, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client,
+    now: () => now, settingsJobExpiryMs: 40, log() {}, permissions: PermissionQueue.open(path.join(root, "permissions.json")),
+    router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
+    queryFn: () => { throw new Error("must not launch"); }, onEvent: (_id, event) => events.push(event), onSessions() {} });
+  t.after(async () => { sessions.shutdown(); await delay(5); fs.rmSync(root, { recursive: true, force: true }); });
+  return { sessions, id, registry, appFile, writeApp, events, transcript, host, advance: () => { now += 4000; } };
+}
+
+for (const kind of ["env", "handoff", "app"] as const) test(`phone model choice queues app settings for ${kind}`, async t => {
+  const f = syncFixture(t, kind);
+  await f.sessions.setModel(f.id, "gpt-new", "high");
+  const jobs = f.sessions.settingsJobs.pending("local_helper");
+  assert.equal(jobs.length, 1);
+  assert.deepEqual([jobs[0]!.cliSessionId, jobs[0]!.model, jobs[0]!.effort], [cli, "gpt-new", "high"]);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.settingsJobs.pending("local_helper").length, 1);
+});
+
+test("an app-only choice and its failure notice survive transcript growth and host restart", async t => {
+  const f = syncFixture(t, "app");
+  await f.sessions.setModel(f.id, "gpt-new", "high");
+  const job = f.sessions.settingsJobs.pending("local_helper")[0]!;
+  assert.equal(f.sessions.settingsJobs.claim(job.jobId, "local_helper"), true);
+  assert.equal(f.sessions.settingsJobs.result(job.jobId, "failed"), true);
+  fs.appendFileSync(f.transcript, line({ type: "assistant", uuid: "later", message: { model: "sonnet", content: [{ type: "text", text: "answer" }] } }));
+  f.advance(); await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_settings_failed").length, 1);
+  f.sessions.shutdown();
+  const restored = new Sessions({ dir: f.host, environmentRoot: path.dirname(path.dirname(path.dirname(path.dirname(f.appFile)))),
+    permissions: PermissionQueue.open(path.join(f.host, "permissions-reopened.json")),
+    router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
+    queryFn: () => { throw new Error("must not launch"); }, onEvent() {}, onSessions() {} });
+  t.after(() => restored.shutdown());
+  assert.deepEqual([restored.summaryOf(f.id)?.model, restored.summaryOf(f.id)?.effort], ["gpt-new", "high"]);
+  assert.equal(restored.log(f.id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_settings_failed").length, 1);
+});
+
+test("a restart during a settings job preserves the choice and reports the unknown outcome once", async t => {
+  const f = syncFixture(t, "handoff");
+  await f.sessions.setModel(f.id, "gpt-new", "high");
+  f.sessions.shutdown();
+  const root = path.dirname(path.dirname(path.dirname(path.dirname(f.appFile))));
+  const recovered = new Sessions({ dir: f.host, desktopSidebar: { root }, desktopProjects: path.dirname(path.dirname(f.transcript)),
+    desktopRegistry: () => f.registry, desktopProcesses: () => "", permissions: PermissionQueue.open(path.join(f.host, "permissions-recovered.json")),
+    router: { status: async () => ({ ok: true, proxyEnv: {} }), figures: async () => { throw new Error("unused"); } },
+    queryFn: () => { throw new Error("must not launch"); }, log() {}, onEvent() {}, onSessions() {} });
+  t.after(() => recovered.shutdown());
+  await recovered.pollDesktop(); await recovered.pollDesktop();
+  assert.deepEqual([recovered.summaryOf(f.id)?.model, recovered.summaryOf(f.id)?.effort], ["gpt-new", "high"]);
+  const notices = recovered.log(f.id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_settings_failed");
+  assert.equal(notices.length, 1);
+  assert.ok(notices[0]?.kind === "notice");
+  assert.equal(notices[0].text, "Mac의 Claude 앱에 모델 또는 추론 강도 설정이 적용되었는지 확인할 수 없습니다.");
+});
+
+test("unsupported app effort is omitted and the phone's choice remains", async t => {
+  const f = syncFixture(t, "handoff");
+  await f.sessions.setModel(f.id, "gpt-new", "ultra");
+  const job = f.sessions.settingsJobs.pending("local_helper")[0]!;
+  assert.equal(job.effort, undefined);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.effort, "ultra");
+  assert.equal(f.sessions.settingsJobs.claim(job.jobId, "local_helper"), true);
+  f.writeApp("gpt-new", "xhigh"); f.advance();
+  assert.equal(f.sessions.settingsJobs.result(job.jobId, "applied"), true);
+  await f.sessions.pollDesktop();
+  f.writeApp("opus", "xhigh"); f.advance(); await f.sessions.pollDesktop();
+  assert.deepEqual([f.sessions.summaryOf(f.id)?.model, f.sessions.summaryOf(f.id)?.effort], ["opus", "ultra"]);
+  f.writeApp("opus", "max"); f.advance(); await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.effort, "max");
+});
+
+for (const kind of ["env", "handoff"] as const) test(`${kind} birth is requested once only after the app record appears`, async t => {
+  const f = syncFixture(t, kind, false);
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.settingsJobs.pending("local_helper").length, 0);
+  f.writeApp();
+  if (kind === "env") f.registry.set(cli, { sessionId: cli, pid: 1, status: "idle", bridgeSessionId: "session_abc" });
+  f.advance(); await f.sessions.pollDesktop();
+  const first = f.sessions.settingsJobs.pending("local_helper")[0]!;
+  assert.deepEqual([first.model, first.effort], ["gpt-luna", "high"]);
+  assert.equal(f.sessions.settingsJobs.claim(first.jobId, "local_helper"), true);
+  f.writeApp("gpt-luna", "high"); f.advance();
+  assert.equal(f.sessions.settingsJobs.result(first.jobId, "applied"), true);
+  await f.sessions.pollDesktop(); await f.sessions.pollDesktop();
+  assert.equal(f.sessions.settingsJobs.pending("local_helper").length, 0);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "gpt-luna");
+});
+
+test("app settings synchronize after an applied job, but not while queued or claimed", async t => {
+  const f = syncFixture(t, "handoff");
+  await f.sessions.setModel(f.id, "gpt-new", "high");
+  const job = f.sessions.settingsJobs.pending("local_helper")[0]!;
+  await f.sessions.pollDesktop();
+  assert.deepEqual([f.sessions.summaryOf(f.id)?.model, f.sessions.summaryOf(f.id)?.effort], ["gpt-new", "high"]);
+  assert.equal(f.sessions.settingsJobs.claim(job.jobId, "local_helper"), true);
+  f.advance(); await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "gpt-new");
+  f.writeApp("gpt-new", "high"); f.advance();
+  assert.equal(f.sessions.settingsJobs.result(job.jobId, "applied"), true);
+  await f.sessions.pollDesktop();
+  f.writeApp("opus", "max"); f.advance(); await f.sessions.pollDesktop();
+  assert.deepEqual([f.sessions.summaryOf(f.id)?.model, f.sessions.summaryOf(f.id)?.effort], ["opus", "max"]);
+  assert.equal(f.sessions.settingsJobs.pending("local_helper").length, 0);
+});
+
+for (const outcome of ["failed", "no-helper"] as const) test(`${outcome} produces one visible notice without reverting the phone`, async t => {
+  const f = syncFixture(t, "handoff");
+  await f.sessions.setModel(f.id, "gpt-new", "high");
+  const job = f.sessions.settingsJobs.pending("local_helper")[0]!;
+  if (outcome === "failed") { assert.equal(f.sessions.settingsJobs.claim(job.jobId, "local_helper"), true); assert.equal(f.sessions.settingsJobs.result(job.jobId, "failed"), true); }
+  else await delay(70);
+  f.advance(); await f.sessions.pollDesktop(); await f.sessions.pollDesktop();
+  f.writeApp("older-job", "medium"); f.advance(); await f.sessions.pollDesktop();
+  assert.deepEqual([f.sessions.summaryOf(f.id)?.model, f.sessions.summaryOf(f.id)?.effort], ["gpt-new", "high"]);
+  const notices = f.sessions.log(f.id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_settings_failed");
+  assert.equal(notices.length, 1);
+  assert.ok(notices[0]?.kind === "notice");
+  assert.equal(notices[0].text, "Mac의 Claude 앱에 모델 또는 추론 강도 설정을 적용하지 못했습니다.");
 });

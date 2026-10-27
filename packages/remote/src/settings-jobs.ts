@@ -26,7 +26,12 @@ export class SettingsJobs {
   private outcomes = new Map<string, SettingsJobStatus>();
   private resultMs: number;
   private expiryMs: number;
-  constructor(resultMs = 30_000, expiryMs = 600_000) { this.resultMs = resultMs; this.expiryMs = expiryMs; }
+  private onFinish: ((job: SettingsJob, outcome: SettingsJobOutcome) => void) | undefined;
+  constructor(resultMs = 30_000, expiryMs = 600_000, onFinish?: (job: SettingsJob, outcome: SettingsJobOutcome) => void) { this.resultMs = resultMs; this.expiryMs = expiryMs; this.onFinish = onFinish; }
+
+  hasPending(appSessionId: string): boolean {
+    return [...this.jobs.values()].some(state => state.job.appSessionId === appSessionId);
+  }
 
   request(job: SettingsJob): void {
     if (!settingsId(job.jobId) || !settingsId(job.appSessionId) || !settingsId(job.cliSessionId) ||
@@ -73,6 +78,7 @@ export class SettingsJobs {
     if (!state) return;
     clearTimeout(state.timer); this.jobs.delete(jobId);
     if (this.outcomes.get(state.job.appSessionId)?.jobId === jobId) this.outcomes.set(state.job.appSessionId, { jobId, outcome, ...(detail === undefined ? {} : { detail }) });
+    this.onFinish?.(state.job, outcome);
   }
 
   close(): void { for (const state of this.jobs.values()) clearTimeout(state.timer); this.jobs.clear(); }
