@@ -1240,6 +1240,56 @@ test("history rebuild reports its epoch and sends the replacement tail to every 
   assert.ok(legacy.events.length > 0);
 });
 
+test("backpressured tail updates coalesce and deliver the latest snapshot after drain", async t => {
+  const f = await memoryHost(t);
+  const log = f.sessions.log(f.id);
+  f.peer.bufferedAmount = 2 * 1024 * 1024;
+  f.peer.receive({ t: "attach", session: f.id });
+  for (let i = 0; i < 10; i++) {
+    log.append({ kind: "user", text: `update-${i}`, clientMsgId: `update-${i}` });
+    f.peer.receive({ t: "attach", session: f.id });
+  }
+  assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
+  t.mock.timers.tick(1000);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
+  f.peer.bufferedAmount = 0;
+  t.mock.timers.tick(200);
+  const tail = await f.peer.take("events");
+  assert.ok(tail.tail);
+  assert.equal(tail.events.at(-1)?.seq, log.lastSeq);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
+});
+
+test("desktop snapshot updates wait for drain and send only the newest tail", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-tail-pressure-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  const id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const file = path.join(project, `${id}.jsonl`);
+  const line = (i: number) => JSON.stringify({ type: "user", uuid: `p-${i}`, cwd: root, message: { content: `update-${i}` } }) + "\n";
+  fs.writeFileSync(file, line(0));
+  const f = await fixture(t, {}, root);
+  const peer = new MemoryPeer();
+  f.server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "slow-desktop-reader" });
+  await peer.take("ready");
+  peer.receive({ t: "attach", session: id });
+  await peer.take("events");
+  peer.bufferedAmount = 2 * 1024 * 1024;
+  for (let i = 1; i <= 10; i++) {
+    fs.appendFileSync(file, line(i));
+    f.server.onEvent(id);
+  }
+  assert.equal(peer.frames.filter(frame => frame.t === "events").length, 0);
+  peer.bufferedAmount = 0;
+  await waitFor(() => peer.frames.some(frame => frame.t === "events"));
+  const tail = await peer.take("events");
+  assert.ok(tail.tail);
+  assert.ok(tail.events.some(event => event.kind === "user" && event.text === "update-10"));
+  assert.equal(peer.frames.filter(frame => frame.t === "events").length, 0);
+});
+
 test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: 4500 }, async t => {
   const f = await fixture(t);
   const id = await f.create();

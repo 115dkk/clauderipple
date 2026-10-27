@@ -95,6 +95,8 @@ interface Client {
   /** session → log epoch and last seq sent to this client */
   attached: Map<string, { epoch: string; seq: number }>;
   pumping: Set<string>;
+  pendingTail: Set<string>;
+  retries: Map<string, ReturnType<typeof setTimeout>>;
   features: ReturnType<typeof clientFeatures>;
 }
 
@@ -300,13 +302,14 @@ export class HostServer {
     if (c.pumping.has(session)) return;
     c.pumping.add(session);
     try {
+      if (c.ws.readyState !== c.ws.OPEN || !c.attached.has(session)) return;
       const log = this.opts.sessions.log(session);
       for (;;) {
         const cursor = c.attached.get(session);
         if (!cursor) break;
-        if (cursor.epoch !== log.epoch) { this.sendTail(c, session, log); break; }
+        if (c.pendingTail.has(session) || cursor.epoch !== log.epoch) { this.sendTail(c, session, log); break; }
         if (cursor.seq >= log.lastSeq) break;
-        if (c.ws.bufferedAmount > HIGH_WATER) { setTimeout(() => this.pump(c, session), 200); break; }
+        if (c.ws.bufferedAmount >= HIGH_WATER) { this.retryPump(c, session); break; }
         const page = log.readAfter(cursor.seq);
         // Skipped (superseded) deltas can leave a page empty; the cursor still moves to the end.
         const last = page.events.length ? page.events[page.events.length - 1]!.seq : log.lastSeq;
@@ -348,7 +351,22 @@ export class HostServer {
     this.sendTail(c, session, log);
   }
 
+  private retryPump(c: Client, session: string): void {
+    if (c.retries.has(session)) return;
+    c.retries.set(session, setTimeout(() => {
+      c.retries.delete(session);
+      this.pump(c, session);
+    }, 200));
+  }
+
   private sendTail(c: Client, session: string, log: ReturnType<Sessions["log"]>): void {
+    if (c.ws.readyState !== c.ws.OPEN || !c.attached.has(session)) return;
+    if (c.ws.bufferedAmount >= HIGH_WATER) {
+      c.pendingTail.add(session);
+      this.retryPump(c, session);
+      return;
+    }
+    c.pendingTail.delete(session);
     const tail = log.tail();
     c.attached.set(session, { epoch: log.epoch, seq: log.lastSeq });
     this.send(c, { t: "events", session, epoch: log.epoch, events: tail.events, more: false, tail: { hasOlder: tail.hasOlder } });
@@ -358,7 +376,7 @@ export class HostServer {
 
   /** A phone connected, directly or through the relay; it must say hello with the token within 10 s. */
   connected(ws: Peer): void {
-    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), features: new Set() };
+    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), pendingTail: new Set(), retries: new Map(), features: new Set() };
     this.clients.add(c);
     const helloTimer = setTimeout(() => { if (!c.authed) ws.close(4001, "hello"); }, 10_000);
     ws.on("message", (data) => {
@@ -371,6 +389,9 @@ export class HostServer {
     });
     ws.on("close", () => {
       clearTimeout(helloTimer);
+      for (const timer of c.retries.values()) clearTimeout(timer);
+      c.retries.clear();
+      c.pendingTail.clear();
       if (c.authed && c.clientId) this.lastSeen.set(c.clientId, c.lastRx);
       this.clients.delete(c);
       this.syncWatches();
@@ -436,7 +457,15 @@ export class HostServer {
     switch (msg.t) {
       case "hello": return;
       case "attach": this.attach(c, msg.session, msg.epoch, msg.afterSeq); return;
-      case "detach": c.attached.delete(msg.session); this.syncWatches(); return;
+      case "detach": {
+        c.attached.delete(msg.session);
+        c.pendingTail.delete(msg.session);
+        const retry = c.retries.get(msg.session);
+        if (retry) clearTimeout(retry);
+        c.retries.delete(msg.session);
+        this.syncWatches();
+        return;
+      }
       case "seen":
         if (c.attached.has(msg.session) && c.visibleAt > 0 && this.now() - c.visibleAt < VISIBLE_MS && s.has(msg.session)) s.markSeen(msg.session);
         return;
