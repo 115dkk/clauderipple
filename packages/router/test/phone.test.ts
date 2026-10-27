@@ -58,6 +58,46 @@ test("admin proxies only allowed phone routes to the configured loopback port wi
   assert.equal(calls.length, 4);
 });
 
+test("inbox routes validate, forward only their own requests and preserve host responses", async t => {
+  const calls: { url: string; method: string; body?: string }[] = [];
+  const f = await admin(t, { fetch: async (url, init) => {
+    assert.equal(new Headers(init?.headers).get("x-ripple-local"), "s".repeat(43));
+    calls.push({ url: String(url), method: init?.method ?? "GET", ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+    return String(url).endsWith("/claim") ? Response.json({ error: "offer unavailable" }, { status: 409 })
+      : Response.json(String(url).includes("/inbox?") ? { offers: [{ sessionId: "a &b", itemId: "one", text: "private", offeredAt: 1 }] } : { ok: true });
+  } });
+  const list = await fetch(`${f.base}/api/phone-inbox?session=a%20%26b`);
+  assert.equal(list.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await list.json(), { offers: [{ sessionId: "a &b", itemId: "one", text: "private", offeredAt: 1 }] });
+  const claim = await fetch(`${f.base}/api/phone-inbox/claim`, { method: "POST", body: '{"itemId":"one"}' });
+  assert.equal(claim.status, 409);
+  assert.deepEqual(await claim.json(), { error: "offer unavailable" });
+  const result = await fetch(`${f.base}/api/phone-inbox/result`, { method: "POST", body: '{"itemId":"one","outcome":"submitted"}' });
+  assert.equal(result.status, 200);
+  assert.deepEqual(await result.json(), { ok: true });
+  assert.deepEqual(calls, [
+    { url: "http://127.0.0.1:18797/local/inbox?session=a%20%26b", method: "GET" },
+    { url: "http://127.0.0.1:18797/local/inbox/claim", method: "POST", body: '{"itemId":"one"}' },
+    { url: "http://127.0.0.1:18797/local/inbox/result", method: "POST", body: '{"itemId":"one","outcome":"submitted"}' },
+  ]);
+  for (const query of ["", "?session=", "?session=a&session=b", `?session=${"x".repeat(201)}`]) assert.equal((await fetch(`${f.base}/api/phone-inbox${query}`)).status, 400);
+  for (const [route, body] of [["claim", "{}"], ["claim", '{"itemId":"a/b"}'], ["claim", '{"itemId":"a","extra":1}'], ["result", '{"itemId":"a"}'], ["result", '{"itemId":"a","outcome":"other"}'], ["claim", "x".repeat(4097)]] as const) {
+    assert.equal((await fetch(`${f.base}/api/phone-inbox/${route}`, { method: "POST", body })).status, 400);
+  }
+  assert.equal((await fetch(`${f.base}/api/phone-inbox/claim`)).status, 404);
+  assert.equal((await fetch(`${f.base}/api/phone-inbox?session=a`, { headers: { origin: "https://evil.example" } })).status, 403);
+  assert.equal(calls.length, 3);
+});
+
+test("every inbox route reports an unreachable host", async t => {
+  const f = await admin(t, { fetch: async () => { throw new Error("private"); } });
+  for (const [route, init] of [["?session=a", {}], ["/claim", { method: "POST", body: '{"itemId":"a"}' }], ["/result", { method: "POST", body: '{"itemId":"a","outcome":"failed"}' }]] as const) {
+    const response = await fetch(`${f.base}/api/phone-inbox${route}`, init);
+    assert.equal(response.status, 503);
+    assert.equal((await response.text()).includes("private"), false);
+  }
+});
+
 test("host-down status gives the install hint; mutations fail without exposing errors or secrets", async t => {
   const f = await admin(t, { fetch: async () => { throw new Error("secret-sensitive transport details"); } });
   assert.deepEqual(await (await fetch(`${f.base}/api/phone/status`)).json(), { hostRunning: false, hint: "clauderipple remote install" });

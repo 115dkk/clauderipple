@@ -1995,6 +1995,36 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         sendJson(res, 403, { error: "cross-site request refused" });
         return;
       }
+      if (pathname === "/api/phone-inbox" || pathname === "/api/phone-inbox/claim" || pathname === "/api/phone-inbox/result") {
+        res.setHeader("cache-control", "no-store");
+        if (crossSiteOrigin(req) || req.headers["sec-fetch-site"] === "cross-site") {
+          sendJson(res, 403, { error: "same-origin phone control required" }); return;
+        }
+        const isList = pathname === "/api/phone-inbox";
+        if (method !== (isList ? "GET" : "POST")) { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
+        let body: string | undefined;
+        let session: string | undefined;
+        if (isList) {
+          const query = new URL(url, "http://127.0.0.1").searchParams;
+          session = query.get("session") ?? undefined;
+          if (!session || session.length > 200 || query.getAll("session").length !== 1) { sendJson(res, 400, { error: "invalid session" }); return; }
+        } else {
+          try { body = (await readBody(req, 4096, new Error("inbox body too large"))).toString("utf8"); }
+          catch { sendJson(res, 400, { error: "invalid inbox request" }); return; }
+          let raw: unknown;
+          try { raw = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid inbox request" }); return; }
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) { sendJson(res, 400, { error: "invalid inbox request" }); return; }
+          const value = raw as Record<string, unknown>;
+          const result = pathname.endsWith("/result");
+          if (typeof value.itemId !== "string" || !/^[\w-]{1,100}$/.test(value.itemId) || Object.keys(value).some(key => key !== "itemId" && (!result || key !== "outcome")) || result && value.outcome !== "submitted" && value.outcome !== "failed") {
+            sendJson(res, 400, { error: "invalid inbox request" }); return;
+          }
+        }
+        const route = isList ? "inbox" : `inbox/${pathname.endsWith("/claim") ? "claim" : "result"}`;
+        const result = await phoneRequest(route, method, body, deps.phone, session);
+        sendJson(res, result.status, result.body);
+        return;
+      }
       if (pathname.startsWith("/api/phone/")) {
         res.setHeader("cache-control", "no-store");
         // Pairing is a credential read: guard cross-site GETs too. Host is checked above.

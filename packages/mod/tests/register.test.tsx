@@ -38,7 +38,7 @@ const MESSAGES: SessionMessage[] = [{ role: 'user', text: 'Implement the specifi
 // The user naming the workers a test spawns by name (worker.ts userNamed).
 const NAMED: SessionMessage[] = [{ role: 'user', text: 'Use Sol, Astra or DeepSeek for this.', toolUses: [] }]
 
-function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number; context?: { model: string; window: number; tokens: number; raw?: number }; deferUsage?: (kind: 'full' | 'summary' | 'none') => Promise<void> | undefined } = {}) {
+function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: unknown; paths?: string[]; key?: string; envFile?: string | (() => string); language?: unknown; env?: Record<string, string>; platform?: string; browserFailure?: 'exit' | 'throw'; appleLocale?: string; appleFail?: boolean; limits?: { kind: string; percentUsed: number; resetsAt?: string }[]; agentMessages?: (agentId: string) => SessionMessage[]; messages?: SessionMessage[]; window?: number; tokens?: number; compactAt?: number | null; engineWindow?: number; context?: { model: string; window: number; tokens: number; raw?: number }; deferUsage?: (kind: 'full' | 'summary' | 'none') => Promise<void> | undefined; phoneSubmit?: (text: string) => 'submitted' | 'drop' | 'throw' } = {}) {
   const clock = mock.clock(on, { now: NOW })
   const saved = new Map<string, unknown>()
   const storeWrites: string[] = []
@@ -143,7 +143,12 @@ function boundaries(on: On, patch: Partial<Settings> = {}, options: { config?: u
   on('ui.render', () => ({ type: 'Text', props: {}, children: ['host drawing'] }))
   // What the model reads beside each prompt, as the hooks attached it.
   const contexts: (readonly string[])[] = []
-  on('prompt.submit', ($, e) => { submitted.push(e.text); contexts.push(e.context ?? []); return { text: e.text } })
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text); contexts.push(e.context ?? [])
+    const action = options.phoneSubmit?.(e.text)
+    if (action === 'throw') throw new Error('private prompt text must not be logged')
+    return action === 'drop' ? { drop: 'not accepted' } : { text: e.text }
+  })
   on('turn.complete', () => ({ text: '' }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
@@ -159,7 +164,7 @@ function http(on: On, exhausted = false, config: unknown = CONFIG, zen?: (input:
       zen(e)
       return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ model: 'jev-1.13', answers: { effort: { choice: 'high', confidence: 0.95 } }, usage: { input_tokens: 50, output_tokens: 10 } }) } }
     }
-    const body = e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/mod-options') ? { ...MOD_OPTIONS, providers: MOD_OPTIONS.providers.map(p => p.name === 'chatgpt' ? { ...p, usable: !exhausted } : p) } : { requests: [] }
+    const body = e.url.includes('/api/phone-inbox?') ? { offers: [] } : e.url.endsWith('/api/status') ? { chatgpt: { accounts: { chatgpt: [{ state: 'ready', quota: { rate_limits: { primary: { used_percent: exhausted ? 100 : 20 } } } }] } } } : e.url.endsWith('/api/config') ? config : e.url.endsWith('/api/mod-options') ? { ...MOD_OPTIONS, providers: MOD_OPTIONS.providers.map(p => p.name === 'chatgpt' ? { ...p, usable: !exhausted } : p) } : { requests: [] }
     return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify(body) } }
   })
   return urls
@@ -3091,6 +3096,107 @@ test('the band Clear asks first, and confirming runs the clear once', async ($, 
   expect(commands).toEqual(['clear'])
   expect(await ui.find({ type: 'Text', text: 'Start this conversation over?' })).toBeUndefined()
   await ui.unmount()
+})
+
+// The phone inbox is a first-wins handoff, never a retry of a submitted prompt.
+// Only the app's own CLI process polls it: the app sets this entrypoint, the host's runs do not.
+const APP_ENV = { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' }
+test('a session the app does not run never polls the phone inbox', async ($, on) => {
+  const calls: string[] = []
+  const b = boundaries(on, {}, { env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } })
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, ($, e) => { calls.push(e.url); return { value: { ok: true, status: 200, headers: {}, text: '{"offers":[]}' } } })
+  http(on)
+  await start($)
+  await b.clock.advance(4500)
+  expect(calls).toEqual([])
+})
+for (const outcome of ['submitted', 'drop', 'throw', 'refused'] as const) test(`phone inbox ${outcome} claims before submitting and reports the outcome`, async ($, on) => {
+  const events: string[] = []
+  let offered = true
+  const b = boundaries(on, {}, { env: APP_ENV, phoneSubmit: text => {
+    events.push(`submit:${text}`)
+    return outcome === 'refused' ? 'submitted' : outcome
+  } })
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, ($, e) => {
+    const url = new URL(e.url)
+    if (url.pathname === '/api/phone-inbox') {
+      events.push(`poll:${url.searchParams.get('session')}`)
+      return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ offers: offered ? [{ sessionId: 'session-test', itemId: 'item-1', text: 'private message', offeredAt: NOW }] : [] }) } }
+    }
+    const body = JSON.parse(e.init?.body ?? '{}')
+    if (url.pathname.endsWith('/claim')) {
+      events.push(`claim:${body.itemId}`)
+      offered = false
+      return { value: { ok: outcome !== 'refused', status: outcome === 'refused' ? 409 : 200, headers: {}, text: '{}' } }
+    }
+    events.push(`result:${body.itemId}:${body.outcome}`)
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  expect(events).toEqual(outcome === 'refused' ? ['poll:session-test', 'claim:item-1'] : ['poll:session-test', 'claim:item-1', 'submit:private message', `result:item-1:${outcome === 'submitted' ? 'submitted' : 'failed'}`])
+  expect(b.logs.join('\n')).not.toContain('private message')
+})
+
+test('phone inbox handles offers in order and refuses a different session', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV, phoneSubmit: text => { events.push(`submit:${text}`); return 'submitted' } })
+  let wrong = false
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, ($, e) => {
+    const url = new URL(e.url)
+    if (url.pathname === '/api/phone-inbox') return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ offers: wrong ? [{ sessionId: 'other', itemId: 'three', text: 'wrong' }] : [{ sessionId: 'session-test', itemId: 'one', text: 'first' }, { sessionId: 'session-test', itemId: 'two', text: 'second' }] }) } }
+    const body = JSON.parse(e.init?.body ?? '{}')
+    events.push(url.pathname.endsWith('/claim') ? `claim:${body.itemId}` : `result:${body.itemId}:${body.outcome}`)
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  expect(events).toEqual(['claim:one', 'submit:first', 'result:one:submitted', 'claim:two', 'submit:second', 'result:two:submitted'])
+  wrong = true
+  await b.clock.advance(1500)
+  expect(events).toHaveLength(6)
+})
+
+test('a claim response delayed past the safe window never submits the message', async ($, on) => {
+  const b = boundaries(on, {}, { env: APP_ENV })
+  const results: string[] = []
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, async ($, e) => {
+    if (e.url.includes('?session=')) return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ offers: [{ sessionId: 'session-test', itemId: 'one', text: 'late' }] }) } }
+    if (e.url.endsWith('/claim')) await b.clock.sleep(11_000)
+    else results.push(JSON.parse(e.init?.body ?? '{}').outcome)
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  await b.clock.advance(11_000)
+  expect(b.submitted).toEqual([])
+  expect(results).toEqual(['failed'])
+})
+
+test('phone inbox skips overlapping polls and backs off after a failed request', async ($, on) => {
+  const b = boundaries(on, {}, { env: APP_ENV })
+  let calls = 0
+  let release: (() => void) | undefined
+  on('http.fetch', { url: /\/api\/phone-inbox/ }, async () => {
+    calls++
+    if (calls === 1) await new Promise<void>(resolve => { release = resolve })
+    if (calls === 1) return { value: { ok: false, status: 503, headers: {}, text: '{}' } }
+    return { value: { ok: true, status: 200, headers: {}, text: '{"offers":[]}' } }
+  })
+  http(on)
+  await start($)
+  await b.clock.advance(1500)
+  await b.clock.advance(4500)
+  expect(calls).toBe(1)
+  release!()
+  await b.clock.settle()
+  await b.clock.advance(13_500)
+  expect(calls).toBe(1)
+  await b.clock.advance(1500)
+  expect(calls).toBe(2)
 })
 
 // The host keeps what the phone queued (packages/remote/src/queue.ts); the band reads its file and

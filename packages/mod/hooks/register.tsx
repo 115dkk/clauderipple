@@ -1457,10 +1457,55 @@ async function tick($: EngineInterface): Promise<void> {
   } catch (error) { await report($, 'session tick', error) }
   finally { ticking = false }
 }
+let inboxPolling = false
+let inboxRetryAt = 0
+/** A claim is never retried or submitted without a 200: a lost reply may already have claimed it. */
+async function pollPhoneInbox($: EngineInterface): Promise<void> {
+  if (inboxPolling) return
+  inboxPolling = true
+  try {
+    // Only the app's own CLI process types a phone message in (measured 2026-10-27: the app sets
+    // claude-desktop; the host's own runs say sdk-ts). Elsewhere this costs one env read a tick.
+    if (await $.env.get('CLAUDE_CODE_ENTRYPOINT') !== 'claude-desktop') return
+    if (await $.clock.now() < inboxRetryAt) return
+    const session = await $.session.id()
+    const admin = await adminUrl($)
+    const list = await $.http.fetch(`${admin}/api/phone-inbox?session=${encodeURIComponent(session)}`)
+    if (list.status !== 200) throw new Error(`inbox HTTP ${list.status}`)
+    const offers = object(JSON.parse(list.text)).offers
+    if (!Array.isArray(offers)) throw new Error('invalid inbox response')
+    for (const raw of offers) {
+      const offer = object(raw)
+      if (offer.sessionId !== session || typeof offer.itemId !== 'string' || !/^[\w-]{1,100}$/.test(offer.itemId) || typeof offer.text !== 'string') throw new Error('invalid inbox offer')
+      if (await $.session.id() !== session) return
+      const claimAt = await $.clock.now()
+      const claim = await $.http.fetch(`${admin}/api/phone-inbox/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId }) })
+      if (claim.status === 409) continue
+      if (claim.status !== 200) throw new Error(`inbox claim HTTP ${claim.status}`)
+      let outcome: 'submitted' | 'failed' = 'failed'
+      try {
+        const now = await $.clock.now()
+        // The host expires a claim after 15s; a late answer must not submit after that failure.
+        if (now >= claimAt && now - claimAt < 10_000 && await $.session.id() === session) {
+          const sent = await $.prompt.submit({ text: offer.text, asUser: true })
+          if (!('drop' in sent)) outcome = 'submitted'
+        }
+      } catch { /* The host shows the failed item for a deliberate resend. */ }
+      const result = await $.http.fetch(`${admin}/api/phone-inbox/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId, outcome }) })
+      if (result.status !== 200) throw new Error(`inbox result HTTP ${result.status}`)
+    }
+    inboxRetryAt = 0
+  } catch {
+    inboxRetryAt = await $.clock.now() + 15_000
+    // Never log a transport or submit error: it may contain the person's message.
+    await report($, 'phone inbox', 'request failed')
+  } finally { inboxPolling = false }
+}
 function startTimers($: EngineInterface): void {
   if (timersStarted) return
   timersStarted = true
   $.clock.after(1, async () => { await refreshRouter($); await tick($) })
+  $.clock.every(1500, async () => { await pollPhoneInbox($) })
   $.clock.every(3000, async () => { await refreshRouter($) })
   $.clock.every(15000, async () => { await tick($) })
   $.clock.every(1000, async () => { await agentsClock($) })
