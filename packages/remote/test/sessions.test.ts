@@ -1739,6 +1739,26 @@ test("after a mod-delivered turn the next message is offered at once, and offere
   assert.equal(f.boundary.queries.length, 1, "the host did not run either message");
 });
 
+// 2026-10-27, the second time: a queue.json written by the earlier build kept an "awaiting" mark from
+// an app-run turn, which settles only on a result or on a state after the answer, and the app's
+// turns wrote neither here. The next phone message sat queued with the app idle.
+test("an awaiting mark left by an app-run turn settles once the app is idle, and the next message is offered", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  (f.sessions as unknown as { sendQueue: { sent(id: string, seq: number, at: number): void } }).sendQueue.sent(f.id, f.sessions.log(f.id).lastSeq, Date.now());
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "app-turn", cwd: f.cwd, message: { content: "earlier" } }) +
+    transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "earlier answer" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "idle" });
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
+  await f.sessions.send(f.id, "next", "next words");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "next"));
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+});
+
 test("pressing send on a queued message offers it to the app's mod first", async t => {
   const f = await modFixture(t, 500, 500);
   // Queued while the app was busy, then the app went idle and the person pressed send.

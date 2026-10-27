@@ -767,6 +767,12 @@ export class Sessions {
         if (this.canTailHandoff(r)) {
           try { this.watchDesktop(r.id); this.tailDesktop(r.id); }
           catch (error) { (this.opts.log ?? console.error)(`[desktop tail] ${r.id}: ${String(error)}`); }
+          // The app's turns leave no result or state line in this log, so the queue's "awaiting" mark
+          // never settled and every message after an app-run turn sat queued (2026-10-27, twice).
+          // Write the app's own run state here, after the tail, as a bridged session's poll does.
+          const status = this.desktop?.liveProcess(r.sdkSessionId!)?.status;
+          const state: SessionState = status === "busy" || status === "shell" ? "running" : status === "waiting" ? "waiting" : "idle";
+          this.setState(r, state, undefined, BUSY.has(state));
         }
         continue;
       }
@@ -1590,6 +1596,8 @@ export class Sessions {
     }
     this.modOwners.delete(offer.itemId);
     this.opts.onSessions();
+    // A message that came in behind this one waited in the queue for the next poll.
+    if (outcome !== "failed" && this.sendQueue.items(id).length) setImmediate(() => void this.drainQueue(id));
   }
 
   // ---- what the phone asks for --------------------------------------------------------------
