@@ -566,7 +566,7 @@ export class Sessions {
       if (record) this.save();
     }
     if ((outcome === "failed" || outcome === "no-helper") && this.has(id)) {
-      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: "Mac의 Claude 앱에 모델 또는 추론 강도 설정을 적용하지 못했습니다." }, false);
+      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: "Claude 앱에 모델이나 추론 강도 설정을 적용하지 못했습니다. Claude 앱에서 직접 변경해 주세요." }, false);
       this.opts.onSessions();
     }
   }
@@ -579,7 +579,7 @@ export class Sessions {
     if (guard?.outcome === "pending") {
       guard.outcome = "failed";
       if (record) this.save();
-      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: "Mac의 Claude 앱에 모델 또는 추론 강도 설정이 적용되었는지 확인할 수 없습니다." }, false);
+      this.append(id, { kind: "notice", code: "desktop_settings_failed", text: "Claude 앱에 모델이나 추론 강도 설정이 적용되었는지 확인할 수 없습니다. Claude 앱에서 확인한 뒤 필요하면 직접 변경해 주세요." }, false);
       this.opts.onSessions();
     }
     const modelAllowed = !guard || guard.modelObserved || app.model === guard.model;

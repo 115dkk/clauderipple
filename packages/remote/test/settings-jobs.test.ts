@@ -164,7 +164,7 @@ test("a restart during a settings job preserves the choice and reports the unkno
   const notices = recovered.log(f.id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_settings_failed");
   assert.equal(notices.length, 1);
   assert.ok(notices[0]?.kind === "notice");
-  assert.equal(notices[0].text, "Mac의 Claude 앱에 모델 또는 추론 강도 설정이 적용되었는지 확인할 수 없습니다.");
+  assert.equal(notices[0].text, "Claude 앱에 모델이나 추론 강도 설정이 적용되었는지 확인할 수 없습니다. Claude 앱에서 확인한 뒤 필요하면 직접 변경해 주세요.");
 });
 
 test("unsupported app effort is omitted and the phone's choice remains", async t => {
@@ -230,5 +230,5 @@ for (const outcome of ["failed", "no-helper"] as const) test(`${outcome} produce
   const notices = f.sessions.log(f.id).tail().events.filter(e => e.kind === "notice" && e.code === "desktop_settings_failed");
   assert.equal(notices.length, 1);
   assert.ok(notices[0]?.kind === "notice");
-  assert.equal(notices[0].text, "Mac의 Claude 앱에 모델 또는 추론 강도 설정을 적용하지 못했습니다.");
+  assert.equal(notices[0].text, "Claude 앱에 모델이나 추론 강도 설정을 적용하지 못했습니다. Claude 앱에서 직접 변경해 주세요.");
 });
