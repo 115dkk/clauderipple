@@ -1407,16 +1407,22 @@ export class Sessions {
     // Its place among the setting changes is taken now, as for a send: one picked after it waits.
     const stops = this.stops.get(id) ?? 0;
     const order = this.inLane(id);
+    /** After any wait: false when the drain is already sending this message; throws when it may no
+     * longer go (shutting down, stopped, removed or replaced, or taken by the app). */
+    const mayGo = (): boolean => {
+      if (this.shuttingDown) throw new OutcomeUnknownError();
+      const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
+      if (!now || now.at !== item.at || now.text !== item.text) throw new Error("That message is no longer queued.");
+      if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
+      if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
+      return !(this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId);
+    };
     try {
       if (order.ready) {
         await order.ready;
-        if (this.shuttingDown) throw new OutcomeUnknownError();
-        const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
-        if (!now) return id;
-        if (now.at !== item.at || now.text !== item.text) throw new Error("That message is no longer queued.");
-        if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
-        if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
-        if (this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId) return id;
+        // Gone meanwhile because the drain sent it: that is the send asked for.
+        if (!this.sendQueue.items(id).some(queued => queued.id === itemId)) return id;
+        if (!mayGo()) return id;
       }
       // A send pressed on a queued message goes to the app too while it holds the session: run here,
       // the turn never showed in the app (2026-10-27).
@@ -1424,6 +1430,8 @@ export class Sessions {
       if (this.modEligible(id, desktopId, item)) {
         const offer = this.offerMod(id, desktopId, item);
         if (offer && await offer !== "expired") return id;
+        // The offer may have waited seconds: everything is checked again before sending here.
+        if (offer && !mayGo()) return id;
       }
       return await this.dispatchQueued(id, item, false);
     } finally { order.done(); }
