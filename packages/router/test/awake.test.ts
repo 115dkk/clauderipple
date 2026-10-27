@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  AwakeController, decideAwake, parseBattery, parseClamshell, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
+  AwakeController, decideAwake, parseBattery, parseClamshell, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
   type Activity, type AwakeInput, type RunResult,
 } from "../src/awake.ts";
 import { AWAKE_DEFAULTS, type AwakeSettings } from "../src/config.ts";
@@ -16,6 +16,16 @@ const THERM_NONE = "Note: No thermal warning level has been recorded\nNote: No p
 // `caps`: "System Capabilities" — 15 measured in a full wake (2026-10-24); a dark wake lacks Graphics (2).
 const FULL_WAKE = 15;
 const DARK_WAKE = 9;
+// `pmset -g assertions` measured 2026-10-27 (system-wide summary trimmed), Amphetamine running.
+const ASSERTIONS_HEAD = "Assertion status system-wide:\n   PreventUserIdleDisplaySleep    1\n   PreventUserIdleSystemSleep     1\nListed by owning process:\n";
+const BACKGROUND_LINES =
+  '   pid 171(bluetoothd): [0x0000ebf20001890a] 00:00:26 PreventUserIdleSystemSleep named: "com.apple.BTStack"  \n' +
+  '   pid 177(WindowServer): [0x0000e8de00098872] 00:00:00 UserIsActive named: ""  \n\tTimeout will fire in 300 secs Action=TimeoutActionRelease\n' +
+  '   pid 1093(mds): [0x0000021c000b87fc] 17:00:36 BackgroundTask named: "com.apple.metadata.mds.power"  \n';
+const AMPHETAMINE_LINES =
+  '   pid 1200(Amphetamine): [0x0000108d0001904c] 15:58:34 PreventUserIdleSystemSleep named: "Amphetamine (Single-Use - System)"  \n' +
+  '   pid 1200(Amphetamine): [0x0000108d0005904d] 15:58:34 PreventUserIdleDisplaySleep named: "Amphetamine (Single-Use - Display)"  \n';
+const assertions = (lines: string): string => `${ASSERTIONS_HEAD}${lines}No kernel assertions.\n`;
 const ioreg = (lid: boolean, causesSleep: boolean, disabled: boolean, caps?: number): string =>
   `${caps === undefined ? "" : `  |   "System Capabilities" = ${caps}\n`}  |   "AppleClamshellCausesSleep" = ${causesSleep ? "Yes" : "No"}\n  |   "AppleClamshellState" = ${lid ? "Yes" : "No"}\n  |   "SleepDisabled" = ${disabled ? "Yes" : "No"}\n`;
 
@@ -37,6 +47,19 @@ test("clamshell flags from ioreg", () => {
   assert.deepEqual(parseClamshell(""), { lidClosed: null, causesSleep: null, sleepDisabled: null, darkWake: null });
   assert.equal(parseClamshell(ioreg(false, true, true, FULL_WAKE)).darkWake, false);
   assert.equal(parseClamshell(ioreg(true, true, false, DARK_WAKE)).darkWake, true);
+});
+
+test("sleep holders: system-sleep assertions of anyone but background daemons", () => {
+  assert.deepEqual(parseSleepHolders(assertions(BACKGROUND_LINES)), []);
+  assert.deepEqual(parseSleepHolders(assertions(BACKGROUND_LINES + AMPHETAMINE_LINES)), [
+    { pid: 1200, process: "Amphetamine", type: "PreventUserIdleSystemSleep", name: "Amphetamine (Single-Use - System)" },
+  ]);
+  const more =
+    '   pid 122(powerd): [0x0000dfad00018595] 00:52:48 PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"  \n' +
+    '   pid 501(Claude): [0x0000e023000186a4] 00:50:50 NoIdleSleepAssertion named: "Electron"  \n' +
+    '   pid 28918(ego lite): [0x0000e023000186a5] 00:00:03 PreventSystemSleep named: "upload"  \n';
+  assert.deepEqual(parseSleepHolders(assertions(more)).map((h) => h.process), ["powerd", "Claude", "ego lite"]);
+  assert.deepEqual(parseSleepHolders(""), []);
 });
 
 const NOW = Date.parse("2026-10-20T12:00:00Z");
@@ -88,10 +111,12 @@ type FakeMac = {
   sudo: "ok" | "refused";
   sleepnowUnprivileged: boolean;
   caps: number;
+  /** `pmset -g assertions` stdout; null fails the command. */
+  assertions: string | null;
 };
 
 function fakeMac(over: Partial<FakeMac> = {}): FakeMac & { run: (f: string, a: string[]) => Promise<RunResult> } {
-  const m: FakeMac = { calls: [], sleepDisabled: false, lid: false, causesSleepWhenReleased: true, batt: BATT_AC, battCode: 0, sudo: "ok", sleepnowUnprivileged: true, caps: FULL_WAKE, ...over };
+  const m: FakeMac = { calls: [], sleepDisabled: false, lid: false, causesSleepWhenReleased: true, batt: BATT_AC, battCode: 0, sudo: "ok", sleepnowUnprivileged: true, caps: FULL_WAKE, assertions: assertions(BACKGROUND_LINES), ...over };
   const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "" });
   return Object.assign(m, {
     run: async (file: string, args: string[]): Promise<RunResult> => {
@@ -99,6 +124,7 @@ function fakeMac(over: Partial<FakeMac> = {}): FakeMac & { run: (f: string, a: s
       m.calls.push(line);
       if (line === "/usr/bin/pmset -g batt") return { code: m.battCode, stdout: m.battCode === 0 ? m.batt : "", stderr: "" };
       if (line === "/usr/bin/pmset -g therm") return ok(THERM_NONE);
+      if (line === "/usr/bin/pmset -g assertions") return m.assertions === null ? { code: 1, stdout: "", stderr: "" } : ok(m.assertions);
       if (line.startsWith("/usr/sbin/ioreg")) return ok(ioreg(m.lid, m.lid && !m.sleepDisabled && m.causesSleepWhenReleased, m.sleepDisabled, m.caps));
       if (line.startsWith("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep ")) {
         if (m.sudo === "refused") return { code: 1, stdout: "", stderr: "sudo: a password is required\n" };
@@ -175,7 +201,7 @@ test("working: a running call disables sleep (journal first), going idle re-enab
 test("releasing with the lid closed and nothing else holding it puts the Mac to sleep", async () => {
   const mac = fakeMac({ lid: true });
   let mode: AwakeSettings["mode"] = "on";
-  const { c, clock } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
+  const { c, clock, lines } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
   await c.tick();
   assert.equal(c.status().applied, true);
   mode = "off";
@@ -184,7 +210,9 @@ test("releasing with the lid closed and nothing else holding it puts the Mac to 
   const i0 = mac.calls.indexOf("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0");
   const i1 = mac.calls.indexOf("/usr/bin/pmset sleepnow");
   assert.ok(i0 >= 0 && i1 > i0, "clear first, then sleep");
+  assert.ok(mac.calls.indexOf("/usr/bin/pmset -g assertions") < i1, "checks other holders before sleeping");
   assert.equal(clock.t - before, SLEEPNOW_SETTLE_MS, "waits for the lid state to settle before reading it");
+  assert.ok(lines.includes("awake: lid is closed; sleeping now (no other process prevents sleep)"));
 });
 
 test("a call in a dark wake takes no hold; the lid opening takes it, and a dark-wake reading keeps it", async () => {
@@ -217,6 +245,42 @@ test("closed lid on an external display (closed-display mode) is never put to sl
   await c.tick();
   assert.ok(mac.calls.includes("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0"));
   assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
+});
+
+test("another process preventing sleep (Amphetamine) keeps a released closed lid out of sleepnow", async () => {
+  // 2026-10-26 18:48: working mode went idle, the flag read "causes sleep" on a Mac driving a TV, and
+  // sleepnow overrode Amphetamine; remote sessions dropped overnight.
+  const mac = fakeMac({ lid: true, assertions: assertions(BACKGROUND_LINES + AMPHETAMINE_LINES) });
+  let mode: AwakeSettings["mode"] = "on";
+  const { c, lines } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
+  await c.tick();
+  mode = "off";
+  await c.tick();
+  assert.ok(mac.calls.includes("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0"));
+  assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
+  assert.ok(lines.includes("awake: lid is closed, but other processes prevent sleep (Amphetamine); leaving sleep to macOS"));
+});
+
+test("a failed assertions read leaves the Mac to macOS rather than sleeping it", async () => {
+  const mac = fakeMac({ lid: true, assertions: null });
+  let mode: AwakeSettings["mode"] = "on";
+  const { c, lines } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
+  await c.tick();
+  mode = "off";
+  await c.tick();
+  assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
+  assert.ok(lines.some((l) => l.startsWith("WARN awake: lid is closed, but pmset -g assertions failed")));
+});
+
+test("a guard release sleeps a closed lid even while another process prevents sleep", async () => {
+  const mac = fakeMac({ lid: true, assertions: assertions(AMPHETAMINE_LINES) });
+  const { c, lines } = controller(mac, { settings: settings({ mode: "on" }) });
+  await c.tick();
+  mac.batt = BATT_LOW;
+  await c.tick();
+  assert.ok(!mac.calls.includes("/usr/bin/pmset -g assertions"), "a guard release does not consult other holders");
+  assert.ok(mac.calls.includes("/usr/bin/pmset sleepnow"));
+  assert.ok(lines.includes("awake: lid is closed; sleeping now (a guard released the hold)"));
 });
 
 test("sleepnow falls back to the sudoers rule when it needs root", async () => {
