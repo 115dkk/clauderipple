@@ -780,7 +780,8 @@ test('workers all stay listed past forty, counted, and still take their steps du
   expect(seen.records().find(a => a.id === 'run-1')).toMatchObject({ effort: 'high' })
   expect(seen.records().find(a => a.id === 'run-1')?.usage).toEqual({ input: 100, cached: 40000, cacheWrite: 0, output: 10 })
   // A worker executing a long tool stays running: it must not be the one dropped past forty.
-  const waiting = $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'run-2', tool_use_id: 'tool-wait' })
+  const input: ToolCallInput = { tool: 'Bash', command: 'npm test', agentId: 'run-2', tool_use_id: 'tool-wait' }
+  const waiting = $.tool.call(input)
   await b.clock.settle()
   await b.clock.advance(15000)
   expect(seen.records().find(a => a.id === 'run-2')?.state).toBe('running')
@@ -3197,6 +3198,165 @@ test('phone inbox skips overlapping polls and backs off after a failed request',
   expect(calls).toBe(1)
   await b.clock.advance(1500)
   expect(calls).toBe(2)
+})
+
+// Settings jobs use another app process, and only after the host grants its claim.
+const SETTINGS_JOB = { jobId: 'job-1', appSessionId: 'local_target', cliSessionId: 'cli-target', model: 'opus', effort: 'high' }
+function settingsMcp(on: On, events: string[], options: { mode?: () => string; failure?: 'isError' | 'throw'; missing?: boolean } = {}) {
+  on('mcp.call', ($, e) => {
+    expect(e.server).toBe('ccd_session_mgmt')
+    if (e.tool === 'get_session') {
+      events.push('self')
+      expect(e.args).toEqual({ session_id: 'self' })
+      if (options.missing) throw new Error('server unavailable')
+      return { value: { isError: false, content: [{ type: 'text', text: JSON.stringify({ sessionId: 'local_helper', permissionMode: options.mode?.() ?? 'bypassPermissions' }) }] } }
+    }
+    events.push(`${e.tool}:${JSON.stringify(e.args)}`)
+    if (options.failure === 'throw') throw new Error('private session text')
+    return { value: { isError: options.failure === 'isError', content: [{ type: 'text', text: options.failure ? 'private session text' : 'ok' }] } }
+  })
+}
+function settingsHttp(on: On, events: string[], options: { status?: number; jobs?: unknown[] } = {}) {
+  on('http.fetch', { url: /\/api\/settings-jobs/ }, ($, e) => {
+    const url = new URL(e.url)
+    if (url.pathname === '/api/settings-jobs') {
+      events.push(`poll:${url.searchParams.get('exclude')}`)
+      return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ jobs: options.jobs ?? [SETTINGS_JOB] }) } }
+    }
+    const body = JSON.parse(e.init?.body ?? '{}')
+    if (url.pathname.endsWith('/claim')) {
+      events.push(`claim:${body.jobId}:${body.helper}`)
+      const status = options.status ?? 200
+      return { value: { ok: status === 200, status, headers: {}, text: '{}' } }
+    }
+    events.push(`result:${body.jobId}:${body.outcome}:${body.detail ?? ''}`)
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
+}
+
+test('settings jobs are not polled outside an app process', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: { CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' } })
+  settingsMcp(on, events); settingsHttp(on, events); http(on)
+  await start($); await b.clock.advance(6000)
+  expect(events).toEqual([])
+})
+
+for (const mode of ['default', 'acceptEdits', 'plan', 'auto', '']) test(`settings jobs do not poll in ${mode || 'unknown'} permission mode`, async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events, { mode: () => mode }); settingsHttp(on, events); http(on)
+  await start($); await b.clock.advance(6000)
+  expect(events).toEqual(['self'])
+})
+
+test('settings jobs claim in order, use the target app id and report success', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events)
+  settingsHttp(on, events, { jobs: [SETTINGS_JOB, { ...SETTINGS_JOB, jobId: 'job-2', model: undefined }] }); http(on)
+  await start($); await b.clock.advance(3000)
+  expect(events).toEqual([
+    'self', 'poll:local_helper', 'claim:job-1:local_helper', 'self',
+    'set_session_model:{"session_id":"local_target","model":"opus"}', 'self',
+    'set_session_effort:{"session_id":"local_target","effort":"high"}', 'result:job-1:applied:',
+    'claim:job-2:local_helper', 'self', 'set_session_effort:{"session_id":"local_target","effort":"high"}', 'result:job-2:applied:',
+  ])
+})
+
+for (const failure of ['isError', 'throw'] as const) test(`settings jobs report a ${failure} tool failure without logging private text`, async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events, { failure }); settingsHttp(on, events); http(on)
+  await start($); await b.clock.advance(3000)
+  expect(events).toEqual(['self', 'poll:local_helper', 'claim:job-1:local_helper', 'self', 'set_session_model:{"session_id":"local_target","model":"opus"}', 'result:job-1:failed:settings change failed'])
+  expect(b.logs.join('\n')).not.toContain('private session text')
+  await b.clock.advance(12_000)
+  expect(events.filter(event => event.startsWith('claim:'))).toHaveLength(1)
+})
+
+test('the helper refreshes its permission mode after three minutes', async ($, on) => {
+  const events: string[] = []
+  let mode = 'default'
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events, { mode: () => mode }); settingsHttp(on, events, { jobs: [] }); http(on)
+  await start($); await b.clock.advance(3000)
+  mode = 'bypassPermissions'
+  await b.clock.advance(177_000)
+  expect(events).toEqual(['self'])
+  await b.clock.advance(3000)
+  expect(events).toEqual(['self', 'self', 'poll:local_helper'])
+})
+
+test('a malformed or self-targeted job is never claimed', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events); settingsHttp(on, events, { jobs: [{ ...SETTINGS_JOB, appSessionId: 'local_helper' }] }); http(on)
+  await start($); await b.clock.advance(3000)
+  expect(events).toEqual(['self', 'poll:local_helper'])
+})
+
+test('settings job claim conflict never calls a setter', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events); settingsHttp(on, events, { status: 409 }); http(on)
+  await start($); await b.clock.advance(3000)
+  expect(events).toEqual(['self', 'poll:local_helper', 'claim:job-1:local_helper'])
+})
+
+test('a changed helper permission after a claim fails the job without an approval', async ($, on) => {
+  const events: string[] = []
+  let reads = 0
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events, { mode: () => ++reads === 1 ? 'bypassPermissions' : 'default' }); settingsHttp(on, events); http(on)
+  await start($); await b.clock.advance(3000)
+  expect(events).toEqual(['self', 'poll:local_helper', 'claim:job-1:local_helper', 'self', 'result:job-1:failed:settings change failed'])
+})
+
+test('a missing session server backs off and never polls', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events, { missing: true }); settingsHttp(on, events); http(on)
+  await start($); await b.clock.advance(15_000)
+  expect(events).toEqual(['self'])
+  await b.clock.advance(3000)
+  expect(events).toEqual(['self', 'self'])
+})
+
+test('settings jobs skip overlapping polls and back off after an HTTP failure', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  let calls = 0
+  let release: (() => void) | undefined
+  settingsMcp(on, events)
+  on('http.fetch', { url: /\/api\/settings-jobs/ }, async () => {
+    calls++
+    if (calls === 1) await new Promise<void>(resolve => { release = resolve })
+    return { value: { ok: calls !== 1, status: calls === 1 ? 503 : 200, headers: {}, text: '{"jobs":[]}' } }
+  })
+  http(on)
+  await start($); await b.clock.advance(3000); await b.clock.advance(6000)
+  expect(calls).toBe(1)
+  release!(); await b.clock.settle(); await b.clock.advance(12_000)
+  expect(calls).toBe(1)
+  await b.clock.advance(3000)
+  expect(calls).toBe(2)
+  expect(events).toEqual(['self', 'self'])
+})
+
+test('a late settings claim is failed without changing the target', async ($, on) => {
+  const events: string[] = []
+  const b = boundaries(on, {}, { env: APP_ENV })
+  settingsMcp(on, events)
+  on('http.fetch', { url: /\/api\/settings-jobs/ }, async ($, e) => {
+    if (e.url.includes('?exclude=')) return { value: { ok: true, status: 200, headers: {}, text: JSON.stringify({ jobs: [SETTINGS_JOB] }) } }
+    if (e.url.endsWith('/claim')) await b.clock.sleep(26_000)
+    else events.push(JSON.parse(e.init?.body ?? '{}').outcome)
+    return { value: { ok: true, status: 200, headers: {}, text: '{}' } }
+  })
+  http(on)
+  await start($); await b.clock.advance(3000); await b.clock.advance(26_000)
+  expect(events).toEqual(['self', 'self', 'failed'])
 })
 
 // The host keeps what the phone queued (packages/remote/src/queue.ts); the band reads its file and

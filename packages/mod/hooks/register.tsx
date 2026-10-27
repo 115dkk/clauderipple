@@ -1501,11 +1501,85 @@ async function pollPhoneInbox($: EngineInterface): Promise<void> {
     await report($, 'phone inbox', 'request failed')
   } finally { inboxPolling = false }
 }
+type SettingsHelper = { sessionId: string; permissionMode: string; readAt: number }
+let settingsHelper: SettingsHelper | null = null
+let jobsPolling = false
+let jobsRetryAt = 0
+
+/** The app reports metadata as JSON in an MCP text block, not as a session transcript. */
+async function readSettingsHelper($: EngineInterface): Promise<SettingsHelper> {
+  const answer = await $.mcp.call('ccd_session_mgmt', 'get_session', { session_id: 'self' })
+  if (answer.isError) throw new Error('session metadata unavailable')
+  for (const block of answer.content) {
+    if (block.type !== 'text' || typeof block.text !== 'string') continue
+    const value = object(JSON.parse(block.text))
+    if (typeof value.sessionId === 'string' && /^[\w-]{1,100}$/.test(value.sessionId) && typeof value.permissionMode === 'string') {
+      return { sessionId: value.sessionId, permissionMode: value.permissionMode, readAt: await $.clock.now() }
+    }
+  }
+  throw new Error('invalid session metadata')
+}
+
+async function applySettingsJob($: EngineInterface, job: { appSessionId: string; model?: string; effort?: Effort }, helper: string, claimAt: number): Promise<void> {
+  for (const setting of ['model', 'effort'] as const) {
+    const value = job[setting]
+    if (!value) continue
+    // A permission change while polling must not open an approval card on the person's screen.
+    settingsHelper = await readSettingsHelper($)
+    if (settingsHelper.sessionId !== helper || settingsHelper.permissionMode !== 'bypassPermissions') throw new Error('helper permissions changed')
+    const now = await $.clock.now()
+    if (now < claimAt || now - claimAt >= 25_000) throw new Error('claim expired')
+    const answer = await $.mcp.call('ccd_session_mgmt', `set_session_${setting}`, { session_id: job.appSessionId, [setting]: value })
+    if (answer.isError) throw new Error(`${setting} change failed`)
+  }
+}
+
+/** Only a claimed job can change another session; a claimed job is never retried. */
+async function pollSettingsJobs($: EngineInterface): Promise<void> {
+  if (jobsPolling) return
+  jobsPolling = true
+  try {
+    if (await $.env.get('CLAUDE_CODE_ENTRYPOINT') !== 'claude-desktop') return
+    const now = await $.clock.now()
+    if (now < jobsRetryAt) return
+    if (!settingsHelper || now - settingsHelper.readAt >= 180_000 || now < settingsHelper.readAt) settingsHelper = await readSettingsHelper($)
+    // Other modes can ask for approval of another session's change, which a phone user cannot answer.
+    if (settingsHelper.permissionMode !== 'bypassPermissions') return
+    const helper = settingsHelper.sessionId
+    const admin = await adminUrl($)
+    const list = await $.http.fetch(`${admin}/api/settings-jobs?exclude=${encodeURIComponent(helper)}`)
+    if (list.status !== 200) throw new Error('settings jobs request failed')
+    const jobs = object(JSON.parse(list.text)).jobs
+    if (!Array.isArray(jobs)) throw new Error('invalid settings jobs response')
+    for (const raw of jobs) {
+      const job = object(raw)
+      const effort = effortOf(job.effort)
+      if (typeof job.jobId !== 'string' || !/^[\w-]{1,100}$/.test(job.jobId) || typeof job.appSessionId !== 'string' || !/^[\w-]{1,100}$/.test(job.appSessionId) || job.appSessionId === helper ||
+          job.model !== undefined && (typeof job.model !== 'string' || !/^[\w.\-\[\]@:]{1,100}$/.test(job.model)) || job.effort !== undefined && !effort || job.model === undefined && !effort) throw new Error('invalid settings job')
+      const claimAt = await $.clock.now()
+      const claim = await $.http.fetch(`${admin}/api/settings-jobs/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.jobId, helper }) })
+      if (claim.status === 409) continue
+      if (claim.status !== 200) throw new Error('settings job claim failed')
+      let outcome: 'applied' | 'failed' = 'applied'
+      try { await applySettingsJob($, { appSessionId: job.appSessionId, ...(typeof job.model === 'string' ? { model: job.model } : {}), ...(effort ? { effort } : {}) }, helper, claimAt) }
+      catch { outcome = 'failed'; settingsHelper = null }
+      const result = await $.http.fetch(`${admin}/api/settings-jobs/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.jobId, outcome, ...(outcome === 'failed' ? { detail: 'settings change failed' } : {}) }) })
+      if (result.status !== 200 || outcome === 'failed') throw new Error('settings job failed')
+    }
+    jobsRetryAt = 0
+  } catch {
+    settingsHelper = null
+    jobsRetryAt = await $.clock.now() + 15_000
+    // Transport and tool errors can contain private data; log neither those nor the job.
+    await report($, 'settings jobs', 'request failed')
+  } finally { jobsPolling = false }
+}
 function startTimers($: EngineInterface): void {
   if (timersStarted) return
   timersStarted = true
   $.clock.after(1, async () => { await refreshRouter($); await tick($) })
   $.clock.every(1500, async () => { await pollPhoneInbox($) })
+  $.clock.every(3000, async () => { await pollSettingsJobs($) })
   $.clock.every(3000, async () => { await refreshRouter($) })
   $.clock.every(15000, async () => { await tick($) })
   $.clock.every(1000, async () => { await agentsClock($) })
