@@ -279,6 +279,9 @@ const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱
 /** The stricter permission mode the person picked was not confirmed by the app's worker. */
 class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
+/** A send that waited for a settings change, during which the session was stopped. */
+const QUEUE_STOPPED = "대기열이 멈춰 메시지를 보내지 않았습니다. 대기열을 다시 시작한 후 보내 주세요.";
+const STOPPED_BEFORE_SEND = "메시지를 보내기 전에 작업이 중지되어 보내지 않았습니다. 필요하면 다시 보내 주세요.";
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -1392,12 +1395,16 @@ export class Sessions {
     for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
     if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
-    // It runs with the settings picked before it, whoever takes it. Over the wait the person may have
-    // stopped the queue or removed the message, and another path may have taken it: then it stays.
+    // It runs with the settings picked before it, whoever takes it. Over the wait the host may be
+    // shutting down, the person may have stopped the queue or removed the message, or the app may
+    // have taken one; the drain may be sending this very message. Then it is not sent from here.
     for (let settling = this.settingsSettled(id); settling; settling = this.settingsSettled(id)) {
       await settling;
-      if (this.sendQueue.held(id) || this.draining.has(id) || this.sendQueue.items(id).some(queued => queued.claimedBy)) return id;
+      if (this.shuttingDown) throw new OutcomeUnknownError();
       if (!this.sendQueue.items(id).some(queued => queued.id === itemId)) return id;
+      if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
+      if (this.sendQueue.held(id)) throw new Error(QUEUE_STOPPED);
+      if (this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId) return id;
     }
     // A send pressed on a queued message goes to the app too while it holds the session: run here,
     // the turn never showed in the app (2026-10-27).
@@ -1430,7 +1437,26 @@ export class Sessions {
 
   /** The phone's Stop: what is queued waits for the person instead of going on its own. */
   holdQueue(id: string): void {
+    this.stops.set(id, (this.stops.get(id) ?? 0) + 1);
     if (this.sendQueue.hold(id)) this.opts.onSessions();
+  }
+  /** Stops from a phone per session, so a send that waited for settings can tell one came after it. */
+  private stops = new Map<string, number>();
+
+  /**
+   * Wait for the settings changes that reached the session before a message, then make sure the
+   * message may still run: a Stop from any phone during the wait cancels it (it was not running
+   * yet), and a host shutting down cannot say what became of it.
+   */
+  beforeSend(id: string): Promise<void> | undefined {
+    const settling = this.settingsSettled(id);
+    // Nothing to wait for: no await either, so a Stop right behind this message still comes after it.
+    if (!settling) return undefined;
+    const stops = this.stops.get(id) ?? 0;
+    return settling.then(() => {
+      if (this.shuttingDown) throw new OutcomeUnknownError();
+      if ((this.stops.get(id) ?? 0) !== stops) throw new Error(STOPPED_BEFORE_SEND);
+    });
   }
 
   private draining = new Set<string>();
@@ -1501,7 +1527,8 @@ export class Sessions {
     // across the wait: the drain starts over and checks everything afresh (a turn may have started,
     // the queue been stopped or the item removed meanwhile).
     const settling = this.settingsSettled(id);
-    if (settling) { void settling.then(() => this.drainQueue(id, registryIdle)); return; }
+    // The registry's word was for before the wait: afterwards the session's own state decides.
+    if (settling) { void settling.then(() => this.drainQueue(id)); return; }
     const awaiting = this.sendQueue.awaiting(id);
     const record = this.records.get(id);
     const appIdle = !!record && !record.desktopBridge && this.canTailHandoff(record) && !this.appBusy(desktopId);

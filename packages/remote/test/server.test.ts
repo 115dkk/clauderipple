@@ -1316,6 +1316,23 @@ for (const stopped of [false, true]) test(`a queued message waits for a setting 
   assert.equal(delivered(), !stopped);
 });
 
+test("a Stop while a message waits for settings cancels the message and keeps the queue stopped", async t => {
+  const f = await memoryHost(t);
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: () => Promise<void> }).changeMode = () => new Promise<void>(resolve => { release = resolve; });
+  f.peer.receive({ t: "set_mode", reqId: "mode-1", sessionId: f.id, mode: "plan" });
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "before-stop", text: "hello", behavior: "steer" });
+  await nextTick();
+  f.sessions.holdQueue(f.id); // what a Stop from another phone does first
+  release();
+  for (let i = 0; i < 10 && !f.peer.frames.some(frame => frame.t === "error" || frame.t === "ack"); i++) await nextTick();
+  const error = f.peer.frames.find(frame => frame.t === "error");
+  assert.equal(error?.t === "error" && error.clientMsgId, "before-stop");
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false);
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "before-stop"), false);
+  assert.equal(f.sessions.list().find(s => s.id === f.id)?.queueHeld ?? true, true);
+});
+
 test("an attach already up to date is answered, so a saved copy can tell it is current", async t => {
   const f = await memoryHost(t);
   const log = f.sessions.log(f.id);
