@@ -1316,6 +1316,17 @@ for (const stopped of [false, true]) test(`a queued message waits for a setting 
   assert.equal(delivered(), !stopped);
 });
 
+test("an attach already up to date is answered, so a saved copy can tell it is current", async t => {
+  const f = await memoryHost(t);
+  const log = f.sessions.log(f.id);
+  log.append({ kind: "user", text: "one", clientMsgId: "one" });
+  f.peer.frames.length = 0;
+  f.peer.receive({ t: "attach", session: f.id, epoch: log.epoch, afterSeq: log.lastSeq });
+  const frame = await f.peer.take("events");
+  assert.deepEqual(frame.events, []);
+  assert.equal(frame.epoch, log.epoch);
+});
+
 test("session lists wait for a backed-up connection to drain and only the newest goes out", async t => {
   const f = await memoryHost(t);
   f.peer.frames.length = 0;

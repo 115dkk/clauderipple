@@ -362,6 +362,9 @@ export class HostServer {
       }
       if (frames < CATCHUP_FRAMES) {
         c.attached.set(session, { epoch: log.epoch, seq: afterSeq });
+        // Already up to date: say so, or a reader showing its own saved copy cannot tell that the
+        // copy is the computer's current one until something new happens.
+        if (afterSeq === log.lastSeq) this.send(c, { t: "events", session, epoch: log.epoch, events: [], more: false });
         this.pump(c, session);
         return;
       }
