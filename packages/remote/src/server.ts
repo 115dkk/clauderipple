@@ -450,8 +450,19 @@ export class HostServer {
         return;
       case "history": {
         if (!s.has(msg.session)) return;
-        const page = s.log(msg.session).before(msg.beforeSeq);
-        this.send(c, { t: "history", session: msg.session, reqId: msg.reqId, events: page.events, hasOlder: page.hasOlder });
+        const log = s.log(msg.session);
+        const mismatch = msg.epoch !== undefined && msg.epoch !== log.epoch;
+        const page = mismatch ? { events: [], hasOlder: false } : log.before(msg.beforeSeq);
+        this.send(c, { t: "history", session: msg.session, reqId: msg.reqId, epoch: log.epoch, events: page.events, hasOlder: page.hasOlder });
+        // Reading can rebuild a desktop snapshot before its watcher notices. Notify every reader,
+        // even when the requester is an older client that did not send an epoch.
+        const requesterCursor = c.attached.get(msg.session);
+        for (const peer of this.clients) {
+          const cursor = peer.attached.get(msg.session);
+          if (peer.authed && cursor && cursor.epoch !== log.epoch) this.pump(peer, msg.session);
+        }
+        if (mismatch && !requesterCursor) this.attach(c, msg.session, undefined, undefined);
+        else if (mismatch && requesterCursor?.epoch === log.epoch) this.sendTail(c, msg.session, log);
         return;
       }
       case "create":

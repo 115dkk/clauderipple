@@ -1204,6 +1204,42 @@ for (const { textSize, count, poll } of [{ textSize: 20, count: 120, poll: false
   }
 });
 
+test("history rebuild reports its epoch and sends the replacement tail to every attached reader", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "history-epoch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = path.join(project, `${id}.jsonl`);
+  const transcript = (prefix: string) => Array.from({ length: 120 }, (_, i) => JSON.stringify({ type: "user", uuid: `${prefix}-${i}`, cwd: root, message: { content: `${prefix}-${i} ${"x".repeat(3000)}` } }) + "\n").join("");
+  fs.writeFileSync(file, transcript("old"));
+  const f = await fixture(t, {}, root);
+  const peers = [new MemoryPeer(), new MemoryPeer()];
+  for (const peer of peers) {
+    f.server.connected(peer);
+    peer.receive({ t: "hello", token, clientId: "history-reader" });
+    await peer.take("ready");
+    peer.receive({ t: "attach", session: id });
+  }
+  const first = await peers[0]!.take("events");
+  await peers[1]!.take("events");
+  fs.writeFileSync(file, transcript("newer"));
+  peers[0]!.emit("message", JSON.stringify({ t: "history", session: id, beforeSeq: first.events[0]!.seq, reqId: "old-page", epoch: first.epoch }));
+  const response = await peers[0]!.take("history");
+  assert.notEqual(response.epoch, first.epoch);
+  assert.deepEqual(response.events, []);
+  for (const peer of peers) {
+    const tail = await peer.take("events");
+    assert.equal(tail.epoch, response.epoch);
+    assert.ok(tail.tail);
+    assert.ok(tail.events.some(event => event.kind === "user" && event.text.startsWith("newer")));
+  }
+  peers[0]!.receive({ t: "history", session: id, beforeSeq: first.events[0]!.seq, reqId: "legacy" });
+  const legacy = await peers[0]!.take("history");
+  assert.equal(legacy.epoch, response.epoch);
+  assert.ok(legacy.events.length > 0);
+});
+
 test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: 4500 }, async t => {
   const f = await fixture(t);
   const id = await f.create();
