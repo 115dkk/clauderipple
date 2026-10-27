@@ -1,6 +1,7 @@
 // Successful task tools → one ordered task list. No transport, UI or filesystem dependencies.
 import type { EventBody, PlanStep, Text } from "./protocol.ts";
 import { toolInput } from "./tool-details.ts";
+import { WRAP_TOOL } from "./wrap-up.ts";
 
 type Input = Record<string, unknown>;
 const object = (value: unknown): Input | null => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Input : null;
@@ -9,6 +10,9 @@ const idOf = (value: unknown): string => typeof value === "string" || typeof val
 const statusOf = (value: unknown): PlanStep["status"] => value === "completed" || value === "in_progress" ? value : "pending";
 const PLAN_TOOL = "mcp__ccd_turn__update_plan";
 export const isTaskTool = (name: string): boolean => [PLAN_TOOL, "update_plan", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList"].includes(name);
+/** Calls that move the list: the task tools, and the Code tab's wrap_up, which checks its plan off. */
+const tracked = (name: string): boolean => isTaskTool(name) || name === WRAP_TOOL;
+const perTurn = (name: string): boolean => name === PLAN_TOOL || name === "update_plan" || name === WRAP_TOOL;
 
 /** Code's indexed edits and the replacement lists used by Code and translated providers. */
 export function nextPlan(steps: PlanStep[] | null, input: Input): PlanStep[] | null {
@@ -70,14 +74,14 @@ export class TaskPlan {
   /** A new human turn clears Code's per-turn plan, not session-scoped TaskCreate/TodoWrite work. */
   newTurn(): void {
     for (const [id, call] of this.calls) {
-      if (call.name !== PLAN_TOOL && call.name !== "update_plan") continue;
+      if (!perTurn(call.name)) continue;
       this.calls.delete(id);
       this.applied.add(id);
     }
     if (this.source === PLAN_TOOL || this.source === "update_plan") this.replace([], this.source);
   }
   call(id: string, name: string, input: Input): void {
-    if (isTaskTool(name) && !this.applied.has(id)) this.calls.set(id, { name, input });
+    if (tracked(name) && !this.applied.has(id)) this.calls.set(id, { name, input });
   }
   result(id: string, ok: boolean, text: string): void {
     const call = this.calls.get(id);
@@ -88,6 +92,10 @@ export class TaskPlan {
     const { name, input } = call;
     if (name === PLAN_TOOL || name === "update_plan") {
       this.replace(nextPlan(this.steps, input) ?? [], name);
+    } else if (name === WRAP_TOOL) {
+      // The Code tab checks its plan off when the turn wraps up, so a turn that ends without a last
+      // advance shows done there (2026-10-27: a phone kept "1 in progress, 0/3" after the turn ended).
+      if (this.source === PLAN_TOOL) this.replace(this.steps.map(step => ({ ...step, status: "completed" })), PLAN_TOOL);
     } else if (name === "TodoWrite" && Array.isArray(input.todos)) {
       this.replace(input.todos.flatMap((value): PlanStep[] => {
         const item = object(value);
@@ -115,7 +123,7 @@ export class TaskPlan {
   accept(event: EventBody, load: (text: Text) => string): void {
     if (event.kind === "user") this.newTurn();
     if (event.kind === "assistant") for (const tool of event.tools) {
-      if (!isTaskTool(tool.name) || tool.input === undefined) continue;
+      if (!tracked(tool.name) || tool.input === undefined) continue;
       const input = toolInput(load(tool.input));
       if (input) this.call(tool.id, tool.name, input);
     }

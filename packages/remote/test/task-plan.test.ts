@@ -78,6 +78,27 @@ test("TodoWrite and both update_plan contracts preserve long text, clear lists a
   assert.equal(nextPlan(null, { advance: true }), null);
 });
 
+test("the Code tab's wrap_up checks its plan off, and only its plan", () => {
+  // 2026-10-27 맘보: a plan set once, then wrap_up with no last advance; the phone kept "1 in progress, 0/3".
+  const state = new TaskPlan();
+  accepted(state, "plan", "mcp__ccd_turn__update_plan", { items: [{ content: "A", status: "in_progress" }, { content: "B", status: "pending" }, { content: "C", status: "pending" }] });
+  state.call("wrap", "mcp__ccd_turn__wrap_up", { recap: "done" });
+  assert.equal(state.list[0]?.status, "in_progress", "nothing moves before the wrap_up succeeds");
+  state.result("wrap", true, "Shown in the next-step box.");
+  assert.deepEqual(state.list.map(step => step.status), ["completed", "completed", "completed"]);
+  const tasks = new TaskPlan();
+  accepted(tasks, "c1", "TaskCreate", { subject: "Session task" }, "Task #1 created successfully: Session task");
+  accepted(tasks, "wrap", "mcp__ccd_turn__wrap_up", { recap: "done" });
+  assert.equal(tasks.list[0]?.status, "pending", "session-scoped tasks are not the Code tab's plan");
+  const late = new TaskPlan();
+  accepted(late, "plan", "mcp__ccd_turn__update_plan", { items: [{ content: "A", status: "in_progress" }] });
+  late.call("old-wrap", "mcp__ccd_turn__wrap_up", { recap: "old" });
+  late.newTurn();
+  accepted(late, "next", "mcp__ccd_turn__update_plan", { items: [{ content: "Next turn", status: "in_progress" }] });
+  late.result("old-wrap", true, "ok");
+  assert.equal(late.list[0]?.status, "in_progress", "a retired turn's wrap_up does not finish the next turn's plan");
+});
+
 test("desktop transcript replay uses the same confirmed task lifecycle and excludes child tools", () => {
   const tracker = new BackgroundTasks();
   const lines: string[] = [];
