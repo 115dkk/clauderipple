@@ -1404,25 +1404,29 @@ export class Sessions {
     // have taken one; the drain may be sending this very message. Then it is not sent from here.
     // A Stop and a resume both inside the wait still count as a Stop; a message removed and queued
     // again under the same id is another message.
+    // Its place among the setting changes is taken now, as for a send: one picked after it waits.
     const stops = this.stops.get(id) ?? 0;
-    for (let settling = this.settingsSettled(id); settling; settling = this.settingsSettled(id)) {
-      await settling;
-      if (this.shuttingDown) throw new OutcomeUnknownError();
-      const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
-      if (!now) return id;
-      if (now.at !== item.at || now.text !== item.text) throw new Error("That message is no longer queued.");
-      if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
-      if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
-      if (this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId) return id;
-    }
-    // A send pressed on a queued message goes to the app too while it holds the session: run here,
-    // the turn never showed in the app (2026-10-27).
-    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
-    if (this.modEligible(id, desktopId, item)) {
-      const offer = this.offerMod(id, desktopId, item);
-      if (offer && await offer !== "expired") return id;
-    }
-    return this.dispatchQueued(id, item, false);
+    const order = this.inLane(id);
+    try {
+      if (order.ready) {
+        await order.ready;
+        if (this.shuttingDown) throw new OutcomeUnknownError();
+        const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
+        if (!now) return id;
+        if (now.at !== item.at || now.text !== item.text) throw new Error("That message is no longer queued.");
+        if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
+        if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
+        if (this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId) return id;
+      }
+      // A send pressed on a queued message goes to the app too while it holds the session: run here,
+      // the turn never showed in the app (2026-10-27).
+      const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+      if (this.modEligible(id, desktopId, item)) {
+        const offer = this.offerMod(id, desktopId, item);
+        if (offer && await offer !== "expired") return id;
+      }
+      return await this.dispatchQueued(id, item, false);
+    } finally { order.done(); }
   }
 
   /** A message on its way into the app (offered to or claimed by the mod) is not shown as queued: it
@@ -1458,21 +1462,30 @@ export class Sessions {
    * yet), and a host shutting down cannot say what became of it.
    */
   beforeSend(id: string): { ready?: Promise<void>; done: () => void } {
-    const settling = this.settingsSettled(id);
-    // Nothing to wait for: no await either, so a Stop right behind this message still comes after it.
-    if (!settling) return { done: () => {} };
+    const order = this.inLane(id);
+    if (!order.ready) return order;
     const stops = this.stops.get(id) ?? 0;
-    // A change that arrives after this message waits for it in the lane, as the message waits for
-    // the ones before it. The caller ends the hold once the message is handed on (or refused); a
-    // hold that is never ended lets go after SEND_HOLD_MS rather than stall the session's settings.
-    let done!: () => void;
-    const hold = new Promise<void>(resolve => { done = resolve; setTimeout(resolve, SEND_HOLD_MS); });
-    void this.scheduleModeChange(id, () => hold);
-    const ready = settling.then(() => {
+    const ready = order.ready.then(() => {
       if (this.shuttingDown) throw new OutcomeUnknownError();
       if ((this.stops.get(id) ?? 0) !== stops) throw new StoppedBeforeSendError(STOPPED_BEFORE_SEND);
     });
-    return { ready, done };
+    return { ready, done: order.done };
+  }
+
+  /**
+   * A message's place among the session's setting changes, taken as it arrives: `ready` once the
+   * ones before it have run. A change (or message) that arrives after it waits in the lane until
+   * the caller calls `done`, when the message has been handed on or refused; a place never given
+   * up lets go after SEND_HOLD_MS rather than stall the session's settings.
+   */
+  private inLane(id: string): { ready?: Promise<void>; done: () => void } {
+    const settling = this.settingsSettled(id);
+    // Nothing to wait for: no await either, so a Stop right behind this message still comes after it.
+    if (!settling) return { done: () => {} };
+    let done!: () => void;
+    const hold = new Promise<void>(resolve => { done = resolve; setTimeout(resolve, SEND_HOLD_MS); });
+    void this.scheduleModeChange(id, () => hold, SEND_HOLD_MS);
+    return { ready: settling, done };
   }
 
   private draining = new Set<string>();
@@ -2451,8 +2464,9 @@ export class Sessions {
   }
 
   private modeChanges = new Map<string, Promise<unknown>>();
-  /** When the newest change in a session's lane was scheduled. */
-  private modeChangeAt = new Map<string, number>();
+  /** How long a session's lane may still hold a message back: each change in it may for 15 s after
+   * it was asked for, a waiting message's place for SEND_HOLD_MS. */
+  private modeChangeUntil = new Map<string, number>();
 
   /**
    * Resolves once the model, effort and mode changes that reached this session before now have
@@ -2466,7 +2480,8 @@ export class Sessions {
     const asked = this.settings.pending(id);
     const lane = this.modeChanges.get(id);
     const pending = [...asked, ...lane ? [lane] : []];
-    const left = asked.length ? ms : (this.modeChangeAt.get(id) ?? 0) + ms - Date.now();
+    const lanePart = lane ? (this.modeChangeUntil.get(id) ?? 0) - Date.now() : 0;
+    const left = Math.max(asked.length ? ms : 0, lanePart);
     // Nothing to wait for: no await either, so the queue's own timing is unchanged.
     if (!pending.length || left <= 0) return undefined;
     return new Promise(resolve => {
@@ -2502,12 +2517,12 @@ export class Sessions {
     return null;
   }
 
-  private scheduleModeChange<T>(id: string, work: () => Promise<T>): Promise<T> {
+  private scheduleModeChange<T>(id: string, work: () => Promise<T>, holdsFor = 15_000): Promise<T> {
     const previous = this.modeChanges.get(id) ?? Promise.resolve();
     const change = previous.catch(() => {}).then(work);
     this.modeChanges.set(id, change);
-    this.modeChangeAt.set(id, Date.now());
-    void change.finally(() => { if (this.modeChanges.get(id) === change) { this.modeChanges.delete(id); this.modeChangeAt.delete(id); } }).catch(() => {});
+    this.modeChangeUntil.set(id, Math.max(this.modeChangeUntil.get(id) ?? 0, Date.now() + holdsFor));
+    void change.finally(() => { if (this.modeChanges.get(id) === change) { this.modeChanges.delete(id); this.modeChangeUntil.delete(id); } }).catch(() => {});
     return change;
   }
 

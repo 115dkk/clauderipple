@@ -1336,6 +1336,44 @@ test("a setting change that arrives after a waiting message runs after it", asyn
   assert.deepEqual(order, ["mode:plan", "send", "mode:default"], "the message runs in plan mode, as picked when it was sent");
 });
 
+test("\"send now\" takes its place among setting changes as it arrives", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: (id: string, mode: string) => Promise<void> }).changeMode = (_id, mode) => {
+    order.push(`mode:${mode}`);
+    return mode === "plan" ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+  };
+  const deliver = (f.sessions as unknown as { deliver: (...args: unknown[]) => unknown }).deliver.bind(f.sessions);
+  (f.sessions as unknown as { deliver: (...args: unknown[]) => unknown }).deliver = (...args) => { order.push("send"); return deliver(...args); };
+  f.peer.receive({ t: "set_mode", reqId: "mode-a", sessionId: f.id, mode: "plan" });
+  // Queued behind mode A (the drain waits for it), then sent now from another phone.
+  f.peer.receive({ t: "req", reqId: "enqueue-1", op: { op: "enqueue", session: f.id, clientMsgId: "queued-now", text: "now" } });
+  await nextTick();
+  const sent = f.sessions.sendQueued(f.id, "queued-now");
+  f.peer.receive({ t: "set_mode", reqId: "mode-b", sessionId: f.id, mode: "default" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  release();
+  await sent;
+  for (let i = 0; i < 10 && order.length < 3; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan", "send", "mode:default"]);
+});
+
+test("a message waiting behind another's place is held as long as that place", async t => {
+  const f = await memoryHost(t);
+  const lane = f.sessions as unknown as { scheduleModeChange(id: string, work: () => Promise<void>, holdsFor?: number): Promise<void> };
+  let release!: () => void;
+  void lane.scheduleModeChange(f.id, () => new Promise<void>(resolve => { release = resolve; }), 30_000);
+  let settled = false;
+  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { settled = true; });
+  t.mock.timers.tick(15_000);
+  await nextTick();
+  assert.equal(settled, false, "the 15 s limit of a setting change is not the limit of a message's place");
+  release();
+  await nextTick(); await nextTick();
+  assert.equal(settled, true);
+});
+
 test("a Stop while a message waits for settings cancels the message and keeps the queue stopped", async t => {
   const f = await memoryHost(t);
   let release!: () => void;
