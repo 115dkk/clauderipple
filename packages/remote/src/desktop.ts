@@ -174,8 +174,8 @@ export interface SubagentContext {
   /** toolUseId → what is known about it; kept across a scan, and across polls for a live tail. */
   state?: Map<string, SubagentState>;
   /** What a subagent's own transcript reports: the model that answered, its steps, its description
-   * (meta.json), and whether it stopped on its own answer (`ended`). */
-  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; ended: boolean; bytes?: number };
+   * (meta.json), and its confirmed terminal state, if any. */
+  resolve?: (toolUseId: string, input: RecordValue) => { model: string | null; steps: number; description: string; terminal: AgentTerminal; bytes?: number };
 }
 
 /** Unknown records and malformed block shapes never become events. */
@@ -306,19 +306,33 @@ function windowLines(fd: number, size: number, tail: boolean): string[] {
   if (start + n < size || !data.endsWith("\n")) data = data.slice(0, Math.max(0, data.lastIndexOf("\n")));
   return data.split("\n");
 }
-/** Whether a subagent transcript's last record is an answer that ends the agent's loop. */
-export function agentEnded(file: string): boolean {
+type AgentTerminal = "done" | "stopped" | null;
+/** Only a final answer or an exact engine interruption record proves this worker stopped.
+ * A quoted marker, tool output, or the parent's interruption says nothing about this worker. */
+function agentTerminal(r: RecordValue | null): AgentTerminal {
+  const message = object(r?.message);
+  const content = message?.content;
+  if (r?.type === "user") {
+    const marker = typeof content === "string" ? content : Array.isArray(content) && content.length === 1 && object(content[0])?.type === "text" ? str(object(content[0])?.text) : "";
+    return /^\[Request interrupted by user(?: for tool use)?\]$/.test(marker) ? "stopped" : null;
+  }
+  return r?.type === "assistant" && ["end_turn", "stop_sequence"].includes(str(message?.stop_reason)) &&
+    !(Array.isArray(content) && content.some(b => object(b)?.type === "tool_use")) ? "done" : null;
+}
+function agentStatus(file: string): AgentTerminal {
   let fd: number;
-  try { fd = fs.openSync(file, "r"); } catch { return false; }
+  try { fd = fs.openSync(file, "r"); } catch { return null; }
   try {
-    const last = windowLines(fd, fs.fstatSync(fd).size, true).filter(Boolean).at(-1);
-    const r = last ? record(last) : null;
-    const message = object(r?.message);
-    const content = message?.content;
-    return r?.type === "assistant" && ["end_turn", "stop_sequence"].includes(str(message?.stop_reason)) &&
-      !(Array.isArray(content) && content.some(b => object(b)?.type === "tool_use"));
+    const size = fs.fstatSync(fd).size;
+    // An incomplete append may already be the start of a resumed worker; never use an older stop.
+    const end = Buffer.alloc(1);
+    if (!size || fs.readSync(fd, end, 0, 1, size - 1) !== 1 || end[0] !== 10) return null;
+    const last = windowLines(fd, size, true).filter(Boolean).at(-1);
+    return agentTerminal(last ? record(last) : null);
   } finally { fs.closeSync(fd); }
 }
+/** Whether a worker has a confirmed terminal record, notification or not. */
+export function agentEnded(file: string): boolean { return agentStatus(file) !== null; }
 function missing(error: unknown): boolean {
   return ["ENOENT", "ENOTDIR", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "");
 }
@@ -506,28 +520,32 @@ export class DesktopSessions {
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
         const model = info.model ?? running.model;
-        if (model === running.model && info.steps === running.steps && (info.bytes ?? 0) === running.bytes && !info.ended) continue;
+        if (model === running.model && info.steps === running.steps && (info.bytes ?? 0) === running.bytes && !info.terminal) continue;
         running.model = model;
         running.steps = info.steps;
         running.bytes = info.bytes ?? 0;
-        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, status: info.ended ? "done" : "running", steps: info.steps });
-        if (info.ended) state.delete(toolUseId);
+        visit({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model, status: info.terminal ?? "running", steps: info.steps });
+        if (info.terminal) state.delete(toolUseId);
       }
       return next;
     } finally { fs.closeSync(fd); }
   }
 
   backgroundTasks(id: string): number { return this.backgroundTaskList(id).length; }
-  backgroundTaskHistory(id: string): BackgroundTask[] { return this.scan(id)?.history ?? []; }
-  /** A background agent whose own transcript ends on its final answer is done, notification or not:
-   * one read through TaskOutput, or finished before a compaction, never gets a <task-notification> line
-   * in the session's transcript and otherwise stays "running" for good (seen 2026-10-14, five hours). */
-  backgroundTaskList(id: string): BackgroundTask[] {
-    const list = this.scan(id)?.list ?? [];
+  backgroundTaskHistory(id: string): BackgroundTask[] { return this.backgroundState(id).history; }
+  backgroundTaskList(id: string): BackgroundTask[] { return this.backgroundState(id).active; }
+  /** Reconcile missing notifications from the worker's own terminal record without mutating the
+   * parent tracker: a later continuation must be allowed to make that worker active again. */
+  private backgroundState(id: string): { active: BackgroundTask[]; history: BackgroundTask[] } {
+    const tracker = this.scan(id);
+    const active: BackgroundTask[] = [], history = tracker?.history ?? [];
     const source = this.sources.get(id);
-    if (!source) return list;
-    const dir = this.subagentsDir(source);
-    return list.filter(task => task.kind !== "agent" || !agentEnded(path.join(dir, `agent-${task.id}.jsonl`)));
+    for (const task of tracker?.list ?? []) {
+      const state = source && task.kind === "agent" ? agentStatus(path.join(this.subagentsDir(source), `agent-${task.id}.jsonl`)) : null;
+      if (state) history.unshift({ ...task, state });
+      else active.push(task);
+    }
+    return { active, history: history.slice(0, 40) };
   }
   turnStartedAt(id: string): number | null { return this.scan(id)?.turnStartedAt ?? null; }
   plan(id: string): PlanStep[] { return this.scan(id)?.plan ?? []; }
@@ -562,10 +580,11 @@ export class DesktopSessions {
   }
 
   /** What a worker's own transcript reports, for its parent's subagent events. */
-  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; steps: number; description: string; ended: boolean; bytes?: number } {
+  private subInfo(id: string, toolUseId: string, input: RecordValue): { model: string | null; steps: number; description: string; terminal: AgentTerminal; bytes?: number } {
     const source = this.sources.get(id);
     const agentId = source ? this.agentMap(id).get(toolUseId) : undefined;
-    let model = "", steps = 0, ended = false, description = "", bytes = 0;
+    let model = "", steps = 0, description = "", bytes = 0;
+    let terminal: AgentTerminal = null;
     if (source && agentId) {
       const dir = this.subagentsDir(source);
       const meta = record(safeRead(path.join(dir, `agent-${agentId}.meta.json`)));
@@ -576,35 +595,32 @@ export class DesktopSessions {
       const read = this.readSubTranscript(path.join(dir, `agent-${agentId}.jsonl`));
       model = read.model || model;
       steps = read.steps;
-      ended = read.ended;
+      terminal = read.terminal;
       bytes = read.bytes;
     }
-    return { model: model || str(input.model) || null, steps, description, ended, bytes };
+    return { model: model || str(input.model) || null, steps, description, terminal, bytes };
   }
 
-  /** The model that answered (its last assistant record) and how far it got. Tail-bounded read. */
-  private readSubTranscript(file: string): { model: string; steps: number; ended: boolean; bytes: number } {
+  /** The model that answered, its step count and terminal state, streamed without a full-file buffer. */
+  private readSubTranscript(file: string): { model: string; steps: number; terminal: AgentTerminal; bytes: number } {
     let fd: number;
-    try { fd = this.openUnder(file); } catch { return { model: "", steps: 0, ended: false, bytes: 0 }; }
+    try { fd = this.openUnder(file); } catch { return { model: "", steps: 0, terminal: null, bytes: 0 }; }
     try {
       let model = "", steps = 0;
       let last: RecordValue | null = null;
-      const bytes = scanLines(fd, fs.fstatSync(fd).size, line => {
+      const size = fs.fstatSync(fd).size;
+      const bytes = scanLines(fd, size, line => {
         const r = record(line);
-        if (!r) return;
         last = r;
+        if (!r) return;
         if (r.type === "assistant") {
           steps++;
           const m = object(r.message);
           if (typeof m?.model === "string") model = m.model;
         }
       });
-      const ending = last as RecordValue | null;
-      const message = object(ending?.message);
-      const content = message?.content;
-      const ended = ending?.type === "assistant" && ["end_turn", "stop_sequence"].includes(str(message?.stop_reason)) &&
-        !(Array.isArray(content) && content.some(b => object(b)?.type === "tool_use"));
-      return { model, steps, ended, bytes };
+      const terminal = bytes === size ? agentTerminal(last) : null;
+      return { model, steps, terminal, bytes };
     } finally { fs.closeSync(fd); }
   }
 
@@ -623,10 +639,7 @@ export class DesktopSessions {
     if (!stat.isFile()) return null;
     const key = `${id}::${sub}`;
     const cached = this.subImports.get(key);
-    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs && [...(cached.children ?? [])].every(([toolUseId, child]) => {
-      const info = this.subInfo(id, toolUseId, child.input);
-      return !info.ended && info.model === child.model && info.steps === child.steps && (info.bytes ?? 0) === child.bytes;
-    })) return cached.log;
+    if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs && this.childrenUnchanged(id, cached.children)) return cached.log;
     if (cached) { this.dispose(cached); this.subImports.delete(key); }
     this.temp ??= fs.mkdtempSync(path.join(os.tmpdir(), "ripple-desktop-"));
     const dir = fs.mkdtempSync(path.join(this.temp, "sub-"));
@@ -660,8 +673,8 @@ export class DesktopSessions {
       });
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
-        if (info.ended) {
-          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+        if (info.terminal) {
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: info.terminal, steps: info.steps });
           state.delete(toolUseId);
         }
       }
@@ -836,12 +849,12 @@ export class DesktopSessions {
           log.append({ ...body, clientMsgId: phoneId ?? (body.clientMsgId || `desktop-${log.lastSeq + 1}`) });
         }
       });
-      // A worker whose own transcript ended on its answer, but whose notification never landed in
-      // the parent, is done: without this it would read "running" for good.
+      // A worker's own final answer or interruption closes it even when the parent never got
+      // a notification; preserve stopped versus done rather than inventing a successful result.
       for (const [toolUseId, running] of state) {
         const info = resolve(toolUseId, running.input);
-        if (info.ended) {
-          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: "done", steps: info.steps });
+        if (info.terminal) {
+          log.append({ kind: "subagent", toolUseId, sub: `sub-${toolUseId}`, description: running.description, model: info.model ?? running.model, status: info.terminal, steps: info.steps });
           state.delete(toolUseId);
         }
       }
@@ -959,6 +972,13 @@ export class DesktopSessions {
     } finally { fs.closeSync(fd); }
   }
 
+  private childrenUnchanged(id: string, children?: Map<string, SubagentState>): boolean {
+    return [...(children ?? [])].every(([toolUseId, child]) => {
+      const info = this.subInfo(id, toolUseId, child.input);
+      return !info.terminal && info.model === child.model && info.steps === child.steps && (info.bytes ?? 0) === child.bytes;
+    });
+  }
+
   log(id: string): EventLog {
     if (!this.has(id)) throw new Error("no such session");
     const source = this.sources.get(id)!;
@@ -966,12 +986,12 @@ export class DesktopSessions {
     try {
       const stat = fs.fstatSync(fd);
       const cached = this.imported.get(id);
-      if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs) return cached.log;
+      if (cached && cached.size === stat.size && cached.mtime === stat.mtimeMs && this.childrenUnchanged(id, cached.children)) return cached.log;
       if (cached) { this.dispose(cached); this.imported.delete(id); }
       this.temp ??= fs.mkdtempSync(path.join(os.tmpdir(), "ripple-desktop-"));
       const dir = fs.mkdtempSync(path.join(this.temp, "snapshot-"));
       const log = this.importInto(id, dir, this.opts.now ?? Date.now);
-      this.imported.set(id, { size: stat.size, mtime: stat.mtimeMs, log, dir });
+      this.imported.set(id, { size: stat.size, mtime: stat.mtimeMs, log, dir, children: new Map([...(this.tailSubs.get(id) ?? [])].map(([toolUseId, child]) => [toolUseId, { ...child }])) });
       return log;
     } finally { fs.closeSync(fd); }
   }
