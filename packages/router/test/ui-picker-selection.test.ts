@@ -698,6 +698,62 @@ test('before a Codex window has been read the picker retains its stored editable
   assert.equal(ui.selections().find(entry => entry.id === 'gpt-6.1-sol')?.contextWindow, 300000);
 });
 
+// The provider's Models tab is the one place a model's window is stated: a model that neither its
+// provider nor the live Codex catalogue gives runs on the global fallback, and saying so is what
+// stops that fallback being silent (Hive's `/models` lists ids and nothing else).
+test('a model with no known window says so on its provider, naming the fallback it runs on', () => {
+  const source = fs.readFileSync(new URL('../../ui/app.js', import.meta.url), 'utf8');
+  const block = (from: string, to: string): string => {
+    const start = source.indexOf(from), end = source.indexOf(to, start);
+    assert.ok(start >= 0 && end > start, `missing app.js block: ${from}`);
+    return source.slice(start, end);
+  };
+  type NoteNode = { tag: string; attrs: Record<string, unknown>; children: NoteNode[] };
+  const el = (tag: string, attrs: Record<string, unknown> = {}, children: NoteNode[] = []): NoteNode =>
+    ({ tag, attrs, children: children.filter(Boolean) });
+  const cell = (label: string, value: NoteNode | null, sub: NoteNode[] | string | null, extraClass?: string): NoteNode =>
+    el('div', { class: `cell ${extraClass ?? ''}`, label, sub: (Array.isArray(sub) ? sub : [sub]).filter(Boolean) }, [value as NoteNode]);
+  const section = (title: string, rows: NoteNode[], footer?: string, action?: NoteNode): NoteNode => el('section', { title, footer, action }, rows);
+  const panel = new Function('el', 'cell', 'section', 't', 'modelsOf', 'labelOf', 'modelEffortTag', 'openProviderForm', `
+    let currentConfig = { cli: { autoCompactWindow: 258400 } }, pickerContextWindows = { windows: {}, catalogWindows: { 'gpt-6.1-sol': 475000 } };
+    const formatNumber = value => value.toLocaleString('en-US');
+    ${block('function discoveredContextWindow(', 'let currentConfig =')}
+    ${block('function providerModelsPanel(', 'async function saveAnthropicRotation(')}
+    return providerModelsPanel;
+  `)(
+    el,
+    cell,
+    section,
+    (key: string, vars?: Record<string, string>) => vars ? `${key}${JSON.stringify(vars)}` : key,
+    (provider: { models: unknown[] }) => provider.models,
+    (model: { id: string; name?: string }) => model.name ?? model.id,
+    () => null,
+    () => {},
+  ) as (name: string, provider: { models: { id: string; name?: string; contextWindow?: number }[] }) => NoteNode;
+  const rendered = panel('hive', { models: [
+    { id: 'deepseek-ai/deepseek-v4.1-flash-1017', name: 'DeepSeek V4.1 Flash' },
+    { id: 'zai-org/glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 327680 },
+    { id: 'gpt-6.1-sol', name: 'Sol' },
+  ] });
+  const rows = rendered.children[0]!.children;
+  const notes = rows.map((row) => (row.attrs.sub as NoteNode[]).filter((node) => node.attrs.class === 'cell-sub warn-text').map((node) => node.attrs.text));
+  assert.deepEqual(notes, [
+    ['providers.windowUnknown{"fallback":"258,400"}'],
+    [], // its own window is known
+    [], // the live Codex catalogue states this one
+  ]);
+  // A config with no global fallback has no number to name, so the note only says it is unknown.
+  const bare = new Function('el', 'cell', 'section', 't', 'modelsOf', 'labelOf', 'modelEffortTag', 'openProviderForm', `
+    let currentConfig = { cli: {} }, pickerContextWindows = { windows: {}, catalogWindows: {} };
+    const formatNumber = value => value.toLocaleString('en-US');
+    ${block('function discoveredContextWindow(', 'let currentConfig =')}
+    ${block('function providerModelsPanel(', 'async function saveAnthropicRotation(')}
+    return providerModelsPanel;
+  `)(el, cell, section, (key: string) => key, (provider: { models: unknown[] }) => provider.models, (model: { id: string }) => model.id, () => null, () => {}) as typeof panel;
+  const single = bare('hive', { models: [{ id: 'jev-1.13' }] });
+  assert.deepEqual((single.children[0]!.children[0]!.attrs.sub as NoteNode[]).map((node) => node.attrs.text), ['jev-1.13', 'providers.windowUnknownNoFallback']);
+});
+
 test('a repeated status refresh leaves a window being typed and the slot selects in place', async () => {
   const ui = await pickerWindowHarness({});
   ui.render();
