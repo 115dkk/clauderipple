@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  AwakeController, decideAwake, parseBattery, parseClamshell, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
+  AwakeController, decideAwake, parseBattery, parseClamshell, parseExternalDisplays, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
   type Activity, type AwakeInput, type RunResult,
 } from "../src/awake.ts";
 import { AWAKE_DEFAULTS, type AwakeSettings } from "../src/config.ts";
@@ -25,7 +25,15 @@ const BACKGROUND_LINES =
 const AMPHETAMINE_LINES =
   '   pid 1200(Amphetamine): [0x0000108d0001904c] 15:58:34 PreventUserIdleSystemSleep named: "Amphetamine (Single-Use - System)"  \n' +
   '   pid 1200(Amphetamine): [0x0000108d0005904d] 15:58:34 PreventUserIdleDisplaySleep named: "Amphetamine (Single-Use - Display)"  \n';
+// Measured 2026-10-28: AlDente takes this while on AC.
+const ALDENTE_LINES = '   pid 1261(com.apphousekitchen.aldente-pro): [0x0001cf2f0007a5ad] 00:02:14 PreventSystemSleep named: "AlDente-Pro"  \n';
 const assertions = (lines: string): string => `${ASSERTIONS_HEAD}${lines}No kernel assertions.\n`;
+// `ioreg -r -c IOMobileFramebufferShim -k DisplayAttributes -d 1`, measured 2026-10-28 with two
+// monitors attached (properties trimmed).
+const DISPLAY_BLOCK =
+  '+-o IOMobileFramebufferShim  <class IOMobileFramebufferShim, id 0x100000bbc, registered, matched, active, busy 0 (7 ms), retain 22>\n' +
+  '    {\n      "DisplayAttributes" = {"SupportsSuspend"=No,"MaximumRefreshRate"=100,"PortID"=48}\n      "external" = Yes\n    }\n    \n';
+const displays = (n: number): string => DISPLAY_BLOCK.repeat(n);
 const ioreg = (lid: boolean, causesSleep: boolean, disabled: boolean, caps?: number): string =>
   `${caps === undefined ? "" : `  |   "System Capabilities" = ${caps}\n`}  |   "AppleClamshellCausesSleep" = ${causesSleep ? "Yes" : "No"}\n  |   "AppleClamshellState" = ${lid ? "Yes" : "No"}\n  |   "SleepDisabled" = ${disabled ? "Yes" : "No"}\n`;
 
@@ -49,17 +57,23 @@ test("clamshell flags from ioreg", () => {
   assert.equal(parseClamshell(ioreg(true, true, false, DARK_WAKE)).darkWake, true);
 });
 
-test("sleep holders: system-sleep assertions of anyone but background daemons", () => {
-  assert.deepEqual(parseSleepHolders(assertions(BACKGROUND_LINES)), []);
-  assert.deepEqual(parseSleepHolders(assertions(BACKGROUND_LINES + AMPHETAMINE_LINES)), [
-    { pid: 1200, process: "Amphetamine", type: "PreventUserIdleSystemSleep", name: "Amphetamine (Single-Use - System)" },
+test("sleep holders: PreventSystemSleep only, never the idle types", () => {
+  assert.deepEqual(parseSleepHolders(assertions(BACKGROUND_LINES + AMPHETAMINE_LINES)), []);
+  assert.deepEqual(parseSleepHolders(assertions(AMPHETAMINE_LINES + ALDENTE_LINES)), [
+    { pid: 1261, process: "com.apphousekitchen.aldente-pro", type: "PreventSystemSleep", name: "AlDente-Pro" },
   ]);
   const more =
     '   pid 122(powerd): [0x0000dfad00018595] 00:52:48 PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"  \n' +
     '   pid 501(Claude): [0x0000e023000186a4] 00:50:50 NoIdleSleepAssertion named: "Electron"  \n' +
     '   pid 28918(ego lite): [0x0000e023000186a5] 00:00:03 PreventSystemSleep named: "upload"  \n';
-  assert.deepEqual(parseSleepHolders(assertions(more)).map((h) => h.process), ["powerd", "Claude", "ego lite"]);
+  assert.deepEqual(parseSleepHolders(assertions(more)).map((h) => h.process), ["ego lite"]);
   assert.deepEqual(parseSleepHolders(""), []);
+});
+
+test("external displays: one per framebuffer block marked external", () => {
+  assert.equal(parseExternalDisplays(displays(2)), 2);
+  assert.equal(parseExternalDisplays(displays(1)), 1);
+  assert.equal(parseExternalDisplays(""), 0);
 });
 
 const NOW = Date.parse("2026-10-20T12:00:00Z");
@@ -113,10 +127,12 @@ type FakeMac = {
   caps: number;
   /** `pmset -g assertions` stdout; null fails the command. */
   assertions: string | null;
+  /** External displays attached; null fails the ioreg read. */
+  externalDisplays: number | null;
 };
 
 function fakeMac(over: Partial<FakeMac> = {}): FakeMac & { run: (f: string, a: string[]) => Promise<RunResult> } {
-  const m: FakeMac = { calls: [], sleepDisabled: false, lid: false, causesSleepWhenReleased: true, batt: BATT_AC, battCode: 0, sudo: "ok", sleepnowUnprivileged: true, caps: FULL_WAKE, assertions: assertions(BACKGROUND_LINES), ...over };
+  const m: FakeMac = { calls: [], sleepDisabled: false, lid: false, causesSleepWhenReleased: true, batt: BATT_AC, battCode: 0, sudo: "ok", sleepnowUnprivileged: true, caps: FULL_WAKE, assertions: assertions(BACKGROUND_LINES), externalDisplays: 0, ...over };
   const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "" });
   return Object.assign(m, {
     run: async (file: string, args: string[]): Promise<RunResult> => {
@@ -125,6 +141,9 @@ function fakeMac(over: Partial<FakeMac> = {}): FakeMac & { run: (f: string, a: s
       if (line === "/usr/bin/pmset -g batt") return { code: m.battCode, stdout: m.battCode === 0 ? m.batt : "", stderr: "" };
       if (line === "/usr/bin/pmset -g therm") return ok(THERM_NONE);
       if (line === "/usr/bin/pmset -g assertions") return m.assertions === null ? { code: 1, stdout: "", stderr: "" } : ok(m.assertions);
+      if (line === "/usr/sbin/ioreg -r -c IOMobileFramebufferShim -k DisplayAttributes -d 1") {
+        return m.externalDisplays === null ? { code: 1, stdout: "", stderr: "" } : ok(displays(m.externalDisplays));
+      }
       if (line.startsWith("/usr/sbin/ioreg")) return ok(ioreg(m.lid, m.lid && !m.sleepDisabled && m.causesSleepWhenReleased, m.sleepDisabled, m.caps));
       if (line.startsWith("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep ")) {
         if (m.sudo === "refused") return { code: 1, stdout: "", stderr: "sudo: a password is required\n" };
@@ -212,7 +231,20 @@ test("releasing with the lid closed and nothing else holding it puts the Mac to 
   assert.ok(i0 >= 0 && i1 > i0, "clear first, then sleep");
   assert.ok(mac.calls.indexOf("/usr/bin/pmset -g assertions") < i1, "checks other holders before sleeping");
   assert.equal(clock.t - before, SLEEPNOW_SETTLE_MS, "waits for the lid state to settle before reading it");
-  assert.ok(lines.includes("awake: lid is closed; sleeping now (no other process prevents sleep)"));
+  assert.ok(lines.includes("awake: lid is closed; sleeping now (no external display or system-sleep hold)"));
+});
+
+test("idle-sleep holders (Amphetamine, powerd's display-on) do not keep a released closed lid awake", async () => {
+  // 2026-10-28 05:33: the hold was released with the lid closed, Amphetamine's and powerd's idle
+  // assertions were taken for a reason not to sleep, and the Mac ran on battery until 09:19.
+  const powerd = '   pid 122(powerd): [0x0001cf5e0001a658] 00:01:27 PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"  \n';
+  const mac = fakeMac({ lid: true, assertions: assertions(BACKGROUND_LINES + AMPHETAMINE_LINES + powerd) });
+  let mode: AwakeSettings["mode"] = "on";
+  const { c } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
+  await c.tick();
+  mode = "off";
+  await c.tick();
+  assert.ok(mac.calls.includes("/usr/bin/pmset sleepnow"));
 });
 
 test("a call in a dark wake takes no hold; the lid opening takes it, and a dark-wake reading keeps it", async () => {
@@ -247,10 +279,10 @@ test("closed lid on an external display (closed-display mode) is never put to sl
   assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
 });
 
-test("another process preventing sleep (Amphetamine) keeps a released closed lid out of sleepnow", async () => {
+test("an external display keeps a released closed lid out of sleepnow although the flag says it causes sleep", async () => {
   // 2026-10-26 18:48: working mode went idle, the flag read "causes sleep" on a Mac driving a TV, and
   // sleepnow overrode Amphetamine; remote sessions dropped overnight.
-  const mac = fakeMac({ lid: true, assertions: assertions(BACKGROUND_LINES + AMPHETAMINE_LINES) });
+  const mac = fakeMac({ lid: true, externalDisplays: 1, assertions: assertions(BACKGROUND_LINES + AMPHETAMINE_LINES) });
   let mode: AwakeSettings["mode"] = "on";
   const { c, lines } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
   await c.tick();
@@ -258,7 +290,29 @@ test("another process preventing sleep (Amphetamine) keeps a released closed lid
   await c.tick();
   assert.ok(mac.calls.includes("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0"));
   assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
-  assert.ok(lines.includes("awake: lid is closed, but other processes prevent sleep (Amphetamine); leaving sleep to macOS"));
+  assert.ok(lines.includes("awake: lid is closed, but 1 external display is attached; leaving sleep to macOS"));
+});
+
+test("another process holding PreventSystemSleep keeps a released closed lid out of sleepnow", async () => {
+  const mac = fakeMac({ lid: true, assertions: assertions(BACKGROUND_LINES + ALDENTE_LINES) });
+  let mode: AwakeSettings["mode"] = "on";
+  const { c, lines } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
+  await c.tick();
+  mode = "off";
+  await c.tick();
+  assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
+  assert.ok(lines.includes("awake: lid is closed, but other processes prevent system sleep (com.apphousekitchen.aldente-pro); leaving sleep to macOS"));
+});
+
+test("a failed display read leaves the Mac to macOS rather than sleeping it", async () => {
+  const mac = fakeMac({ lid: true, externalDisplays: null });
+  let mode: AwakeSettings["mode"] = "on";
+  const { c, lines } = controller(mac, { settings: () => ({ ...AWAKE_DEFAULTS, mode }) });
+  await c.tick();
+  mode = "off";
+  await c.tick();
+  assert.ok(!mac.calls.some((l) => l.includes("sleepnow")));
+  assert.ok(lines.some((l) => l.startsWith("WARN awake: lid is closed, but ioreg failed reading displays")));
 });
 
 test("a failed assertions read leaves the Mac to macOS rather than sleeping it", async () => {
@@ -273,7 +327,7 @@ test("a failed assertions read leaves the Mac to macOS rather than sleeping it",
 });
 
 test("a guard release sleeps a closed lid even while another process prevents sleep", async () => {
-  const mac = fakeMac({ lid: true, assertions: assertions(AMPHETAMINE_LINES) });
+  const mac = fakeMac({ lid: true, externalDisplays: 1, assertions: assertions(ALDENTE_LINES) });
   const { c, lines } = controller(mac, { settings: settings({ mode: "on" }) });
   await c.tick();
   mac.batt = BATT_LOW;
