@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.18 — 2026-10-28
+
+### Fixed
+
+- **A model saved with `"contextWindow": null` gets its catalogue window too.** The catalogue
+  backfill and the new-provider check filled only a missing field, so a config that stored the blank
+  as `null` (Hive's models in a real config) kept running on the 258,400 fallback after 0.12.17.
+
 ## 0.12.17 — 2026-10-28
 
 ### Fixed
