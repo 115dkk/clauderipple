@@ -2607,7 +2607,8 @@ test("backfillContextWindows fills only models without a window, leaving a set o
           preset: "opencode-go",
           headers: { authorization: "Bearer sk-test" },
           models: [
-            { id: "muse-spark-1.3-contributor", name: "Muse" },
+            // A saved null is blank too: the live config carried `"contextWindow": null` (2026-10-28).
+            { id: "muse-spark-1.3-contributor", name: "Muse", contextWindow: null as unknown as number },
             { id: "deepseek-v4.1-flash", name: "DeepSeek", contextWindow: 123 },
             { id: "not-listed", name: "Unlisted" },
           ],

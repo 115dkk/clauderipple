@@ -1616,7 +1616,7 @@ function applyMeasurements(configFile: string, providerName: string, results: Me
     if (model.wire === undefined) model.wire = result.wire;
     const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
     if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
-    if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
+    if (model.contextWindow == null && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
     if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
   }
   const errors = validate(current);
@@ -1691,7 +1691,8 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
     if (!("models" in provider) || !provider.models) continue;
     const preset = "preset" in provider ? provider.preset : undefined;
     for (const model of provider.models) {
-      if (model.contextWindow !== undefined) continue;
+      // A saved `null` is as blank as a missing field (configs written by older dashboards carry it).
+      if (model.contextWindow != null) continue;
       const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
       if (stated === undefined) continue;
       model.contextWindow = stated;
@@ -2291,7 +2292,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // A provider being added gets the same blank-only fill as one already saved: Hive's `/models`
         // names its models and nothing else, and the form saves what the probe returns. A window the
         // vendor did report is kept, and one the catalogue cannot match is left blank.
-        const missing = result.models.filter((model) => model.contextWindow === undefined);
+        const missing = result.models.filter((model) => model.contextWindow == null);
         if (missing.length > 0 && deps.modelCatalog) {
           const catalog = await deps.modelCatalog().catch(() => undefined);
           const preset = typeof probe.preset === "string" && probe.preset ? probe.preset : undefined;
