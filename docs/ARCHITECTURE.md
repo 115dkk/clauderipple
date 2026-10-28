@@ -1236,7 +1236,12 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   Anthropic tools/tool_choice. `max_output_tokens` → `max_tokens`, and
   `temperature` is preserved. `reasoning.effort` → `output_config.effort`; this
   ingress does not invent a thinking-token budget because that would change
-  the caller's requested output ceiling.
+  the caller's requested output ceiling. Codex's remote compaction control item
+  `{"type":"compaction_trigger"}` (last in the transcript, a request control
+  rather than a response item) becomes the user turn that asks for the summary,
+  and a transcript that ends with the assistant gets one short user turn, because
+  Anthropic reads that shape as prefill and models that take none refuse it
+  (#104, 2026-10-28).
 - Cache discipline: serialization has no timestamps; cache breakpoints are put
   on the system block, the final tool definition, and the final user content
   block. Upstream Anthropic usage maps `cache_read_input_tokens` to Responses

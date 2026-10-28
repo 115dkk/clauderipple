@@ -135,6 +135,28 @@ function mapToolChoice(value: unknown): AnthropicIngressRequest["tool_choice"] |
   return undefined;
 }
 
+/**
+ * Codex's remote compaction asks for a summary by appending the control item
+ * `{"type":"compaction_trigger"}` after the transcript, which it calls "request controls, not durable
+ * response items" (codex-rs protocol/src/models.rs at rust-v0.164.0-alpha.11.1; the transcript is
+ * pushed first and the trigger last in core/src/compact_remote_v2_attempt.rs). The wrapped transcript
+ * therefore still ends with the assistant's last turn, and Anthropic rejects that shape for models
+ * that take no assistant prefill (issue #104: "This model does not support assistant message
+ * prefill"). A summary is the answer to a request, so the trigger becomes the user turn that asks
+ * for it; every item before it is passed through unchanged.
+ */
+const COMPACTION_REQUEST = "Summarize this conversation so the work can continue from the summary alone: what the user asked for, what was done and decided, the constraints and preferences that still apply, and what is left to do.";
+
+/**
+ * OpenAI clients have no prefill: a transcript that ends with the assistant asks for the next turn,
+ * while Anthropic reads it as prefill and some models refuse it outright (issue #104). One short user
+ * turn is the same request in the shape Anthropic accepts; nothing in the transcript is rewritten.
+ */
+function endWithUserTurn(messages: AnthropicMessage[]): void {
+  if (messages.at(-1)?.role !== "assistant") return;
+  messages.push({ role: "user", content: [{ type: "text", text: "Continue." }] });
+}
+
 function applyMessageCache(messages: AnthropicMessage[]): void {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
@@ -164,6 +186,10 @@ function responseItems(value: unknown): AnthropicMessage[] {
     if (type === "function_call_output") {
       const callId = string(item.call_id) ?? "";
       if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: contentText(item.output) }] });
+      continue;
+    }
+    if (type === "compaction_trigger") {
+      messages.push({ role: "user", content: [{ type: "text", text: COMPACTION_REQUEST }] });
       continue;
     }
     if (type !== "message") continue;
@@ -214,6 +240,7 @@ function placeInstructions(prefix: string | undefined, instructions: string[], m
 export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string): AnthropicIngressRequest {
   const instructions = string(body.instructions);
   const messages = responseItems(body.input);
+  endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, instructions ? [instructions] : [], messages);
   applyMessageCache(messages);
   const tools = mapTools(body.tools);
@@ -274,6 +301,7 @@ export function chatToAnthropic(body: Json, targetModel: string, systemPrefix?: 
     }
     messages.push(...chatMessageToAnthropic(raw));
   }
+  endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, systems, messages);
   applyMessageCache(messages);
   const tools = mapTools(body.tools);

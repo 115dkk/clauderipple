@@ -40,6 +40,65 @@ test("Responses request becomes cache-friendly Anthropic Messages request", () =
   assert.equal(out.max_tokens, 123);
 });
 
+// Issue #104: Codex's remote compaction appends the control item `{"type":"compaction_trigger"}`
+// after the whole transcript, so the transcript itself still ends with the assistant's last turn.
+// Anthropic rejects that shape ("This model does not support assistant message prefill").
+const compactRequest = {
+  model: "claude-opus-5",
+  instructions: "You are Codex.",
+  input: [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "add a test" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "I added it." }] },
+    { type: "compaction_trigger" },
+  ],
+  max_output_tokens: 16,
+};
+
+test("Codex compaction trigger becomes the user turn that asks for the summary", () => {
+  const out = responsesToAnthropic(compactRequest, "claude-opus-5");
+  assert.equal(out.messages.at(-1)?.role, "user");
+  assert.deepEqual(out.messages[0]?.content, [{ type: "text", text: "add a test" }]);
+  assert.deepEqual(out.messages[1]?.content, [{ type: "text", text: "I added it." }], "the assistant turn is kept as it was");
+  const last = out.messages.at(-1)!;
+  assert.equal(last.content.length, 1);
+  assert.match((last.content[0] as { text: string }).text, /summar/i);
+  assert.deepEqual((last.content[0] as { cache_control?: unknown }).cache_control, { type: "ephemeral" });
+});
+
+test("a transcript that ends with the assistant still ends with a user turn", () => {
+  const out = responsesToAnthropic({
+    model: "claude-opus-5",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "hello" }] },
+    ],
+  }, "claude-opus-5");
+  assert.equal(out.messages.at(-1)?.role, "user");
+  assert.deepEqual(out.messages[1]?.content, [{ type: "text", text: "hello" }], "nothing of the transcript is rewritten");
+});
+
+test("a transcript that ends with the user is left alone", () => {
+  const out = responsesToAnthropic({
+    model: "claude-opus-5",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "hello" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "again" }] },
+    ],
+  }, "claude-opus-5");
+  assert.equal(out.messages.length, 3);
+  assert.deepEqual(out.messages.at(-1)?.content, [{ type: "text", text: "again", cache_control: { type: "ephemeral" } }]);
+});
+
+test("Chat Completions: a transcript that ends with the assistant also ends with a user turn", () => {
+  const out = chatToAnthropic({
+    model: "claude-opus-5",
+    messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }],
+  }, "claude-opus-5");
+  assert.equal(out.messages.at(-1)?.role, "user");
+  assert.deepEqual(out.messages[1]?.content, [{ type: "text", text: "hello" }]);
+});
+
 test("Chat Completions maps system, tools, images and tool calls", () => {
   const out = chatToAnthropic({
     model: "claude-sonnet-5",

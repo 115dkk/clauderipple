@@ -88,6 +88,25 @@ test("Responses non-stream and stream traverse fake Anthropic-compatible provide
   assert.equal(seen.at(-1)?.headers["x-api-key"], "upstream-key");
 });
 
+// Issue #104: this is the body Codex sends for /compact against a Claude model (transcript, then the
+// remote-compaction control item). Anthropic refuses it when it arrives with an assistant last turn.
+test("Codex /compact body reaches the provider ending with a user message", async () => {
+  const response = await call("/v1/responses", {
+    model: "claude-sonnet-5",
+    instructions: "system",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "add a test" }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "I added it." }] },
+      { type: "compaction_trigger" },
+    ],
+    max_output_tokens: 16,
+  });
+  assert.equal(response.status, 200);
+  const messages = seen.at(-1)?.body.messages as { role: string }[];
+  assert.equal(messages.at(-2)?.role, "assistant", "the transcript is unchanged");
+  assert.equal(messages.at(-1)?.role, "user");
+});
+
 test("Chat Completions non-stream and stream traverse same provider", async () => {
   const body = { model: "claude-sonnet-5", messages: [{ role: "user", content: "say ok" }], tools: [{ type: "function", function: { name: "Read", description: "read", parameters: { type: "object" } } }] };
   const nonstream = await call("/v1/chat/completions", body);
