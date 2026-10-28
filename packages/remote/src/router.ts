@@ -89,7 +89,7 @@ export class RouterClient {
 /** Resolve usage against the model that actually served it, never the native alias's SDK cap. */
 function figureWindow(body: unknown, mainModel: string, route: Figures["route"], sdkWindow: number | null): number | null {
   const data = obj(body);
-  const lookup = (map: Record<string, unknown>, model: string): unknown => map[model.split("@")[0]!] ?? map[base(model)];
+  const lookup = (map: Record<string, unknown>, model: string): unknown => map[model] ?? map[model.split("@")[0]!] ?? map[base(model)];
   const positive = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
   const target = route?.model ?? mainModel;
   if (data.resolvedWindows && typeof data.resolvedWindows === "object") {
@@ -100,7 +100,7 @@ function figureWindow(body: unknown, mainModel: string, route: Figures["route"],
       const entry = obj(lookup(map, id));
       if (typeof entry.model !== "string") continue;
       if (route && (base(entry.model) !== base(target) || (entry.provider ?? "anthropic") !== route.provider)) continue;
-      return positive(entry.contextWindow); // an explicit unknown must not fall through to a stale SDK value
+      return positive("compactWindow" in entry ? entry.compactWindow : entry.contextWindow); // never fall through to a stale SDK capacity
     }
     return null;
   }

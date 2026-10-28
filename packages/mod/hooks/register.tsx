@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
@@ -352,7 +352,14 @@ async function putSettings($: EngineInterface, admin: string, base: Settings): P
     if (attempt === 1) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: 409 }))
   }
 }
+let compactWindows: unknown = null
+async function currentCompactAt($: EngineInterface): Promise<number | null> {
+  return modelCompactWindow(compactWindows, await $.session.model()) ?? await read($, compactAt)
+}
 async function syncSettings($: EngineInterface, admin: string): Promise<void> {
+  const windows = await $.http.fetch(`${admin}/api/context-windows`)
+  if (windows.ok) compactWindows = JSON.parse(windows.text)
+  else if (windows.status !== 404) await report($, 'context windows', `HTTP ${windows.status}`)
   const response = await $.http.fetch(`${admin}/api/mod-settings`)
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   const snapshot = settingsSnapshot(response.text)
@@ -510,7 +517,7 @@ async function toggleLimits($: EngineInterface): Promise<void> {
 async function countContext($: EngineInterface): Promise<void> {
   if ((await read($, contextFull))?.busy) return
   const basis = (await read($, context))?.basis ?? null
-  const at = await read($, compactAt)
+  const at = await currentCompactAt($)
   const model = await $.session.model()
   const gen = generation
   const epoch = contextEpoch
@@ -524,7 +531,7 @@ async function countContext($: EngineInterface): Promise<void> {
     // switch while it ran makes it another context's count, and it is dropped.
     const now = await $.session.usage().catch(error => { void report($, 'context check', error); return null })
     const nowModel = await $.session.model()
-    const nowAt = await read($, compactAt)
+    const nowAt = await currentCompactAt($)
     const nowBasis = (await read($, context))?.basis ?? null
     // Read the scope again after every await: a clear may have moved it while this ran.
     const live = run === contextRun && gen === generation && epoch === contextEpoch && model === nowModel && at === nowAt && basis === nowBasis && now !== null && now.context.window === window
@@ -1333,7 +1340,7 @@ let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null
  */
 async function contextShare($: EngineInterface, c: SessionContextUsage): Promise<{ percent: number; tokens: number; window: number; basis: number } | null> {
   if (c.tokens === undefined) return null
-  const at = await read($, compactAt)
+  const at = await currentCompactAt($)
   const model = await $.session.model()
   const full = await read($, contextFull)
   // The count stands only where it was taken: same response, model, window and chat. A stale one
@@ -1354,13 +1361,13 @@ async function contextShare($: EngineInterface, c: SessionContextUsage): Promise
       catch (error) { await report($, 'context summary', error) }
       // A clear or compaction while the summary ran outranks it: publish only for the state it was asked in.
       const modelNow = await $.session.model()
-      const atNow = await read($, compactAt)
+      const atNow = await currentCompactAt($)
       if (gen === generation && epoch === contextEpoch && model === modelNow && at === atNow) shareMemo = { key, breakdown: summary }
     }
     b = shareMemo?.key === key ? shareMemo.breakdown : null
   }
   if (b && b.rawMaxTokens > 0) return { tokens: b.totalTokens, percent: b.percentage, window: b.rawMaxTokens, basis: c.tokens }
-  const window = contextWindow(c.window, at)
+  const window = contextWindow(c.window, at, modelCompactWindow(compactWindows, model))
   return window > 0 ? { tokens: c.tokens, percent: c.tokens / window * 100, window, basis: c.tokens } : null
 }
 async function refreshUsage($: EngineInterface): Promise<void> {
@@ -2481,7 +2488,7 @@ export const register: Register = on => {
       const full = await read($, contextFull)
       // The count's own window is the one it draws; another window clears it in contextShare, and
       // a model or chat change is caught here before that poll (2026-10-25).
-      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await read($, compactAt))
+      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await currentCompactAt($))
       const fresh = full?.breakdown && same ? full : null
       // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
       const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null
