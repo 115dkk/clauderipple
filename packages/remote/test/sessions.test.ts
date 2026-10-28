@@ -1654,13 +1654,16 @@ for (const order of ["report-first", "transcript-first"] as const) test(`an app-
   assert.equal(view.items.filter(item => item.type === "user" && item.text === "Phone message").length, 1);
   assert.ok(view.items.some(item => item.type === "assistant" && item.text === "App response"));
   assert.ok(f.events.some(row => row.session === f.id), "transcript growth notifies the phone to refresh its snapshot");
+  // The phone clears its own "sending" copy only on a user event carrying its id.
+  const phoneIds = () => f.sessions.log(f.id).readAfter(0).events.flatMap(e => e.kind === "user" && e.text === "Phone message" ? [e.clientMsgId] : []);
+  assert.deepEqual(phoneIds(), ["native-send"]);
   const epoch = f.sessions.log(f.id).epoch;
   assert.equal(await f.sessions.send(f.id, "native-send", "Phone message"), f.id);
   assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
   fs.appendFileSync(f.file, transcriptLine({ type: "assistant", uuid: "more", message: { model: "test", content: [{ type: "text", text: "More response" }] } }));
   await f.sessions.pollDesktop();
   assert.notEqual(f.sessions.log(f.id).epoch, epoch);
-  assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "Phone message").length, 1);
+  assert.deepEqual(phoneIds(), ["native-send"], "a rebuild keeps the phone's id on the same line");
   assert.equal(f.sessions.summaryOf(f.id)?.origin, "desktop", "delivery never creates a host-owned record");
   assert.equal(fs.existsSync(path.join(f.dir, "sessions.json")), false);
   assert.equal(f.boundary.queries.length, 0);

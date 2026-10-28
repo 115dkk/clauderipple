@@ -532,7 +532,8 @@ export class Sessions {
     }) : null;
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       ...(this.sidebar ? { sidebarIds: () => new Set(this.sidebar!.read().sessions.keys()) } : {}),
-      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
+      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text),
+      ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
       // desktop app, are hidden; any other one may be open in the app and must stay reachable
@@ -1631,6 +1632,23 @@ export class Sessions {
     this.modEchoes.set(offer.itemId, { id, text: offer.text, expires: this.now() + 60_000 });
   }
 
+  /**
+   * A recordless app session is a snapshot rebuilt from the app's transcript, so the phone's id for
+   * a message the mod typed in goes on the matching user line here: by text the first time, then by
+   * that line's uuid on every later rebuild. Without it the phone kept its own copy "sending" beside
+   * the app's for ten minutes (2026-10-28).
+   */
+  private appUserId(id: string, uuid: string, text: string): string | undefined {
+    const known = this.appUserIds.get(uuid);
+    if (known || this.records.has(id)) return known;
+    const itemId = this.takeModEcho(id, text);
+    if (!itemId) return undefined;
+    while (this.appUserIds.size >= Sessions.ECHO_CAP) this.appUserIds.delete(this.appUserIds.keys().next().value!);
+    this.appUserIds.set(uuid, itemId);
+    return itemId;
+  }
+  private appUserIds = new Map<string, string>();
+
   private takeModEcho(id: string, text: string): string | undefined {
     for (const [itemId, echo] of this.modEchoes) {
       if (echo.expires < this.now()) { this.modEchoes.delete(itemId); continue; }
@@ -1654,7 +1672,7 @@ export class Sessions {
         this.rememberClientMsgId(id, offer.itemId);
       }
       if (!this.records.has(id)) {
-        this.modEchoes.delete(offer.itemId);
+        // The echo stays: the snapshot rebuild puts the phone's id on the app's user line with it.
         this.watchDesktop(id);
         this.tailDesktop(id);
       }

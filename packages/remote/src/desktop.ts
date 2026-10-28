@@ -115,6 +115,9 @@ export interface DesktopOptions {
   /** The latest figures the host read for a session. A snapshot is rebuilt from the transcript
    * whenever it grows, so the figures are put back at the end of every rebuild. */
   figures?: (id: string) => Figures | undefined;
+  /** The phone's id for a user line the app's mod typed in (by the line's uuid and text), so the
+   * phone can tell its own message when it comes back in a rebuilt snapshot. */
+  userId?: (id: string, uuid: string, text: string) => string | undefined;
 }
 
 /** Match session flags, not UUIDs appearing in a prompt or another flag's value. */
@@ -827,7 +830,11 @@ export class DesktopSessions {
       source.size = scanLines(fd, fs.fstatSync(fd).size, line => {
         const parsed = transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, data => log.image(data), { state, resolve });
         at = parsed.at ?? at;
-        for (const body of parsed.bodies) log.append(body.kind === "user" && !body.clientMsgId ? { ...body, clientMsgId: `desktop-${log.lastSeq + 1}` } : body);
+        for (const body of parsed.bodies) {
+          if (body.kind !== "user") { log.append(body); continue; }
+          const phoneId = body.clientMsgId ? this.opts.userId?.(id, body.clientMsgId, body.text) : undefined;
+          log.append({ ...body, clientMsgId: phoneId ?? (body.clientMsgId || `desktop-${log.lastSeq + 1}`) });
+        }
       });
       // A worker whose own transcript ended on its answer, but whose notification never landed in
       // the parent, is done: without this it would read "running" for good.
