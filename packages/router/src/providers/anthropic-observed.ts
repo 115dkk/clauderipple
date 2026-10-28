@@ -4,6 +4,7 @@
 // Code-tab request happens to pass through. No diagnostics or listing surface exists.
 
 import fs from "node:fs";
+import { parseClaudeCliVersion } from "./claude-cli-version.ts";
 
 export const OBSERVED_CLAUDE_CODE_TTL_MS = 12 * 60 * 60 * 1_000;
 
@@ -33,6 +34,8 @@ function isObservedHeader(name: string): boolean {
 export class ObservedClaudeCodeAuth {
   private snapshot: ObservedClaudeCodeAuthSnapshot | null = null;
   private readonly file: string | null;
+  private cliVersionSeen: string | null = null;
+  private cliVersionAt = 0;
 
   constructor(file?: string) {
     this.file = file ?? null;
@@ -41,10 +44,24 @@ export class ObservedClaudeCodeAuth {
         const raw = JSON.parse(fs.readFileSync(this.file, "utf8")) as ObservedClaudeCodeAuthSnapshot;
         if (raw && typeof raw.authorization === "string" && raw.headers && typeof raw.observedAt === "number") {
           this.snapshot = { authorization: raw.authorization, headers: Object.freeze({ ...raw.headers }), observedAt: raw.observedAt };
+          this.recordCliVersion(raw.headers, raw.observedAt);
         }
       } catch {
         /* no file yet or unreadable: start empty */
       }
+    }
+  }
+
+  /** Keeps only the version token from `user-agent`, never the rest of the header set. */
+  private recordCliVersion(headers: Readonly<Record<string, string>>, observedAt: number): void {
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() !== "user-agent") continue;
+      const version = parseClaudeCliVersion(value);
+      if (version) {
+        this.cliVersionSeen = version;
+        this.cliVersionAt = observedAt;
+      }
+      return;
     }
   }
 
@@ -79,7 +96,17 @@ export class ObservedClaudeCodeAuth {
       headers: Object.freeze({ ...headers }),
       observedAt,
     };
+    this.recordCliVersion(headers, observedAt);
     if (changed) this.persist();
+  }
+
+  /**
+   * The CLI version seen on the last observation that is still inside the snapshot's TTL, for the
+   * fallback headers' `user-agent`. A bare version only: the header set itself is never exposed.
+   */
+  cliVersion(now = Date.now()): string | null {
+    if (!this.cliVersionSeen || now < this.cliVersionAt || now - this.cliVersionAt >= OBSERVED_CLAUDE_CODE_TTL_MS) return null;
+    return this.cliVersionSeen;
   }
 
   getFresh(now = Date.now()): ObservedClaudeCodeAuthSnapshot | null {

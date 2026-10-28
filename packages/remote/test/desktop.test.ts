@@ -7,8 +7,9 @@ import { agentEnded, BackgroundTasks, DesktopSessions, processHasSession, transc
 import { summarize, Sessions } from "../src/sessions.ts";
 import { PermissionQueue } from "../src/permissions.ts";
 import { FRAME_CAP } from "../src/protocol.ts";
+import { BackgroundActivity } from "../src/background-activity.ts";
 import { reduce } from "../web/timeline.ts";
-import { BridgeClient, DesktopBlockedError } from "../src/bridge-client.ts";
+import { BridgeClient, DESKTOP_BUSY } from "../src/bridge-client.ts";
 import { fileSymlinks } from "../../../test/capabilities.ts";
 
 const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -286,6 +287,19 @@ test("large timeline outputs are blobs and paged below the frame cap", t => {
   assert.equal(count, 22);
 });
 
+test("a fresh desktop process read bypasses the registry cache", { skip: process.platform !== "darwin" }, t => {
+  const f = fixture(t);
+  const registry = path.join(f.root, "sessions");
+  fs.mkdirSync(registry);
+  const file = path.join(registry, `${process.pid}.json`);
+  const write = (status: string) => fs.writeFileSync(file, JSON.stringify({ pid: process.pid, entrypoint: "claude-desktop", sessionId: id, status }));
+  write("idle");
+  assert.equal(f.desktop.liveProcess(id)?.status, "idle");
+  write("busy");
+  assert.equal(f.desktop.liveProcess(id)?.status, "idle", "the normal read uses the cached snapshot");
+  assert.equal(f.desktop.liveProcess(id, 0)?.status, "busy", "the fresh read observes the changed registry");
+});
+
 test("open detection matches exact session flags in fake ps output", () => {
   for (const flag of [`--resume=${id}`, `--session-id ${id}`, `--session-id=${id}`, `--resume ${id}`]) {
     assert.equal(processHasSession(` PID COMMAND\n 42 /path with spaces/claude ${flag} --model test\n`, id), true);
@@ -376,7 +390,8 @@ for (const mode of ["resume", "process", "recent"] as const) test(`desktop conti
   assert.deepEqual(reduce(sessions.log(id).tail().events).items.map(item => item.type), ["user", "assistant"]);
   if (mode === "process") {
     await assert.rejects(sessions.setModel(id, "chosen-model", "high"), /Claude 앱/);
-    assert.throws(() => sessions.send(id, "first-phone", "continue"), DesktopBlockedError);
+    assert.equal(sessions.send(id, "first-phone", "continue"), id);
+    assert.equal(sessions.summaryOf(id)?.queue?.[0]?.error, DESKTOP_BUSY, "an open process without registry status waits safely");
     assert.equal(options.length, 0);
     assert.equal(sessions.log(id).tail().events.some(e => e.kind === "user" && e.clientMsgId === "first-phone"), false);
     return;
@@ -519,6 +534,76 @@ test("a running worker with a known model emits progress as only its own transcr
   assert.equal(f.desktop.subLog(id, `sub-${worker}`)?.tail().events.at(-1)?.kind, "assistant");
 });
 
+for (const content of ["[Request interrupted by user]", [{ type: "text", text: "[Request interrupted by user for tool use]" }]]) {
+  test(`an interrupted worker closes without a notification (${typeof content}) on import, tail and reconnect`, t => {
+    const f = fixture(t);
+    const worker = "interrupted";
+    const file = path.join(f.project, `${id}.jsonl`);
+    const workerFile = path.join(f.project, id, "subagents", `agent-${worker}.jsonl`);
+    const launch = line({ type: "assistant", message: { content: [{ type: "tool_use", id: worker, name: "Agent", input: { run_in_background: true } }] } });
+    const launched = line({ type: "user", toolUseResult: { isAsync: true, agentId: worker }, message: { content: [{ type: "tool_result", tool_use_id: worker, content: "Async agent launched" }] } });
+    subagent(f.project, worker, { toolUseId: worker }, [assistantTurn("sol", "tool_use", [{ type: "tool_use", id: "read", name: "Read", input: {} }])]);
+    fs.writeFileSync(file, line(user) + launch + launched);
+    const before = f.desktop.log(id);
+    assert.equal(f.desktop.backgroundTasks(id), 1);
+    fs.appendFileSync(workerFile, line({ type: "user", isSidechain: true, message: { content } }));
+    assert.equal(agentEnded(workerFile), true);
+    const events: import("../src/protocol.ts").EventBody[] = [];
+    f.desktop.tail(id, fs.statSync(file).size, body => events.push(body));
+    assert.deepEqual(events.filter(e => e.kind === "subagent").map(e => e.status), ["stopped"]);
+    assert.equal(f.desktop.backgroundTasks(id), 0);
+    assert.equal(f.desktop.backgroundTaskHistory(id).find(task => task.id === worker)?.state, "stopped");
+    const after = f.desktop.log(id);
+    assert.notEqual(after, before, "worker-only changes invalidate the parent snapshot");
+    assert.equal(subagentEvents(after).at(-1)?.status, "stopped");
+    const replay = new BackgroundActivity();
+    for (const event of after.tail(1 << 20).events) replay.accept(event, text => typeof text === "string" ? text : after.blob(text.blob) ?? "");
+    assert.equal(replay.active.length, 0);
+    assert.equal(replay.history[0]?.state, "stopped");
+    const restarted = new DesktopSessions({ projects: f.projects, summarize, excluded: () => new Set(), processes: () => "" });
+    t.after(() => restarted.close());
+    assert.equal(subagentEvents(restarted.log(id)).at(-1)?.status, "stopped");
+    assert.equal(restarted.backgroundTasks(id), 0);
+  });
+}
+
+test("only an exact final interruption record stops a worker, never inactivity or the parent's interruption", t => {
+  const f = fixture(t);
+  const file = path.join(f.project, `${id}.jsonl`);
+  const launch = (tool: string) => line({ type: "assistant", message: { content: [{ type: "tool_use", id: tool, name: "Agent", input: {} }] } });
+  const running = assistantTurn("sol", "tool_use", [{ type: "tool_use", id: "read", name: "Read", input: {} }]);
+  const interrupted = line({ type: "user", isSidechain: true, message: { content: "[Request interrupted by user for tool use]" } });
+  const endings = [
+    running,
+    interrupted + running,
+    line({ type: "user", message: { content: "[Request interrupted by user] quoted instruction" } }),
+    line({ type: "assistant", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } }),
+    interrupted.slice(0, -1),
+    interrupted + '{"type":"assistant"',
+    line({ type: "user", message: { content: [{ type: "tool_result", content: "[Request interrupted by user]" }] } }),
+  ];
+  endings.forEach((ending, index) => subagent(f.project, `guard-${index}`, { toolUseId: `guard-${index}` }, [running, ending]));
+  fs.writeFileSync(file, line(user) + endings.map((_, index) => launch(`guard-${index}`)).join("") +
+    line({ type: "user", message: { content: "[Request interrupted by user]" } }));
+  f.advance();
+  assert.ok(subagentEvents(f.desktop.log(id)).every(e => e.status === "running"));
+  endings.forEach((_, index) => assert.equal(agentEnded(path.join(f.project, id, "subagents", `agent-guard-${index}.jsonl`)), false));
+});
+
+test("a nested worker's interruption refreshes its unchanged parent's cached worker log", t => {
+  const f = fixture(t);
+  subagent(f.project, "parent", { toolUseId: "parent" }, [assistantTurn("sol", "tool_use", [{ type: "tool_use", id: "child", name: "Agent", input: {} }])]);
+  subagent(f.project, "child", { toolUseId: "child" }, [assistantTurn("sol", "tool_use", [{ type: "tool_use", id: "read", name: "Read", input: {} }])]);
+  fs.writeFileSync(path.join(f.project, `${id}.jsonl`), line(user));
+  f.desktop.list();
+  const before = f.desktop.subLog(id, "sub-parent")!;
+  assert.equal(subagentEvents(before).at(-1)?.status, "running");
+  fs.appendFileSync(path.join(f.project, id, "subagents", "agent-child.jsonl"), line({ type: "user", isSidechain: true, message: { content: "[Request interrupted by user for tool use]" } }));
+  const after = f.desktop.subLog(id, "sub-parent")!;
+  assert.notEqual(after, before);
+  assert.equal(subagentEvents(after).at(-1)?.status, "stopped");
+});
+
 test("a Mac session's worker log is readable and grows with its transcript", t => {
   const f = fixture(t);
   subagent(f.project, "grow", { toolUseId: "toolu_grow", model: "sol@high", description: "sol·high · Task" }, [
@@ -539,7 +624,7 @@ test("a Mac session's worker log is readable and grows with its transcript", t =
 
 test("sidechain records open children only inside their own worker conversation", () => {
   const nested = line({ isSidechain: true, type: "assistant", message: { model: "sol", content: [{ type: "tool_use", id: "nested", name: "Agent", input: { description: "nested" } }] } });
-  const resolve = () => ({ model: "sol", steps: 1, description: "", ended: false });
+  const resolve = () => ({ model: "sol", steps: 1, description: "", terminal: null });
   // The parent pass skips sidechain records entirely.
   assert.deepEqual(transcriptEvents(nested, "/x", summarize).bodies, []);
   // Its own conversation exposes the child, retaining the launch call beside the lifecycle event.

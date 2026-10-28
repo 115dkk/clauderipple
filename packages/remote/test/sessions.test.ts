@@ -12,7 +12,7 @@ import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
-import { BridgeClient, CLI_NOT_LOGGED_IN } from "../src/bridge-client.ts";
+import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
@@ -111,7 +111,7 @@ function controlledQueries(readInputs = true, waitForExit = false) {
   return { queryFn, queries };
 }
 
-function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions">> = {}) {
+function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {}, extra: Partial<Pick<SessionsOptions, "handoff" | "log" | "queryFn" | "desktopProjects" | "desktopRegistry" | "desktopProcesses" | "bridgeClient" | "desktopSidebar" | "now" | "onSessions" | "environmentRoot" | "environmentWaitMs" | "environmentPollMs" | "environmentModeMs" | "modOfferMs" | "modResultMs">> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-sessions-"));
   const cwd = path.join(dir, "project");
   fs.mkdirSync(cwd);
@@ -375,6 +375,35 @@ test("a plan approval cancelled during the mode control restores plan mode and i
   assert.equal(await f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow"), true);
   assert.equal((await again).behavior, "allow");
   assert.equal(f.sessions.summaryOf(id)?.permissionMode, "bypassPermissions");
+});
+
+for (const cancelled of [false, true]) test(`plan ${cancelled ? "rollback" : "approval"} stays ahead of a later pick and message in the lane`, async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  await f.sessions.setMode(id, "plan");
+  const abort = new AbortController();
+  const answer = (query.options.canUseTool as CanUseTool)("ExitPlanMode", { plan: "Implement" }, { signal: abort.signal });
+  query.modeReply = Promise.withResolvers<void>();
+  const approval = f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  const pick = f.sessions.setMode(id, "default", "after-plan");
+  const send = f.sessions.orderedSend(id, "after-plan", "continue");
+  await waitFor(() => query.modes.length === 2);
+  assert.deepEqual(query.modes, ["plan", "acceptEdits"]);
+  assert.equal(query.users.length, 1);
+  if (cancelled) abort.abort();
+  query.modeReply.resolve();
+  assert.equal(await approval, !cancelled);
+  assert.equal((await answer).behavior, cancelled ? "deny" : "allow");
+  await pick;
+  await send;
+  await nextTick();
+  assert.deepEqual(query.modes, cancelled ? ["plan", "acceptEdits", "plan", "default"] : ["plan", "acceptEdits", "default"]);
+  const ordered = f.sessions.log(id).tail().events.filter(e => e.kind === "mode" || e.kind === "user");
+  assert.deepEqual(ordered.slice(-2).map(e => e.kind === "mode" ? e.mode : e.clientMsgId), ["default", "after-plan"]);
+  assert.equal(query.users.at(-1)?.message.content, "continue");
 });
 
 test("steer keeps the running query; interrupt closes it and withdraws unstarted inputs", async t => {
@@ -946,7 +975,7 @@ test("handoff closes an idle SDK writer and waits for real process exit before i
   assert.equal(calls, 1);
 });
 
-for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "waits durably for the app bridge"}, never a second SDK writer`, async t => {
+for (const reachable of [true, false]) test(`input accepted during handoff ${reachable ? "uses the new app bridge" : "resumes through the SDK once the app is idle"}, never a second concurrent writer`, async t => {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-app-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -979,34 +1008,64 @@ for (const reachable of [true, false]) test(`input accepted during handoff ${rea
   assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${id}:during-app-handoff`), null, "queued acceptance does not pretend the input reached a worker");
   registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(reachable ? { bridgeSessionId: "bridge" } : {}) });
   finish.resolve();
-  await waitFor(() => reachable ? posts.length === 1 : !!f.sessions.summaryOf(id)?.queue?.[0]?.error);
+  if (!reachable) {
+    // Issue #102: the app only holds the handed-off session open, so the host resumes it itself.
+    await waitFor(() => boundary.queries.length === 2 && boundary.queries[1]!.users.length === 1);
+    assert.equal(first.closed, true, "the first writer exited before the resume");
+    assert.equal(boundary.queries[1]!.options.resume, sdkId);
+    assert.ok(JSON.stringify(boundary.queries[1]!.users[0]).includes(photo), "queue-owned photo bytes reach the resumed turn");
+    assert.equal(posts.length, 0);
+    await waitFor(() => f.sessions.summaryOf(id)?.queue === undefined);
+    await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments);
+    assert.equal(boundary.queries[1]!.users.length, 1, "the original phone id completes exactly once");
+    return;
+  }
+  await waitFor(() => posts.length === 1);
   assert.equal(first.closed, true);
   assert.equal(boundary.queries.length, 1);
-  let active = f.sessions;
-  if (reachable) {
-    assert.match(posts[0]!, /accepted during handoff/);
-    assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
-    assert.equal(f.sessions.list().length, 1);
-  } else {
-    assert.equal(f.sessions.summaryOf(id)?.queueHeld, undefined);
-    assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "accepted during handoff");
-    f.sessions.shutdown();
-    fs.rmSync(path.join(f.dir, "sessions", id, "blobs"), { recursive: true, force: true });
-    active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
-      desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient, onEvent() {}, onSessions() {}, log() {} });
-    f.instances.push(active);
-    active.recover();
-    assert.equal(await active.send(id, "during-app-handoff", "accepted during handoff", attachments), id, "a resend after restart still belongs to the saved queue");
-    registry.get(sdkId)!.bridgeSessionId = "bridge";
-    active.pollQueued();
-    await waitFor(() => posts.length === 1);
-    assert.equal(active.summaryOf(id)?.queue, undefined);
-  }
-  await active.send(id, "during-app-handoff", "accepted during handoff", attachments);
-  await active.pollDesktop();
+  assert.match(posts[0]!, /accepted during handoff/);
+  assert.equal(f.sessions.summaryOf(id)?.desktopBridge, true);
+  assert.equal(f.sessions.list().length, 1);
+  await f.sessions.send(id, "during-app-handoff", "accepted during handoff", attachments);
+  await f.sessions.pollDesktop();
   assert.ok(posts[0]!.includes(photo), "queue-owned photo bytes survive the Desktop log rebase");
   assert.equal(posts.length, 1, "the original phone id completes exactly once");
   assert.equal(boundary.queries.length, 1);
+});
+
+test("a handed-off session waits while the app runs a turn, across a host restart, then resumes once", async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-busy-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "",
+    handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 7, status: "busy" }); return "opened"; }, log: () => {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${sdkId}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  boundary.queries[0]!.emit({ type: "system", subtype: "init", session_id: sdkId });
+  boundary.queries[0]!.emit({ type: "result", subtype: "success" });
+  await waitFor(() => registry.has(sdkId) && boundary.queries[0]!.closed);
+  await f.sessions.send(id, "while-app-works", "sent while the app works");
+  f.sessions.pollQueued();
+  await waitFor(() => f.sessions.summaryOf(id)?.queue?.[0]?.error === DESKTOP_BUSY);
+  assert.equal(boundary.queries.length, 1, "no second writer while the app is busy");
+  f.sessions.shutdown();
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, desktopProjects: projects,
+    desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs: 5, onEvent() {}, onSessions() {}, log() {} });
+  f.instances.push(active);
+  active.recover();
+  active.pollQueued();
+  assert.equal(boundary.queries.length, 1, "still busy after the restart");
+  registry.get(sdkId)!.status = "idle";
+  active.pollQueued();
+  await waitFor(() => boundary.queries.length === 2 && boundary.queries[1]!.users.length === 1);
+  assert.equal(boundary.queries[1]!.options.resume, sdkId);
+  active.pollQueued();
+  await waitFor(() => active.summaryOf(id)?.queue === undefined);
+  assert.equal(boundary.queries.length, 2, "sent exactly once");
 });
 
 test("a successful later handoff clears the durable failure and is not attempted again", async t => {
@@ -1032,7 +1091,7 @@ test("handoff does not reopen a conversation already owned by Desktop with RC of
   const registry = new Map<string, DesktopProcess>();
   let calls = 0;
   const f = fixture(t, { permission: true }, { desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "",
-    handoff: async () => { calls++; return "opened"; }, log() {} });
+    handoff: async () => { calls++; return "opened"; }, modOfferMs: 5, log() {} });
   const id = await f.create();
   await waitFor(() => f.permissions.pending(id).length === 1);
   registry.set("sdk-1", { sessionId: "sdk-1", pid: 42, status: "idle" });
@@ -1041,7 +1100,8 @@ test("handoff does not reopen a conversation already owned by Desktop with RC of
   await f.sessions.pollDesktop();
   assert.equal(calls, 0);
   assert.equal(f.fake.spies.close, 1, "the idle SDK stops rather than remaining a second writer");
-  assert.throws(() => f.sessions.send(id, "blocked-after-adoption", "do not start another writer"), /Remote Control/);
+  await f.sessions.send(id, "after-adoption", "the phone keeps going while the app is idle");
+  await waitFor(() => f.fake.users.length === 2);
 });
 
 for (const status of ["pending", "opening"]) test(`a ${status} Desktop handoff recovers and retries without a new phone turn`, async t => {
@@ -1424,6 +1484,512 @@ test("one message id keeps one content: a reused id with other words is refused,
   assert.equal(users().length, 1, "the refused reuse never becomes a second message");
   // An attachment change is a content change too.
   assert.throws(() => f.sessions.send(id, "same-id", "first words", [{ blob: "b", name: "photo.png", mediaType: "image/png" }]), /같은 메시지 ID에 다른 내용이 이미 접수되었습니다/);
+});
+
+test("environment creation attaches once, sends once, and adopts the desktop CLI identity without duplicate rows", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
+  const projects = path.join(root, "projects"); fs.mkdirSync(projects);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const registry = new Map<string, DesktopProcess>();
+  const calls: string[] = [];
+  let reads = 0, handoffs = 0;
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    const target = String(url);
+    if (options?.method === "POST" && target.endsWith("/sessions")) { calls.push("create"); return Response.json({ session: { id: "cse_abc" } }); }
+    if (options?.method === "POST") { calls.push("send"); return Response.json({}); }
+    if (target.endsWith("/cse_abc")) { calls.push("read"); return Response.json(++reads < 3 ? {} : { worker_status: "idle" }); }
+    if (target.includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [] });
+  } });
+  client.control = async (_id, _requestId, request) => { calls.push(request.subtype); };
+  const f = fixture(t, {}, { environmentRoot: root, environmentWaitMs: 500, environmentPollMs: 1, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: client, handoff: async () => { handoffs++; return "opened"; }, log() {} });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ lastKnownAccountUuid: "account" }));
+  fs.writeFileSync(path.join(root, "remote-control-state.json"), JSON.stringify({ identities: { "org:account": { serve: "on", folders: { [f.cwd]: { environmentId: "env_abc" } } } } }));
+  const id = await f.create();
+  assert.deepEqual(calls.filter(call => ["create", "read", "send"].includes(call)), ["create", "read", "read", "read", "send"]);
+  assert.ok(calls.includes("set_model") && calls.includes("apply_flag_settings") && calls.includes("set_permission_mode"));
+  assert.equal(f.fake.options.length, 0); assert.equal(handoffs, 0);
+  assert.equal(await f.create(), id);
+  assert.equal(await f.sessions.send(id, "create-1", "ping"), id);
+  assert.equal(calls.filter(call => call === "send").length, 1);
+  const cli = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${cli}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n" +
+    JSON.stringify({ type: "assistant", uuid: "first-answer", message: { model: "claude-test", content: [{ type: "text", text: "first answer" }] } }) + "\n");
+  const scope = path.join(root, "claude-code-sessions", "account", "org"); fs.mkdirSync(scope, { recursive: true });
+  fs.writeFileSync(path.join(scope, "local_target.json"), JSON.stringify({ cliSessionId: cli, model: "sonnet", effort: "xhigh" }));
+  registry.set(cli, { sessionId: cli, pid: 42, status: "idle", bridgeSessionId: "session_abc" });
+  await waitFor(() => f.events.some(row => row.session === id && row.event.kind === "assistant" && row.event.text === "first answer"));
+  assert.equal(f.sessions.list().length, 1);
+  assert.equal((JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { sdkSessionId: string }[])[0]!.sdkSessionId, cli);
+  assert.deepEqual(f.sessions.settingsJobs.pending("local_helper").map(job => [job.model, job.effort]), [["claude-test", "high"]]);
+});
+
+// The app starts these sessions in acceptEdits: a stricter mode must be confirmed before the first message.
+for (const applied of [false, true]) test(`environment plan mode ${applied ? "confirmed sends" : "unconfirmed holds"} the first message`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
+  const projects = path.join(root, "projects"); fs.mkdirSync(projects);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let sends = 0;
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    const target = String(url);
+    if (options?.method === "POST" && target.endsWith("/sessions")) return Response.json({ session: { id: "cse_abc" } });
+    if (options?.method === "POST") { sends++; return Response.json({}); }
+    if (target.endsWith("/cse_abc")) return Response.json({ worker_status: "idle" });
+    if (target.includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [] });
+  } });
+  client.control = async (_id, _requestId, request) => {
+    if (request.subtype === "set_permission_mode" && !applied) throw new Error("refused");
+  };
+  const f = fixture(t, {}, { environmentRoot: root, environmentWaitMs: 500, environmentPollMs: 1, environmentModeMs: 50, desktopProjects: projects, desktopRegistry: () => new Map(), desktopProcesses: () => "", bridgeClient: client, handoff: async () => "opened", log() {} });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ lastKnownAccountUuid: "account" }));
+  fs.writeFileSync(path.join(root, "remote-control-state.json"), JSON.stringify({ identities: { "org:account": { serve: "on", folders: { [f.cwd]: { environmentId: "env_abc" } } } } }));
+  const id = await f.sessions.create({ clientMsgId: "create-1", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping", permissionMode: "plan" });
+  assert.equal(sends, applied ? 1 : 0);
+  const queued = f.sessions.summaryOf(id)?.queue ?? [];
+  if (applied) assert.equal(queued.length, 0);
+  else assert.match(queued[0]?.error ?? "", /권한 모드를 Claude 앱에 적용하지 못해/);
+});
+
+for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "4xx", "5xx", "network", "timeout", "send-unknown"] as const) test(`environment ${outcome} follows the safe creation path`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "environment-app-"));
+  const projects = path.join(root, "projects"); fs.mkdirSync(projects);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let posts = 0, sends = 0, handoffs = 0;
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", ...(outcome === "account-mismatch" ? { accountUuid: "other" } : {}), expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    const target = String(url);
+    if (options?.method === "POST" && target.endsWith("/sessions")) {
+      posts++;
+      if (outcome === "network") throw new Error("network");
+      if (outcome === "4xx" || outcome === "5xx") return new Response(null, { status: outcome === "4xx" ? 400 : 503 });
+      return Response.json({ id: "cse_abc" });
+    }
+    if (options?.method === "POST") { sends++; if (outcome === "send-unknown") throw new Error("network"); return Response.json({}); }
+    if (target.endsWith("/cse_abc")) return Response.json(outcome === "timeout" ? {} : { worker_status: "idle" });
+    if (target.includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [] });
+  } });
+  client.control = async () => {};
+  const f = fixture(t, {}, { environmentRoot: root, environmentWaitMs: 5, environmentPollMs: 1, desktopProjects: projects, desktopRegistry: () => new Map(), desktopProcesses: () => "", bridgeClient: client, handoff: async () => { handoffs++; return "opened"; }, log() {} });
+  fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({ lastKnownAccountUuid: "account" }));
+  if (outcome !== "missing") fs.writeFileSync(path.join(root, "remote-control-state.json"), JSON.stringify({ identities: { "org:account": { serve: "on", folders: { [outcome === "mismatch" ? `${f.cwd}-other` : f.cwd]: { environmentId: "env_abc" } } }, ...(outcome === "ambiguous" ? { "org:other": { serve: "on", folders: {} } } : {}) } }));
+  const id = await f.create();
+  if (["missing", "mismatch", "ambiguous", "account-mismatch", "4xx"].includes(outcome)) {
+    await waitFor(() => f.fake.options.length === 1);
+    assert.equal(posts, outcome === "4xx" ? 1 : 0);
+    assert.equal(f.sessions.summaryOf(id)?.queue, undefined);
+  } else {
+    assert.equal(posts, 1); assert.equal(f.fake.options.length, 0); assert.equal(handoffs, 0);
+    assert.equal(f.sessions.summaryOf(id)?.state, "error");
+    assert.equal(f.sessions.summaryOf(id)?.queue?.[0]?.text, "ping");
+    assert.equal(f.sessions.summaryOf(id)?.queueHeld, true);
+    assert.ok(f.sessions.log(id).tail().events.some(event => event.kind === "result" && !event.ok));
+    assert.equal(await f.create(), id);
+    assert.equal(posts, 1);
+    if (outcome === "send-unknown") {
+      assert.equal(sends, 1);
+      await assert.rejects(f.sessions.sendQueued(id, "create-1"), /전송 결과를 확인할 수 없음/);
+      assert.equal(sends, 1);
+    }
+  }
+});
+
+async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, waitForExit = false, appRoot?: string) {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "mod-inbox-projects-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries(true, waitForExit);
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs, modResultMs,
+    ...(appRoot ? { desktopSidebar: { root: appRoot } } : {}),
+    handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" }); return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  fs.mkdirSync(path.join(projects, "project"));
+  fs.writeFileSync(path.join(projects, "project", `${sdkId}.jsonl`), JSON.stringify({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "ping" } }) + "\n");
+  boundary.queries[0]!.emit({ type: "system", subtype: "init", session_id: sdkId });
+  boundary.queries[0]!.emit({ type: "result", subtype: "success" });
+  if (waitForExit) { await waitFor(() => boundary.queries[0]!.closed); boundary.queries[0]!.exitReply.resolve(); }
+  await waitFor(() => registry.has(sdkId) && boundary.queries[0]!.closed);
+  return { ...f, id, sdkId, boundary, registry, projects };
+}
+
+const transcriptLine = (value: unknown) => JSON.stringify(value) + "\n";
+
+function appNativeModFixture(t: TestContext, modOfferMs = 500) {
+  const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const app = claudeAppData(t, id);
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "app-native-mod-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const registry = new Map<string, DesktopProcess>([[id, { sessionId: id, pid: 42, status: "idle" }]]);
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry,
+    desktopProcesses: () => "", desktopSidebar: { root: app.root }, modOfferMs, modResultMs: 500, log() {} });
+  fs.mkdirSync(path.join(projects, "project"));
+  const file = path.join(projects, "project", `${id}.jsonl`);
+  fs.writeFileSync(file, transcriptLine({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "From the app" } }));
+  assert.equal(f.sessions.summaryOf(id)?.origin, "desktop");
+  return { ...f, id, registry, boundary, file };
+}
+
+for (const order of ["report-first", "transcript-first"] as const) test(`an app-created session delivers through the mod exactly once with ${order}`, async t => {
+  const f = appNativeModFixture(t);
+  f.sessions.watchAttached(new Set([f.id]));
+  assert.equal(await f.sessions.send(f.id, "native-send", "Phone message"), f.id);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id).map(offer => [offer.itemId, offer.text]), [["native-send", "Phone message"]]);
+  assert.equal(f.sessions.modInbox.claim("native-send"), true);
+  const write = async () => {
+    fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "Phone message" } }) +
+      transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "App response" }] } }));
+    await f.sessions.pollDesktop();
+  };
+  if (order === "transcript-first") await write();
+  assert.equal(f.sessions.modInbox.result("native-send", "submitted"), true);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${f.id}:native-send`), "completed");
+  if (order === "report-first") await write();
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  const view = reduce(events);
+  assert.equal(view.items.filter(item => item.type === "user" && item.text === "Phone message").length, 1);
+  assert.ok(view.items.some(item => item.type === "assistant" && item.text === "App response"));
+  assert.ok(f.events.some(row => row.session === f.id), "transcript growth notifies the phone to refresh its snapshot");
+  // The phone clears its own "sending" copy only on a user event carrying its id.
+  const phoneIds = () => f.sessions.log(f.id).readAfter(0).events.flatMap(e => e.kind === "user" && e.text === "Phone message" ? [e.clientMsgId] : []);
+  assert.deepEqual(phoneIds(), ["native-send"]);
+  const epoch = f.sessions.log(f.id).epoch;
+  assert.equal(await f.sessions.send(f.id, "native-send", "Phone message"), f.id);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+  fs.appendFileSync(f.file, transcriptLine({ type: "assistant", uuid: "more", message: { model: "test", content: [{ type: "text", text: "More response" }] } }));
+  await f.sessions.pollDesktop();
+  assert.notEqual(f.sessions.log(f.id).epoch, epoch);
+  assert.deepEqual(phoneIds(), ["native-send"], "a rebuild keeps the phone's id on the same line");
+  assert.equal(f.sessions.summaryOf(f.id)?.origin, "desktop", "delivery never creates a host-owned record");
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions.json")), false);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("an app-created session queues while busy and offers once the registry becomes idle", async t => {
+  const f = appNativeModFixture(t);
+  f.registry.get(f.id)!.status = "busy";
+  await f.sessions.send(f.id, "busy-native", "Wait for idle");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.error, DESKTOP_BUSY);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+  f.sessions.pollQueued();
+  assert.equal(f.boundary.queries.length, 0);
+  f.registry.get(f.id)!.status = "idle";
+  f.sessions.pollQueued();
+  await waitFor(() => f.sessions.modInbox.pending(f.id).length === 1);
+  assert.equal(f.sessions.modInbox.claim("busy-native"), true);
+  assert.equal(f.sessions.modInbox.result("busy-native", "submitted"), true);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("an unclaimed app-created offer stays queued with Remote Control guidance, including send-now", async t => {
+  const f = appNativeModFixture(t, 20);
+  await f.sessions.send(f.id, "unclaimed-native", "Keep this message");
+  await waitFor(() => f.sessions.summaryOf(f.id)?.queue?.[0]?.error === DESKTOP_WAITING);
+  assert.equal(f.sessions.modInbox.claim("unclaimed-native"), false);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${f.id}:unclaimed-native`), null);
+  await assert.rejects(f.sessions.sendQueued(f.id, "unclaimed-native"), DesktopBlockedError);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.text, "Keep this message");
+  assert.equal(f.boundary.queries.length, 0);
+  assert.equal(f.sessions.removeQueued(f.id, "unclaimed-native")?.text, "Keep this message");
+});
+
+for (const kind of ["attachment", "slash", "clear", "interrupt"] as const) test(`an app-created ${kind} send remains blocked`, async t => {
+  const f = appNativeModFixture(t);
+  const attachments = kind === "attachment" ? [{ blob: f.sessions.log(f.id).image(Buffer.from("photo").toString("base64")), name: "photo.png", mediaType: "image/png" }] : [];
+  for (const status of ["idle", "busy"] as const) {
+    f.registry.get(f.id)!.status = status;
+    assert.throws(() => f.sessions.send(f.id, `blocked-${kind}-${status}`, kind === "slash" ? "/help" : kind === "clear" ? "/clear" : "Phone message", attachments, kind === "interrupt" ? "interrupt" : "steer"), DesktopBlockedError);
+  }
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("a closed app-created session can still continue on the host", async t => {
+  const f = appNativeModFixture(t);
+  f.registry.delete(f.id);
+  await f.sessions.send(f.id, "closed-native", "Continue here");
+  await waitFor(() => f.boundary.queries.length === 1);
+  assert.equal(f.boundary.queries[0]!.options.resume, f.id);
+  assert.equal(f.sessions.summaryOf(f.id)?.origin, "host");
+});
+
+test("an idle handed-off session tails app turns without a phone attached", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "app-user", cwd: f.cwd, message: { content: "From the app" } }) +
+    transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "App answer" }] } }));
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.ok(events.some(e => e.kind === "user" && e.text === "From the app"));
+  assert.ok(events.some(e => e.kind === "assistant" && e.text === "App answer"));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "App answer").length, 1);
+});
+
+test("a handed-off session the app is running shows the app's state, and a stop says to use the app", async t => {
+  const f = await modFixture(t, 500, 500);
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
+  await f.sessions.interrupt(f.id);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+  await assert.rejects(f.sessions.interrupt(f.id), /Claude 앱에서 직접 중지해 주세요/);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "waiting" });
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "waiting");
+});
+
+for (const order of ["report-first", "transcript-first"] as const) test(`mod echo is shown once with ${order}`, async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "mod-echo", "same prompt");
+  assert.equal(f.sessions.modInbox.claim("mod-echo"), true);
+  const write = () => fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "different", cwd: f.cwd, message: { content: "different prompt" } }) +
+    transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "same prompt" } }));
+  if (order === "report-first") { f.sessions.modInbox.result("mod-echo", "submitted"); write(); await f.sessions.pollDesktop(); }
+  else { write(); await f.sessions.pollDesktop(); f.sessions.modInbox.result("mod-echo", "submitted"); }
+  const users = f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user");
+  assert.equal(users.filter(e => e.text === "same prompt").length, 1);
+  assert.equal(users.find(e => e.text === "same prompt")?.clientMsgId, "mod-echo");
+  assert.equal(users.filter(e => e.text === "different prompt").length, 1);
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "later", cwd: f.cwd, message: { content: "same prompt" } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "same prompt").length, 2, "a later genuine message is not an echo");
+});
+
+test("an app message with an attachment is not mistaken for a text-only mod echo", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "text-only", "same words");
+  assert.equal(f.sessions.modInbox.claim("text-only"), true);
+  assert.equal(f.sessions.modInbox.result("text-only", "submitted"), true);
+  const image = { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from("photo").toString("base64") } };
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "with-image", cwd: f.cwd, message: { content: [{ type: "text", text: "same words" }, image] } }) +
+    transcriptLine({ type: "user", uuid: "actual-echo", cwd: f.cwd, message: { content: "same words" } }));
+  await f.sessions.pollDesktop();
+  const users = f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "same words");
+  assert.equal(users.length, 2);
+  assert.ok(users.some(e => e.kind === "user" && e.images?.length === 1 && e.clientMsgId === "with-image"));
+  assert.ok(users.some(e => e.kind === "user" && e.clientMsgId === "text-only"));
+});
+
+test("an old handed-off record starts tailing at the current end", async t => {
+  const f = await modFixture(t);
+  f.sessions.shutdown();
+  const recordsFile = path.join(f.dir, "sessions.json");
+  const records = JSON.parse(fs.readFileSync(recordsFile, "utf8")) as { transcriptOffset?: number }[];
+  delete records[0]!.transcriptOffset;
+  fs.writeFileSync(recordsFile, JSON.stringify(records));
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "old", message: { model: "test", content: [{ type: "text", text: "old answer" }] } }));
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", onEvent() {}, onSessions() {} });
+  f.instances.push(active);
+  await active.pollDesktop();
+  assert.equal(active.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "old answer"), false);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "new", message: { model: "test", content: [{ type: "text", text: "new answer" }] } }));
+  await active.pollDesktop();
+  assert.equal(active.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "new answer").length, 1);
+});
+
+test("host turns are not tailed while running or replayed after the writer exits", async t => {
+  const f = await modFixture(t, 10, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "host-turn", "/help");
+  await waitFor(() => f.boundary.queries.length === 2);
+  const query = f.boundary.queries[1]!;
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "host-echo", cwd: f.cwd, message: { content: "/help" } }) +
+    transcriptLine({ type: "assistant", uuid: "host-answer", message: { model: "test", content: [{ type: "text", text: "host answer" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "host answer"), false);
+  query.emit({ type: "assistant", message: { id: "sdk-answer", model: "test", content: [{ type: "text", text: "host answer" }] } });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => query.closed);
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.equal(events.filter(e => e.kind === "assistant" && e.text === "host answer").length, 1);
+  assert.equal(events.filter(e => e.kind === "user" && e.text === "/help").length, 1);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "next", message: { model: "test", content: [{ type: "text", text: "next app answer" }] } }));
+  await f.sessions.pollDesktop();
+  assert.ok(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "next app answer"));
+});
+
+test("tailing waits for the SDK process exit and includes its final transcript write in the boundary", async t => {
+  const f = await modFixture(t, 500, 500, true);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  await f.sessions.send(f.id, "closing-turn", "/help");
+  await waitFor(() => f.boundary.queries.length === 2);
+  const query = f.boundary.queries[1]!;
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => query.closed);
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "late-host", message: { model: "test", content: [{ type: "text", text: "late host write" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "assistant" && e.text === "late host write"), false);
+  query.exitReply.resolve();
+  await nextTick();
+  fs.appendFileSync(file, transcriptLine({ type: "assistant", uuid: "app-after-exit", message: { model: "test", content: [{ type: "text", text: "after exit" }] } }));
+  await f.sessions.pollDesktop();
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  assert.equal(events.some(e => e.kind === "assistant" && e.text === "late host write"), false);
+  assert.equal(events.filter(e => e.kind === "assistant" && e.text === "after exit").length, 1);
+});
+
+test("mod claim persists before success, refuses queue actions, and submitted is idempotent", async t => {
+  const f = await modFixture(t, 500, 500);
+  await f.sessions.send(f.id, "mod-one", "private message");
+  assert.equal(f.sessions.modInbox.pending("other").length, 0);
+  assert.deepEqual(f.sessions.modInbox.pending(f.sdkId).map(offer => [offer.itemId, offer.text]), [["mod-one", "private message"]]);
+  assert.equal(f.sessions.modInbox.claim("mod-one"), true);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir, "queue.json"), "utf8"))[f.id].items[0].claimedBy, "mod");
+  assert.equal(f.sessions.modInbox.claim("mod-one"), false);
+  assert.throws(() => f.sessions.removeQueued(f.id, "mod-one"), /처리하고 있습니다/);
+  await assert.rejects(f.sessions.sendQueued(f.id, "mod-one"), /처리하고 있습니다/);
+  f.sessions.resumeQueue(f.id); f.sessions.pollQueued();
+  assert.equal(f.boundary.queries.length, 1);
+  assert.equal(f.sessions.modInbox.result("mod-one", "submitted"), true);
+  assert.equal(f.sessions.modInbox.result("mod-one", "submitted"), false);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+  assert.equal(await f.sessions.send(f.id, "mod-one", "private message"), f.id);
+  assert.equal(f.boundary.queries.length, 1);
+  assert.equal(f.sessions.log(f.id).tail().events.filter(e => e.kind === "user" && e.clientMsgId === "mod-one").length, 1);
+});
+
+// 2026-10-27 on the person's Mac: the message after a mod-delivered turn sat in the queue with the app idle
+// (an app-run turn writes no result here to settle on), and the queue showed each message on its way in.
+test("after a mod-delivered turn the next message is offered at once, and offered messages are not shown as queued", async t => {
+  const f = await modFixture(t, 500, 500);
+  await f.sessions.send(f.id, "first", "first words");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined, "an offered message is not listed as queued");
+  assert.equal(f.sessions.modInbox.claim("first"), true);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined, "a claimed message is not listed as queued");
+  assert.equal(f.sessions.modInbox.result("first", "submitted"), true);
+  await f.sessions.send(f.id, "second", "second words");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "second"));
+  assert.equal(f.boundary.queries.length, 1, "the host did not run either message");
+});
+
+// 2026-10-27, the second time: a queue.json written by the earlier build kept an "awaiting" mark from
+// an app-run turn, which settles only on a result or on a state after the answer, and the app's
+// turns wrote neither here. The next phone message sat queued with the app idle.
+test("an awaiting mark left by an app-run turn settles once the app is idle, and the next message is offered", async t => {
+  const f = await modFixture(t, 500, 500);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  (f.sessions as unknown as { sendQueue: { sent(id: string, seq: number, at: number): void } }).sendQueue.sent(f.id, f.sessions.log(f.id).lastSeq, Date.now());
+  // The app's turn starts and ends between two polls: the host never sees it busy.
+  fs.appendFileSync(file, transcriptLine({ type: "user", uuid: "app-turn", cwd: f.cwd, message: { content: "earlier" } }) +
+    transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "earlier answer" }] } }));
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
+  await f.sessions.send(f.id, "next", "next words");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "next"));
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+});
+
+test("the app's busy and idle show on the phone for a handed-off session the host follows", async t => {
+  const f = await modFixture(t, 500, 500);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "running");
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "idle" });
+  await f.sessions.pollDesktop();
+  assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");
+});
+
+test("pressing send on a queued message offers it to the app's mod first", async t => {
+  const f = await modFixture(t, 500, 500);
+  // Queued while the app was busy, then the app went idle and the person pressed send.
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "busy" });
+  f.sessions.enqueue(f.id, "held", "held words");
+  assert.equal(f.sessions.modInbox.pending(f.sdkId).length, 0);
+  f.registry.set(f.sdkId, { sessionId: f.sdkId, pid: 42, status: "idle" });
+  const sending = f.sessions.sendQueued(f.id, "held");
+  await waitFor(() => f.sessions.modInbox.pending(f.sdkId).some(offer => offer.itemId === "held"));
+  assert.equal(f.sessions.modInbox.claim("held"), true);
+  assert.equal(await sending, f.id);
+  assert.equal(f.boundary.queries.length, 1, "the host did not run it");
+});
+
+for (const answer of ["claimed", "expired", "deadline"] as const) test(`send-now holds a later pick until the app offer is ${answer}, not until its two-minute result`, async t => {
+  const app = claudeAppData(t, "dddddddd-dddd-dddd-dddd-dddddddddddd");
+  const f = await modFixture(t, answer === "expired" ? 6000 : 120_000, 120_000, false, app.root);
+  f.registry.get(f.sdkId)!.status = "busy";
+  f.sessions.enqueue(f.id, "ordered-offer", "offer words");
+  await nextTick();
+  f.registry.get(f.sdkId)!.status = "idle";
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  const sending = f.sessions.sendQueued(f.id, "ordered-offer");
+  const outcome = answer === "deadline" ? assert.rejects(sending, /전송 결과를 확인할 수 없음/) : sending;
+  const pick = f.sessions.setModel(f.id, "next-model", null, "after-offer");
+  await nextTick();
+  assert.equal(f.sessions.modInbox.pending(f.sdkId).length, 1);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "claude-test");
+  t.mock.timers.tick(answer === "deadline" ? 14_999 : 5999);
+  await nextTick();
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "claude-test", "the later pick still waits");
+  if (answer === "claimed") assert.equal(f.sessions.modInbox.claim("ordered-offer"), true);
+  else t.mock.timers.tick(1);
+  await outcome;
+  assert.deepEqual(await pick, { status: "applied", model: "next-model", effort: null });
+  if (answer === "claimed") {
+    assert.equal(f.boundary.queries.length, 1, "the host never dispatched a claimed message");
+    assert.equal(f.sessions.modInbox.result("ordered-offer", "submitted"), true, "the later result remains tracked independently");
+  }
+  if (answer === "deadline") {
+    t.mock.timers.tick(120_000);
+    await nextTick();
+    assert.equal(f.boundary.queries.length, 1, "an expired lane item cannot dispatch after its offer expires");
+  }
+});
+
+test("an unclaimed offer expires before the host runs it; late claims lose", async t => {
+  const f = await modFixture(t, 20);
+  await f.sessions.send(f.id, "fallback", "fallback text");
+  await waitFor(() => f.boundary.queries.length === 2 && f.boundary.queries[1]!.users.length === 1);
+  assert.equal(f.sessions.modInbox.claim("fallback"), false);
+  assert.equal(f.boundary.queries[1]!.users[0]!.message.content, "fallback text");
+});
+
+for (const outcome of ["failed", "timeout", "restart"] as const) test(`a mod claim with ${outcome} is held as uncertain and never runs on the host`, async t => {
+  const f = await modFixture(t, 100, 30);
+  await f.sessions.send(f.id, "uncertain", "check first");
+  assert.equal(f.sessions.modInbox.claim("uncertain"), true);
+  let active = f.sessions;
+  if (outcome === "failed") assert.equal(active.modInbox.result("uncertain", "failed"), true);
+  if (outcome === "timeout") await waitFor(() => !!active.summaryOf(f.id)?.queueHeld);
+  if (outcome === "restart") {
+    active.shutdown();
+    active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", modOfferMs: 10, onEvent() {}, onSessions() {} });
+    f.instances.push(active); active.recover();
+  }
+  assert.equal(active.summaryOf(f.id)?.queueHeld, true);
+  assert.match(active.summaryOf(f.id)?.queue?.[0]?.error ?? "", /전송되었는지 확인할 수 없습니다/);
+  active.pollQueued(); await delay(40);
+  assert.equal(f.boundary.queries.length, 1);
+  assert.equal(active.modInbox.result("uncertain", "submitted"), false);
+});
+
+test("withdrawing an offer for editing or send-now never runs the original offer", async t => {
+  const f = await modFixture(t, 100);
+  await f.sessions.send(f.id, "edit", "edit me");
+  assert.equal(f.sessions.removeQueued(f.id, "edit")?.text, "edit me");
+  assert.equal(f.sessions.modInbox.claim("edit"), false);
+  await delay(110);
+  assert.equal(f.boundary.queries.length, 1);
+  await f.sessions.send(f.id, "now", "send now");
+  await f.sessions.sendQueued(f.id, "now");
+  await waitFor(() => f.boundary.queries.length === 2 && f.boundary.queries[1]!.users.length === 1);
+  await delay(110);
+  assert.equal(f.boundary.queries.length, 2);
+  assert.equal(f.sessions.modInbox.claim("now"), false);
+});
+
+for (const kind of ["attachment", "slash", "steer", "interrupt"] as const) test(`${kind} bypasses the mod inbox`, async t => {
+  const f = await modFixture(t, 100);
+  const attachments = kind === "attachment" ? [{ blob: f.sessions.log(f.id).image(Buffer.from("photo").toString("base64")), name: "photo.png", mediaType: "image/png" }] : [];
+  await f.sessions.send(f.id, `bypass-${kind}`, kind === "slash" ? "/help" : "direct", attachments, kind === "steer" || kind === "interrupt" ? kind : undefined);
+  await waitFor(() => f.boundary.queries.length === 2);
+  assert.deepEqual(f.sessions.modInbox.pending(f.sdkId), []);
 });
 
 test("a new session keeps one idempotent create per content", async t => {

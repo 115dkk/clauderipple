@@ -21,6 +21,7 @@
 
 import crypto from "node:crypto";
 import { phoneRequest } from "./phone.ts";
+import { settingsId, validSettingsJobAction } from "../../remote/src/settings-jobs.ts";
 import type { PhoneDeps } from "./phone.ts";
 import fs from "node:fs";
 import net from "node:net";
@@ -54,9 +55,9 @@ import { answersWebSearch, effortLevels, targetWarnings } from "./targets.ts";
 export { effortLevels } from "./targets.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
-import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
+import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts";
 import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
-import { catalogEntry } from "./catalog.ts";
+import { catalogEntry, catalogueWindow } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -921,7 +922,7 @@ function pickerTrust(): { caTrusted: boolean; appProxy: boolean } {
  * does nothing is the exact bug this closes, so a failure has to come back to the screen rather
  * than being swallowed into the router log.
  */
-function syncModelSlotsForGui(cfg: Config): string | null {
+function syncModelSlotsForGui(cfg: Config, agentDir?: string): string | null {
   try {
     const home = homeDir();
     syncModelSlots({
@@ -932,6 +933,7 @@ function syncModelSlotsForGui(cfg: Config): string | null {
       // Claude, and `syncModelSlots` reads an absent `models` as "do not touch these".
       models: cfg.cli.models ?? {},
     });
+    syncContextWindows(cfg, agentDir ? [agentDir] : undefined);
     return null;
   } catch (e) {
     const message = (e as Error).message;
@@ -1535,7 +1537,7 @@ function applyMeasurements(configFile: string, providerName: string, results: Me
     if (model.wire === undefined) model.wire = result.wire;
     const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
     if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
-    if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
+    if (model.contextWindow == null && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
     if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
   }
   const errors = validate(current);
@@ -1585,10 +1587,12 @@ export function measureUnsettledModels(deps: AdminDeps): number {
  *
  * OpenCode's `/models` reports ids alone, so a provider set up before the catalogue's `limit.context`
  * was read keeps no window and falls back to `cli.autoCompactWindow` — a quarter of a 1M model's real
- * window. The measurement folds the catalogue's window in, but only over the models it runs on and
- * only through its own write; this pass reaches the models already on disk, once, at start-up. Only
- * into a blank field, through the same validated write, so a window the user or the vendor set is
- * never overwritten. Returns the `provider/model` ids it filled.
+ * window. Hive's `/models` states even less, and it has no catalogue block of its own, so a model
+ * saved there is matched against the catalogue by id (`catalogueWindow`). The measurement folds the
+ * catalogue's window in, but only over the models it runs on and only through its own write; this
+ * pass reaches the models already on disk, once, at start-up. Only into a blank field, through the
+ * same validated write, so a window the user or the vendor set is never overwritten. Returns the
+ * `provider/model` ids it filled.
  */
 export async function backfillContextWindows(deps: AdminDeps): Promise<string[]> {
   const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
@@ -1608,12 +1612,13 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
     if (!("models" in provider) || !provider.models) continue;
     const preset = "preset" in provider ? provider.preset : undefined;
     for (const model of provider.models) {
-      if (model.contextWindow !== undefined) continue;
-      const entry = catalogEntry(catalog, preset, model.id);
-      if (entry?.contextWindow === undefined) continue;
-      model.contextWindow = entry.contextWindow;
+      // A saved `null` is as blank as a missing field (configs written by older dashboards carry it).
+      if (model.contextWindow != null) continue;
+      const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+      if (stated === undefined) continue;
+      model.contextWindow = stated;
       filled.push(`${name}/${model.id}`);
-      deps.log.info(`admin: ${name}/${model.id} context window ${entry.contextWindow} (catalogue)`);
+      deps.log.info(`admin: ${name}/${model.id} context window ${stated} (catalogue)`);
     }
   }
   if (filled.length === 0) return [];
@@ -1710,8 +1715,10 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
       if (facts.contextWindow !== undefined) measured.contextWindow = facts.contextWindow;
     }
     // The wire was answered, so the model exists: the catalogue's own window travels with the result
-    // and is written only into a model that has none (see applyMeasurements).
-    if (measured.wire && listed?.contextWindow !== undefined) measured.contextWindow = listed.contextWindow;
+    // and is written only into a model that has none (see applyMeasurements). A provider without a
+    // catalogue block of its own is matched by id instead (`catalogueWindow`).
+    const window = listed?.contextWindow ?? catalogueWindow(catalog, id);
+    if (measured.wire && window !== undefined) measured.contextWindow = window;
     job.results.push(measured);
     job.done++;
     deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : facts ? " (ollama)" : ""}` : ""}`}`);
@@ -1770,45 +1777,8 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
  * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
  * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
  */
-async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> }> {
-  const cfg = deps.config();
-  const windows: Record<string, number> = {};
-  const catalogWindows: Record<string, number> = {};
-  const resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> = {};
-  const put = (id: string, fallback?: number, native = false): void => {
-    const base = id.split("@")[0]!;
-    const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
-    const live = chatgptModelWindow(cfg, id);
-    // Keep the legacy editor maps, but give usage readers a provider-bound resolution. A native
-    // alias's window and the global compaction setting are not the routed model's capacity.
-    const resolved = resolve(id, {}, cfg) ?? (cfg.aliases[base] ? resolve(cfg.aliases[base], {}, cfg) : null);
-    const model = resolved?.model.split("@")[0] ?? base;
-    const provider = resolved ? cfg.providers[resolved.provider] : undefined;
-    const explicit = resolved && !cfg.direct.some(d => base.startsWith(d.prefix)) ? route?.contextWindow : undefined;
-    const own = cfg.cli.extraModels.find(m => m.model.split("@")[0] === model)?.contextWindow
-      ?? provider?.models?.find(m => m.id === model || m.id === model.replace(/-\d{8}$/, ""))?.contextWindow;
-    const known = resolved ? explicit ?? live ?? own : native ? fallback : undefined;
-    if (!resolvedWindows[id]) resolvedWindows[id] = {
-      model, provider: resolved?.provider ?? null,
-      contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null,
-    };
-    if (!resolved && declaredBy(base, cfg).length > 1) return;
-    const value = route?.contextWindow ?? live ?? fallback;
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
-    windows[id] = Math.floor(value);
-    if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
-  };
-  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow, true);
-  for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
-  for (const [name, provider] of Object.entries(cfg.providers)) {
-    for (const model of ("models" in provider && provider.models) || []) {
-      put(model.id, model.contextWindow);
-      if (declaredBy(model.id, cfg).length > 1) put(`${name}:${model.id}`, model.contextWindow);
-    }
-  }
-  for (const id of Object.keys(cfg.routes)) put(id);
-  for (const id of Object.keys(cfg.aliases)) put(id);
-  return { windows, catalogWindows, resolvedWindows };
+async function contextWindows(deps: AdminDeps): Promise<ReturnType<typeof contextWindowSnapshot>> {
+  return contextWindowSnapshot(deps.config(), await claudeModelList(deps), deps.agentDir ? [deps.agentDir] : undefined);
 }
 
 function tailLines(file: string, n: number): string {
@@ -1914,6 +1884,57 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
       if (method !== "GET" && crossSiteOrigin(req)) {
         deps.log.warn(`admin: refused ${method} ${pathname} from origin ${String(req.headers.origin)}`);
         sendJson(res, 403, { error: "cross-site request refused" });
+        return;
+      }
+      if (pathname === "/api/settings-jobs" || pathname === "/api/settings-jobs/claim" || pathname === "/api/settings-jobs/result") {
+        res.setHeader("cache-control", "no-store");
+        if (crossSiteOrigin(req) || req.headers["sec-fetch-site"] === "cross-site") { sendJson(res, 403, { error: "same-origin phone control required" }); return; }
+        const isList = pathname === "/api/settings-jobs";
+        if (method !== (isList ? "GET" : "POST")) { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
+        let body: string | undefined, exclude: string | undefined;
+        if (isList) {
+          const query = new URL(url, "http://127.0.0.1").searchParams;
+          exclude = query.get("exclude") ?? undefined;
+          if (!settingsId(exclude) || query.getAll("exclude").length !== 1) { sendJson(res, 400, { error: "invalid helper" }); return; }
+        } else {
+          try { body = (await readBody(req, 4096, new Error("settings job body too large"))).toString("utf8"); }
+          catch { sendJson(res, 400, { error: "invalid settings job request" }); return; }
+          let raw: unknown;
+          try { raw = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid settings job request" }); return; }
+          if (!validSettingsJobAction(raw, pathname.endsWith("/result"))) { sendJson(res, 400, { error: "invalid settings job request" }); return; }
+        }
+        const route = isList ? "settings-jobs" : `settings-jobs/${pathname.endsWith("/claim") ? "claim" : "result"}`;
+        const result = await phoneRequest(route, method, body, deps.phone, exclude);
+        sendJson(res, result.status, result.body); return;
+      }
+      if (pathname === "/api/phone-inbox" || pathname === "/api/phone-inbox/claim" || pathname === "/api/phone-inbox/result") {
+        res.setHeader("cache-control", "no-store");
+        if (crossSiteOrigin(req) || req.headers["sec-fetch-site"] === "cross-site") {
+          sendJson(res, 403, { error: "same-origin phone control required" }); return;
+        }
+        const isList = pathname === "/api/phone-inbox";
+        if (method !== (isList ? "GET" : "POST")) { sendJson(res, 404, { error: "unknown phone endpoint or method" }); return; }
+        let body: string | undefined;
+        let session: string | undefined;
+        if (isList) {
+          const query = new URL(url, "http://127.0.0.1").searchParams;
+          session = query.get("session") ?? undefined;
+          if (!session || session.length > 200 || query.getAll("session").length !== 1) { sendJson(res, 400, { error: "invalid session" }); return; }
+        } else {
+          try { body = (await readBody(req, 4096, new Error("inbox body too large"))).toString("utf8"); }
+          catch { sendJson(res, 400, { error: "invalid inbox request" }); return; }
+          let raw: unknown;
+          try { raw = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid inbox request" }); return; }
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) { sendJson(res, 400, { error: "invalid inbox request" }); return; }
+          const value = raw as Record<string, unknown>;
+          const result = pathname.endsWith("/result");
+          if (typeof value.itemId !== "string" || !/^[\w-]{1,100}$/.test(value.itemId) || Object.keys(value).some(key => key !== "itemId" && (!result || key !== "outcome")) || result && value.outcome !== "submitted" && value.outcome !== "failed") {
+            sendJson(res, 400, { error: "invalid inbox request" }); return;
+          }
+        }
+        const route = isList ? "inbox" : `inbox/${pathname.endsWith("/claim") ? "claim" : "result"}`;
+        const result = await phoneRequest(route, method, body, deps.phone, session);
+        sendJson(res, result.status, result.body);
         return;
       }
       if (pathname.startsWith("/api/phone/")) {
@@ -2060,6 +2081,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.compactAt !== undefined) {
           if (body.compactAt !== null && typeof body.compactAt !== "number") throw new ModSettingsInputError("compactAt must be a number of tokens or null");
           writeAutoCompactWindow(body.compactAt);
+          syncContextWindows(deps.config(), deps.agentDir ? [deps.agentDir] : undefined);
         }
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
@@ -2188,6 +2210,18 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
           ...(probe.wire === "chat" || probe.wire === "responses" ? { wire: probe.wire } : {}),
         }, deps.probeModelFetch ?? fetchWithTimeout);
+        // A provider being added gets the same blank-only fill as one already saved: Hive's `/models`
+        // names its models and nothing else, and the form saves what the probe returns. A window the
+        // vendor did report is kept, and one the catalogue cannot match is left blank.
+        const missing = result.models.filter((model) => model.contextWindow == null);
+        if (missing.length > 0 && deps.modelCatalog) {
+          const catalog = await deps.modelCatalog().catch(() => undefined);
+          const preset = typeof probe.preset === "string" && probe.preset ? probe.preset : undefined;
+          for (const model of missing) {
+            const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+            if (stated !== undefined) model.contextWindow = stated;
+          }
+        }
         sendJson(res, 200, result);
         return;
       }
@@ -2274,7 +2308,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;
         // otherwise the Clients screen shows a choice that only a later `install` would honour.
-        const slotWarning = syncModelSlotsForGui(parsed);
+        const slotWarning = syncModelSlotsForGui(parsed, deps.agentDir);
         const warnings = [...(slotWarning ? [slotWarning] : []), ...targetWarnings(parsed)];
         sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(warnings.length ? { warning: warnings.join("\n") } : {}) });
         return;

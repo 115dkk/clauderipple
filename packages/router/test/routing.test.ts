@@ -314,7 +314,7 @@ test("each routed model and slot keeps its own compaction window; the global val
   assert.equal(out.auto_compact_windows["gpt-5.6-terra@high"], 400_000);
   assert.equal(out.auto_compact_windows["gpt-6-astra@high"], 258400, "no own window → global fallback");
   assert.equal(out.auto_compact_windows["claude-opus-4-8"], 1_000_000, "slot carries its own");
-  assert.equal(out.auto_compact_windows["claude-opus-4-6"], 258400);
+  assert.equal(out.auto_compact_windows["claude-opus-4-6"], 400_000, "slot follows its target's known window before the global fallback");
 });
 
 test("a picker model with no window of its own takes its provider's before the global fallback", () => {

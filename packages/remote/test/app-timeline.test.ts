@@ -14,7 +14,7 @@ interface AppBoundary {
   loadOlder(retry?: boolean): void;
   ui: { link: { state: string }; models: unknown[] };
   link: FakeLink;
-  caches: Map<string, { scroll: "bottom" | { key: string; inset: number } | null }>;
+  caches: Map<string, { scroll: "bottom" | { key: string; inset: number } | null; epoch: string | null; events: { seq: number; text: string }[]; hasOlder: boolean }>;
   /** Where the reader is: at the newest message, or reading above it. */
   pinned: boolean;
 }
@@ -77,6 +77,82 @@ test("the oldest loaded page is asked for one at a time, and a page that failed 
   assert.equal(browser.el("#older").hidden, true, "an empty page leaves no edge");
   app.loadOlder();
   assert.equal(asks(app).length, 2);
+});
+
+test("a new epoch tail replaces the old timeline and its older pages remain accessible", async () => {
+  install(new Storage());
+  const app = await start();
+  app.go({ name: "session", id: "s1" });
+  app.onHost({ t: "events", session: "s1", epoch: "old", events: [words(100)], more: false, tail: { hasOlder: false } });
+  app.go({ name: "home" });
+  app.go({ name: "session", id: "s1" });
+  assert.deepEqual(app.link.sent.filter(message => message.t === "attach").at(-1), { t: "attach", session: "s1", epoch: "old", afterSeq: 100 });
+
+  app.onHost({ t: "events", session: "s1", epoch: "new", events: [words(101), words(120)], more: false, tail: { hasOlder: true } });
+  const cache = app.caches.get("s1")!;
+  assert.equal(cache.epoch, "new");
+  assert.deepEqual(cache.events.map(item => item.seq), [101, 120]);
+  assert.equal(cache.hasOlder, true);
+  app.loadOlder();
+  const request = asks(app).at(-1)!;
+  assert.equal(request.beforeSeq, 101);
+  app.onHost({ t: "history", session: "s1", reqId: request.reqId, events: [words(1), words(100)], hasOlder: false });
+  assert.deepEqual(cache.events.map(item => item.seq), [1, 100, 101, 120]);
+  assert.equal(cache.hasOlder, false);
+});
+
+test("late history cannot cross an epoch or satisfy a newer request", async () => {
+  install(new Storage());
+  const app = await start();
+  app.go({ name: "session", id: "s1" });
+  app.onHost({ t: "events", session: "s1", epoch: "A", events: [words(764)], more: false, tail: { hasOlder: true } });
+  app.loadOlder();
+  const old = asks(app).at(-1)!;
+  assert.equal(old.epoch, "A");
+  app.onHost({ t: "events", session: "s1", epoch: "B", events: [words(1264), words(1500)], more: false, tail: { hasOlder: true } });
+  app.loadOlder();
+  const current = asks(app).at(-1)!;
+  assert.notEqual(current.reqId, old.reqId);
+  app.onHost({ t: "history", session: "s1", reqId: old.reqId, epoch: "A", events: [words(763)], hasOlder: true });
+  app.onHost({ t: "history", session: "s1", reqId: current.reqId, epoch: "A", events: [words(763)], hasOlder: true });
+  assert.deepEqual(app.caches.get("s1")!.events.map(e => e.seq), [1264, 1500]);
+  app.onHost({ t: "history", session: "s1", reqId: current.reqId, epoch: "B", events: [words(1263)], hasOlder: true });
+  assert.deepEqual(app.caches.get("s1")!.events.map(e => e.seq), [1263, 1264, 1500]);
+});
+
+test("same epoch overlapping or adjacent tails retain loaded history; gaps replace it", async () => {
+  install(new Storage());
+  const app = await start();
+  app.go({ name: "session", id: "s1" });
+  const tail = (events: ReturnType<typeof words>[], hasOlder: boolean) => app.onHost({ t: "events", session: "s1", epoch: "e", events, more: false, tail: { hasOlder } });
+  tail([words(764), words(765)], true);
+  app.loadOlder();
+  const req = asks(app).at(-1)!;
+  app.onHost({ t: "history", session: "s1", reqId: req.reqId, epoch: "e", events: [words(527), words(763)], hasOlder: true });
+  tail([words(764), words(765), words(766)], true);
+  assert.deepEqual(app.caches.get("s1")!.events.map(e => e.seq), [527, 763, 764, 765, 766]);
+  tail([words(767)], true);
+  assert.equal(app.caches.get("s1")!.events[0]!.seq, 527);
+  tail([words(900)], true);
+  assert.deepEqual(app.caches.get("s1")!.events.map(e => e.seq), [900]);
+});
+
+test("a page whose request cursor no longer matches the first event is not merged", async () => {
+  const browser = install(new Storage());
+  const app = await start();
+  app.go({ name: "session", id: "s1" });
+  app.onHost({ t: "events", session: "s1", epoch: "e", events: [words(100), words(101)], more: false, tail: { hasOlder: true } });
+  app.loadOlder();
+  const request = asks(app).at(-1)!;
+  app.onHost({ t: "events", session: "s1", epoch: "e", events: [words(99), words(100), words(101)], more: false, tail: { hasOlder: true } });
+  app.onHost({ t: "history", session: "s1", reqId: request.reqId, epoch: "e", events: [words(50)], hasOlder: true });
+  assert.deepEqual(app.caches.get("s1")!.events.map(e => e.seq), [99, 100, 101]);
+  assert.match(browser.el("#older").innerHTML, /이전 대화를 불러오지 못했습니다/);
+  app.loadOlder(true);
+  const retry = asks(app).at(-1)!;
+  assert.equal(retry.beforeSeq, 99);
+  app.onHost({ t: "history", session: "s1", reqId: retry.reqId, epoch: "e", events: [words(98)], hasOlder: true });
+  assert.deepEqual(app.caches.get("s1")!.events.map(e => e.seq), [98, 99, 100, 101]);
 });
 
 test("a conversation opens where the reader left it, and at its newest message when they left it there", async () => {

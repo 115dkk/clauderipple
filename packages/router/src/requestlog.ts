@@ -24,6 +24,8 @@ export type RequestRecord = {
   source: string;
   target: string;
   provider: string;
+  /** Actual responder's configured label or 1-based ordinal; never a credential id or token. */
+  credential?: string;
   effort?: string;
   upstreamRequestId?: string;
   messageId?: string;

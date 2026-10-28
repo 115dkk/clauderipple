@@ -32,6 +32,7 @@ import { VERSION } from "./version.ts";
 import { allowLongSilences } from "./providers/retry.ts";
 import { assetsFingerprint, readLocalAssets, spawnSsh, syncRemoteAssets } from "./remote-host.ts";
 import { RemoteTunnels, proxyConnectHost } from "./remote-tunnel.ts";
+import { syncContextWindows } from "./context-windows.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
 // second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
@@ -68,6 +69,8 @@ const store = new ConfigStore(undefined, (c, errors) => {
   } catch (e) {
     (log ?? console).warn(`agent files: ${(e as Error).message}`);
   }
+  try { syncContextWindows(c); }
+  catch (e) { (log ?? console).warn(`compact windows: ${(e as Error).message}`); }
   // Remote hosts get the regenerated agent files too, and a hand edit of `remote.hosts` takes effect.
   tunnels?.reconcile(c.remote?.hosts ?? []);
   tunnels?.assetsChanged();
@@ -251,6 +254,14 @@ proxy
     const catalogEvery = 2 * 60 * 60_000;
     proxy.chatgptRefreshCatalog();
     setInterval(() => proxy.chatgptRefreshCatalog(), catalogEvery).unref();
+    // Also notices hand edits to global/model settings and catalogue/agent changes, without a restart.
+    const syncCompact = () => {
+      if (draining) return;
+      try { syncContextWindows(store.get()); }
+      catch (e) { log!.warn(`compact windows: ${(e as Error).message}`); }
+    };
+    syncCompact();
+    setInterval(syncCompact, 15_000).unref();
     // Captured once, at start: this process's installation id and pid are what it reports and what
     // a control request is checked against, whatever the files say later (B01/D6).
     const instance = {

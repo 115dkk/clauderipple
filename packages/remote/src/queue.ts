@@ -13,7 +13,7 @@ import type { Attachment, QueuedMessage, SessionEvent } from "./protocol.ts";
 export const QUEUE_CAP = 20;
 
 export interface QueueAttachment { name: string; mediaType: string; file: string }
-export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; error?: string }
+export interface QueueItem { id: string; text: string; attachments: QueueAttachment[]; at: number; error?: string; claimedBy?: "mod" }
 interface Entry {
   items: QueueItem[];
   /** Attachments taken back to the composer; retained outside the timeline's rebase lifecycle. */
@@ -123,6 +123,28 @@ export class SendQueue {
     this.save();
   }
 
+  claimMod(session: string, id: string): boolean {
+    const item = this.entries.get(session)?.items.find(queued => queued.id === id);
+    if (!item || item.claimedBy) return false;
+    item.claimedBy = "mod";
+    this.save();
+    return true;
+  }
+
+  failMod(session: string, id: string, reason: string): void {
+    const item = this.entries.get(session)?.items.find(queued => queued.id === id);
+    if (!item?.claimedBy) return;
+    delete item.claimedBy;
+    try { this.fail(session, id, reason); }
+    catch (error) { item.claimedBy = "mod"; throw error; }
+  }
+
+  recoverMod(reason: string): void {
+    for (const [session, entry] of this.entries) {
+      for (const item of entry.items) if (item.claimedBy === "mod") this.failMod(session, item.id, reason);
+    }
+  }
+
   /** A known pre-send obstacle is not a failed write: keep watching, with the reason visible. */
   wait(session: string, id: string, reason: string): boolean {
     const item = this.entries.get(session)?.items.find(item => item.id === id);
@@ -175,14 +197,17 @@ export class SendQueue {
    * reports no result, and its state can read idle for a few seconds before the turn starts, so
    * the answer has to come first); or nothing at all for AWAIT_GIVE_UP_MS (the turn never started).
    */
-  settle(session: string, after: readonly SessionEvent[], now: number): boolean {
+  /** `appIdle`: the Claude app runs this session and its own process reads idle right now. Its turns
+   * can start and end between two polls, leaving no state line here to settle on (2026-10-27). */
+  settle(session: string, after: readonly SessionEvent[], now: number, appIdle = false): boolean {
     const entry = this.entries.get(session);
     const awaiting = entry?.awaiting;
     if (!entry || !awaiting) return true;
     const answered = after.findIndex(e => e.kind === "assistant");
     const done = after.some(e => e.kind === "result")
       || answered >= 0 && after.slice(answered).some(e => e.kind === "state" && ["idle", "error", "stopped"].includes(e.state))
-      || answered < 0 && now - awaiting.at > AWAIT_GIVE_UP_MS;
+      || answered >= 0 && appIdle
+      || (answered < 0 || appIdle) && now - awaiting.at > AWAIT_GIVE_UP_MS;
     if (!done) return false;
     delete entry.awaiting;
     this.prune(session);

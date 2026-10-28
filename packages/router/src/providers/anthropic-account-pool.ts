@@ -126,6 +126,9 @@ export class ClaudeAccountAuthPool {
     const out: Credential[] = [];
     const accounts = readClaudeOAuthAccounts(this.home);
     const current = this.current.get();
+    // A request from Claude Code itself names the newest version this machine runs; manufactured
+    // headers may use it while the observation is recent (issue #103).
+    const observedCliVersion = this.current.observedCliVersion();
     let currentToken: string | undefined;
     if (!(current instanceof Error)) {
       if (current.source === "observed") {
@@ -142,7 +145,7 @@ export class ClaudeAccountAuthPool {
           id: credentialId("current", currentToken),
           ownerId: "current",
           label: "Current Claude login",
-          headers: nativeAnthropicHeaders({ type: "anthropic", auth: "claude-code" }, current.credentials),
+          headers: nativeAnthropicHeaders({ type: "anthropic", auth: "claude-code" }, current.credentials, { observed: observedCliVersion }),
         });
       }
     }
@@ -162,6 +165,7 @@ export class ClaudeAccountAuthPool {
         headers: nativeAnthropicHeaders(
           { type: "anthropic", auth: "claude-code" },
           { accessToken: account.token, expiresAt: account.expiresAt },
+          { observed: observedCliVersion },
         ),
       };
       // The pool tries credentials in this order, so the account the user chose goes ahead of the

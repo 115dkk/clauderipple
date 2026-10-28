@@ -44,6 +44,14 @@ type Status = {
   agentTitle?: boolean;
 };
 
+type AwakeMode = "off" | "working" | "on";
+/** `GET /api/power` (router power.ts), the fields the tray shows. Absent before 0.10 (501). */
+type Power = {
+  platform: string;
+  awake: { mode: AwakeMode; setup: "ok" | "needs-setup" | "unsupported" };
+  tether: { enabled: boolean };
+};
+
 const home = process.env.CLAUDERIPPLE_HOME ?? path.join(os.homedir(), ".clauderipple");
 const POLL_MS = 5000;
 
@@ -155,6 +163,13 @@ const STRINGS = {
     updateCheckFailed: "Could not check for updates",
     updatePackaged: "This is the standalone app. Download the new version from the releases page.",
     updateCheckout: "This is a source checkout. Update it with git pull.",
+    awakeMenu: (mode: string) => `Keep laptop awake · ${mode}`,
+    awakeOff: "Off",
+    awakeWorking: "While working",
+    awakeOn: "Always",
+    tetherItem: "Phone hotspot when Wi-Fi drops",
+    laptopOpen: "Open Laptop settings…",
+    laptopSetup: "Set up laptop features…",
   },
   ko: {
     healthy: "정상",
@@ -242,6 +257,13 @@ const STRINGS = {
     updateCheckFailed: "업데이트 정보를 확인하지 못했습니다",
     updatePackaged: "설치형 앱입니다. 릴리스 페이지에서 최신 버전을 다운로드해 주십시오.",
     updateCheckout: "소스 코드로 실행 중입니다. git pull 명령으로 업데이트해 주십시오.",
+    awakeMenu: (mode: string) => `노트북 깨어 있기 · ${mode}`,
+    awakeOff: "끔",
+    awakeWorking: "일할 때만",
+    awakeOn: "계속 켜 두기",
+    tetherItem: "와이파이가 끊기면 휴대폰 핫스팟으로",
+    laptopOpen: "노트북 관리 열기…",
+    laptopSetup: "노트북 기능 설정…",
   },
   zh: {
     healthy: "运行正常",
@@ -329,6 +351,13 @@ const STRINGS = {
     updateCheckFailed: "无法检查更新",
     updatePackaged: "这是独立打包的应用。请从发布页面下载新版本。",
     updateCheckout: "这是从仓库检出的源码版本，请用 git pull 更新。",
+    awakeMenu: (mode: string) => `笔记本保持唤醒 · ${mode}`,
+    awakeOff: "关闭",
+    awakeWorking: "仅在工作时",
+    awakeOn: "始终开启",
+    tetherItem: "Wi-Fi 断开时改用手机热点",
+    laptopOpen: "打开笔记本管理…",
+    laptopSetup: "设置笔记本功能…",
   },
   ja: {
     healthy: "正常",
@@ -416,6 +445,13 @@ const STRINGS = {
     updateCheckFailed: "アップデートを確認できませんでした",
     updatePackaged: "これはスタンドアロン版のアプリです。リリースページから新しいバージョンをダウンロードしてください。",
     updateCheckout: "これはソースから実行している環境です。git pullで更新してください。",
+    awakeMenu: (mode: string) => `ノートPC のスリープ防止 · ${mode}`,
+    awakeOff: "オフ",
+    awakeWorking: "作業中のみ",
+    awakeOn: "常にオン",
+    tetherItem: "Wi-Fi が切れたらスマートフォンのインターネット共有へ",
+    laptopOpen: "ノートPC の管理を開く…",
+    laptopSetup: "ノートPC の機能を設定…",
   },
   es: {
     healthy: "en buen estado",
@@ -503,6 +539,13 @@ const STRINGS = {
     updateCheckFailed: "No se pudo comprobar si hay actualizaciones",
     updatePackaged: "Esta es la app independiente. Descarga la nueva versión desde la página de versiones.",
     updateCheckout: "Esta es una copia del código fuente. Actualízala con git pull.",
+    awakeMenu: (mode: string) => `Mantener el portátil despierto · ${mode}`,
+    awakeOff: "No",
+    awakeWorking: "Mientras trabaja",
+    awakeOn: "Siempre",
+    tetherItem: "Punto de acceso del teléfono si se cae el Wi-Fi",
+    laptopOpen: "Abrir Portátil…",
+    laptopSetup: "Configurar funciones del portátil…",
   },
   pt: {
     healthy: "funcionando",
@@ -590,6 +633,13 @@ const STRINGS = {
     updateCheckFailed: "Não foi possível verificar atualizações",
     updatePackaged: "Este é o app independente. Baixe a nova versão na página de releases.",
     updateCheckout: "Isto é um checkout do código-fonte. Atualize com git pull.",
+    awakeMenu: (mode: string) => `Manter o notebook acordado · ${mode}`,
+    awakeOff: "Não",
+    awakeWorking: "Enquanto trabalha",
+    awakeOn: "Sempre",
+    tetherItem: "Acesso Pessoal do celular quando o Wi-Fi cai",
+    laptopOpen: "Abrir Notebook…",
+    laptopSetup: "Configurar recursos do notebook…",
   },
 };
 
@@ -607,6 +657,8 @@ function readConfigPorts(): { proxy: number; admin: number } {
 
 let tray: Tray | null = null;
 let last: Status | null = null;
+/** The laptop settings, read with each healthy poll; null when the router has none to offer. */
+let power: Power | null = null;
 let lastError: string | null = null;
 let starting = false;
 let downSince: number | null = null;
@@ -745,8 +797,10 @@ async function poll(): Promise<void> {
     answered = true;
     void handleRouterUpdate(last).catch((error: unknown) => console.error(`update notification: ${error}`));
     void reconcileRouter(last);
+    power = await readPower();
   } catch (e) {
     last = null;
+    power = null;
     lastError = (e as Error).message;
     answered = false;
     downSince ??= Date.now();
@@ -767,6 +821,35 @@ async function poll(): Promise<void> {
   if (rec.restartClaude && !rec.busy && Date.now() - restartCheckedAt >= RESTART_CHECK_MS) {
     restartCheckedAt = Date.now();
     if (!restartStillOwed(restartOwedSince, await claudeStartedAt())) rec.restartClaude = false;
+  }
+  render();
+}
+
+/** The laptop settings for the tray, or null: a router without them (501), Linux, or a failed read. */
+async function readPower(): Promise<Power | null> {
+  try {
+    const res = await fetch(`${adminUrl()}api/power`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return null;
+    const p = (await res.json()) as Power;
+    return p.awake?.setup === "unsupported" ? null : p;
+  } catch {
+    return null;
+  }
+}
+
+/** Saves one laptop setting through the router (the same PUT the dashboard sends), then redraws. */
+async function changePower(change: { awake?: { mode: AwakeMode; until: null }; tether?: { enabled: boolean } }): Promise<void> {
+  try {
+    const res = await fetch(`${adminUrl()}api/power`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(change),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) power = (await res.json()) as Power;
+    else console.error(`power change: HTTP ${res.status} ${await res.text()}`);
+  } catch (e) {
+    console.error(`power change: ${(e as Error).message}`);
   }
   render();
 }
@@ -1443,6 +1526,27 @@ function render(): void {
     .map((account) => ({ account, windows: windowsText(account.quota) }))
     .filter(({ windows }) => windows)
     .map(({ account, windows }) => ({ label: L.claudeUsage(account.id === "current" ? L.claudeCurrent : account.label, windows), click: () => void openDashboard() }) as Electron.MenuItemConstructorOptions);
+  // The laptop settings people change on the way out, without opening the window. A mode picked
+  // here has no end time, so it clears one set in the dashboard.
+  const laptop = power;
+  const modeLabel = (m: AwakeMode): string => (m === "off" ? L.awakeOff : m === "working" ? L.awakeWorking : L.awakeOn);
+  const laptopItems: Electron.MenuItemConstructorOptions[] = laptop
+    ? [
+        {
+          label: L.awakeMenu(modeLabel(laptop.awake.mode)),
+          submenu: [
+            ...(["off", "working", "on"] as const).map(
+              (m) => ({ label: modeLabel(m), type: "radio", checked: laptop.awake.mode === m, click: () => void changePower({ awake: { mode: m, until: null } }) }) as Electron.MenuItemConstructorOptions,
+            ),
+            { type: "separator" },
+            { label: L.tetherItem, type: "checkbox", checked: laptop.tether.enabled, click: (item) => void changePower({ tether: { enabled: item.checked } }) },
+            { type: "separator" },
+            { label: laptop.awake.setup === "needs-setup" ? L.laptopSetup : L.laptopOpen, click: () => showWindow("mac") },
+          ],
+        },
+        { type: "separator" },
+      ]
+    : [];
   const template: Electron.MenuItemConstructorOptions[] = [
     // First, because it is the way back when nothing else works: the window needs no router.
     { label: L.open, click: () => void openDashboard() },
@@ -1455,6 +1559,7 @@ function render(): void {
       ? [{ label: updating ? L.updating(availableUpdate.latest ?? "") : L.updateAvailableItem(availableUpdate.latest ?? ""), enabled: !updating, click: () => void offerUpdate(availableUpdate!) } as Electron.MenuItemConstructorOptions]
       : []),
     { type: "separator" },
+    ...laptopItems,
     { label: L.startAtLogin, type: "checkbox", checked: loginItemOn(), click: (item) => { void setLoginItem(item.checked); } },
     { type: "separator" },
     { label: unconfigured ? L.runSetup : L.rerunSetup, click: () => void setup() },

@@ -153,6 +153,8 @@ for (const failedKey of ['lang', 'settings', 'phoneQueue', 'judgeDown', 'jev', '
     on('ui.log', () => ({ value: undefined }))
     on('ui.close', () => { closed++; return { value: undefined } })
     const site = failedKey === 'requests' ? { component: 'Pane' as const, requestId: 'ripple-log', props: PROPS } : { component: 'AbovePrompt' as const, props: { bodyColumns: 100, maxRows: 30, scroll: { offset: 0, bodyRows: 30 }, isWorking: false, hasSurvey: false, view: {} } }
+    // The band asks for what is drawn under it; the engine alone answers with its own (empty) drawing.
+    on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'engine', ref: 0 }))
     const ui = await $.ui.mount({ plugin: 'ripple', surface: 'desktop', ...site })
     expect(await ui.find({ type: 'Text', text: /상태 읽기 실패/ })).toBeDefined()
     expect(reads).toBe(1)

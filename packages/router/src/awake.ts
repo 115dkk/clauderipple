@@ -11,8 +11,9 @@
 //   - The bit is set only while it is wanted, and a journal (`<home>/awake.json`) records that we
 //     set it, so a router that died with it set clears it on its next start.
 //   - Battery below the floor, a thermal warning, or any error reading either forces it off.
-//   - Turning it off with the lid closed (and nothing else holding the Mac awake) sends the Mac to
-//     sleep, because clearing the bit alone leaves a bagged Mac running (MacMiniMode does the same).
+//   - Turning it off with the lid closed sends the Mac to sleep, because clearing the bit alone leaves
+//     a bagged Mac running (MacMiniMode does the same) — unless an external display is attached or
+//     another process holds PreventSystemSleep. Only a guard release (battery, heat) overrides those.
 //   - The router's exit does not touch the bit: a restart's successor reconciles within one tick,
 //     and clearing it here then setting it again a second later is exactly the off-then-on window in
 //     which a closed lid could sleep mid-work. `clauderipple stop`/`uninstall` clear it.
@@ -112,8 +113,9 @@ export type Clamshell = { lidClosed: boolean | null; causesSleep: boolean | null
  *   |   "AppleClamshellCausesSleep" = No
  *   |   "AppleClamshellState" = Yes
  *   |   "SleepDisabled" = No
- * `AppleClamshellCausesSleep` is No while an external display keeps a closed Mac in closed-display
- * mode — the state in which a closed lid must never be put to sleep by us.
+ * `AppleClamshellCausesSleep` is meant to be No while an external display keeps a closed Mac in
+ * closed-display mode, but it is not enough alone: on 2026-10-26 it read Yes right after we cleared
+ * the bit on a closed Mac driving an awake TV over HDMI, and sleepnow followed (see afterRelease).
  * `System Capabilities` is IOPM.h's kIOPMSystemCapability mask (CPU 1, Graphics 2, Audio 4, Network 8):
  * 15 in a full wake (measured 2026-10-24). A dark wake — the Mac up in the background while asleep to
  * its user — has no Graphics (`pmset -g log`: "DarkWake … [CDNP]" against a full "Wake … [CDNVA]").
@@ -130,6 +132,38 @@ export function parseClamshell(text: string): Clamshell {
     sleepDisabled: flag("SleepDisabled"),
     darkWake: caps === undefined ? null : (Number(caps) & 2) === 0,
   };
+}
+
+/** A process that keeps the system out of sleep, from `pmset -g assertions`. */
+export type SleepHolder = { pid: number; process: string; type: string; name: string };
+
+/**
+ * `pmset -g assertions`, the "Listed by owning process" lines (measured 2026-10-27/28):
+ *   pid 1261(com.apphousekitchen.aldente-pro): [0x0001cf2f0007a5ad] 00:02:14 PreventSystemSleep named: "AlDente-Pro"
+ *   pid 1200(Amphetamine): [0x0000108d0001904c] 15:58:34 PreventUserIdleSystemSleep named: "Amphetamine (Single-Use - System)"
+ * Only PreventSystemSleep counts. The idle types (PreventUserIdleSystemSleep, NoIdleSleepAssertion —
+ * Amphetamine, coreaudiod, the Claude app, powerd's "display is on") do not stop a closed lid from
+ * sleeping: the Mac slept every lid close under the same Amphetamine session, and counting them kept
+ * a closed Mac awake on battery from 05:33 to 09:19 on 2026-10-28 (§5).
+ */
+export function parseSleepHolders(text: string): SleepHolder[] {
+  const holders: SleepHolder[] = [];
+  for (const [, pid = "", proc = "", type = "", name = ""] of text.matchAll(/^\s*pid (\d+)\((.+?)\): \[[^\]]*\] \S+ (\w+) named: "(.*)"/gm)) {
+    if (type === "PreventSystemSleep") holders.push({ pid: Number(pid), process: proc, type, name });
+  }
+  return holders;
+}
+
+/**
+ * `ioreg -r -c IOMobileFramebufferShim -k DisplayAttributes -d 1` (no privilege needed): one block per
+ * Apple silicon framebuffer with a display attached; unused ports have no DisplayAttributes. Measured
+ * 2026-10-28 with the lid closed and two monitors attached, each block carrying
+ *       "external" = Yes
+ * while AppleClamshellCausesSleep read Yes, so this, not that flag, says whether a monitor or TV keeps
+ * a closed Mac in closed-display mode. A Mac without these framebuffers (Intel) counts none.
+ */
+export function parseExternalDisplays(text: string): number {
+  return text.match(/^\s*"external" = Yes$/gm)?.length ?? 0;
 }
 
 // ---- The decision -----------------------------------------------------------------------------
@@ -152,8 +186,11 @@ export type AwakeInput = {
   error?: string;
 };
 
-/** Whether the Mac should be held awake now, and the one-line reason. Pure. */
-export function decideAwake(i: AwakeInput): { wanted: boolean; reason: string } {
+/**
+ * Whether the Mac should be held awake now, and the one-line reason. Pure. `forced`: a guard (a failed
+ * read, the battery floor, heat) turned it off although it is wanted.
+ */
+export function decideAwake(i: AwakeInput): { wanted: boolean; reason: string; forced?: true } {
   const { mode, until, batteryFloorPercent } = i.settings;
   if (mode === "off") return { wanted: false, reason: "off" };
   const untilMs = until ? Date.parse(until) : NaN;
@@ -168,11 +205,11 @@ export function decideAwake(i: AwakeInput): { wanted: boolean; reason: string } 
   // begun while the Mac was awake to its user takes a hold; one already taken is kept.
   if (mode === "working" && i.darkWake && !i.held) return { wanted: false, reason: "asleep: a model call in a dark wake does not hold the Mac awake" };
   // Guards only matter when something wants the Mac awake.
-  if (i.error) return { wanted: false, reason: `error: ${i.error}` };
+  if (i.error) return { wanted: false, reason: `error: ${i.error}`, forced: true };
   if (i.battery?.onBattery && i.battery.percent !== null && i.battery.percent < batteryFloorPercent) {
-    return { wanted: false, reason: `battery ${i.battery.percent}% is below ${batteryFloorPercent}%` };
+    return { wanted: false, reason: `battery ${i.battery.percent}% is below ${batteryFloorPercent}%`, forced: true };
   }
-  if (i.thermal === "warning") return { wanted: false, reason: "thermal warning" };
+  if (i.thermal === "warning") return { wanted: false, reason: "thermal warning", forced: true };
   return { wanted: true, reason };
 }
 
@@ -247,8 +284,11 @@ export interface AwakeBackend {
   stillHeld(): Promise<boolean>;
   hold(): Promise<HoldOutcome>;
   release(): Promise<HoldOutcome>;
-  /** Right after a successful release: put a closed lid to sleep where the OS would have. */
-  afterRelease(): Promise<void>;
+  /**
+   * Right after a successful release: put a closed lid to sleep where the OS would have. `forced`: a
+   * guard (battery, heat, a failed read) released it, so sleep is not left to other processes.
+   */
+  afterRelease(forced: boolean): Promise<void>;
   setup(sudoFailed: boolean): "ok" | "needs-setup";
   /** Fields the backend keeps in the journal (Windows: the lid action to restore). */
   journalExtra(): Partial<AwakeJournal>;
@@ -456,7 +496,7 @@ export class AwakeController {
     if (d.reason.startsWith("asleep:")) this.logOnce(`awake: ${d.reason}`);
     if (d.wanted && !this.applied) await this.set(true, d.reason);
     else if (!d.wanted && this.applied) {
-      if (await this.set(false, d.reason)) await backend.afterRelease();
+      if (await this.set(false, d.reason)) await backend.afterRelease(d.forced === true);
     }
     this.persist();
   }
@@ -553,12 +593,40 @@ class MacAwakeBackend implements AwakeBackend {
    * lid is closed and macOS says a closed lid now causes sleep (no external display holding it in
    * closed-display mode), put it to sleep so a bagged Mac does not run on. Tried unprivileged first,
    * then through the sudoers rule.
+   *
+   * It sleeps only where macOS would have on the lid closing, had we not held it. Not with an external
+   * display attached: on 2026-10-26 the flag read Yes on a closed Mac driving a TV, and sleepnow
+   * dropped an Amphetamine session's remote sessions and stopped audio playing at the desk (§5). Not
+   * while another process holds PreventSystemSleep (see parseSleepHolders). A failed read leaves the
+   * Mac to macOS too. A guard release (`forced`) sleeps regardless.
    */
-  async afterRelease(): Promise<void> {
+  async afterRelease(forced: boolean): Promise<void> {
     await this.deps.sleep(SLEEPNOW_SETTLE_MS);
     const c = await this.readClamshell();
     if (!c?.lidClosed || c.causesSleep !== true) return;
-    this.deps.log.info("awake: lid is closed and nothing else holds the Mac awake; sleeping now");
+    if (!forced) {
+      const d = await this.deps.run(IOREG, ["-r", "-c", "IOMobileFramebufferShim", "-k", "DisplayAttributes", "-d", "1"]);
+      if (d.code !== 0) {
+        this.deps.log.warn(`awake: lid is closed, but ioreg failed reading displays (${d.code}); leaving sleep to macOS`);
+        return;
+      }
+      const displays = parseExternalDisplays(d.stdout);
+      if (displays > 0) {
+        this.deps.log.info(`awake: lid is closed, but ${displays} external display${displays === 1 ? " is" : "s are"} attached; leaving sleep to macOS`);
+        return;
+      }
+      const a = await this.deps.run(PMSET, ["-g", "assertions"]);
+      if (a.code !== 0) {
+        this.deps.log.warn(`awake: lid is closed, but pmset -g assertions failed (${a.code}); leaving sleep to macOS`);
+        return;
+      }
+      const holders = [...new Set(parseSleepHolders(a.stdout).map((h) => h.process))];
+      if (holders.length > 0) {
+        this.deps.log.info(`awake: lid is closed, but other processes prevent system sleep (${holders.join(", ")}); leaving sleep to macOS`);
+        return;
+      }
+    }
+    this.deps.log.info(`awake: lid is closed; sleeping now (${forced ? "a guard released the hold" : "no external display or system-sleep hold"})`);
     const r = await this.deps.run(PMSET, ["sleepnow"]);
     if (r.code === 0) return;
     const s = await this.deps.run(SUDO, ["-n", PMSET, "sleepnow"]);

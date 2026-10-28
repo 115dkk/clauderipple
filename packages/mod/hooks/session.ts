@@ -155,8 +155,19 @@ export function swamped(context: SessionContextUsage | null, at: number = HEAVY_
  * The window the context share is measured against: Claude Code's own compaction point
  * (`autoCompactWindow`) while it is below the model's window, else the model's window.
  */
-export function contextWindow(window: number, compactAt: number | null | undefined): number {
+export function contextWindow(window: number, compactAt: number | null | undefined, resolvedWindow?: number | null): number {
+  if (resolvedWindow !== null && resolvedWindow !== undefined && resolvedWindow > 0) return resolvedWindow
   return compactAt !== null && compactAt !== undefined && compactAt > 0 && compactAt < window ? compactAt : window
+}
+
+/** Per-model effective window from the router; null also supports routers predating this field. */
+export function modelCompactWindow(body: unknown, model: string): number | null {
+  const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const map = object(object(body).resolvedWindows)
+  const base = model.split('@')[0]!
+  const entry = object(map[model] ?? map[base] ?? map[base.replace(/-\d{8}$/, '')])
+  const value = entry.compactWindow
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
 }
 
 export function coldAlert(memo: CacheMemo | null, contextTokens: number, now: number, hidden: boolean): boolean {

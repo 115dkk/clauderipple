@@ -38,7 +38,7 @@ const boot = (c: Config) =>
 
 test("a route alias follows the live catalogue once it has been read, and today's value before", () => {
   assert.equal(chatgptModelWindow(cfg, "claude-opus-4-7"), undefined, "no catalogue read yet");
-  assert.equal(boot(cfg).auto_compact_windows["claude-opus-4-7"], 258400, "today's global fallback");
+  assert.equal(boot(cfg).auto_compact_windows["claude-opus-4-7"], 272000, "stored target capacity before catalogue refresh");
   noteChatgptModelWindows(catalogue(500000, 95));
   assert.equal(boot(cfg).auto_compact_windows["claude-opus-4-7"], 475000, "the route's target is a catalogue model");
 });

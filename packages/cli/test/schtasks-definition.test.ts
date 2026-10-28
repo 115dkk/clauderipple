@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { taskDefinitionMatches, taskUser } from "../src/schtasks.ts";
+import path from "node:path";
+import { taskDefinitionMatches, taskRouterPid, taskUser, type TaskDeps } from "../src/schtasks.ts";
 
 const expected = { execute: "conhost.exe", arguments: '--headless powershell.exe -NoProfile -File "C:\\Users\\me\\.clauderipple\\router.ps1"', userId: "me" };
 const valid = {
@@ -55,4 +56,80 @@ test("the task user is domain-qualified, and either spelling of it matches", () 
   assert.equal(taskDefinitionMatches({ ...valid, userId: "x", triggerUserId: "x" }, qualified), true);
   assert.equal(taskDefinitionMatches({ ...valid, userId: "Y\\x", triggerUserId: "X\\x" }, qualified), false);
   assert.equal(taskDefinitionMatches({ ...valid, userId: "x", triggerUserId: "X\\other" }, qualified), false);
+});
+
+const home = path.resolve("task-pid-fixture");
+const launcher = path.join(home, "clauderipple-router.ps1");
+const launcherCommand = `powershell.exe -File "${launcher}"`;
+const routerCommand = '"C:\\node.exe" "C:\\shared\\router\\src\\index.js"';
+type ProcessRow = { ProcessId: number; ParentProcessId: number; CommandLine: string | null };
+const tree: ProcessRow[] = [
+  { ProcessId: 31664, ParentProcessId: 100, CommandLine: `conhost.exe --headless ${launcherCommand}` },
+  { ProcessId: 33820, ParentProcessId: 31664, CommandLine: launcherCommand },
+  { ProcessId: 752, ParentProcessId: 33820, CommandLine: routerCommand },
+];
+
+/** Model CIM's read-only process queries, including the old immediate-child query. */
+function processDeps(rows: ProcessRow[]): TaskDeps {
+  return {
+    definition: () => ({ arguments: `--headless ${launcherCommand}` }),
+    run: script => {
+      assert.match(script, /^Get-CimInstance|^\$c = Get-CimInstance/);
+      const parent = /ParentProcessId=(\d+)/.exec(script);
+      if (parent) {
+        const child = rows.find(row => row.ParentProcessId === Number(parent[1]) && row.CommandLine?.includes("router\\src\\index."));
+        return { ok: true, out: JSON.stringify(child ? { pid: child.ProcessId } : null) };
+      }
+      const selected = script.includes("Where-Object") ? rows.filter(row => row.CommandLine?.includes("clauderipple-router.ps1")) : rows;
+      return { ok: true, out: JSON.stringify(selected) };
+    },
+  };
+}
+
+test("issue #100: finds the router grandchild of conhost regardless of process order", () => {
+  const idle = { ProcessId: 0, ParentProcessId: 0, CommandLine: null };
+  for (const rows of [tree, [...tree].reverse(), [idle, ...tree]]) {
+    assert.equal(taskRouterPid(undefined, { home, deps: processDeps(rows) }), 752);
+  }
+});
+
+test("finds direct and deeper descendants, including the packaged runtime", () => {
+  assert.equal(taskRouterPid(undefined, { home, deps: processDeps(tree.slice(1)) }), 752);
+  const deeper = [
+    ...tree.slice(0, 2),
+    { ProcessId: 500, ParentProcessId: 33820, CommandLine: null },
+    { ProcessId: 752, ParentProcessId: 500, CommandLine: routerCommand.replace("node.exe", "ClaudeRipple.exe") },
+  ];
+  assert.equal(taskRouterPid(undefined, { home, deps: processDeps(deeper) }), 752);
+});
+
+test("a shared-runtime router outside our launcher tree is never a control target", () => {
+  const foreign = [
+    { ProcessId: 900, ParentProcessId: 100, CommandLine: 'powershell.exe -File "C:\\other\\clauderipple-router.ps1"' },
+    { ProcessId: 901, ParentProcessId: 900, CommandLine: routerCommand },
+    { ProcessId: 902, ParentProcessId: 100, CommandLine: routerCommand },
+  ];
+  assert.equal(taskRouterPid(undefined, { home, deps: processDeps([...foreign, ...tree]) }), 752);
+  assert.equal(taskRouterPid(undefined, { home, deps: processDeps([...foreign, ...tree.slice(0, 2)]) }), null);
+  assert.equal(taskRouterPid(undefined, { home, deps: processDeps(foreign) }), null);
+});
+
+test("cyclic parent links terminate without selecting an unrelated router", () => {
+  const cyclic = [
+    { ...tree[0]!, ParentProcessId: 33820 },
+    tree[1]!,
+    { ProcessId: 902, ParentProcessId: 100, CommandLine: routerCommand },
+  ];
+  assert.equal(taskRouterPid(undefined, { home, deps: processDeps(cyclic) }), null);
+});
+
+test("unreadable process lists yield no PID without changing task ownership", () => {
+  for (const result of [{ ok: false, out: "Access denied" }, { ok: true, out: "invalid JSON" }, { ok: true, out: "null" }, { ok: true, out: "[]" }]) {
+    const deps = { ...processDeps(tree), run: () => result };
+    assert.equal(taskRouterPid(undefined, { home, deps }), null);
+  }
+  for (const definition of [() => null, () => ({}), () => ({ arguments: '-File "C:\\other\\clauderipple-router.ps1"' })]) {
+    const deps = { definition, run: () => { assert.fail("unowned tasks must not inspect processes"); } };
+    assert.equal(taskRouterPid(undefined, { home, deps }), null);
+  }
 });

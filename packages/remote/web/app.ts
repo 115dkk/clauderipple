@@ -24,7 +24,7 @@ import { emptyQuestionDraft, freeAnswer, questionAnswers, questionsComplete, tog
 /** Where the reader is in a conversation: at its newest message, or at the row whose start sits
  * `inset` pixels below the top edge of the screen (negative when that start is above it). */
 type Position = "bottom" | { key: string; inset: number };
-interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean; /** the page in flight, or the one that failed */ olderReq: string | null; olderFailed: boolean; scroll: Position | null }
+interface Cache { epoch: string | null; events: SessionEvent[]; hasOlder: boolean; loadingOlder: boolean; olderReq: string | null; olderEpoch: string | null; olderCursor: number | null; olderTimer: ReturnType<typeof setTimeout> | null; olderFailed: boolean; scroll: Position | null }
 type Screen = { name: "pair" } | { name: "home" } | { name: "session"; id: string };
 
 const store = {
@@ -130,8 +130,6 @@ export class App {
   }
   private workerPath: V.WorkerSheet[] = [];
   private timelineSize: ResizeObserver | null = null;
-  /** The deadline on the page of earlier history this phone asked for. */
-  private olderTimer: ReturnType<typeof setTimeout> | null = null;
   private imageUrls = new Map<string, Promise<string>>();
   /** Where a diff file was last left, by session and path, so it opens where it was read. */
   private diffOffsets = new Map<string, number>();
@@ -328,7 +326,17 @@ export class App {
         this.ui.sessions = m.sessions; this.ui.groups = m.groups; if (this.screen.name === "home") this.render(); else this.renderChrome(); break;
       case "events": {
         const c = this.cache(m.session);
-        if (m.tail || (c.epoch && c.epoch !== m.epoch)) { c.events = []; c.hasOlder = m.tail?.hasOlder ?? false; }
+        const first = m.events[0]?.seq, last = m.events.at(-1)?.seq;
+        const oldFirst = c.events[0]?.seq, oldLast = c.events.at(-1)?.seq;
+        const connected = c.epoch === m.epoch && first !== undefined && last !== undefined && oldFirst !== undefined && oldLast !== undefined && first <= oldLast + 1 && last >= oldFirst - 1;
+        const replace = (c.epoch !== null && c.epoch !== m.epoch) || (!!m.tail && !connected);
+        if (replace) {
+          this.cancelOlder(c);
+          c.events = [];
+          c.hasOlder = m.tail?.hasOlder ?? false;
+        } else if (m.tail && (oldFirst === undefined || first !== undefined && first <= oldFirst)) {
+          c.hasOlder = m.tail.hasOlder;
+        }
         c.epoch = m.epoch;
         c.events = mergeEvents(c.events, m.events);
         for (const e of m.events) {
@@ -341,10 +349,9 @@ export class App {
       }
       case "history": {
         const c = this.cache(m.session);
-        c.loadingOlder = false;
-        c.olderFailed = false;
-        c.olderReq = null;
-        if (this.olderTimer !== null) { clearTimeout(this.olderTimer); this.olderTimer = null; }
+        if (!c.loadingOlder || c.olderReq !== m.reqId || c.olderEpoch !== c.epoch || (m.epoch !== undefined && m.epoch !== c.olderEpoch)) break;
+        if (c.events[0]?.seq !== c.olderCursor) { this.failOlder(m.reqId); break; }
+        this.cancelOlder(c);
         // A page that adds nothing ends the asking: the host has nothing older to give.
         c.hasOlder = m.events.length ? m.hasOlder : false;
         // The page went in above what the reader is looking at; the row they were on stays put.
@@ -407,7 +414,7 @@ export class App {
 
   cache(id: string): Cache {
     let c = this.caches.get(id);
-    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false, olderReq: null, olderFailed: false, scroll: null }; this.caches.set(id, c); }
+    if (!c) { c = { epoch: null, events: [], hasOlder: false, loadingOlder: false, olderReq: null, olderEpoch: null, olderCursor: null, olderTimer: null, olderFailed: false, scroll: null }; this.caches.set(id, c); }
     return c;
   }
 
@@ -816,25 +823,34 @@ export class App {
     const c = this.cache(this.screen.id);
     if (!c.hasOlder || c.loadingOlder || !c.events.length || (c.olderFailed && !retry)) return;
     if (this.ui.link.state !== "open") return;
-    const reqId = uid();
-    if (!this.link?.send({ t: "history", session: this.screen.id, beforeSeq: c.events[0]!.seq, reqId })) return;
+    const reqId = uid(), beforeSeq = c.events[0]!.seq, epoch = c.epoch;
+    if (!this.link?.send({ t: "history", session: this.screen.id, beforeSeq, reqId, ...(epoch !== null ? { epoch } : {}) })) return;
     c.loadingOlder = true;
     c.olderFailed = false;
     c.olderReq = reqId;
-    if (this.olderTimer !== null) clearTimeout(this.olderTimer);
+    c.olderEpoch = epoch;
+    c.olderCursor = beforeSeq;
     // A host that never answers must not leave the edge spinning for the rest of the visit.
-    this.olderTimer = setTimeout(() => this.failOlder(reqId), 12_000);
+    c.olderTimer = setTimeout(() => this.failOlder(reqId), 12_000);
     this.renderSession();
+  }
+
+  private cancelOlder(c: Cache): void {
+    if (c.olderTimer !== null) clearTimeout(c.olderTimer);
+    c.olderTimer = null;
+    c.loadingOlder = false;
+    c.olderReq = null;
+    c.olderEpoch = null;
+    c.olderCursor = null;
+    c.olderFailed = false;
   }
 
   private failOlder(reqId: string | null): void {
     if (reqId === null) return;
     for (const [id, c] of this.caches) {
       if (c.olderReq !== reqId) continue;
-      c.loadingOlder = false;
+      this.cancelOlder(c);
       c.olderFailed = true;
-      c.olderReq = null;
-      if (this.olderTimer !== null) { clearTimeout(this.olderTimer); this.olderTimer = null; }
       if (this.isCurrent(id)) this.renderSession();
       return;
     }

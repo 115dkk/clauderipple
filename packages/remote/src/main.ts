@@ -194,6 +194,8 @@ async function runHost(): Promise<void> {
     local: new LocalControl({
       dir, config: cfg, version: VERSION, hostPublicKey: toB64u(loadHostKey(dir, nacl).publicKey),
       phones: () => server?.phones() ?? [],
+      inbox: live.modInbox,
+      settingsJobs: live.settingsJobs,
       rotate: token => { server?.rotateToken(token); },
       shutdown: () => stop(),
       busy: () => live.busy(),

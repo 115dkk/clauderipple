@@ -95,6 +95,21 @@ export function providerModelWindow(cfg: Config, model: string): number | undefi
   return entry?.contextWindow;
 }
 
+/** Provider-bound capacity, shared by bootstrap's keys and the context-window API. */
+export function resolvedModelWindow(cfg: Config, id: string, nativeWindow?: number): { model: string; provider: string | null; contextWindow: number | null } {
+  const base = id.split("@")[0]!;
+  const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
+  const target = resolve(id, {}, cfg) ?? (cfg.aliases[base] ? resolve(cfg.aliases[base], {}, cfg) : null);
+  const model = target?.model.split("@")[0] ?? base;
+  const provider = target ? cfg.providers[target.provider] : undefined;
+  const explicit = target && !cfg.direct.some(d => base.startsWith(d.prefix)) ? route?.contextWindow : undefined;
+  const own = cfg.cli.extraModels.find(m => m.model.split("@")[0] === base)?.contextWindow
+    ?? cfg.cli.extraModels.find(m => m.model.split("@")[0] === model)?.contextWindow
+    ?? provider?.models?.find(m => m.id === model || m.id.replace(/-\d{8}$/, "") === model.replace(/-\d{8}$/, ""))?.contextWindow;
+  const known = target ? explicit ?? chatgptModelWindow(cfg, id) ?? own : nativeWindow;
+  return { model, provider: target?.provider ?? null, contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null };
+}
+
 export type PickerModelEntry = { id: string; name: string };
 export type InjectResult = { injected: number; surfaces: { id: string; models: string[]; entries: PickerModelEntry[] }[] };
 

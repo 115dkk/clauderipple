@@ -130,7 +130,7 @@ export type EventBody = MessageImages & (
   | { kind: "figures"; figures: Figures }
   | { kind: "notice"; code: NoticeCode; text?: string });
 
-export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed";
+export type NoticeCode = "host_restarted" | "interrupted" | "api_retry" | "router_down" | "model_changed" | "resumed" | "desktop_open" | "desktop_resumed" | "desktop_bridge" | "desktop_blocked" | "desktop_handoff" | "desktop_handoff_requested" | "desktop_handoff_retry" | "desktop_handoff_failed" | "desktop_settings_failed";
 
 export type SessionEvent = EventBody & { seq: number; at: number };
 
@@ -300,7 +300,8 @@ export type ClientMsg =
   /** `afterSeq` 0 or absent with no epoch: send the tail page. */
   | { t: "attach"; session: string; epoch?: string; afterSeq?: number }
   | { t: "detach"; session: string }
-  | { t: "history"; session: string; beforeSeq: number; reqId: string }
+  /** The cursor belongs to epoch; omitted by older clients. */
+  | { t: "history"; session: string; beforeSeq: number; reqId: string; epoch?: string }
   | { t: "create"; clientMsgId: string; cwd: string; model: string; effort: Effort | null; text: string; permissionMode?: PermissionMode; isolation?: Isolation; baseBranch?: string }
   /** The phone is looking at this session now; clears its attention (a permission request stays). */
   | { t: "seen"; session: string }
@@ -432,7 +433,8 @@ export type HostMsg =
   | { t: "denied"; reason: "token" }
   /** Events after the client's seq. `more` means another frame follows at once. `tail` means older events exist before `events[0]`. */
   | { t: "events"; session: string; epoch: string; events: SessionEvent[]; more: boolean; tail?: { hasOlder: boolean } }
-  | { t: "history"; session: string; reqId: string; events: SessionEvent[]; hasOlder: boolean }
+  /** Epoch actually read; absent on older hosts. A mismatched request gets no page and a fresh tail. */
+  | { t: "history"; session: string; reqId: string; epoch?: string; events: SessionEvent[]; hasOlder: boolean }
   | { t: "sessions"; sessions: SessionSummary[]; groups?: string[] | undefined }
   | { t: "host"; host: HostInfo }
   | { t: "ack"; clientMsgId: string; session: string }

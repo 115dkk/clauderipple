@@ -14,7 +14,7 @@ import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom,
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
@@ -352,7 +352,14 @@ async function putSettings($: EngineInterface, admin: string, base: Settings): P
     if (attempt === 1) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: 409 }))
   }
 }
+let compactWindows: unknown = null
+async function currentCompactAt($: EngineInterface): Promise<number | null> {
+  return modelCompactWindow(compactWindows, await $.session.model()) ?? await read($, compactAt)
+}
 async function syncSettings($: EngineInterface, admin: string): Promise<void> {
+  const windows = await $.http.fetch(`${admin}/api/context-windows`)
+  if (windows.ok) compactWindows = JSON.parse(windows.text)
+  else if (windows.status !== 404) await report($, 'context windows', `HTTP ${windows.status}`)
   const response = await $.http.fetch(`${admin}/api/mod-settings`)
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   const snapshot = settingsSnapshot(response.text)
@@ -510,7 +517,7 @@ async function toggleLimits($: EngineInterface): Promise<void> {
 async function countContext($: EngineInterface): Promise<void> {
   if ((await read($, contextFull))?.busy) return
   const basis = (await read($, context))?.basis ?? null
-  const at = await read($, compactAt)
+  const at = await currentCompactAt($)
   const model = await $.session.model()
   const gen = generation
   const epoch = contextEpoch
@@ -524,7 +531,7 @@ async function countContext($: EngineInterface): Promise<void> {
     // switch while it ran makes it another context's count, and it is dropped.
     const now = await $.session.usage().catch(error => { void report($, 'context check', error); return null })
     const nowModel = await $.session.model()
-    const nowAt = await read($, compactAt)
+    const nowAt = await currentCompactAt($)
     const nowBasis = (await read($, context))?.basis ?? null
     // Read the scope again after every await: a clear may have moved it while this ran.
     const live = run === contextRun && gen === generation && epoch === contextEpoch && model === nowModel && at === nowAt && basis === nowBasis && now !== null && now.context.window === window
@@ -1333,7 +1340,7 @@ let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null
  */
 async function contextShare($: EngineInterface, c: SessionContextUsage): Promise<{ percent: number; tokens: number; window: number; basis: number } | null> {
   if (c.tokens === undefined) return null
-  const at = await read($, compactAt)
+  const at = await currentCompactAt($)
   const model = await $.session.model()
   const full = await read($, contextFull)
   // The count stands only where it was taken: same response, model, window and chat. A stale one
@@ -1354,13 +1361,13 @@ async function contextShare($: EngineInterface, c: SessionContextUsage): Promise
       catch (error) { await report($, 'context summary', error) }
       // A clear or compaction while the summary ran outranks it: publish only for the state it was asked in.
       const modelNow = await $.session.model()
-      const atNow = await read($, compactAt)
+      const atNow = await currentCompactAt($)
       if (gen === generation && epoch === contextEpoch && model === modelNow && at === atNow) shareMemo = { key, breakdown: summary }
     }
     b = shareMemo?.key === key ? shareMemo.breakdown : null
   }
   if (b && b.rawMaxTokens > 0) return { tokens: b.totalTokens, percent: b.percentage, window: b.rawMaxTokens, basis: c.tokens }
-  const window = contextWindow(c.window, at)
+  const window = contextWindow(c.window, at, modelCompactWindow(compactWindows, model))
   return window > 0 ? { tokens: c.tokens, percent: c.tokens / window * 100, window, basis: c.tokens } : null
 }
 async function refreshUsage($: EngineInterface): Promise<void> {
@@ -1457,10 +1464,129 @@ async function tick($: EngineInterface): Promise<void> {
   } catch (error) { await report($, 'session tick', error) }
   finally { ticking = false }
 }
+let inboxPolling = false
+let inboxRetryAt = 0
+/** A claim is never retried or submitted without a 200: a lost reply may already have claimed it. */
+async function pollPhoneInbox($: EngineInterface): Promise<void> {
+  if (inboxPolling) return
+  inboxPolling = true
+  try {
+    // Only the app's own CLI process types a phone message in (measured 2026-10-27: the app sets
+    // claude-desktop; the host's own runs say sdk-ts). Elsewhere this costs one env read a tick.
+    if (await $.env.get('CLAUDE_CODE_ENTRYPOINT') !== 'claude-desktop') return
+    if (await $.clock.now() < inboxRetryAt) return
+    const session = await $.session.id()
+    const admin = await adminUrl($)
+    const list = await $.http.fetch(`${admin}/api/phone-inbox?session=${encodeURIComponent(session)}`)
+    if (list.status !== 200) throw new Error(`inbox HTTP ${list.status}`)
+    const offers = object(JSON.parse(list.text)).offers
+    if (!Array.isArray(offers)) throw new Error('invalid inbox response')
+    for (const raw of offers) {
+      const offer = object(raw)
+      if (offer.sessionId !== session || typeof offer.itemId !== 'string' || !/^[\w-]{1,100}$/.test(offer.itemId) || typeof offer.text !== 'string') throw new Error('invalid inbox offer')
+      if (await $.session.id() !== session) return
+      const claimAt = await $.clock.now()
+      const claim = await $.http.fetch(`${admin}/api/phone-inbox/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId }) })
+      if (claim.status === 409) continue
+      if (claim.status !== 200) throw new Error(`inbox claim HTTP ${claim.status}`)
+      let outcome: 'submitted' | 'failed' = 'failed'
+      try {
+        const now = await $.clock.now()
+        // A claim answered this late is not submitted: the host may be close to giving up on it.
+        if (now >= claimAt && now - claimAt < 10_000 && await $.session.id() === session) {
+          const sent = await $.prompt.submit({ text: offer.text, asUser: true })
+          if (!('drop' in sent)) outcome = 'submitted'
+        }
+      } catch { /* The host shows the failed item for a deliberate resend. */ }
+      const result = await $.http.fetch(`${admin}/api/phone-inbox/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ itemId: offer.itemId, outcome }) })
+      if (result.status !== 200) throw new Error(`inbox result HTTP ${result.status}`)
+    }
+    inboxRetryAt = 0
+  } catch {
+    inboxRetryAt = await $.clock.now() + 15_000
+    // Never log a transport or submit error: it may contain the person's message.
+    await report($, 'phone inbox', 'request failed')
+  } finally { inboxPolling = false }
+}
+type SettingsHelper = { sessionId: string; permissionMode: string; readAt: number }
+let settingsHelper: SettingsHelper | null = null
+let jobsPolling = false
+let jobsRetryAt = 0
+
+/** The app reports metadata as JSON in an MCP text block, not as a session transcript. */
+async function readSettingsHelper($: EngineInterface): Promise<SettingsHelper> {
+  const answer = await $.mcp.call('ccd_session_mgmt', 'get_session', { session_id: 'self' })
+  if (answer.isError) throw new Error('session metadata unavailable')
+  for (const block of answer.content) {
+    if (block.type !== 'text' || typeof block.text !== 'string') continue
+    const value = object(JSON.parse(block.text))
+    if (typeof value.sessionId === 'string' && /^[\w-]{1,100}$/.test(value.sessionId) && typeof value.permissionMode === 'string') {
+      return { sessionId: value.sessionId, permissionMode: value.permissionMode, readAt: await $.clock.now() }
+    }
+  }
+  throw new Error('invalid session metadata')
+}
+
+async function applySettingsJob($: EngineInterface, job: { appSessionId: string; model?: string; effort?: Effort }, helper: string, claimAt: number): Promise<void> {
+  for (const setting of ['model', 'effort'] as const) {
+    const value = job[setting]
+    if (!value) continue
+    // A permission change while polling must not open an approval card on the person's screen.
+    settingsHelper = await readSettingsHelper($)
+    if (settingsHelper.sessionId !== helper || settingsHelper.permissionMode !== 'bypassPermissions') throw new Error('helper permissions changed')
+    const now = await $.clock.now()
+    if (now < claimAt || now - claimAt >= 25_000) throw new Error('claim expired')
+    const answer = await $.mcp.call('ccd_session_mgmt', `set_session_${setting}`, { session_id: job.appSessionId, [setting]: value })
+    if (answer.isError) throw new Error(`${setting} change failed`)
+  }
+}
+
+/** Only a claimed job can change another session; a claimed job is never retried. */
+async function pollSettingsJobs($: EngineInterface): Promise<void> {
+  if (jobsPolling) return
+  jobsPolling = true
+  try {
+    if (await $.env.get('CLAUDE_CODE_ENTRYPOINT') !== 'claude-desktop') return
+    const now = await $.clock.now()
+    if (now < jobsRetryAt) return
+    if (!settingsHelper || now - settingsHelper.readAt >= 180_000 || now < settingsHelper.readAt) settingsHelper = await readSettingsHelper($)
+    // Other modes can ask for approval of another session's change, which a phone user cannot answer.
+    if (settingsHelper.permissionMode !== 'bypassPermissions') return
+    const helper = settingsHelper.sessionId
+    const admin = await adminUrl($)
+    const list = await $.http.fetch(`${admin}/api/settings-jobs?exclude=${encodeURIComponent(helper)}`)
+    if (list.status !== 200) throw new Error('settings jobs request failed')
+    const jobs = object(JSON.parse(list.text)).jobs
+    if (!Array.isArray(jobs)) throw new Error('invalid settings jobs response')
+    for (const raw of jobs) {
+      const job = object(raw)
+      const effort = effortOf(job.effort)
+      if (typeof job.jobId !== 'string' || !/^[\w-]{1,100}$/.test(job.jobId) || typeof job.appSessionId !== 'string' || !/^[\w-]{1,100}$/.test(job.appSessionId) || job.appSessionId === helper ||
+          job.model !== undefined && (typeof job.model !== 'string' || !/^[\w.\-\[\]@:]{1,100}$/.test(job.model)) || job.effort !== undefined && !effort || job.model === undefined && !effort) throw new Error('invalid settings job')
+      const claimAt = await $.clock.now()
+      const claim = await $.http.fetch(`${admin}/api/settings-jobs/claim`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.jobId, helper }) })
+      if (claim.status === 409) continue
+      if (claim.status !== 200) throw new Error('settings job claim failed')
+      let outcome: 'applied' | 'failed' = 'applied'
+      try { await applySettingsJob($, { appSessionId: job.appSessionId, ...(typeof job.model === 'string' ? { model: job.model } : {}), ...(effort ? { effort } : {}) }, helper, claimAt) }
+      catch { outcome = 'failed'; settingsHelper = null }
+      const result = await $.http.fetch(`${admin}/api/settings-jobs/result`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jobId: job.jobId, outcome, ...(outcome === 'failed' ? { detail: 'settings change failed' } : {}) }) })
+      if (result.status !== 200 || outcome === 'failed') throw new Error('settings job failed')
+    }
+    jobsRetryAt = 0
+  } catch {
+    settingsHelper = null
+    jobsRetryAt = await $.clock.now() + 15_000
+    // Transport and tool errors can contain private data; log neither those nor the job.
+    await report($, 'settings jobs', 'request failed')
+  } finally { jobsPolling = false }
+}
 function startTimers($: EngineInterface): void {
   if (timersStarted) return
   timersStarted = true
   $.clock.after(1, async () => { await refreshRouter($); await tick($) })
+  $.clock.every(1500, async () => { await pollPhoneInbox($) })
+  $.clock.every(3000, async () => { await pollSettingsJobs($) })
   $.clock.every(3000, async () => { await refreshRouter($) })
   $.clock.every(15000, async () => { await tick($) })
   $.clock.every(1000, async () => { await agentsClock($) })
@@ -2273,28 +2399,35 @@ export const register: Register = on => {
       const which = await read($, panel)
       if (e.props.hasSurvey && which !== null) return next(e)
       const frame = await frameOf($, e)
-      if (which === 'settings') return renderSettings(el, frame, await settingsView($), settingsActions($)) as RenderElement
+      const { Box, Button, Text } = el
+      // What the hooks after ours drew here (another mod's tree, the desktop's survey) stays, with
+      // ours under it: a band drawn in its place blanked their rows (catalogue review, 2026-10-26).
+      // The engine alone draws nothing here but a survey, so its bare answer (or none) is left out.
+      const drawn = await next(e)
+      const theirs = drawn != null && (e.props.hasSurvey || drawn.type !== 'engine') ? drawn : null
+      const after = (node: RenderNode): RenderElement => (theirs
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{theirs}{node}</Box>
+        : node) as RenderElement
+      if (which === 'settings') return after(renderSettings(el, frame, await settingsView($), settingsActions($)))
       if (which === 'compact' || which === 'clear') {
         const choice = await alertView($, frame.now)
-        if (choice) return renderAlert(el, frame, choice, alertActions($, choice)) as RenderElement
+        if (choice) return after(renderAlert(el, frame, choice, alertActions($, choice)))
       }
       if (which === 'setup') {
-        return renderSetup(el, frame, { draft: normalizeSettings(await read($, settingsDraft) ?? await read($, settings)), jev: await read($, jev), step: await read($, setupStep) }, setupActions($)) as RenderElement
+        return after(renderSetup(el, frame, { draft: normalizeSettings(await read($, settingsDraft) ?? await read($, settings)), jev: await read($, jev), step: await read($, setupStep) }, setupActions($)))
       }
-      const { Box, Button, Text } = el
       // What the phone queued floats over whatever is here, only while something waits (ui/queue.tsx).
       const queued = await read($, phoneQueue)
-      // The desktop's survey (above) sits under what the phone queued and over the band.
-      const survey = e.props.hasSurvey ? await next(e) : null
-      const over = (node: RenderNode | null): RenderElement => (queued || survey
-        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{queued ? renderPhoneQueue(el, frame, queued) : null}{survey}{node}</Box>
-        : node) as RenderElement
+      // Theirs sits under what the phone queued and over the band.
+      const over = (node: RenderNode | null): RenderElement => (queued || theirs
+        ? <Box flexDirection="column" rowGap={0.5} width="100%" minWidth={0}>{queued ? renderPhoneQueue(el, frame, queued) : null}{theirs}{node}</Box>
+        : node ?? drawn) as RenderElement
       const below = queued ? { ...frame, maxRows: Math.max(1, frame.maxRows - PHONE_QUEUE_ROWS) } : frame
-      if (await read($, bandHidden)) return over(survey ? null : await next(e))
+      if (await read($, bandHidden)) return over(null)
       const alert = await alertView($, frame.now)
       if (alert) return over(renderAlert(el, below, alert, alertActions($, alert)))
       const s = await currentSettings($)
-      if (s.layout === 'minimal') return over(survey ? null : await next(e))
+      if (s.layout === 'minimal') return over(null)
       const actions = bandActions($, e.surface)
       // The desktop draws the band as one surface with its × inside; the terminal keeps the row
       // of facts and controls with the close control (and its effort button) after it.
@@ -2355,7 +2488,7 @@ export const register: Register = on => {
       const full = await read($, contextFull)
       // The count's own window is the one it draws; another window clears it in contextShare, and
       // a model or chat change is caught here before that poll (2026-10-25).
-      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await read($, compactAt))
+      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await currentCompactAt($))
       const fresh = full?.breakdown && same ? full : null
       // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
       const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null

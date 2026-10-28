@@ -10,7 +10,9 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay, setImmediate as nextTick } from "node:timers/promises";
 import { WebSocket } from "ws";
 import { PermissionQueue } from "../src/permissions.ts";
-import { MessageReceipts } from "../src/receipts.ts";
+import { BridgeClient } from "../src/bridge-client.ts";
+import type { DesktopProcess } from "../src/desktop.ts";
+import { MessageReceipts, OutcomeUnknownError } from "../src/receipts.ts";
 import { ATTACHMENT_CAP, CHUNK_MESSAGE_MAX, FRAME_CAP, PING_MS, STALE_MS } from "../src/protocol.ts";
 import type { BlobChunk, BrowseResult, ClientMsg, HostMsg, SessionEvent } from "../src/protocol.ts";
 import { FrameAssembler } from "../src/chunks.ts";
@@ -265,10 +267,10 @@ function holdingQuery(users: string[]) {
 }
 
 /** No listener, real SDK, router, credentials or desktop sessions; only owned temporary storage. */
-async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn) {
+async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn, status = router.status) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-memory-host-"));
-  const sessions = new Sessions({ dir, router, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
+  const sessions = new Sessions({ dir, router: { ...router, status }, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
     onEvent: () => {}, onSessions: () => {} });
   const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
     hostName: "test", version: "test", recentCli: async () => [] });
@@ -1135,6 +1137,465 @@ test("attach tails without a cursor, replays exactly after epoch/seq, and tails 
   assert.equal(wrongEpoch.epoch, tail.epoch);
   assert.deepEqual(wrongEpoch.tail, { hasOlder: false });
   assert.deepEqual(wrongEpoch.events, readAll(f.sessions, id));
+});
+
+for (const { textSize, count, poll } of [{ textSize: 20, count: 120, poll: false }, { textSize: 3000, count: 120, poll: false }, { textSize: 20, count: 20, poll: true }]) test(`connected clients receive the rebuilt desktop epoch as a tail (${count} events, ${textSize} characters, ${poll ? "poll" : "send"})`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "epoch-rebase-wire-"));
+  const projects = path.join(root, "projects", "project");
+  const dir = path.join(root, "host");
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  fs.mkdirSync(projects, { recursive: true });
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(projects, `${id}.jsonl`), Array.from({ length: count }, (_, i) =>
+    JSON.stringify({ type: "user", uuid: `desktop-${i}`, cwd: root, message: { content: `${i}:` + "x".repeat(textSize) } }) + "\n").join(""));
+  fs.writeFileSync(path.join(dir, "sessions.json"), JSON.stringify([{ id, sdkSessionId: id, cwd: root, model: "test", effort: null,
+    title: "test", createdAt: 1, updatedAt: 1, state: "idle", createdBy: "old", contextWindow: null, desktopHandoff: "excluded" }]));
+  const registry = new Map<string, DesktopProcess>([[id, { sessionId: id, pid: 42, status: "idle" }]]);
+  const bridge = new BridgeClient({ auth: () => ({ accessToken: "test", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (options?.method === "POST") return Response.json({});
+    if (String(url).includes("/events/stream")) return new Response(new ReadableStream<Uint8Array>({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    if (String(url).includes("/events?")) return Response.json({ data: [] });
+    return Response.json({ worker_status: "idle" });
+  } });
+  let server: HostServer;
+  const sessions = new Sessions({ dir, desktopProjects: path.dirname(projects), desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient: bridge,
+    permissions: PermissionQueue.open(path.join(root, "permissions.json")), router, queryFn: () => { throw new Error("unexpected SDK query"); },
+    onEvent: session => server.onEvent(session), onSessions: () => server.onSessions() });
+  server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router, hostName: "test", version: "test", recentCli: async () => [] });
+  const peers = [new MemoryPeer(), new MemoryPeer()];
+  t.after(async () => { await server.close(); sessions.shutdown(); await nextTick(); fs.rmSync(root, { recursive: true, force: true }); });
+  const oldLog = sessions.log(id);
+  for (let i = 0; i < 100; i++) oldLog.append({ kind: "user", text: `old-${i}`, clientMsgId: `old-${i}` });
+  for (const peer of peers) {
+    server.connected(peer);
+    peer.receive({ t: "hello", token, clientId: "epoch-phone" });
+    await peer.take("ready");
+    peer.receive({ t: "attach", session: id });
+    assert.equal((await peer.take("events")).events.at(-1)?.seq, 100);
+  }
+  registry.get(id)!.bridgeSessionId = "bridge";
+  if (poll) await sessions.pollDesktop();
+  else await sessions.send(id, "new-phone-message", "continue");
+  const log = sessions.log(id);
+  assert.notEqual(log.epoch, oldLog.epoch);
+  assert.ok(log.lastSeq >= count);
+  if (poll) await waitFor(() => peers.every(peer => peer.frames.some(frame => frame.t === "events")));
+  for (const peer of peers) {
+    const frame = await peer.take("events");
+    assert.equal(frame.epoch, log.epoch);
+    assert.deepEqual(frame.tail, { hasOlder: textSize === 3000 });
+    assert.deepEqual(frame.events, log.before(frame.events.at(-1)!.seq + 1).events);
+    let events = frame.events;
+    let hasOlder = frame.tail!.hasOlder;
+    while (hasOlder) {
+      peer.receive({ t: "history", session: id, beforeSeq: events[0]!.seq, reqId: `older-${events[0]!.seq}` });
+      const page = await peer.take("history");
+      events = [...page.events, ...events];
+      hasOlder = page.hasOlder;
+    }
+    assert.deepEqual(events, readAll(sessions, id).filter(event => event.seq <= frame.events.at(-1)!.seq));
+    assert.deepEqual(events.map(event => event.seq), Array.from({ length: frame.events.at(-1)!.seq }, (_, i) => i + 1));
+  }
+  const appended = log.append({ kind: "user", text: "same epoch", clientMsgId: "same-epoch" });
+  server.onEvent(id);
+  for (const peer of peers) {
+    const frames = peer.frames.filter((frame): frame is Extract<HostMsg, { t: "events" }> => frame.t === "events");
+    assert.ok(frames.every(frame => frame.epoch === log.epoch && !frame.tail));
+    assert.equal(frames.flatMap(frame => frame.events).filter(event => event.seq === appended.seq).length, 1);
+  }
+});
+
+test("history rebuild reports its epoch and sends the replacement tail to every attached reader", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "history-epoch-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const file = path.join(project, `${id}.jsonl`);
+  const transcript = (prefix: string) => Array.from({ length: 120 }, (_, i) => JSON.stringify({ type: "user", uuid: `${prefix}-${i}`, cwd: root, message: { content: `${prefix}-${i} ${"x".repeat(3000)}` } }) + "\n").join("");
+  fs.writeFileSync(file, transcript("old"));
+  const f = await fixture(t, {}, root);
+  const peers = [new MemoryPeer(), new MemoryPeer()];
+  for (const peer of peers) {
+    f.server.connected(peer);
+    peer.receive({ t: "hello", token, clientId: "history-reader" });
+    await peer.take("ready");
+    peer.receive({ t: "attach", session: id });
+  }
+  const first = await peers[0]!.take("events");
+  await peers[1]!.take("events");
+  fs.writeFileSync(file, transcript("newer"));
+  peers[0]!.emit("message", JSON.stringify({ t: "history", session: id, beforeSeq: first.events[0]!.seq, reqId: "old-page", epoch: first.epoch }));
+  const response = await peers[0]!.take("history");
+  assert.notEqual(response.epoch, first.epoch);
+  assert.deepEqual(response.events, []);
+  for (const peer of peers) {
+    const tail = await peer.take("events");
+    assert.equal(tail.epoch, response.epoch);
+    assert.ok(tail.tail);
+    assert.ok(tail.events.some(event => event.kind === "user" && event.text.startsWith("newer")));
+  }
+  peers[0]!.receive({ t: "history", session: id, beforeSeq: first.events[0]!.seq, reqId: "legacy" });
+  const legacy = await peers[0]!.take("history");
+  assert.equal(legacy.epoch, response.epoch);
+  assert.ok(legacy.events.length > 0);
+});
+
+test("backpressured tail updates coalesce and deliver the latest snapshot after drain", async t => {
+  const f = await memoryHost(t);
+  const log = f.sessions.log(f.id);
+  f.peer.bufferedAmount = 2 * 1024 * 1024;
+  f.peer.receive({ t: "attach", session: f.id });
+  for (let i = 0; i < 10; i++) {
+    log.append({ kind: "user", text: `update-${i}`, clientMsgId: `update-${i}` });
+    f.peer.receive({ t: "attach", session: f.id });
+  }
+  assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
+  t.mock.timers.tick(1000);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
+  f.peer.bufferedAmount = 0;
+  t.mock.timers.tick(200);
+  const tail = await f.peer.take("events");
+  assert.ok(tail.tail);
+  assert.equal(tail.events.at(-1)?.seq, log.lastSeq);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
+});
+
+/** Script only the SDK boundary: observe the model when each input is actually read. */
+function orderedQuery() {
+  const modelReply = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const users: { text: string; model: string }[] = [];
+  const queryFn: QueryFn = params => {
+    let model = String(params.options.model);
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const user of params.prompt) {
+          users.push({ text: String(user.message.content), model });
+          yield { type: "result", subtype: "success" };
+        }
+      },
+      interrupt: async () => {}, close: () => {},
+      setPermissionMode: async mode => { calls.push(`mode:${mode}`); },
+      setModel: async next => {
+        calls.push(`model:${next}`);
+        if (next === "slow" || next === "hung") await modelReply.promise;
+        model = next!;
+      },
+    };
+  };
+  return { queryFn, modelReply, calls, users };
+}
+
+for (const separateReads of [false, true]) test(`model pick then immediate send uses the new model (${separateReads ? "separate reads" : "same read"})`, async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  f.peer.receive({ t: "set_model", session: f.id, reqId: "pick", model: "slow", effort: null });
+  if (separateReads) await nextTick();
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-pick", text: "after pick" });
+  await nextTick();
+  assert.equal(sdk.users.length, 1);
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false);
+  sdk.modelReply.resolve();
+  await f.peer.take("ack");
+  assert.deepEqual(sdk.users.at(-1), { text: "after pick", model: "slow" });
+});
+
+test("send then pick dispatches with the old model before applying the pick", async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "before-pick", text: "old model" });
+  f.peer.receive({ t: "set_model", session: f.id, reqId: "pick", model: "next", effort: null });
+  await f.peer.take("ack");
+  await f.peer.take("res");
+  assert.deepEqual(sdk.users.at(-1), { text: "old model", model: "test" });
+  assert.deepEqual(sdk.calls, ["model:next"]);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "next");
+});
+
+test("a hung pick releases the next pick and send at 15 seconds, and its late answer records nothing", async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  const hung = f.sessions.setModel(f.id, "hung", null, "hung-pick");
+  const next = f.sessions.setModel(f.id, "next", null, "next-pick");
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-hung", text: "after hung" });
+  await nextTick();
+  t.mock.timers.tick(14_999);
+  await nextTick();
+  assert.deepEqual(sdk.calls, ["model:hung"]);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await hung, { status: "unknown" });
+  assert.deepEqual(await next, { status: "applied", model: "next", effort: null });
+  await f.peer.take("ack");
+  assert.deepEqual(sdk.users.at(-1), { text: "after hung", model: "next" });
+  const before = f.sessions.log(f.id).lastSeq;
+  sdk.modelReply.resolve();
+  await nextTick(); await nextTick();
+  assert.equal(f.sessions.log(f.id).lastSeq, before);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "next");
+  assert.deepEqual(await f.sessions.setModel(f.id, "hung", null, "hung-pick"), { status: "unknown" });
+});
+
+test("an expired mode waiting for SDK readiness makes no outgoing call when readiness arrives", async t => {
+  const sdk = orderedQuery();
+  const ready = Promise.withResolvers<Awaited<ReturnType<typeof router.status>>>();
+  const f = await memoryHost(t, sdk.queryFn, () => ready.promise);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  const first = f.sessions.setMode(f.id, "plan", "old-mode");
+  const second = f.sessions.setMode(f.id, "default", "new-mode");
+  await nextTick();
+  t.mock.timers.tick(15_000);
+  assert.deepEqual(await first, { status: "unknown" });
+  await nextTick();
+  ready.resolve(await router.status());
+  assert.deepEqual(await second, { status: "applied", permissionMode: "default" });
+  assert.deepEqual(sdk.calls, ["mode:default"]);
+  assert.equal(f.sessions.summaryOf(f.id)?.permissionMode, "default");
+  assert.equal(f.sessions.log(f.id).tail().events.some(e => e.kind === "mode" && e.mode === "plan"), false);
+});
+
+test("each queued pick gets 15 seconds from its own start, not from arrival", async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  const first = f.sessions.setModel(f.id, "hung", null, "first");
+  const second = f.sessions.setModel(f.id, "slow", null, "second");
+  await nextTick();
+  t.mock.timers.tick(15_000);
+  assert.deepEqual(await first, { status: "unknown" });
+  await nextTick();
+  assert.deepEqual(sdk.calls, ["model:hung", "model:slow"]);
+  t.mock.timers.tick(14_999);
+  let done = false;
+  void second.then(() => { done = true; });
+  await nextTick();
+  assert.equal(done, false);
+  sdk.modelReply.resolve();
+  assert.deepEqual(await second, { status: "applied", model: "slow", effort: null });
+});
+
+test("a message in the same read as a setting change still waits for it", async t => {
+  const f = await memoryHost(t);
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: () => Promise<void> }).changeMode = () => new Promise<void>(resolve => { release = resolve; });
+  f.peer.frames.length = 0;
+  f.peer.receive({ t: "set_mode", reqId: "mode-1", sessionId: f.id, mode: "plan" });
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "same-read", text: "hello", behavior: "steer" });
+  await nextTick(); await nextTick();
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false, "the message waits for the mode change before it");
+  release();
+  for (let i = 0; i < 5 && !f.peer.frames.some(frame => frame.t === "ack"); i++) await nextTick();
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), true);
+});
+
+for (const stopped of [false, true]) test(`a queued message waits for a setting change, then ${stopped ? "stays queued after a Stop" : "goes out"}`, async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  const changing = f.sessions.setModel(f.id, "slow", null, "pick");
+  f.peer.receive({ t: "req", reqId: "enqueue-1", op: { op: "enqueue", session: f.id, clientMsgId: "queued-1", text: "after the pick" } });
+  await nextTick();
+  assert.equal(sdk.users.length, 1, "the drain waits for the pick before it");
+  if (stopped) f.sessions.holdQueue(f.id);
+  sdk.modelReply.resolve();
+  await changing;
+  for (let i = 0; i < 10; i++) await nextTick();
+  assert.equal(sdk.users.length, stopped ? 1 : 2);
+  if (!stopped) assert.deepEqual(sdk.users.at(-1), { text: "after the pick", model: "slow" });
+});
+
+test("a setting change that arrives after a waiting message runs after it", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: (id: string, mode: string) => Promise<void> }).changeMode = (_id, mode) => {
+    order.push(`mode:${mode}`);
+    return mode === "plan" ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+  };
+  const send = f.sessions.send.bind(f.sessions);
+  f.sessions.send = ((...args: Parameters<typeof send>) => { order.push("send"); return send(...args); }) as typeof send;
+  f.peer.receive({ t: "set_mode", reqId: "mode-a", sessionId: f.id, mode: "plan" });
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "between", text: "hello", behavior: "steer" });
+  f.peer.receive({ t: "set_mode", reqId: "mode-b", sessionId: f.id, mode: "default" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan"]);
+  release();
+  for (let i = 0; i < 20 && order.length < 3; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan", "send", "mode:default"], "the message runs in plan mode, as picked when it was sent");
+});
+
+for (const action of ["hold", "remove", "replace"] as const) test(`send-now rechecks ${action} after waiting for settings`, async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  // A pending pick keeps the drain on the first item, ahead of send-now's chosen item.
+  const changing = f.sessions.setModel(f.id, "slow", null, "pick");
+  f.sessions.enqueue(f.id, "first", "first");
+  f.sessions.holdQueue(f.id);
+  f.sessions.enqueue(f.id, "queued-now", "original");
+  const sent = f.sessions.sendQueued(f.id, "queued-now");
+  const refused = assert.rejects(sent, action === "hold" ? /대기열이 멈춰/ : /no longer queued/);
+  if (action === "hold") f.sessions.holdQueue(f.id);
+  else {
+    f.sessions.removeQueued(f.id, "queued-now");
+    if (action === "replace") {
+      f.sessions.enqueue(f.id, "queued-now", "original");
+      f.sessions.holdQueue(f.id);
+    }
+  }
+  sdk.modelReply.resolve();
+  await changing;
+  await refused;
+  assert.equal(sdk.users.some(user => user.text === "original"), false);
+  f.sessions.holdQueue(f.id);
+});
+
+test("\"send now\" takes its place among setting changes as it arrives", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  let release!: () => void;
+  (f.sessions as unknown as { changeMode: (id: string, mode: string) => Promise<void> }).changeMode = (_id, mode) => {
+    order.push(`mode:${mode}`);
+    return mode === "plan" ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+  };
+  const deliver = (f.sessions as unknown as { deliver: (...args: unknown[]) => unknown }).deliver.bind(f.sessions);
+  (f.sessions as unknown as { deliver: (...args: unknown[]) => unknown }).deliver = (...args) => { order.push("send"); return deliver(...args); };
+  f.peer.receive({ t: "set_mode", reqId: "mode-a", sessionId: f.id, mode: "plan" });
+  // Queued behind mode A (the drain waits for it), then sent now from another phone.
+  f.peer.receive({ t: "req", reqId: "enqueue-1", op: { op: "enqueue", session: f.id, clientMsgId: "queued-now", text: "now" } });
+  await nextTick();
+  const sent = f.sessions.sendQueued(f.id, "queued-now");
+  f.peer.receive({ t: "set_mode", reqId: "mode-b", sessionId: f.id, mode: "default" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  release();
+  await sent;
+  for (let i = 0; i < 10 && order.length < 3; i++) await nextTick();
+  assert.deepEqual(order, ["mode:plan", "send", "mode:default"]);
+});
+
+test("\"send now\" holds its place while the app considers it, with nothing before it", async t => {
+  const f = await memoryHost(t);
+  const order: string[] = [];
+  const host = f.sessions as unknown as {
+    changeMode: (id: string, mode: string) => Promise<void>;
+    modEligible: () => boolean;
+    offerMod: () => Promise<"expired">;
+    deliver: (...args: unknown[]) => unknown;
+  };
+  host.changeMode = async (_id, mode) => { order.push(`mode:${mode}`); };
+  let lapse!: () => void;
+  host.modEligible = () => true;
+  host.offerMod = () => new Promise(resolve => { lapse = () => resolve("expired"); });
+  const deliver = host.deliver.bind(f.sessions);
+  host.deliver = (...args) => { order.push("send"); return deliver(...args); };
+  // Left in the queue while a turn ran (as the drain would, it skips one that is held).
+  (f.sessions as unknown as { sendQueue: { add(session: string, item: { id: string; text: string; attachments: [] }, at: number): boolean } }).sendQueue.add(f.id, { id: "queued-now", text: "now", attachments: [] }, Date.now());
+  f.sessions.holdQueue(f.id);
+  const sent = f.sessions.sendQueued(f.id, "queued-now");
+  f.peer.receive({ t: "set_mode", reqId: "mode-after", sessionId: f.id, mode: "plan" });
+  for (let i = 0; i < 5; i++) await nextTick();
+  assert.deepEqual(order, [], "the pick made after it waits while the app has the offer");
+  lapse();
+  await sent;
+  for (let i = 0; i < 10 && order.length < 2; i++) await nextTick();
+  assert.deepEqual(order, ["send", "mode:plan"]);
+});
+
+test("queuing an id still being sent answers with that send", async t => {
+  const f = await memoryHost(t);
+  const host = f.sessions as unknown as {
+    receipts: { begin(key: string, session: string): void };
+    sending: Map<string, Promise<string>>;
+  };
+  let fail!: (error: Error) => void;
+  const send = new Promise<string>((_, reject) => { fail = reject; });
+  host.receipts.begin(`send:${f.id}:in-flight`, f.id);
+  host.sending.set(`send:${f.id}:in-flight`, send);
+  const queued = f.sessions.enqueue(f.id, "in-flight", "hello");
+  assert.ok(queued, "not an \"it is queued\" while nothing holds it");
+  fail(new Error("upstream refused"));
+  await assert.rejects(queued, /upstream refused/);
+});
+
+test("a message id already sent is not queued again", async t => {
+  const f = await memoryHost(t);
+  const receipts = (f.sessions as unknown as { receipts: { begin(key: string, session: string): void; complete(key: string, session?: string): void } }).receipts;
+  receipts.begin(`send:${f.id}:taken`, f.id);
+  receipts.complete(`send:${f.id}:taken`, f.id);
+  // The app took it last time; it would take this one too, with no receipt check on its way.
+  const offered: string[] = [];
+  const host = f.sessions as unknown as { modEligible: () => boolean; offerMod: (id: string, desktopId: string, item: { id: string }) => null };
+  host.modEligible = () => true;
+  host.offerMod = (_id, _desktopId, item) => { offered.push(item.id); return null; };
+  f.sessions.enqueue(f.id, "taken", "hello");
+  await nextTick();
+  assert.deepEqual(offered, [], "the app would run it a second time");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+});
+
+test("an attach already up to date is answered, so a saved copy can tell it is current", async t => {
+  const f = await memoryHost(t);
+  const log = f.sessions.log(f.id);
+  log.append({ kind: "user", text: "one", clientMsgId: "one" });
+  f.peer.frames.length = 0;
+  f.peer.receive({ t: "attach", session: f.id, epoch: log.epoch, afterSeq: log.lastSeq });
+  const frame = await f.peer.take("events");
+  assert.deepEqual(frame.events, []);
+  assert.equal(frame.epoch, log.epoch);
+});
+
+test("session lists wait for a backed-up connection to drain and only the newest goes out", async t => {
+  const f = await memoryHost(t);
+  f.peer.frames.length = 0;
+  f.peer.bufferedAmount = 2 * 1024 * 1024;
+  for (let i = 0; i < 8; i++) {
+    f.server.onSessions();
+    t.mock.timers.tick(150);
+  }
+  t.mock.timers.tick(1000);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "sessions").length, 0);
+  f.peer.bufferedAmount = 0;
+  t.mock.timers.tick(200);
+  assert.equal(f.peer.frames.filter(frame => frame.t === "sessions").length, 1);
+});
+
+test("desktop snapshot updates wait for drain and send only the newest tail", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-tail-pressure-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = path.join(root, "project");
+  fs.mkdirSync(project);
+  const id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const file = path.join(project, `${id}.jsonl`);
+  const line = (i: number) => JSON.stringify({ type: "user", uuid: `p-${i}`, cwd: root, message: { content: `update-${i}` } }) + "\n";
+  fs.writeFileSync(file, line(0));
+  const f = await fixture(t, {}, root);
+  const peer = new MemoryPeer();
+  f.server.connected(peer);
+  peer.receive({ t: "hello", token, clientId: "slow-desktop-reader" });
+  await peer.take("ready");
+  peer.receive({ t: "attach", session: id });
+  await peer.take("events");
+  peer.bufferedAmount = 2 * 1024 * 1024;
+  for (let i = 1; i <= 10; i++) {
+    fs.appendFileSync(file, line(i));
+    f.server.onEvent(id);
+  }
+  assert.equal(peer.frames.filter(frame => frame.t === "events").length, 0);
+  peer.bufferedAmount = 0;
+  await waitFor(() => peer.frames.some(frame => frame.t === "events"));
+  const tail = await peer.take("events");
+  assert.ok(tail.tail);
+  assert.ok(tail.events.some(event => event.kind === "user" && event.text === "update-10"));
+  assert.equal(peer.frames.filter(frame => frame.t === "events").length, 0);
 });
 
 test("history pages a >=2 MiB log back to seq 1 with bounded frames and every visible seq exactly once", { timeout: 4500 }, async t => {

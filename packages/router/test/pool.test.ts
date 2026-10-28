@@ -94,6 +94,24 @@ test("only failures another credential could answer are retryable", () => {
   assert.equal(classify(501).retryable, false, "the server says it will never do this");
 });
 
+test("issue #101: only the relay's explicit workspace-region 400 can move a credential", () => {
+  const message = "Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it.";
+  const body = JSON.stringify({ error: { type: "server_error", message } });
+  assert.deepEqual(classify(400, undefined, body), { retryable: true, kind: "auth", cooldownMs: 60_000, quarantine: false });
+  for (const text of ["", message, JSON.stringify({ error: { type: "invalid_request_error", message } }), JSON.stringify({ error: { type: "server_error", message: "Upstream request failed: invalid messages" } }), JSON.stringify({ error: { type: "server_error", message: "Global regions" } })]) {
+    assert.equal(classify(400, undefined, text).retryable, false, text);
+  }
+  const c = clock();
+  const pool = new CredentialPool({ now: c.now });
+  const all = creds("a", "b");
+  pool.pick("p", all, "worker-a");
+  pool.penalise("p", "a", 400, undefined, body);
+  assert.equal(pool.pick("p", all, "worker-a")?.id, "b");
+  c.advance(60_001);
+  assert.equal(pool.pick("p", all, "worker-a")?.id, "b");
+  assert.equal(pool.pick("p", all, "worker-b")?.id, "a");
+});
+
 test("a rejected credential is parked; a rate-limited one is only paused", () => {
   const auth = classify(401);
   assert.equal(auth.retryable && auth.quarantine, true, "an auth failure does not heal on its own");

@@ -1,5 +1,199 @@
 # Changelog
 
+## 0.12.18 — 2026-10-28
+
+### Fixed
+
+- **A model saved with `"contextWindow": null` gets its catalogue window too.** The catalogue
+  backfill and the new-provider check filled only a missing field, so a config that stored the blank
+  as `null` (Hive's models in a real config) kept running on the 258,400 fallback after 0.12.17.
+
+## 0.12.17 — 2026-10-28
+
+### Fixed
+
+- **A routed model compacts within its own window, not at the global setting.** With
+  `autoCompactWindow` set in settings.json, Claude Code used it for every model and treated the
+  per-model windows the router sends at bootstrap as defaults only: a slot routed to GPT-6.1 Sol
+  (475K) compacted at 600K, past what Sol accepts. The router now writes
+  `modelSettings.<model>.autoCompactWindow` for each routed model, the smaller of the model's window
+  and the global setting, which Claude Code honours over the global value. Native Claude models are
+  left to the global setting. An entry the person wrote themselves is never touched, entries for
+  models no longer routed are removed, and uninstall removes only the unchanged entries it wrote.
+  Changes to the global setting are picked up within 15 seconds.
+- **The phone and the band show the window the session actually compacts at.** The phone showed a
+  1M Claude session against 1M while the Desktop app said 600K, and the band's fallback used the
+  global setting for every model. Both now read the router's per-model effective window from
+  `/api/context-windows` (`compactWindow`); the band still prefers `/context`'s own figure.
+- **A provider that does not report context sizes gets them from the model catalogue.** Hive's
+  `/models` lists ids alone, so its models fell back to `cli.autoCompactWindow` (258,400) even where
+  the same model has a published window. A blank window is now filled from models.dev when the id,
+  without its organisation prefix and, failing that, its build stamp, matches a catalogue model
+  exactly; where providers disagree the smallest window is taken, since a reseller may serve less.
+  A value set by the person or the vendor is never replaced.
+
+### Added
+
+- **The Models tab says when a model's context size is unknown** and which fallback it runs on.
+
+## 0.12.16 — 2026-10-28
+
+### Added
+
+- **A session the phone creates on a folder saved as an environment now starts in the Claude app**
+  (#102). Such a session ran its first turn on the host and was then handed to the app with
+  `--desktop --resume`, which the app imports with Remote Control off, so every later turn stayed
+  invisible in the app until a restart. When the folder is one the person saved as an environment, the
+  host now creates the session on that environment as Claude's own phone app does: the app picks it up
+  in about three seconds, starts it and attaches Remote Control, and the first message goes through
+  the bridge once the worker has attached. Only a definite refusal (no matching environment, no login,
+  a 4xx) falls back to the old path; a lost answer, a 5xx or an attach timeout holds the first message
+  as failed rather than risking a second session.
+- **A phone message to a session the app holds runs in the app, and its turn shows on the phone**
+  (#102). A session open in the app without Remote Control answered every phone message with "turn on
+  Remote Control", and a handed-off session ran the message on the host, where the app never showed it
+  until a restart. The host now offers plain text to the mod inside the app's own CLI process, which
+  types it in as the person's prompt, and tails the transcript whenever it is not running the session,
+  so turns typed in the app reach the phone too and the mod's prompt shows once whichever arrives
+  first. Attachments, slash commands and interrupts still get the blocked answer, a claimed message is
+  never also run on the host, and a claim that never arrives is reported failed after two minutes,
+  with a notice that says to resend or delete the message.
+- **The phone's model and effort are kept as the app's own record for the session.** The app keeps each
+  session's model and effort in its own record and re-applies it when the session is opened, while a
+  phone's `set_model`, effort control or in-session `/model` changed only the running CLI, so a
+  phone-picked model was lost the moment the session was opened on the Mac. A phone change now also
+  asks for the app's record to change, through a job the mod in another app session claims and applies
+  with the app's own tools, and only while that session is in bypassPermissions since the app would
+  otherwise ask the person to approve. A change made in the app shows on the phone at the next poll, a
+  phone change still on its way is not undone by the app's older value, and when the app could not be
+  changed the phone keeps its choice and says what to check in the app. A Mac, whose sidebar names no
+  root, now builds the record reader anyway, so the sync is no longer off in production.
+- **The tray sets the laptop's stay-awake mode.** Changing the mode or the hotspot failover meant
+  opening the window and going to Laptop settings, which is what people skip on their way out. The tray
+  now reads `GET /api/power` with each healthy poll and shows a submenu with the current mode in its
+  label: the three modes as radio items, the hotspot switch and a shortcut to the Laptop page, or to
+  setup when the sudoers rule is missing. A mode picked there has no end time, so it clears one set in
+  the dashboard; routers without the API and Linux show nothing.
+
+### Changed
+
+- **A model id can name the provider that should serve it, and a shared id no longer deletes
+  workers** (#94). When two providers declared the same vendor id, the router wrote one worker per id,
+  so adding a second provider deleted the first's worker, and a bare duplicate gave no way to say
+  which subscription should pay. A `<provider>:<modelId>` marker now selects that provider only when
+  the prefix is a configured provider that declares the remaining id, and the upstream receives only
+  the model id; anything else stays a model id, so Ollama's `qwen3:8b` is unchanged. The first
+  outbound provider in config order keeps the plain worker name and later ones take
+  `<name>-<provider>`, every duplicate worker carries a qualified `model:`, single-owner files stay
+  byte-identical, and quota is checked by the worker's own provider and id, so a spent Google key
+  falls through to the OpenCode Go worker for the same model. A duplicate that stays ambiguous is
+  refused with its qualified alternatives rather than guessed or sent to Anthropic.
+
+### Fixed
+
+- **An interrupted worker stops showing as running** (#108). A background agent stopped during a tool
+  call can leave no task notification, so the phone kept its card running forever. The worker's own
+  complete transcript now supplies an exact final interruption marker as proof of stopped, background
+  history is reconciled, and parent and nested snapshots refresh when a worker's record changes, while
+  a normal final answer still completes as before. Nothing is inferred from elapsed time, a parent's
+  interruption or completion, a missing inventory or a failed Task Stop, and a partial append, quoted
+  marker or resumed transcript stays nonterminal, preferring a missed stop to a false one.
+- **A Windows update no longer takes its own router for another installation** (#100). The headless
+  scheduled task starts conhost before PowerShell, so the router is a grandchild rather than a direct
+  child, and the identity check found no router of its own. The lookup now walks the launcher's whole
+  subtree from one process snapshot, without weakening task ownership or accepting an unrelated
+  shared-runtime router; an unreadable PID discovery still yields nothing.
+- **A Codex request to a Claude model no longer needs a Claude Code version the router never saw**
+  (#103). The fallback `user-agent` was pinned to `claude-cli/2.1.266`, and Anthropic refuses a model
+  to a client below a version floor it raises over time, so Opus 5.5 answered "version 2.1.280 or
+  newer is required" on a machine whose Code tab never passed through the router. The fallback now
+  takes the newest version the machine can vouch for: a recent observed Claude Code request, else the
+  newest CLI the Desktop app has cached, else a constant updated to 2.1.304. Headers from an observed
+  request are still replayed exactly.
+- **Codex's `/compact` reaches a Claude model as a request it accepts** (#104). The remote-compaction
+  body ends with a control item that the OpenAI ingress dropped as unknown, so the assistant's turn
+  stayed last and Anthropic answered "This model does not support assistant message prefill." The
+  trigger now becomes the user turn that asks for the summary, with every earlier item passed through
+  unchanged, and a transcript that ends with the assistant for any other reason gets one short
+  "Continue." turn. Both land before the cache breakpoint is placed, and the Claude Code path is
+  untouched. Codex then expects exactly one `compaction` item back: the summary now comes back as
+  that item, in a format only the router reads, and when Codex sends it with the next turn the
+  router restores it as user text in place, so the conversation carries on from the summary. A
+  compaction item that OpenAI produced is still dropped, now with a warning in the log.
+- **Workers on one account no longer pile onto one key, and the log names the key that answered**
+  (#101). Every worker of one person injected the same opening text, so the conversation key collided
+  and one secondary key's claim was renewed indefinitely; the key is now captured before routing so
+  agents, sessions and full opening messages separate, while metadata-less side requests keep their
+  shared affinity. A healthy conversation stays on its key rather than switching back when an earlier
+  key recovers, since a warm cache is worth more than config order. The credential records the
+  responder's label or ordinal, an OAuth account by ordinal rather than its email, selection reasons
+  and retries are logged without runtime ids or tokens, and the measured relay `server_error` "Global
+  regions" 400 is read as a workspace-key refusal, rested briefly and tried on another key while
+  ordinary 400s still stop.
+- **A Claude worker whose prompt starts with a delegation marker still passes through** (#94).
+  Refusing ambiguous markers on Claude requests dropped the old rule that a `claude-*` request is
+  never refused, so a worker whose prompt began with `[[ripple: standard]]` or `[[ripple: opus@high]]`
+  was answered "not an alias and not an agent name". A Claude request now passes through unless its
+  marker names a model two providers declare.
+- **A handed-off phone session keeps going while the app is idle** (#102). After the app adopted a
+  phone session for its list, every next phone message waited for Remote Control, which the app never
+  turns on for a session it adopted, and the session had forked once when a host process kept between
+  turns answered from its own last line while the person typed in the app. The host now resumes a
+  session it started and handed off when the app's registry entry, read fresh, says idle, and queues
+  the message with its own notice while the app runs a turn, across host restarts. It lets its SDK
+  process go after each turn while the app holds the session, so every phone turn resumes from the
+  transcript.
+- **A phone message runs with the settings picked before it, and a late change cannot undo a newer
+  pick.** A message sent right after a model or permission pick could run with the old one, "send now"
+  could wait for changes picked after it, and a change that hung held every later one forever. Each
+  session now has one queue in which every setting change, direct send, "send now" and queue drain
+  takes one place with one deadline of fifteen seconds from when it starts; an expired place lets the
+  queue move on and invalidates its token, checked before every outgoing call, so an overtaken change
+  never reaches the session. A message already handed on still records its receipt after the deadline,
+  and a Stop, a removal or the app taking the message during a wait is reported rather than passed
+  over.
+- **A handed-off session's queue settles once the app has answered** (#102). A mod-delivered message
+  left an "awaiting" mark that only a result event clears, and an app-run turn writes none to the
+  host's log, so the next message sat in the queue while the app was idle and pressing send ran it on
+  the host. The mark is now dropped, the host writes the app's own running, waiting and idle state for
+  a handed-off session it follows so the phone shows when the app is working, and a short app turn
+  between two polls no longer leaves a stale mark, which also clears old ones left by an earlier
+  build. A stop from the phone on a session the app is running now says to stop it in the app instead
+  of reporting a stop that never happened.
+- **A page of history belongs to the log it was read from, and a rebuilt log gets a fresh tail.** A
+  phone or browser asked for the page before a sequence number of one epoch, the host rebuilt the log
+  as another meanwhile, and it answered with the new log's page, so the reader merged its past under
+  the old recent events; the web client also lost a stretch of history for good after a fresh tail and
+  dropped loaded pages whenever a same-epoch tail arrived. The request now names its epoch and the
+  answer names the one the host read, a mismatch gets no page and a fresh tail, and a read that
+  rebuilds the log tells every attached reader. A phone's cursor carries its epoch, so a rebuilt log
+  sends the new tail with `hasOlder` instead of a slice of it, and a phone already at the last
+  sequence gets an empty frame so its saved copy knows it is current.
+- **A slow connection no longer queues a tail for every update.** Ten desktop updates on a slow link
+  queued ten 260 KB tails, and eight session lists grew the buffer from 1 MiB to 2.1 MiB while the
+  held tail never left. A tail now waits until the buffer drains, one per session, and the newest
+  snapshot goes out then; a backed-up connection gets only the newest list once it drains. A detach or
+  close clears what was waiting.
+- **A Code tab plan finishes when its turn wraps up.** The Code tab checks its task list off when a
+  turn calls `wrap_up`, so a turn may end without a last advance, and the phone kept such a plan at
+  "step 1 in progress, 0/3" after the turn had ended. A successful `wrap_up` now completes the
+  per-turn plan; session-scoped `TaskCreate` and `TodoWrite` lists are left alone, and a `wrap_up`
+  from a retired turn cannot finish the next turn's plan.
+- **A released closed lid sleeps again.** Releasing the lid-closed hold ran `pmset sleepnow` whenever
+  `ioreg` said a closed lid causes sleep, which on 2026-10-26 overrode an Amphetamine session and audio
+  playing at the desk; the first fix left the Mac to idle sleep when another process held a
+  system-sleep assertion, but Amphetamine's indefinite session and powerd's "display is on" were taken
+  as such holds though they do not stop lid-close sleep, so on 2026-10-28 the Mac ran on battery from
+  55% to 11%. Only `PreventSystemSleep` now counts as another process's hold, the closed Mac driving a
+  TV is caught by reading attached external displays from `ioreg`'s framebuffers instead, and battery,
+  heat and a failed guard read still sleep the lid.
+- **The band leaves room for other mods and loads under strict plugin validation.** The dashboard
+  band, the alert cards and the settings and setup cards returned their own tree without asking for
+  what another mod drew above the prompt, so that drawing vanished; every path now asks for it once
+  and puts ours under it, and the engine's bare answer is left out so the band looks the same when no
+  other mod draws. Claude Code 2.1.310's strict plugin validation also rejects an inline import in the
+  state contract, which is now named from the surrounding module scope instead.
+
 ## 0.12.15 — 2026-10-26
 
 ### Added

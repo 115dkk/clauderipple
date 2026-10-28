@@ -393,11 +393,12 @@ The router is the single source of the mod's settings, persisted in
 `{settings:<full normalized Settings>, revision, stored:boolean, compactAt:number|null}`.
 `compactAt` is Claude Code's own compaction point, read from `autoCompactWindow`
 in `~/.claude/settings.json` (`CLAUDE_SETTINGS_PATH` overrides the path): the
-top-level key, else the one value `/autocompact <n>` saved under
-`modelSettings.<model>` (a per-model value outranks the top-level one, per the
-2.1.304 settings schema); null means the model's default stands, or models
-disagree. A dashboard save also drops the per-model values, which would
-otherwise hide it. Compaction fires about 33k tokens before the window
+top-level key, else the one **user-owned** value `/autocompact <n>` saved under
+`modelSettings.<model>`; generated values never masquerade as a global preference.
+Null means no single user preference can be reported. A dashboard save changes only
+the global key and preserves user per-model preferences (2026-10-28); it also reconciles
+the router-owned values described in §4. The band's model-specific fallback comes from
+`GET /api/context-windows`, not this global dashboard field. Compaction fires about 33k tokens before the window
 (20k output reserve + 13k buffer), not at it. Before the first write it returns normalized defaults, revision 0 and
 `stored:false`, without creating storage. `PUT` accepts `{settings, revision?,
 compactAt?}`: a `compactAt` writes or removes that settings.json key directly
@@ -708,6 +709,45 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     `route.contextWindow` still wins; every non-chatgpt provider keeps the old
     fallback. The catalogue is now read at router start and every two hours, not
     only when the dashboard asks.
+  - **Effective compaction windows (2026-10-28, Claude Code 2.1.308).** The owner's
+    measured `/context` reported `30.7k / 600k` on `claude-opus-4-7` routed to Sol
+    (475000 capacity), despite bootstrap and `autoCompactWindowsCache` carrying 475000.
+    Bootstrap is only client-data defaults: the user's global `autoCompactWindow`
+    overrides it. A `--settings` model-specific 475000 changed that model to `/ 475k`
+    while native Opus 5.5 stayed `/ 600k` (owner-supplied measurement). Reproduced in
+    this change with generated temporary settings and an isolated `CLAUDE_CONFIG_DIR`,
+    `--setting-sources '' --no-session-persistence`, Desktop's 2.1.308 binary:
+    Opus 4.7 `31.8k / 475k`, native Opus 5.5 `16.7k / 600k`; `/context` only,
+    no inference turn and no operational settings/router changes.
+    `picker.ts:resolvedModelWindow` now supplies the capacity for bootstrap and the
+    context API; `bootstrapWindows` supplies their shared advertised key set, including
+    slot aliases, extra models and agent `@effort` ids. `effectiveCompactWindow` in
+    `cli/src/compact-windows.ts` computes `min(capacity, user model setting ?? user global
+    setting ?? capacity)`. Generated settings are excluded from user preferences, so a
+    lowered global setting can later rise again. Routed CLI windows are capped at
+    `CLI_WINDOW_MAX`; a result below the CLI's 100K minimum fails visibly, never rounds
+    above the model's capacity.
+    The router writes only routed, non-native `modelSettings[id].autoCompactWindow`:
+    on startup/config reload, immediately on GUI config/compact-setting saves, and every
+    15 seconds (also picks up settings, catalogue and agent-file changes). Unchanged
+    settings are not rewritten. Native Anthropic settings are never generated.
+    Exact generated values live in the existing settings-adjacent ownership store's
+    `homes[installation].compactWindows`; settings lock + atomic JSON replacement are
+    shared with CLI writers. Hand-written or user-edited values and other installations'
+    claims are preserved. A removed route or uninstall removes only unchanged owned
+    fields and keeps sibling keys. A user writing the exact generated value cannot be
+    distinguished from leaving it untouched. Explicit user model overrides above the
+    capacity are preserved, not silently corrected.
+    `GET /api/context-windows` keeps the real `contextWindow` and adds `compactWindow`
+    per provider-bound resolution, including native Claude catalogue models; unknown
+    capacity remains null. The remote host's figures prefer `compactWindow` even over
+    SDK `modelUsage` capacities, retaining old behavior when the field is absent. The
+    mod polls the same API; its fallback uses that model's effective window, while a
+    `/context` breakdown's `rawMaxTokens` always wins as the running CLI's actual value.
+    Higher-priority project/local/managed/command-line settings are outside this user-file
+    policy; an already-running CLI may retain its own window until it reloads settings.
+    Tests: `router/test/context-windows.test.ts`, `chatgpt-windows-api.test.ts`,
+    `remote/test/compact-windows.test.ts`, `test/mod/session.test.ts`.
   - Model self-introduction is not evidence of routing. Verify by upstream
     usage records.
   - **Implemented 2026-09-11** in `packages/router/src/providers/chatgpt/`.
@@ -1151,9 +1191,19 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     notices is the worse mistake. Only 401 parks.
   - An answer lifts a quarantine but does not cancel a live cooldown: requests overlap, and a 200
     arriving after a concurrent 429 does not mean the limit lifted.
-  - The conversation key is `conversationKey`, the same one the prompt cache uses. `metadata.user_id`
-    alone is one value for every conversation a user has, so using it raw dragged all of them onto
-    one credential at once — the opposite of what stickiness is for.
+  - **Pool affinity (2026-10-28, issue #101)** uses `requestConversationKey` captured before routing:
+    agent + session when available, otherwise session/user identity + the full first user message
+    (cache-control markers excluded). `conversationKey` truncates at 4000 characters, so workers
+    sharing injected instructions had shared one user's affinity indefinitely. New conversations
+    try the preferred/first usable configured key; a healthy existing affinity never moves merely
+    because an earlier key recovered. Provider cache/session keys remain unchanged. Metadata-less
+    one-message side requests without an agent keep their shared `conversationKey` class below.
+    Request records expose `credential` (configured label or 1-based ordinal, never runtime id/token);
+    `router.log` also records selection reason and candidate health, plus every same-turn retry.
+    The measured JSON `server_error` / `Upstream request failed: This Go model requires Global regions`
+    400 rests the workspace's key for 60s (or Retry-After) and permits another key before the first
+    response byte. Other 400s still neither penalise keys nor retry the pool. Tests: `pool.test.ts`
+    and `proxy-failover.test.ts`.
   - The same key has a second branch, because not every request is a conversation. What the CLI
     sends *beside* one — the web-search side request, a title, a summary — carries no `metadata` at
     all and one lone user message that is different every time, so seeding on that message minted a
@@ -1255,6 +1305,16 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   reads are cached for 60 seconds; ClaudeRipple **never refreshes or writes**
   Claude Code's own credential. Expiry becomes OpenAI-style 401 `Claude Code
   login expired — open Claude Code once to refresh`.
+- Headers ClaudeRipple manufactures itself (no observation, e.g. the Codex
+  ingress on a machine whose Code tab never passed through the router) name the
+  newest CLI this machine can vouch for, not a pinned one
+  (`providers/claude-cli-version.ts`): the `claude-cli/<version>` of a recent
+  observation, else the newest CLI the Desktop app has cached (version
+  directory names, cached 5 minutes, no child process), else the release's
+  constant. Issue #103: the pinned `claude-cli/2.1.266` made Opus 5.5 answer
+  `Claude Code 2.1.266 does not support this model; version 2.1.280 or newer is
+  required`. The version is a client fingerprint only; the model list and wire
+  shape are unaffected.
 - `clauderipple claude-login` (0.1.2) is ClaudeRipple's own browser sign-in:
   the OAuth authorization-code flow with PKCE (S256) against Claude Code's
   public client, exactly as Claude Code 2.1.271 does (read from its binary,
@@ -1345,7 +1405,34 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   Anthropic tools/tool_choice. `max_output_tokens` → `max_tokens`, and
   `temperature` is preserved. `reasoning.effort` → `output_config.effort`; this
   ingress does not invent a thinking-token budget because that would change
-  the caller's requested output ceiling.
+  the caller's requested output ceiling. Codex's remote compaction control item
+  `{"type":"compaction_trigger"}` (last in the transcript, a request control
+  rather than a response item) becomes the user turn that asks for the summary,
+  and a transcript that ends with the assistant gets one short user turn, because
+  Anthropic reads that shape as prefill and models that take none refuse it
+  (#104, 2026-10-28). For a translated Responses request with that trigger,
+  the mapper buffers the model's summary and emits exactly one output item
+  `{type:"compaction", id:"cmp_…", encrypted_content:"clauderipple:compaction:v1:…"}`
+  instead of message/text events, in `response.output_item.added`, then
+  `response.output_item.done`, then `response.completed` (whose `output` holds
+  the same item). Non-streaming JSON uses the same item. The suffix is base64
+  UTF-8 JSON `{summary:<text>}`: a router-owned opaque replay value, **not
+  encryption**, not an OpenAI ciphertext. Replayed `compaction` input restores
+  `Summary of the earlier conversation: <text>` as a user turn at that position;
+  foreign formats are dropped with a warning that never includes their content.
+  Malformed router-owned payloads fail visibly rather than discard context.
+  Empty, interrupted, truncated or tool-call compaction answers do not emit a
+  successful compaction item. GPT passthrough remains byte-for-byte unchanged;
+  the older `/responses/compact` endpoint is still GPT-only.
+  Behavioral source (no code copied): OpenAI Codex tag
+  [`rust-v0.164.0-alpha.11.1`](https://github.com/openai/codex/tree/rust-v0.164.0-alpha.11.1),
+  `codex-rs/protocol/src/models.rs` (`ResponseItem::Compaction`: required string
+  `encrypted_content`, optional `id` and internal metadata),
+  `codex-rs/codex-api/src/sse/responses.rs` (added/done deserialize `item`), and
+  `codex-rs/core/src/compact_remote_v2.rs::collect_compaction_output` (counts
+  exactly one compaction from OutputItemDone and requires Completed).
+  Verified by `packages/router/test/ingress-server.test.ts` round trips over
+  local HTTP/SSE and JSON, plus `ingress-translate.test.ts` edge cases.
 - Cache discipline: serialization has no timestamps; cache breakpoints are put
   on the system block, the final tool definition, and the final user content
   block. Upstream Anthropic usage maps `cache_read_input_tokens` to Responses
@@ -1850,6 +1937,7 @@ plan unless marked otherwise.
 | Tool names over 64 characters were forwarded to the Responses API unchanged, so a single connected MCP server — the product's own use case (§2) — failed every request of that turn (found by reading the source, issue #1, 2026-09-17) | Any name a translated provider sends is mangled into the provider's constraint deterministically and restored on the way back (§4). A translator must validate what it forwards against the wire it forwards to, not only what it builds itself. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
 | That 272000 then capped every routed worker: Claude Code compacts a model it does not know at the smaller of this cap and the model's own `auto_compact_windows` entry, so 6.1 Sol's 475000 and DeepSeek's, MiniMax's and Gemini's million all compacted at 272000. Separately, an `auto_compact_windows` value outside the CLI's settings range (100K–1M) is dropped whole, so Gemini's 1,048,576 never applied and it fell back to the session's own setting (read from 2.1.308's resolver, 2026-10-24) | The cap is Claude Code's ceiling for a per-model window (`CLI_WINDOW_MAX`, 1,000,000): `install` writes it unless `--max-context-tokens` names another, and the bootstrap sends each window at most that. Every routed model the CLI can be asked for carries its own entry (picker models, agent-file ids, route aliases; the global `cli.autoCompactWindow` only where none is known), so the raised cap never stands in for a window. |
+| Global settings `autoCompactWindow: 600000` overrode bootstrap's per-model 475000 for a GPT-routed slot (owner `/context` measurement, CLI 2.1.308, 2026-10-28), so the upstream could overflow before compaction; mobile displayed native 1M beside desktop 600k | Bootstrap alone is not enforcement. Manage routed per-model settings with exact-value ownership, preserve user overrides and native settings, and expose the same effective compact window to host and mod; `/context` rawMaxTokens remains authoritative (§4). |
 | Server tools (`web_search`) were declared to translated providers as ordinary functions: a tool the model can call and nothing can run. Not observed live, because Claude Code currently routes its web search elsewhere (§4) — the failure was one server-side flag away, and its shape is an empty answer with nothing logged (issue #4, 2026-09-17) | A translator declares only what the provider can actually execute, and says in the log what it removed. A capability that silently disappears is worse than one that visibly fails. |
 | Routed workers were told to call the `advisor` after its declaration was dropped: Claude Code explains the tool in a user message the router left in place, so 26 of 28 worker transcripts reported it missing, every turn (issue #47, 2026-10-04) | Removing a capability includes withdrawing what was said about it. A translator that drops a tool adds one stable line saying so, rather than editing the caller's text. |
 | One context window was written to every routed model and every slot, because `cli.autoCompactWindow` is a single number while `auto_compact_windows` and `context_window_by_model` are per-model maps. Routed models do not share a window: set it high and the smaller model overflows before it compacts, set it low and the larger throws away most of its own (issue #2, 2026-09-17) | A window belongs to a model, not to the router. `CliModel.contextWindow` and `Route.contextWindow` win, then whatever the vendor's `/models` reported as `context_length`, then the global value as the fallback it always was. A value the config can only express once must not be injected into a map that is keyed per model. |
@@ -1900,6 +1988,8 @@ plan unless marked otherwise.
 | A Google 429 for spending-cap exhaustion (`Your project has exceeded its monthly spending cap.`) was classified and recorded in ProviderHealth, so the next delegation skipped the provider — but the worker that received the plain 429 retried it ten times over ~2.5 minutes (08:56:35–08:59:06) before failing (#89, 2026-10-24) | Same status and body, plus `x-should-retry: false` and a `retry-after` to the exhaustion's `until` (min 1s), wherever a definite exhaustion is written: the generic path (`proxy.ts`) and the Google, ChatGPT and OpenAI-compatible adapters. Claude Code reads `x-should-retry` before its 429 rule, so the worker fails at once. A bare rate limit keeps no such header. |
 | A Workflow script sent eight agents with `[[ripple: gemini-3-8-flash@high]]` as the prompt's first line (and `subagent_type`, which `agent()` does not take — its option is `agentType`); all eight ran on the session's Opus. CLI 2.1.308 frames a workflow agent's prompt: a relayed user request, then a `[Workflow harness — computed task] … follows:` header line, then the script's text indented — so no user message started with the marker (2026-10-22) | A text block that starts with that header is read from the line after it: the script's first line is the prompt's top, as a spawned subagent's is (`routing.ts`, `WORKFLOW_TASK`). Only a block that *starts* with the header counts — the harness indents everything inside, so a header quoted lower down is prose. |
 | A closed lid was held awake on battery overnight (2026-10-24, owner-reported, `pmset -g log` + router.log): the lid closed and the Mac slept at 00:59 ("Clamshell Sleep"), but in two maintenance dark wakes (01:09 and 09:51) model calls ran — the mod's cache keep-warm pings (4-token turns on idle sessions) and a Claude app scheduled task — and `working` mode counted them as work: "sleep disabled (working: 1 model call running)" turned a ~45 s dark wake into 72 min (01:09–02:21) and 35 min (09:51–10:26) awake, 6 of the night's 10 battery points | A hold is never **started** in a dark wake: ioreg's IOPMrootDomain `System Capabilities` (read with the clamshell flags, no extra process) without Graphics (2) means the Mac is asleep to its user, and `decideAwake` answers "asleep: …" (logged once). A hold already taken is kept whatever the reading, and mode `on` is unaffected. Measured: 15 in a full wake; a held lid-closed Mac (2026-10-23 18:22–19:32) logged no transition to DarkWake. Tests: `awake.test.ts`. |
+| Our sleepnow overrode other processes keeping the Mac awake (2026-10-26, owner-reported, `pmset -g log` + router.log + unified log): in `working` mode the hold was released 10 min after the last call and, with the lid closed and `AppleClamshellCausesSleep` reading Yes although an awake TV was attached over HDMI, `pmset sleepnow` ran — at 18:48 under an Amphetamine session (remote sessions dropped overnight), and at 17:17 while audio played at the desk (coreaudiod's assertions released at the sleep). The log line claimed "nothing else holds the Mac awake" without checking | Before sleepnow, a non-guard release leaves the Mac to macOS when an external display is attached (ioreg framebuffers, not the flag) or another process holds PreventSystemSleep, or either read fails; the log names the reason. Guard releases (battery, heat, failed guard read) still sleep. Tests: `awake.test.ts`. |
+| A closed lid ran on battery for 4 hours because idle assertions were taken for sleep holds (2026-10-28, owner-reported, `pmset -g log` + router.log): a call at 05:14 set the bit, the lid was closed while it was set, and the 05:33:52 release logged "other processes prevent sleep (Amphetamine, powerd)" and skipped sleepnow. Both were PreventUserIdleSystemSleep — Amphetamine's indefinite session and powerd's "display is on" — which do not stop lid-close sleep (the Mac had slept every lid close that night under the same session) and, never letting go, kept idle sleep away too. No sleep was logged until AC at 09:19: 55% → 11% | Only PreventSystemSleep counts as another process's hold, beside an attached external display (the row above). Tests: `awake.test.ts` "idle-sleep holders … do not keep a released closed lid awake". |
 | A new worker could not be spawned in a session that was open when it was added: the router wrote `zai-org-glm-5-3-flash.md` at 10:51:45, the MAMBO session (idle since 10:47) got its next message 26 s later, and the Agent tool answered "not found" at 10:52 and 11:12; after a `/clear` the mod rewrote `ripple:auto` to the worker and the CLI refused that too (11:24). The ClaudeRipple session, in use at the time, listed it by 10:55 (2026-10-23). CLI 2.1.308 polls `~/.claude/agents` every 2 s in use and 30 s after a minute idle; going back to 2 s rebuilds the watcher from the directory as it then is, and the catch-up compares only skills and commands, so a write in the last 30 s of idling is never read, and `/clear` keeps the process's list | Every sync that writes or removes a generated agent touches the generated files again `RETOUCH_AFTER_MS` (45 s) later (`agents.ts` `retouchLater`): any agent file's change makes a session reread all of them, and 45 s is past the idle poll. A session that already missed one is fixed the same way, by touching any file in `~/.claude/agents`. Tests: `agents.test.ts`. |
 | A routed request's `messages` array carried Anthropic-only shapes — a mid-conversation `role: "system"` message and `tool_addition`/`tool_removal` content blocks — and the compat layer cleaned only the top-level fields, so the vendor's Anthropic skin answered 400 `Invalid Anthropic Messages API request` on every turn once a SessionStart hook or a deferred MCP tool was in play (issue #92, CLI 2.1.308+, 2026-10-26) | A compat layer validates the **whole body** it forwards, `messages` included, not just the fields the CLI adds at the top level: a role an Anthropic-shaped vendor does not accept in `messages` is folded to `user` with the text untouched, a content block type only Anthropic defines is either converted into something the wire already has (a deferred tool's definition joins `tools`) or dropped, and a message left with no content goes whole. The request log counts each fold (`system_role×N`, `tool_addition×N`, `tool_removal×N`) so a vendor's next refusal can be read against what was sent. Same rule as the tool-schema row: what is forwarded must be valid for the wire it is forwarded to, not merely for the client that produced it. |
 
@@ -1997,7 +2087,17 @@ batt`), a recorded thermal warning (`pmset -g therm`; measured on macOS 27.0.1 w
 acted on, a failed read is), and any error reading either. Releasing it with the lid closed and
 `AppleClamshellCausesSleep = Yes` (`ioreg`, no privilege) runs `pmset sleepnow` (unprivileged first,
 then through the rule): clearing the bit alone leaves a bagged Mac running (MacMiniMode does the
-same). With an external display (closed-display mode) CausesSleep reads No and nothing is slept.
+same). With an external display (closed-display mode) CausesSleep should read No and nothing is
+slept, but it read Yes on 2026-10-26 with an awake TV attached and on 2026-10-28 with two monitors
+attached (§5). So a release that is not a guard's sleeps only where macOS would have on the lid
+closing: it leaves the Mac to macOS when `ioreg -r -c IOMobileFramebufferShim -k DisplayAttributes -d 1`
+lists a framebuffer with `"external" = Yes` (an attached display; unused ports have no
+DisplayAttributes; Intel Macs have no such framebuffers and count none), or when `pmset -g assertions`
+shows another process holding PreventSystemSleep (AlDente on AC). Idle assertions
+(PreventUserIdleSystemSleep, NoIdleSleepAssertion: Amphetamine, coreaudiod, the Claude app, powerd's
+"display is on") do not count — a closed lid sleeps under them. A failed read of either leaves the Mac
+to macOS. A guard release (battery floor, thermal warning, a failed guard read) sleeps the lid
+regardless.
 `<home>/awake.json` journals `{applied, since, reason, lastActivityAt}`; the journal is written
 before setting the bit and after clearing it. A bit that reads cleared while the journal says set
 (reboot, another tool) is re-applied if still wanted.
