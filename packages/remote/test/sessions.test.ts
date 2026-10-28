@@ -12,7 +12,7 @@ import { sessionGroup, sidebarState } from "../web/sidebar.ts";
 import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
-import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY } from "../src/bridge-client.ts";
+import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
 import type { DesktopProcess } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
@@ -1616,6 +1616,103 @@ async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, w
 }
 
 const transcriptLine = (value: unknown) => JSON.stringify(value) + "\n";
+
+function appNativeModFixture(t: TestContext, modOfferMs = 500) {
+  const id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const app = claudeAppData(t, id);
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "app-native-mod-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const registry = new Map<string, DesktopProcess>([[id, { sessionId: id, pid: 42, status: "idle" }]]);
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry,
+    desktopProcesses: () => "", desktopSidebar: { root: app.root }, modOfferMs, modResultMs: 500, log() {} });
+  fs.mkdirSync(path.join(projects, "project"));
+  const file = path.join(projects, "project", `${id}.jsonl`);
+  fs.writeFileSync(file, transcriptLine({ type: "user", uuid: "first", cwd: f.cwd, message: { content: "From the app" } }));
+  assert.equal(f.sessions.summaryOf(id)?.origin, "desktop");
+  return { ...f, id, registry, boundary, file };
+}
+
+for (const order of ["report-first", "transcript-first"] as const) test(`an app-created session delivers through the mod exactly once with ${order}`, async t => {
+  const f = appNativeModFixture(t);
+  f.sessions.watchAttached(new Set([f.id]));
+  assert.equal(await f.sessions.send(f.id, "native-send", "Phone message"), f.id);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id).map(offer => [offer.itemId, offer.text]), [["native-send", "Phone message"]]);
+  assert.equal(f.sessions.modInbox.claim("native-send"), true);
+  const write = async () => {
+    fs.appendFileSync(f.file, transcriptLine({ type: "user", uuid: "app-echo", cwd: f.cwd, message: { content: "Phone message" } }) +
+      transcriptLine({ type: "assistant", uuid: "app-answer", message: { model: "test", content: [{ type: "text", text: "App response" }] } }));
+    await f.sessions.pollDesktop();
+  };
+  if (order === "transcript-first") await write();
+  assert.equal(f.sessions.modInbox.result("native-send", "submitted"), true);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${f.id}:native-send`), "completed");
+  if (order === "report-first") await write();
+  assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
+  const events = f.sessions.log(f.id).readAfter(0).events;
+  const view = reduce(events);
+  assert.equal(view.items.filter(item => item.type === "user" && item.text === "Phone message").length, 1);
+  assert.ok(view.items.some(item => item.type === "assistant" && item.text === "App response"));
+  assert.ok(f.events.some(row => row.session === f.id), "transcript growth notifies the phone to refresh its snapshot");
+  const epoch = f.sessions.log(f.id).epoch;
+  assert.equal(await f.sessions.send(f.id, "native-send", "Phone message"), f.id);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+  fs.appendFileSync(f.file, transcriptLine({ type: "assistant", uuid: "more", message: { model: "test", content: [{ type: "text", text: "More response" }] } }));
+  await f.sessions.pollDesktop();
+  assert.notEqual(f.sessions.log(f.id).epoch, epoch);
+  assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "user" && e.text === "Phone message").length, 1);
+  assert.equal(f.sessions.summaryOf(f.id)?.origin, "desktop", "delivery never creates a host-owned record");
+  assert.equal(fs.existsSync(path.join(f.dir, "sessions.json")), false);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("an app-created session queues while busy and offers once the registry becomes idle", async t => {
+  const f = appNativeModFixture(t);
+  f.registry.get(f.id)!.status = "busy";
+  await f.sessions.send(f.id, "busy-native", "Wait for idle");
+  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.error, DESKTOP_BUSY);
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+  f.sessions.pollQueued();
+  assert.equal(f.boundary.queries.length, 0);
+  f.registry.get(f.id)!.status = "idle";
+  f.sessions.pollQueued();
+  await waitFor(() => f.sessions.modInbox.pending(f.id).length === 1);
+  assert.equal(f.sessions.modInbox.claim("busy-native"), true);
+  assert.equal(f.sessions.modInbox.result("busy-native", "submitted"), true);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("an unclaimed app-created offer stays queued with Remote Control guidance, including send-now", async t => {
+  const f = appNativeModFixture(t, 20);
+  await f.sessions.send(f.id, "unclaimed-native", "Keep this message");
+  await waitFor(() => f.sessions.summaryOf(f.id)?.queue?.[0]?.error === DESKTOP_WAITING);
+  assert.equal(f.sessions.modInbox.claim("unclaimed-native"), false);
+  assert.equal(MessageReceipts.open(path.join(f.dir, "receipts.json")).status(`send:${f.id}:unclaimed-native`), null);
+  await assert.rejects(f.sessions.sendQueued(f.id, "unclaimed-native"), DesktopBlockedError);
+  assert.equal(f.sessions.summaryOf(f.id)?.queue?.[0]?.text, "Keep this message");
+  assert.equal(f.boundary.queries.length, 0);
+  assert.equal(f.sessions.removeQueued(f.id, "unclaimed-native")?.text, "Keep this message");
+});
+
+for (const kind of ["attachment", "slash", "clear", "interrupt"] as const) test(`an app-created ${kind} send remains blocked`, async t => {
+  const f = appNativeModFixture(t);
+  const attachments = kind === "attachment" ? [{ blob: f.sessions.log(f.id).image(Buffer.from("photo").toString("base64")), name: "photo.png", mediaType: "image/png" }] : [];
+  for (const status of ["idle", "busy"] as const) {
+    f.registry.get(f.id)!.status = status;
+    assert.throws(() => f.sessions.send(f.id, `blocked-${kind}-${status}`, kind === "slash" ? "/help" : kind === "clear" ? "/clear" : "Phone message", attachments, kind === "interrupt" ? "interrupt" : "steer"), DesktopBlockedError);
+  }
+  assert.deepEqual(f.sessions.modInbox.pending(f.id), []);
+  assert.equal(f.boundary.queries.length, 0);
+});
+
+test("a closed app-created session can still continue on the host", async t => {
+  const f = appNativeModFixture(t);
+  f.registry.delete(f.id);
+  await f.sessions.send(f.id, "closed-native", "Continue here");
+  await waitFor(() => f.boundary.queries.length === 1);
+  assert.equal(f.boundary.queries[0]!.options.resume, f.id);
+  assert.equal(f.sessions.summaryOf(f.id)?.origin, "host");
+});
 
 test("an idle handed-off session tails app turns without a phone attached", async t => {
   const f = await modFixture(t, 500, 500);

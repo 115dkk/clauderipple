@@ -1442,10 +1442,16 @@ export class Sessions {
     return queue.length ? { ...summary, queue } : {};
   }
 
-  /** The app holds this handed-off session without Remote Control and is idle: its mod can type it in. */
-  private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
+  /** The app owns the writer, independently of where the conversation was created. */
+  private appModSession(id: string, desktopId: string): boolean {
     const process = this.desktop?.liveProcess(desktopId);
-    return !!process && !process.bridgeSessionId && !this.live.has(id) && this.handedOff(id) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
+    return !process?.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id) &&
+      !!(process || this.desktop?.isOpen(desktopId));
+  }
+
+  /** An idle app session without Remote Control can receive plain text through its mod. */
+  private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
+    return this.appModSession(id, desktopId) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
   }
 
   resumeQueue(id: string): void {
@@ -1454,7 +1460,9 @@ export class Sessions {
 
   /** The phone's Stop: what is queued waits for the person instead of going on its own. */
   holdQueue(id: string): void {
-    if (this.sendQueue.hold(id)) this.opts.onSessions();
+    if (!this.sendQueue.hold(id)) return;
+    for (const item of this.sendQueue.items(id)) this.withdrawMod(id, item.id);
+    this.opts.onSessions();
   }
   /** The socket send joins synchronously, including /clear's settings snapshot. */
   orderedSend(id: string, clientMsgId: string, text: string, attachments?: Attachment[], behavior?: SendBehavior): Promise<string> {
@@ -1534,14 +1542,9 @@ export class Sessions {
     if (!head || head.claimedBy) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
-    if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
-      // A session this host started keeps going from the phone while the app only holds it open;
-      // one the app opened itself still needs its Remote Control (issue #102).
-      const ours = this.handedOff(id);
-      if (!ours || this.appBusy(desktopId)) {
-        if (this.sendQueue.wait(id, head.id, ours ? DESKTOP_BUSY : DESKTOP_WAITING)) this.opts.onSessions();
-        return;
-      }
+    if (this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
+      if (this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
+      return;
     }
     // Registry idle can precede the accepted bridge turn actually starting.
     const sent = process?.bridgeSessionId ? this.bridgeRunning.get(process.bridgeSessionId) : undefined;
@@ -1643,10 +1646,17 @@ export class Sessions {
     else {
       const key = `send:${id}:${offer.itemId}`;
       if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
-      if (!this.seen(id, offer.itemId)) {
-        this.personMessage(id);
+      this.personMessage(id);
+      // A recordless session is a rebuilt transcript snapshot, not a host-owned event log.
+      // Its user event must come from the app: appending here would duplicate it until rebuild.
+      if (this.records.has(id) && !this.seen(id, offer.itemId)) {
         this.append(id, { kind: "user", text: offer.text, clientMsgId: offer.itemId, images: [] });
         this.rememberClientMsgId(id, offer.itemId);
+      }
+      if (!this.records.has(id)) {
+        this.modEchoes.delete(offer.itemId);
+        this.watchDesktop(id);
+        this.tailDesktop(id);
       }
       this.receipts.complete(key, id);
       // No "awaiting" settle: an app-run turn leaves no result in this log (the tail does not write
@@ -1829,9 +1839,9 @@ export class Sessions {
       if (existing.text !== text || existing.attachments.length !== attachments.length) throw new Error(SAME_ID_OTHER_CONTENT);
       return id;
     }
-    const desktopId = this.records.get(id)?.sdkSessionId;
-    const process = desktopId ? this.desktop?.liveProcess(desktopId) : undefined;
-    const eligible = desktopId && process && !process.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id) && this.handedOff(id);
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    const eligible = this.appModSession(id, desktopId);
+    if (eligible && !this.handedOff(id) && (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/"))) throw new DesktopBlockedError();
     if (eligible && this.seen(id, clientMsgId)) return id;
     if (eligible && this.sendQueue.items(id).some(item => item.claimedBy || this.modOwners.get(item.id) === id)) {
       if (this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
@@ -1887,9 +1897,9 @@ export class Sessions {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
-    // The same for a handed-off session while the app runs a turn in it: queue it, send it after.
-    const desktopId = this.records.get(id)?.sdkSessionId;
-    if (!queued && desktopId && !this.live.has(id) && this.handedOff(id) && !this.desktop?.liveProcess(desktopId)?.bridgeSessionId && this.appBusy(desktopId)) {
+    // The same for an app-held session while the app runs a turn in it: queue it, send it after.
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (!queued && this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
       this.enqueue(id, clientMsgId, text, attachments);
       const head = this.sendQueue.items(id)[0];
       if (head && this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
@@ -1937,7 +1947,8 @@ export class Sessions {
         this.bridgeSends.set(key, sending);
         return sending;
       }
-      if (process || this.desktop.isOpen(desktopId)) {
+      if (this.appModSession(id, desktopId)) {
+        // Preserve the legacy handed-off fallback, but never adopt an app-created writer.
         if (!this.handedOff(id)) throw new DesktopBlockedError();
         if (this.appBusy(desktopId)) throw new DesktopBusyError();
       }
