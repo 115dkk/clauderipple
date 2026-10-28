@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.12.17 — 2026-10-28
+
+### Fixed
+
+- **A routed model compacts within its own window, not at the global setting.** With
+  `autoCompactWindow` set in settings.json, Claude Code used it for every model and treated the
+  per-model windows the router sends at bootstrap as defaults only: a slot routed to GPT-6.1 Sol
+  (475K) compacted at 600K, past what Sol accepts. The router now writes
+  `modelSettings.<model>.autoCompactWindow` for each routed model, the smaller of the model's window
+  and the global setting, which Claude Code honours over the global value. Native Claude models are
+  left to the global setting. An entry the person wrote themselves is never touched, entries for
+  models no longer routed are removed, and uninstall removes only the unchanged entries it wrote.
+  Changes to the global setting are picked up within 15 seconds.
+- **The phone and the band show the window the session actually compacts at.** The phone showed a
+  1M Claude session against 1M while the Desktop app said 600K, and the band's fallback used the
+  global setting for every model. Both now read the router's per-model effective window from
+  `/api/context-windows` (`compactWindow`); the band still prefers `/context`'s own figure.
+- **A provider that does not report context sizes gets them from the model catalogue.** Hive's
+  `/models` lists ids alone, so its models fell back to `cli.autoCompactWindow` (258,400) even where
+  the same model has a published window. A blank window is now filled from models.dev when the id,
+  without its organisation prefix and, failing that, its build stamp, matches a catalogue model
+  exactly; where providers disagree the smallest window is taken, since a reseller may serve less.
+  A value set by the person or the vendor is never replaced.
+
+### Added
+
+- **The Models tab says when a model's context size is unknown** and which fallback it runs on.
+
 ## 0.12.16 — 2026-10-28
 
 ### Added
