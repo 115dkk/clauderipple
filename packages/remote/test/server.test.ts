@@ -266,10 +266,10 @@ function holdingQuery(users: string[]) {
 }
 
 /** No listener, real SDK, router, credentials or desktop sessions; only owned temporary storage. */
-async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn) {
+async function memoryHost(t: TestContext, queryFn: QueryFn = scriptedQuery().queryFn, status = router.status) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_000_000 });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-memory-host-"));
-  const sessions = new Sessions({ dir, router, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
+  const sessions = new Sessions({ dir, router: { ...router, status }, permissions: PermissionQueue.open(path.join(dir, "permissions.json")), queryFn,
     onEvent: () => {}, onSessions: () => {} });
   const server = new HostServer({ listen: "127.0.0.1", port: 0, token, webDir, sessions, router,
     hostName: "test", version: "test", recentCli: async () => [] });
@@ -1260,31 +1260,124 @@ test("backpressured tail updates coalesce and deliver the latest snapshot after 
   assert.equal(f.peer.frames.filter(frame => frame.t === "events").length, 0);
 });
 
-test("a message waits for the setting change that reached the host before it, but not past the limit", async t => {
-  const f = await memoryHost(t);
-  const lane = f.sessions as unknown as { scheduleModeChange(id: string, work: () => Promise<void>): Promise<void> };
-  let release!: () => void;
-  void lane.scheduleModeChange(f.id, () => new Promise<void>(resolve => { release = resolve; }));
-  let settled = false;
-  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { settled = true; });
+/** Script only the SDK boundary: observe the model when each input is actually read. */
+function orderedQuery() {
+  const modelReply = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const users: { text: string; model: string }[] = [];
+  const queryFn: QueryFn = params => {
+    let model = String(params.options.model);
+    return {
+      async *[Symbol.asyncIterator]() {
+        for await (const user of params.prompt) {
+          users.push({ text: String(user.message.content), model });
+          yield { type: "result", subtype: "success" };
+        }
+      },
+      interrupt: async () => {}, close: () => {},
+      setPermissionMode: async mode => { calls.push(`mode:${mode}`); },
+      setModel: async next => {
+        calls.push(`model:${next}`);
+        if (next === "slow" || next === "hung") await modelReply.promise;
+        model = next!;
+      },
+    };
+  };
+  return { queryFn, modelReply, calls, users };
+}
+
+for (const separateReads of [false, true]) test(`model pick then immediate send uses the new model (${separateReads ? "separate reads" : "same read"})`, async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
   await nextTick();
-  assert.equal(settled, false);
-  f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-pick", text: "hello", behavior: "steer" });
+  f.peer.receive({ t: "set_model", session: f.id, reqId: "pick", model: "slow", effort: null });
+  if (separateReads) await nextTick();
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-pick", text: "after pick" });
   await nextTick();
-  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false, "the message waits for the pick");
-  release();
+  assert.equal(sdk.users.length, 1);
+  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false);
+  sdk.modelReply.resolve();
+  await f.peer.take("ack");
+  assert.deepEqual(sdk.users.at(-1), { text: "after pick", model: "slow" });
+});
+
+test("send then pick dispatches with the old model before applying the pick", async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "before-pick", text: "old model" });
+  f.peer.receive({ t: "set_model", session: f.id, reqId: "pick", model: "next", effort: null });
+  await f.peer.take("ack");
+  await f.peer.take("res");
+  assert.deepEqual(sdk.users.at(-1), { text: "old model", model: "test" });
+  assert.deepEqual(sdk.calls, ["model:next"]);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "next");
+});
+
+test("a hung pick releases the next pick and send at 15 seconds, and its late answer records nothing", async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  const hung = f.sessions.setModel(f.id, "hung", null, "hung-pick");
+  const next = f.sessions.setModel(f.id, "next", null, "next-pick");
+  f.peer.receive({ t: "send", session: f.id, clientMsgId: "after-hung", text: "after hung" });
+  await nextTick();
+  t.mock.timers.tick(14_999);
+  await nextTick();
+  assert.deepEqual(sdk.calls, ["model:hung"]);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await hung, { status: "unknown" });
+  assert.deepEqual(await next, { status: "applied", model: "next", effort: null });
+  await f.peer.take("ack");
+  assert.deepEqual(sdk.users.at(-1), { text: "after hung", model: "next" });
+  const before = f.sessions.log(f.id).lastSeq;
+  sdk.modelReply.resolve();
   await nextTick(); await nextTick();
-  assert.equal(settled, true);
-  void lane.scheduleModeChange(f.id, () => new Promise<void>(() => {}));
-  let late = false;
-  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { late = true; });
+  assert.equal(f.sessions.log(f.id).lastSeq, before);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "next");
+  assert.deepEqual(await f.sessions.setModel(f.id, "hung", null, "hung-pick"), { status: "unknown" });
+});
+
+test("an expired mode waiting for SDK readiness makes no outgoing call when readiness arrives", async t => {
+  const sdk = orderedQuery();
+  const ready = Promise.withResolvers<Awaited<ReturnType<typeof router.status>>>();
+  const f = await memoryHost(t, sdk.queryFn, () => ready.promise);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  const first = f.sessions.setMode(f.id, "plan", "old-mode");
+  const second = f.sessions.setMode(f.id, "default", "new-mode");
+  await nextTick();
   t.mock.timers.tick(15_000);
+  assert.deepEqual(await first, { status: "unknown" });
   await nextTick();
-  assert.equal(late, true, "a change that hangs holds messages no longer than the limit");
-  let after = false;
-  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { after = true; });
+  ready.resolve(await router.status());
+  assert.deepEqual(await second, { status: "applied", permissionMode: "default" });
+  assert.deepEqual(sdk.calls, ["mode:default"]);
+  assert.equal(f.sessions.summaryOf(f.id)?.permissionMode, "default");
+  assert.equal(f.sessions.log(f.id).tail().events.some(e => e.kind === "mode" && e.mode === "plan"), false);
+});
+
+test("each queued pick gets 15 seconds from its own start, not from arrival", async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
   await nextTick();
-  assert.equal(after, true, "nor does it hold later ones");
+  const first = f.sessions.setModel(f.id, "hung", null, "first");
+  const second = f.sessions.setModel(f.id, "slow", null, "second");
+  await nextTick();
+  t.mock.timers.tick(15_000);
+  assert.deepEqual(await first, { status: "unknown" });
+  await nextTick();
+  assert.deepEqual(sdk.calls, ["model:hung", "model:slow"]);
+  t.mock.timers.tick(14_999);
+  let done = false;
+  void second.then(() => { done = true; });
+  await nextTick();
+  assert.equal(done, false);
+  sdk.modelReply.resolve();
+  assert.deepEqual(await second, { status: "applied", model: "slow", effort: null });
 });
 
 test("a message in the same read as a setting change still waits for it", async t => {
@@ -1302,18 +1395,20 @@ test("a message in the same read as a setting change still waits for it", async 
 });
 
 for (const stopped of [false, true]) test(`a queued message waits for a setting change, then ${stopped ? "stays queued after a Stop" : "goes out"}`, async t => {
-  const f = await memoryHost(t);
-  let release!: () => void;
-  (f.sessions as unknown as { changeMode: () => Promise<void> }).changeMode = () => new Promise<void>(resolve => { release = resolve; });
-  const delivered = () => f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "queued-1");
-  f.peer.receive({ t: "set_mode", reqId: "mode-1", sessionId: f.id, mode: "plan" });
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  const changing = f.sessions.setModel(f.id, "slow", null, "pick");
   f.peer.receive({ t: "req", reqId: "enqueue-1", op: { op: "enqueue", session: f.id, clientMsgId: "queued-1", text: "after the pick" } });
-  for (let i = 0; i < 5; i++) await nextTick();
-  assert.equal(delivered(), false, "the queue waits for the mode change before it");
+  await nextTick();
+  assert.equal(sdk.users.length, 1, "the drain waits for the pick before it");
   if (stopped) f.sessions.holdQueue(f.id);
-  release();
+  sdk.modelReply.resolve();
+  await changing;
   for (let i = 0; i < 10; i++) await nextTick();
-  assert.equal(delivered(), !stopped);
+  assert.equal(sdk.users.length, stopped ? 1 : 2);
+  if (!stopped) assert.deepEqual(sdk.users.at(-1), { text: "after the pick", model: "slow" });
 });
 
 test("a setting change that arrives after a waiting message runs after it", async t => {
@@ -1334,6 +1429,33 @@ test("a setting change that arrives after a waiting message runs after it", asyn
   release();
   for (let i = 0; i < 20 && order.length < 3; i++) await nextTick();
   assert.deepEqual(order, ["mode:plan", "send", "mode:default"], "the message runs in plan mode, as picked when it was sent");
+});
+
+for (const action of ["hold", "remove", "replace"] as const) test(`send-now rechecks ${action} after waiting for settings`, async t => {
+  const sdk = orderedQuery();
+  const f = await memoryHost(t, sdk.queryFn);
+  await f.sessions.send(f.id, "warmup", "warmup");
+  await nextTick();
+  // A pending pick keeps the drain on the first item, ahead of send-now's chosen item.
+  const changing = f.sessions.setModel(f.id, "slow", null, "pick");
+  f.sessions.enqueue(f.id, "first", "first");
+  f.sessions.holdQueue(f.id);
+  f.sessions.enqueue(f.id, "queued-now", "original");
+  const sent = f.sessions.sendQueued(f.id, "queued-now");
+  const refused = assert.rejects(sent, action === "hold" ? /대기열이 멈춰/ : /no longer queued/);
+  if (action === "hold") f.sessions.holdQueue(f.id);
+  else {
+    f.sessions.removeQueued(f.id, "queued-now");
+    if (action === "replace") {
+      f.sessions.enqueue(f.id, "queued-now", "original");
+      f.sessions.holdQueue(f.id);
+    }
+  }
+  sdk.modelReply.resolve();
+  await changing;
+  await refused;
+  assert.equal(sdk.users.some(user => user.text === "original"), false);
+  f.sessions.holdQueue(f.id);
 });
 
 test("\"send now\" takes its place among setting changes as it arrives", async t => {
@@ -1357,21 +1479,6 @@ test("\"send now\" takes its place among setting changes as it arrives", async t
   await sent;
   for (let i = 0; i < 10 && order.length < 3; i++) await nextTick();
   assert.deepEqual(order, ["mode:plan", "send", "mode:default"]);
-});
-
-test("a message waiting behind another's place is held as long as that place", async t => {
-  const f = await memoryHost(t);
-  const lane = f.sessions as unknown as { scheduleModeChange(id: string, work: () => Promise<void>, holdsFor?: number): Promise<void> };
-  let release!: () => void;
-  void lane.scheduleModeChange(f.id, () => new Promise<void>(resolve => { release = resolve; }), 30_000);
-  let settled = false;
-  void Promise.resolve(f.sessions.settingsSettled(f.id)).then(() => { settled = true; });
-  t.mock.timers.tick(15_000);
-  await nextTick();
-  assert.equal(settled, false, "the 15 s limit of a setting change is not the limit of a message's place");
-  release();
-  await nextTick(); await nextTick();
-  assert.equal(settled, true);
 });
 
 test("\"send now\" holds its place while the app considers it, with nothing before it", async t => {
@@ -1400,63 +1507,6 @@ test("\"send now\" holds its place while the app considers it, with nothing befo
   await sent;
   for (let i = 0; i < 10 && order.length < 2; i++) await nextTick();
   assert.deepEqual(order, ["send", "mode:plan"]);
-});
-
-test("a setting change that hangs lets the ones after it run once its hold is over", async t => {
-  const f = await memoryHost(t);
-  const lane = f.sessions as unknown as { scheduleModeChange(id: string, work: () => Promise<void>, holdsFor?: number): Promise<void> };
-  void lane.scheduleModeChange(f.id, () => new Promise<void>(() => {}));
-  let ran = false;
-  void lane.scheduleModeChange(f.id, async () => { ran = true; });
-  t.mock.timers.tick(14_000);
-  await nextTick();
-  assert.equal(ran, false, "the one before it still holds the lane");
-  t.mock.timers.tick(1_000);
-  await nextTick(); await nextTick();
-  assert.equal(ran, true);
-});
-
-test("a setting change overtaken while it hung records nothing when its answer comes", async t => {
-  const f = await memoryHost(t);
-  const lane = f.sessions as unknown as {
-    scheduleModeChange(id: string, work: (turn: number) => Promise<void>): Promise<void>;
-    stillCurrent(id: string, turn: number): void;
-  };
-  let answer!: () => void;
-  const hung = lane.scheduleModeChange(f.id, async turn => {
-    await new Promise<void>(resolve => { answer = resolve; });
-    lane.stillCurrent(f.id, turn);
-  });
-  void lane.scheduleModeChange(f.id, async turn => { lane.stillCurrent(f.id, turn); });
-  t.mock.timers.tick(15_000);
-  await nextTick(); await nextTick();
-  answer();
-  await assert.rejects(hung, OutcomeUnknownError, "the later pick is the one asked for last");
-});
-
-test("\"send now\" claimed by the app keeps its place until the app reports", async t => {
-  const f = await memoryHost(t);
-  const order: string[] = [];
-  const host = f.sessions as unknown as {
-    changeMode: (id: string, mode: string) => Promise<void>;
-    modEligible: () => boolean;
-    offerMod: () => Promise<"claimed">;
-    modOwners: Map<string, string>;
-    finishMod: (offer: { sessionId: string; itemId: string; text: string; offeredAt: number }, outcome: "submitted") => void;
-    sendQueue: { add(session: string, item: { id: string; text: string; attachments: [] }, at: number): boolean };
-  };
-  host.changeMode = async (_id, mode) => { order.push(`mode:${mode}`); };
-  host.modEligible = () => true;
-  host.offerMod = async () => { host.modOwners.set("claimed-now", f.id); return "claimed"; };
-  host.sendQueue.add(f.id, { id: "claimed-now", text: "now", attachments: [] }, Date.now());
-  f.sessions.holdQueue(f.id);
-  await f.sessions.sendQueued(f.id, "claimed-now");
-  f.peer.receive({ t: "set_mode", reqId: "mode-after-claim", sessionId: f.id, mode: "plan" });
-  for (let i = 0; i < 5; i++) await nextTick();
-  assert.deepEqual(order, [], "the app has not submitted it yet");
-  host.finishMod({ sessionId: f.id, itemId: "claimed-now", text: "now", offeredAt: 0 }, "submitted");
-  for (let i = 0; i < 10 && !order.length; i++) await nextTick();
-  assert.deepEqual(order, ["mode:plan"]);
 });
 
 test("queuing an id still being sent answers with that send", async t => {
@@ -1489,23 +1539,6 @@ test("a message id already sent is not queued again", async t => {
   await nextTick();
   assert.deepEqual(offered, [], "the app would run it a second time");
   assert.equal(f.sessions.summaryOf(f.id)?.queue, undefined);
-});
-
-test("a Stop while a message waits for settings cancels the message and keeps the queue stopped", async t => {
-  const f = await memoryHost(t);
-  let release!: () => void;
-  (f.sessions as unknown as { changeMode: () => Promise<void> }).changeMode = () => new Promise<void>(resolve => { release = resolve; });
-  f.peer.receive({ t: "set_mode", reqId: "mode-1", sessionId: f.id, mode: "plan" });
-  f.peer.receive({ t: "send", session: f.id, clientMsgId: "before-stop", text: "hello", behavior: "steer" });
-  await nextTick();
-  f.sessions.holdQueue(f.id); // what a Stop from another phone does first
-  release();
-  for (let i = 0; i < 10 && !f.peer.frames.some(frame => frame.t === "error" || frame.t === "ack"); i++) await nextTick();
-  const error = f.peer.frames.find(frame => frame.t === "error");
-  assert.equal(error?.t === "error" && error.clientMsgId, "before-stop");
-  assert.equal(f.peer.frames.some(frame => frame.t === "ack"), false);
-  assert.equal(f.sessions.log(f.id).readAfter(0).events.some(e => e.kind === "user" && e.clientMsgId === "before-stop"), false);
-  assert.equal(f.sessions.list().find(s => s.id === f.id)?.queueHeld ?? true, true);
 });
 
 test("an attach already up to date is answered, so a saved copy can tell it is current", async t => {

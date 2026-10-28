@@ -279,13 +279,11 @@ const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱
 /** The stricter permission mode the person picked was not confirmed by the app's worker. */
 class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
-/** A send that waited for a settings change, during which the session was stopped. */
-const QUEUE_STOPPED = "대기열이 멈춰 메시지를 보내지 않았습니다. 대기열을 다시 시작한 후 보내 주세요.";
-const STOPPED_BEFORE_SEND = "메시지를 보내기 전에 작업이 중지되어 보내지 않았습니다. 필요하면 다시 보내 주세요.";
-/** A message refused because a Stop came while it waited; the phone holds it instead of resending. */
-export class StoppedBeforeSendError extends Error {}
-/** The longest a waiting message holds back the setting changes that arrived after it. */
-const SEND_HOLD_MS = 30_000;
+/** A lane item checks its token before every outgoing call; a setting change also checks it after
+ * each await before recording. A message already handed on records its outcome regardless. */
+type LaneToken = { check(): void };
+/** How long one lane item may hold the items behind it, counted from when it starts. */
+const LANE_ITEM_MS = 15_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -582,7 +580,7 @@ export class Sessions {
   private syncAppSettings(id: string, app: AppSettings): void {
     const record = this.records.get(id);
     const guard = record?.appSettingsGuard;
-    if (this.settingsJobs.hasPending(app.appSessionId) || this.modeChanges.has(id)) return;
+    if (this.settingsJobs.hasPending(app.appSessionId) || this.sessionLanes.has(id)) return;
     // A restarted host lost its in-memory job; it cannot know whether the helper applied it.
     if (guard?.outcome === "pending") {
       guard.outcome = "failed";
@@ -1411,51 +1409,29 @@ export class Sessions {
     if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
     for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
-    if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
-    // It runs with the settings picked before it, whoever takes it. Over the wait the host may be
-    // shutting down, the person may have stopped the queue or removed the message, or the app may
-    // have taken one; the drain may be sending this very message. Then it is not sent from here.
-    // A Stop and a resume both inside the wait still count as a Stop; a message removed and queued
-    // again under the same id is another message.
-    // Its place among the setting changes is taken now, as for a send: one picked after it waits.
-    // It is taken even with nothing before it, since the app's answer to the offer can take seconds.
-    const stops = this.stops.get(id) ?? 0;
-    const order = this.inLane(id, true);
-    /** After any wait: false when the drain is already sending this message; throws when it may no
-     * longer go (shutting down, stopped, removed or replaced, or taken by the app). */
-    const mayGo = (): boolean => {
-      if (this.shuttingDown) throw new OutcomeUnknownError();
-      const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
-      if (!now || now.at !== item.at || now.text !== item.text) throw new Error("That message is no longer queued.");
-      if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
-      if (this.sendQueue.held(id) || (this.stops.get(id) ?? 0) !== stops) throw new Error(QUEUE_STOPPED);
-      return !(this.draining.has(id) && this.sendQueue.items(id)[0]?.id === itemId);
-    };
-    let handed = false;
-    try {
-      if (order.ready) {
-        await order.ready;
-        // Gone meanwhile because the drain sent it: that is the send asked for.
-        if (!this.sendQueue.items(id).some(queued => queued.id === itemId)) return id;
-        if (!mayGo()) return id;
-      }
-      // A send pressed on a queued message goes to the app too while it holds the session: run here,
-      // the turn never showed in the app (2026-10-27).
+    return this.inSessionLane(id, async token => {
+      if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
+      // Only a completed dispatch, not an edit/removal, can satisfy this send while it waits.
+      if (!this.sendQueue.items(id).some(queued => queued.id === itemId) && this.receipts.status(`send:${id}:${itemId}`) === "completed") return id;
+      const mayGo = (): void => {
+        token.check();
+        const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
+        if (now !== item) throw new Error("That message is no longer queued.");
+        if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
+        if (this.sendQueue.held(id)) throw new Error("대기열이 멈춰 메시지를 보내지 않았습니다. 대기열을 다시 시작한 후 보내 주세요.");
+      };
+      mayGo();
       const desktopId = this.records.get(id)?.sdkSessionId ?? id;
       if (this.modEligible(id, desktopId, item)) {
         const offer = this.offerMod(id, desktopId, item);
         const state = offer ? await offer : null;
-        // Claimed, the app submits it later: the place is kept until it says how that went.
-        if (state === "claimed") { this.modLanes.set(item.id, order.done); handed = true; }
+        // Acceptance hands ownership to the app; its eventual result uses the receipt path.
         if (state && state !== "expired") return id;
-        // The offer may have waited seconds: everything is checked again before sending here.
-        if (offer && !mayGo()) return id;
+        mayGo();
       }
-      return await this.dispatchQueued(id, item, false);
-    } finally { if (!handed) order.done(); }
+      return this.dispatchQueued(id, item, false, token);
+    });
   }
-  /** "Send now" places held for messages the app claimed, by item, until it reports on them. */
-  private modLanes = new Map<string, () => void>();
 
   /** A message on its way into the app (offered to or claimed by the mod) is not shown as queued: it
    * flashed in the queue for a moment before the chat (2026-10-27). A failure shows it again. */
@@ -1478,43 +1454,14 @@ export class Sessions {
 
   /** The phone's Stop: what is queued waits for the person instead of going on its own. */
   holdQueue(id: string): void {
-    this.stops.set(id, (this.stops.get(id) ?? 0) + 1);
     if (this.sendQueue.hold(id)) this.opts.onSessions();
   }
-  /** Stops from a phone per session, so a send that waited for settings can tell one came after it. */
-  private stops = new Map<string, number>();
-
-  /**
-   * Wait for the settings changes that reached the session before a message, then make sure the
-   * message may still run: a Stop from any phone during the wait cancels it (it was not running
-   * yet), and a host shutting down cannot say what became of it.
-   */
-  beforeSend(id: string): { ready?: Promise<void>; done: () => void } {
-    const order = this.inLane(id);
-    if (!order.ready) return order;
-    const stops = this.stops.get(id) ?? 0;
-    const ready = order.ready.then(() => {
-      if (this.shuttingDown) throw new OutcomeUnknownError();
-      if ((this.stops.get(id) ?? 0) !== stops) throw new StoppedBeforeSendError(STOPPED_BEFORE_SEND);
-    });
-    return { ready, done: order.done };
-  }
-
-  /**
-   * A message's place among the session's setting changes, taken as it arrives: `ready` once the
-   * ones before it have run. A change (or message) that arrives after it waits in the lane until
-   * the caller calls `done`, when the message has been handed on or refused; a place never given
-   * up lets go after SEND_HOLD_MS rather than stall the session's settings. `always` takes the place
-   * with nothing to wait for too, for a message that is handed on asynchronously.
-   */
-  private inLane(id: string, always = false): { ready?: Promise<void>; done: () => void } {
-    const settling = this.settingsSettled(id);
-    // Nothing to wait for: no await either, so a Stop right behind this message still comes after it.
-    if (!settling && !always) return { done: () => {} };
-    let done!: () => void;
-    const hold = new Promise<void>(resolve => { done = resolve; setTimeout(resolve, SEND_HOLD_MS); });
-    void this.scheduleModeChange(id, () => hold, SEND_HOLD_MS);
-    return { ...settling ? { ready: settling } : {}, done };
+  /** The socket send joins synchronously, including /clear's settings snapshot. */
+  orderedSend(id: string, clientMsgId: string, text: string, attachments?: Attachment[], behavior?: SendBehavior): Promise<string> {
+    return this.inSessionLane(id, token => {
+      token.check();
+      return this.send(id, clientMsgId, text, attachments, behavior, token);
+    }, false);
   }
 
   private draining = new Set<string>();
@@ -1560,7 +1507,29 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.handingOff.has(id) || this.closing.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.draining.has(id)) return;
+    const head = this.queueHead(id, registryIdle);
+    if (!head) return;
+    const waited = this.sessionLanes.has(id);
+    this.draining.add(id);
+    try {
+      await this.inSessionLane(id, token => this.drainHead(id, head, registryIdle && !waited, token), false);
+    } catch (error) {
+      if (this.shuttingDown) return;
+      // Dispatch failures are already on the item; expiry also leaves it visible for review.
+      if (error instanceof OutcomeUnknownError && this.sendQueue.items(id).includes(head) && !head.claimedBy) {
+        this.sendQueue.fail(id, head.id, error.message);
+        this.opts.onSessions();
+      } else (this.opts.log ?? console.error)(`[queue drain] ${id}: ${String(error)}`);
+    } finally {
+      this.draining.delete(id);
+      if (head.claimedBy || !this.sendQueue.items(id).includes(head)) void this.drainQueue(id);
+    }
+  }
+
+  /** Recheck after a lane wait, without reserving a busy session on the cheap polling path. */
+  private queueHead(id: string, registryIdle: boolean): QueueItem | undefined {
+    if (this.handingOff.has(id) || this.closing.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head || head.claimedBy) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
@@ -1581,34 +1550,25 @@ export class Sessions {
       const summary = this.has(id) ? this.summaryOf(id) : undefined;
       if (!summary || BUSY.has(summary.state)) return;
     }
-    // A queued message runs with the settings picked before it, whoever takes it. Nothing is held
-    // across the wait: the drain starts over and checks everything afresh (a turn may have started,
-    // the queue been stopped or the item removed meanwhile).
-    const settling = this.settingsSettled(id);
-    // The registry's word was for before the wait: afterwards the session's own state decides.
-    if (settling) { void settling.then(() => this.drainQueue(id)); return; }
     const awaiting = this.sendQueue.awaiting(id);
     const record = this.records.get(id);
     const appIdle = !!record && !record.desktopBridge && this.canTailHandoff(record) && !this.appBusy(desktopId);
     if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now(), appIdle)) return;
-    this.draining.add(id);
-    let claimed = false;
-    try {
-      if (this.modEligible(id, desktopId, head)) {
-        const offer = this.offerMod(id, desktopId, head);
-        const state = offer ? await offer : null;
-        if (state === "claimed") claimed = true;
-        if (state && state !== "expired") return;
-        if (this.shuttingDown || this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
-      }
-      await this.dispatchQueued(id, head, true);
+    return head;
+  }
+
+  private async drainHead(id: string, head: QueueItem, registryIdle: boolean, token: LaneToken): Promise<void> {
+    token.check();
+    if (this.queueHead(id, registryIdle) !== head) return;
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (this.modEligible(id, desktopId, head)) {
+      const offer = this.offerMod(id, desktopId, head);
+      const state = offer ? await offer : null;
+      if (state && state !== "expired") return;
+      token.check();
+      if (this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
     }
-    catch { /* recorded on the item by dispatchQueued */ }
-    finally {
-      this.draining.delete(id);
-      // A message that arrived while this one was being offered was turned away by `draining`.
-      if (claimed) void this.drainQueue(id);
-    }
+    await this.dispatchQueued(id, head, true, token);
   }
 
   private eventsAfter(id: string, seq: number): SessionEvent[] {
@@ -1625,7 +1585,7 @@ export class Sessions {
     return out;
   }
 
-  private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean): Promise<string> {
+  private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean, token?: LaneToken): Promise<string> {
     const attachments: Attachment[] = [];
     for (const a of item.attachments) {
       const data = this.sendQueue.data(a);
@@ -1635,7 +1595,8 @@ export class Sessions {
     let before = 0;
     try { before = this.log(id).lastSeq; } catch { /* the send below creates it */ }
     try {
-      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true);
+      token?.check();
+      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true, token);
       this.sendQueue.remove(id, item.id);
       // Only a message sent from here waits for its own turn; one sent now rides the running turn.
       if (fromQueue) this.sendQueue.sent(id, before, this.now());
@@ -1678,8 +1639,6 @@ export class Sessions {
   private finishMod(offer: ModOffer, outcome: ModOutcome): void {
     const id = this.modOwners.get(offer.itemId);
     if (!id) throw new Error("Missing mod offer owner");
-    this.modLanes.get(offer.itemId)?.();
-    this.modLanes.delete(offer.itemId);
     if (outcome === "failed") { this.modEchoes.delete(offer.itemId); this.sendQueue.failMod(id, offer.itemId, MOD_UNKNOWN); }
     else {
       const key = `send:${id}:${offer.itemId}`;
@@ -1861,9 +1820,10 @@ export class Sessions {
    * has accepted it; a resend of a completed id returns without running again, and a resend that
    * finds a pending receipt from before a host restart throws OutcomeUnknownError.
    * During Desktop handoff, ACK means durable queue ownership; its send receipt starts only at dispatch. */
-  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior?: SendBehavior): string | Promise<string> {
+  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior?: SendBehavior, token?: LaneToken): string | Promise<string> {
+    token?.check();
     const key = `send:${id}:${clientMsgId}`;
-    if (this.receipts.status(key) !== null) return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer");
+    if (this.receipts.status(key) !== null) return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
     const existing = this.sendQueue.items(id).find(item => item.id === clientMsgId);
     if (existing) {
       if (existing.text !== text || existing.attachments.length !== attachments.length) throw new Error(SAME_ID_OTHER_CONTENT);
@@ -1884,10 +1844,11 @@ export class Sessions {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
-    return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer");
+    return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
   }
 
-  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false): string | Promise<string> {
+  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false, token?: LaneToken): string | Promise<string> {
+    token?.check();
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
     const key = `send:${id}:${clientMsgId}`;
     const fingerprint = sendFingerprint(text, attachments);
@@ -1915,7 +1876,7 @@ export class Sessions {
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
-    if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
+    if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer", token));
     // A Desktop handoff may finish before its RC transport exists. Acknowledge durable queue
     // ownership, not an in-memory transfer that would later fail despite the phone's ACK.
     if (!queued && this.records.get(id)?.environmentBridgeId && this.creating.has(this.records.get(id)!.createdBy)) {
@@ -1936,7 +1897,7 @@ export class Sessions {
     }
     this.receipts.begin(key, id, fingerprint);
     try {
-      return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
+      return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments, token));
     } catch (error) {
       this.receipts.abandon(key);
       throw error;
@@ -1955,13 +1916,13 @@ export class Sessions {
     return tracked;
   }
 
-  private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[]): string | Promise<string> {
+  private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[], token?: LaneToken): string | Promise<string> {
     // Stop closes this query's inbox before awaiting the SDK. Reject before recording the
     // user/seen id or converting attachments, so a retry can enter the next query exactly once.
     if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
     if (existing?.environmentCreateUnknown) throw new OutcomeUnknownError();
-    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId).then(sent => {
+    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId, token).then(sent => {
       if (!existing.sdkSessionId) this.pollEnvironmentAdoption(existing);
       return sent;
     });
@@ -1972,7 +1933,7 @@ export class Sessions {
         const key = `${id}/${clientMsgId}`;
         const pending = this.bridgeSends.get(key);
         if (pending) return pending;
-        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId).finally(() => this.bridgeSends.delete(key));
+        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId, token).finally(() => this.bridgeSends.delete(key));
         this.bridgeSends.set(key, sending);
         return sending;
       }
@@ -2008,7 +1969,7 @@ export class Sessions {
     return id;
   }
 
-  private async sendBridge(id: string, clientMsgId: string, text: string, attachments: Attachment[], bridgeId: string): Promise<string> {
+  private async sendBridge(id: string, clientMsgId: string, text: string, attachments: Attachment[], bridgeId: string, token?: LaneToken): Promise<string> {
     if (attachments.some(a => !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(a?.mediaType))) {
       throw new Error("Only photos can be attached to Claude app sessions for now.");
     }
@@ -2042,6 +2003,7 @@ export class Sessions {
     const uuid = UUID_RE.test(clientMsgId) ? clientMsgId : uuidFrom(clientMsgId);
     while (this.bridgeEchoes.size >= Sessions.ECHO_CAP) this.bridgeEchoes.delete(this.bridgeEchoes.values().next().value!);
     this.bridgeEchoes.add(uuid);
+    token?.check();
     try { await this.bridge.send(bridgeId, uuid, converted.content); }
     catch (error) {
       this.noteBridge(bridgeId, error, "bridge send");
@@ -2371,12 +2333,13 @@ export class Sessions {
   private implementPlan(id: string, permId: string): Promise<boolean> {
     const pending = this.planDecisions.get(permId);
     if (pending) return pending;
-    const change = this.scheduleModeChange(id, async turn => {
+    const change = this.inSessionLane(id, async turn => {
       if (this.opts.permissions.get(permId)?.state !== "pending") return false;
       const r = this.records.get(id)!;
       const previousMode = r.permissionMode ?? "auto";
       const previousPrePlanMode = r.prePlanMode;
       await this.changeMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits", turn);
+      turn.check();
       let approved = false;
       try {
         approved = this.opts.permissions.decide(permId, "allow") !== null;
@@ -2387,6 +2350,7 @@ export class Sessions {
           // Cancellation/expiry or a failed durable decision can win during the SDK request.
           // Roll back in this lane before a later user mode change runs.
           await this.changeMode(id, previousMode, turn);
+          turn.check();
           if (previousPrePlanMode === undefined) delete r.prePlanMode;
           else r.prePlanMode = previousPrePlanMode;
           this.save();
@@ -2494,37 +2458,48 @@ export class Sessions {
     this.append(id, { kind: "notice", code: "interrupted" });
   }
 
-  private modeChanges = new Map<string, Promise<unknown>>();
-  /** How long a session's lane may still hold a message back: each change in it may for 15 s after
-   * it was asked for, a waiting message's place for SEND_HOLD_MS. */
-  private modeChangeUntil = new Map<string, number>();
+  private sessionLanes = new Map<string, Promise<void>>();
 
-  /**
-   * Resolves once the model, effort and mode changes that reached this session before now have
-   * run, so a message sent right after a pick runs with it (and /clear copies it). A change that
-   * hangs holds messages no longer than `ms` after it was asked for; the phone's own answer for it
-   * has said "not confirmed" by then.
-   */
-  settingsSettled(id: string, ms = 15_000): Promise<void> | undefined {
-    // A request registers with `settings` as it arrives and joins the lane a microtask later; frames
-    // that came in one read are handled back to back, so the message may see only the former.
-    const asked = this.settings.pending(id);
-    const lane = this.modeChanges.get(id);
-    const pending = [...asked, ...lane ? [lane] : []];
-    const lanePart = lane ? (this.modeChangeUntil.get(id) ?? 0) - Date.now() : 0;
-    const left = Math.max(asked.length ? ms : 0, lanePart);
-    // Nothing to wait for: no await either, so the queue's own timing is unchanged.
-    if (!pending.length || left <= 0) return undefined;
-    return new Promise(resolve => {
-      const timer = setTimeout(resolve, left);
-      void Promise.allSettled(pending).then(() => { clearTimeout(timer); resolve(); });
+  /** One FIFO per session. Only running time counts toward an item's single deadline.
+   * Expiry releases the lane and invalidates the token, even if upstream never answers, and the
+   * caller hears "not confirmed" unless `answerAtExpiry` is false (it then gets the work's own
+   * outcome). Either way the work goes on: a message already handed on still records its receipt
+   * and log entry, so only the token's pre-send checks stop one that was not. */
+  private inSessionLane<T>(id: string, work: (token: LaneToken) => T | Promise<T>, answerAtExpiry = true): Promise<T> {
+    const previous = this.sessionLanes.get(id);
+    const result = Promise.withResolvers<T>();
+    const released = Promise.withResolvers<void>();
+    const tail = released.promise.then(() => {
+      if (this.sessionLanes.get(id) === tail) this.sessionLanes.delete(id);
     });
+    this.sessionLanes.set(id, tail);
+    const start = async (): Promise<void> => {
+      let current = true;
+      const token: LaneToken = { check: () => {
+        if (!current || this.shuttingDown) throw new OutcomeUnknownError();
+      } };
+      const timer = setTimeout(() => {
+        current = false;
+        released.resolve();
+        if (answerAtExpiry) result.reject(new OutcomeUnknownError());
+      }, LANE_ITEM_MS);
+      try {
+        token.check();
+        result.resolve(await work(token));
+      } catch (error) { result.reject(error); }
+      finally { current = false; clearTimeout(timer); released.resolve(); }
+    };
+    // Register before starting, and start synchronously when idle: frames in one read keep order.
+    if (previous) void previous.then(start);
+    else void start();
+    return result.promise;
   }
 
   setMode(id: string, mode: PermissionMode, reqId: string = randomUUID()): Promise<SettingsResult> {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
-    return this.settings.run(id, reqId, JSON.stringify(["mode", mode]), "permissionMode", () => this.scheduleModeChange(id, async turn => {
+    return this.settings.run(id, reqId, JSON.stringify(["mode", mode]), "permissionMode", () => this.inSessionLane(id, async turn => {
       await this.changeMode(id, mode, turn);
+      turn.check();
       return { status: "applied", permissionMode: mode };
     }), result => { if (!this.shuttingDown) this.append(id, { kind: "settings", reqId, ...result }); });
   }
@@ -2548,42 +2523,14 @@ export class Sessions {
     return null;
   }
 
-  private scheduleModeChange<T>(id: string, work: (turn: number) => Promise<T>, holdsFor = 15_000): Promise<T> {
-    // A change that hangs holds the ones behind it no longer than it holds messages: its answer has
-    // said "not confirmed" by then, and every pick after it would otherwise never run. Its late
-    // answer then records nothing (`stillCurrent`): the newer pick is what was asked for last.
-    const previous = this.modeChanges.get(id);
-    const left = (this.modeChangeUntil.get(id) ?? 0) - Date.now();
-    const before = !previous ? Promise.resolve() : new Promise<void>(resolve => {
-      const timer = setTimeout(resolve, Math.max(0, left));
-      void previous.catch(() => {}).then(() => { clearTimeout(timer); resolve(); });
-    });
-    const change = before.then(() => {
-      const turn = (this.modeTurns.get(id) ?? 0) + 1;
-      this.modeTurns.set(id, turn);
-      return work(turn);
-    });
-    this.modeChanges.set(id, change);
-    this.modeChangeUntil.set(id, Math.max(this.modeChangeUntil.get(id) ?? 0, Date.now() + holdsFor));
-    void change.finally(() => { if (this.modeChanges.get(id) === change) { this.modeChanges.delete(id); this.modeChangeUntil.delete(id); } }).catch(() => {});
-    return change;
-  }
-
-  /** Lane entries started per session, so a change can tell a later one ran past it. */
-  private modeTurns = new Map<string, number>();
-  /** After a change's await: one the host cannot follow up any more, or that a later change overtook
-   * while it hung, records nothing and says "not confirmed". */
-  private stillCurrent(id: string, turn: number): void {
-    if (this.shuttingDown || this.modeTurns.get(id) !== turn) throw new OutcomeUnknownError();
-  }
-
-  private async changeMode(id: string, mode: PermissionMode, turn: number): Promise<void> {
+  private async changeMode(id: string, mode: PermissionMode, turn: LaneToken): Promise<void> {
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const bridgeId = this.settingsBridge(id);
     const r = this.records.get(id) ?? this.continueDesktop(id, "");
     if (bridgeId) {
+      turn.check();
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_permission_mode", mode });
-      this.stillCurrent(id, turn);
+      turn.check();
       this.recordMode(r, mode);
       return;
     }
@@ -2591,9 +2538,10 @@ export class Sessions {
     if (!live && mode === "bypassPermissions" && !(r.bypassAllowed ?? r.permissionMode === "bypassPermissions")) throw new Error("bypass_not_launched");
     if (live) {
       await live.ready;
+      turn.check();
       if (this.live.get(id) !== live) throw new Error("The session stopped before its mode changed. Try again.");
       await live.query.setPermissionMode(mode);
-      this.stillCurrent(id, turn);
+      turn.check();
     }
     this.recordMode(r, mode);
   }
@@ -2613,17 +2561,18 @@ export class Sessions {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
     if (typeof model !== "string" || !model.trim() || model.length > 300 || /[@\s]/.test(model)) return Promise.reject(new Error("Invalid model"));
     if (effort !== null && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) return Promise.reject(new Error("Invalid effort"));
-    return this.settings.run(id, reqId, JSON.stringify(["model", model, effort]), "model", () => this.scheduleModeChange(id, turn => this.changeModel(id, model, effort, turn)),
+    return this.settings.run(id, reqId, JSON.stringify(["model", model, effort]), "model", () => this.inSessionLane(id, turn => this.changeModel(id, model, effort, turn)),
       result => { if (!this.shuttingDown) this.append(id, { kind: "settings", reqId, ...result }); });
   }
 
-  private async changeModel(id: string, model: string, effort: Effort | null, turn: number): Promise<SettingsResult> {
+  private async changeModel(id: string, model: string, effort: Effort | null, turn: LaneToken): Promise<SettingsResult> {
     const bridgeId = this.settingsBridge(id, true);
     const m = modelArg(model, effort);
     if (bridgeId) {
       const r = this.records.get(id)!;
+      turn.check();
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_model", model: m.model });
-      this.stillCurrent(id, turn);
+      turn.check();
       if (r.model !== model) r.contextWindow = null;
       r.model = model;
       r.confirmedSettings = { ...r.confirmedSettings, model };
@@ -2632,15 +2581,18 @@ export class Sessions {
       // Claude's effort is a distinct CLI setting, never a thinking-token budget. Routed
       // models carry it ONLY in modelArg, so there cannot be a second conflicting setting.
       if (isClaudeModel(model)) {
-        try { await this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: effort } }); }
+        try {
+          turn.check();
+          await this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: effort } });
+        }
         catch (error) {
           if (error instanceof OutcomeUnknownError) throw error;
-          this.stillCurrent(id, turn);
+          turn.check();
           if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, r.effort);
           return { status: "partial", model, errors: { effort: error instanceof Error ? error.message : String(error) } };
         }
       }
-      this.stillCurrent(id, turn);
+      turn.check();
       r.effort = effort;
       r.confirmedSettings = { ...r.confirmedSettings, effort };
       this.save();
@@ -2668,9 +2620,10 @@ export class Sessions {
     const live = this.live.get(id);
     if (live && (changedModel || changedEffort && !isClaudeModel(model))) {
       await live.ready;
+      turn.check();
       if (this.live.get(id) !== live) throw new Error("The session stopped before its model changed. Try again.");
       await live.query.setModel(m.model);
-      this.stillCurrent(id, turn);
+      turn.check();
     }
     if (changedModel) r.contextWindow = null;
     r.model = model;

@@ -377,6 +377,35 @@ test("a plan approval cancelled during the mode control restores plan mode and i
   assert.equal(f.sessions.summaryOf(id)?.permissionMode, "bypassPermissions");
 });
 
+for (const cancelled of [false, true]) test(`plan ${cancelled ? "rollback" : "approval"} stays ahead of a later pick and message in the lane`, async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  await f.sessions.setMode(id, "plan");
+  const abort = new AbortController();
+  const answer = (query.options.canUseTool as CanUseTool)("ExitPlanMode", { plan: "Implement" }, { signal: abort.signal });
+  query.modeReply = Promise.withResolvers<void>();
+  const approval = f.sessions.decide(id, f.permissions.pending(id)[0]!.id, "allow");
+  const pick = f.sessions.setMode(id, "default", "after-plan");
+  const send = f.sessions.orderedSend(id, "after-plan", "continue");
+  await waitFor(() => query.modes.length === 2);
+  assert.deepEqual(query.modes, ["plan", "acceptEdits"]);
+  assert.equal(query.users.length, 1);
+  if (cancelled) abort.abort();
+  query.modeReply.resolve();
+  assert.equal(await approval, !cancelled);
+  assert.equal((await answer).behavior, cancelled ? "deny" : "allow");
+  await pick;
+  await send;
+  await nextTick();
+  assert.deepEqual(query.modes, cancelled ? ["plan", "acceptEdits", "plan", "default"] : ["plan", "acceptEdits", "default"]);
+  const ordered = f.sessions.log(id).tail().events.filter(e => e.kind === "mode" || e.kind === "user");
+  assert.deepEqual(ordered.slice(-2).map(e => e.kind === "mode" ? e.mode : e.clientMsgId), ["default", "after-plan"]);
+  assert.equal(query.users.at(-1)?.message.content, "continue");
+});
+
 test("steer keeps the running query; interrupt closes it and withdraws unstarted inputs", async t => {
   const f = fixture(t, { permission: true });
   const id = await f.create();
@@ -1566,13 +1595,14 @@ for (const outcome of ["missing", "mismatch", "ambiguous", "account-mismatch", "
   }
 });
 
-async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, waitForExit = false) {
+async function modFixture(t: TestContext, modOfferMs = 100, modResultMs = 100, waitForExit = false, appRoot?: string) {
   const projects = fs.mkdtempSync(path.join(os.tmpdir(), "mod-inbox-projects-"));
   t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
   const sdkId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
   const registry = new Map<string, DesktopProcess>();
   const boundary = controlledQueries(true, waitForExit);
   const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", modOfferMs, modResultMs,
+    ...(appRoot ? { desktopSidebar: { root: appRoot } } : {}),
     handoff: async () => { registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" }); return "opened"; }, log() {} });
   const id = await f.create();
   await waitFor(() => boundary.queries.length === 1);
@@ -1778,6 +1808,38 @@ test("pressing send on a queued message offers it to the app's mod first", async
   assert.equal(f.sessions.modInbox.claim("held"), true);
   assert.equal(await sending, f.id);
   assert.equal(f.boundary.queries.length, 1, "the host did not run it");
+});
+
+for (const answer of ["claimed", "expired", "deadline"] as const) test(`send-now holds a later pick until the app offer is ${answer}, not until its two-minute result`, async t => {
+  const app = claudeAppData(t, "dddddddd-dddd-dddd-dddd-dddddddddddd");
+  const f = await modFixture(t, answer === "expired" ? 6000 : 120_000, 120_000, false, app.root);
+  f.registry.get(f.sdkId)!.status = "busy";
+  f.sessions.enqueue(f.id, "ordered-offer", "offer words");
+  await nextTick();
+  f.registry.get(f.sdkId)!.status = "idle";
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+  const sending = f.sessions.sendQueued(f.id, "ordered-offer");
+  const outcome = answer === "deadline" ? assert.rejects(sending, /전송 결과를 확인할 수 없음/) : sending;
+  const pick = f.sessions.setModel(f.id, "next-model", null, "after-offer");
+  await nextTick();
+  assert.equal(f.sessions.modInbox.pending(f.sdkId).length, 1);
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "claude-test");
+  t.mock.timers.tick(answer === "deadline" ? 14_999 : 5999);
+  await nextTick();
+  assert.equal(f.sessions.summaryOf(f.id)?.model, "claude-test", "the later pick still waits");
+  if (answer === "claimed") assert.equal(f.sessions.modInbox.claim("ordered-offer"), true);
+  else t.mock.timers.tick(1);
+  await outcome;
+  assert.deepEqual(await pick, { status: "applied", model: "next-model", effort: null });
+  if (answer === "claimed") {
+    assert.equal(f.boundary.queries.length, 1, "the host never dispatched a claimed message");
+    assert.equal(f.sessions.modInbox.result("ordered-offer", "submitted"), true, "the later result remains tracked independently");
+  }
+  if (answer === "deadline") {
+    t.mock.timers.tick(120_000);
+    await nextTick();
+    assert.equal(f.boundary.queries.length, 1, "an expired lane item cannot dispatch after its offer expires");
+  }
 });
 
 test("an unclaimed offer expires before the host runs it; late claims lose", async t => {

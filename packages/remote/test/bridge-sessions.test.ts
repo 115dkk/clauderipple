@@ -14,7 +14,7 @@ const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const line = (value: unknown) => JSON.stringify(value) + "\n";
 
-function fixture(t: import("node:test").TestContext, rejected = false, resumed: boolean | string = false) {
+function fixture(t: import("node:test").TestContext, rejected = false, resumed: boolean | string = false, postGate?: Promise<void>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-session-test-"));
   const projects = path.join(root, "projects");
   fs.mkdirSync(path.join(projects, "project"), { recursive: true });
@@ -30,6 +30,7 @@ function fixture(t: import("node:test").TestContext, rejected = false, resumed: 
   const client = new BridgeClient({ auth: () => ({ accessToken: "private-token", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
     if (options?.method === "POST") {
       posts.push(JSON.parse(String(options.body)));
+      await postGate;
       return new Response("{}", { status: rejected ? 403 : 200 });
     }
     if (String(url).endsWith("/sessions/bridge")) {
@@ -281,6 +282,21 @@ test("bridge caps total base64 at ATTACHMENT_COUNT times ATTACHMENT_CAP, inclusi
   assert.equal(content.filter(block => block.type === "image").reduce((size, block) => size + block.source.data.length, 0), ATTACHMENT_COUNT * ATTACHMENT_CAP);
   assert.deepEqual(content.at(-1), { type: "text", text: "Please inspect these images." });
   assert.equal(f.queries(), 0);
+});
+
+test("a bridge send accepted after its lane deadline still logs the message and completes its receipt", async t => {
+  const gate = Promise.withResolvers<void>();
+  const f = fixture(t, false, false, gate.promise);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sending = f.sessions.orderedSend(id, "slow-accept", "slow words");
+  await tick();
+  assert.equal(f.posts.length, 1);
+  t.mock.timers.tick(15_000);
+  gate.resolve();
+  assert.equal(await sending, id);
+  assert.equal(f.sessions.log(id).tail().events.filter(e => e.kind === "user" && e.clientMsgId === "slow-accept").length, 1);
+  assert.equal(await f.sessions.orderedSend(id, "slow-accept", "slow words"), id);
+  assert.equal(f.posts.length, 1, "the completed receipt answers a resend without posting again");
 });
 
 test("a rejected live bridge send fails each attempt without logging the user or starting a writer", async t => {
