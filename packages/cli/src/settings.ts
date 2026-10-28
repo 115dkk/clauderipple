@@ -11,6 +11,7 @@ import { homeDir } from "../../router/src/config.ts";
 import { withFileLock, writeJsonAtomic } from "../../router/src/locked-file.ts";
 import { type HomeClaims, type OwnerStore, type SlotClaims, claimedElsewhere, claimsOf, ownersPath, readOwners, setClaims } from "./owners.ts";
 import { legacyIntegrationPath } from "./ownership.ts";
+import { reconcileCompactWindows } from "./compact-windows.ts";
 
 /** Slots whose env value this call actually wrote or removed. Empty when the file already agreed. */
 export type SlotName = "main" | "smallFast" | "subagent";
@@ -298,13 +299,16 @@ export function removeProxyEnv(opts: { proxyUrl: string; caPath: string; models?
 
 function removeProxyEnvLocked(opts: { proxyUrl: string; caPath: string; models?: ModelSlots; home?: string }): SettingsEdit {
   const home = opts.home ?? homeDir();
-  const record = owners(home);
+  let record = owners(home);
   if (record.error) return { changed: false, backup: null, notes: [`could not read ClaudeRipple's ownership record (${record.error}); settings.json was left as it was`], wroteSlots: [] };
+  const compactChanged = reconcileCompactWindows(settingsPath(), home, {});
+  // Reconciliation released just the compact-window claims under this same settings lock.
+  record = owners(home);
   const file = settingsPath();
   const s = readSettings(file);
   const env = { ...((s.env as Record<string, string> | undefined) ?? {}) };
   const notes: string[] = [];
-  let changed = false;
+  let changed = compactChanged;
   if (env.HTTPS_PROXY === opts.proxyUrl && env.NODE_EXTRA_CA_CERTS === opts.caPath) {
     delete env.HTTPS_PROXY;
     changed = true;

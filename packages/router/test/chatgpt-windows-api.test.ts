@@ -15,7 +15,8 @@ type WindowsResponse = { windows: Record<string, number>; catalogWindows: Record
 
 test("the real catalogue lookup and probe give bootstrap, picker and admin the effective Codex window", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-window-api-"));
-  const previous = { CLAUDERIPPLE_HOME: process.env.CLAUDERIPPLE_HOME, CODEX_HOME: process.env.CODEX_HOME };
+  const previous = { CLAUDERIPPLE_HOME: process.env.CLAUDERIPPLE_HOME, CODEX_HOME: process.env.CODEX_HOME, CLAUDE_SETTINGS_PATH: process.env.CLAUDE_SETTINGS_PATH };
+  process.env.CLAUDE_SETTINGS_PATH = path.join(home, "settings.json");
   process.env.CLAUDERIPPLE_HOME = home;
   process.env.CODEX_HOME = home;
   t.after(() => {
@@ -88,7 +89,7 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
   const before = await readWindows();
   assert.equal(before.windows["gpt-6.1-sol"], 272000, "stored value before any catalogue read");
   assert.deepEqual(before.catalogWindows, {});
-  assert.deepEqual(before.resolvedWindows["claude-opus-4-8"], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 272000 }, "stored target window beats the native alias before a live catalogue read");
+  assert.deepEqual(before.resolvedWindows["claude-opus-4-8"], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 272000, compactWindow: 272000 }, "stored target window beats the native alias before a live catalogue read");
   assert.equal(before.resolvedWindows["claude-opus-unknown"]?.contextWindow, null, "unknown routed capacity cannot inherit the native million");
   assert.equal(before.resolvedWindows["unknown-capacity"]?.contextWindow, null, "global compaction is not a known model capacity");
 
@@ -116,7 +117,7 @@ test("the real catalogue lookup and probe give bootstrap, picker and admin the e
 
   const after = await readWindows();
   for (const id of ["gpt-6-astra", "astra", "claude-opus-4-8"]) {
-    assert.deepEqual(after.resolvedWindows[id], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 258400 });
+    assert.deepEqual(after.resolvedWindows[id], { model: "gpt-6-astra", provider: "chatgpt", contextWindow: 258400, compactWindow: 258400 });
   }
   assert.equal(after.resolvedWindows["claude-sonnet-5"]?.contextWindow, 600000, "resolved metadata keeps an explicit route override");
   for (const id of ["gpt-6.1-sol", "sol", "provider-only", "prefix-only", "claude-opus-5"]) {

@@ -54,7 +54,7 @@ import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
-import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
+import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts";
 import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
 import { catalogEntry } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
@@ -1001,7 +1001,7 @@ function providerCanSearch(name: string, cfg: Config): boolean {
  * does nothing is the exact bug this closes, so a failure has to come back to the screen rather
  * than being swallowed into the router log.
  */
-function syncModelSlotsForGui(cfg: Config): string | null {
+function syncModelSlotsForGui(cfg: Config, agentDir?: string): string | null {
   try {
     const home = homeDir();
     syncModelSlots({
@@ -1012,6 +1012,7 @@ function syncModelSlotsForGui(cfg: Config): string | null {
       // Claude, and `syncModelSlots` reads an absent `models` as "do not touch these".
       models: cfg.cli.models ?? {},
     });
+    syncContextWindows(cfg, agentDir ? [agentDir] : undefined);
     return null;
   } catch (e) {
     const message = (e as Error).message;
@@ -1850,45 +1851,8 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
  * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
  * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
  */
-async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> }> {
-  const cfg = deps.config();
-  const windows: Record<string, number> = {};
-  const catalogWindows: Record<string, number> = {};
-  const resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> = {};
-  const put = (id: string, fallback?: number, native = false): void => {
-    const base = id.split("@")[0]!;
-    const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
-    const live = chatgptModelWindow(cfg, id);
-    // Keep the legacy editor maps, but give usage readers a provider-bound resolution. A native
-    // alias's window and the global compaction setting are not the routed model's capacity.
-    const resolved = resolve(id, {}, cfg) ?? (cfg.aliases[base] ? resolve(cfg.aliases[base], {}, cfg) : null);
-    const model = resolved?.model.split("@")[0] ?? base;
-    const provider = resolved ? cfg.providers[resolved.provider] : undefined;
-    const explicit = resolved && !cfg.direct.some(d => base.startsWith(d.prefix)) ? route?.contextWindow : undefined;
-    const own = cfg.cli.extraModels.find(m => m.model.split("@")[0] === model)?.contextWindow
-      ?? provider?.models?.find(m => m.id === model || m.id === model.replace(/-\d{8}$/, ""))?.contextWindow;
-    const known = resolved ? explicit ?? live ?? own : native ? fallback : undefined;
-    if (!resolvedWindows[id]) resolvedWindows[id] = {
-      model, provider: resolved?.provider ?? null,
-      contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null,
-    };
-    if (!resolved && declaredBy(base, cfg).length > 1) return;
-    const value = route?.contextWindow ?? live ?? fallback;
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
-    windows[id] = Math.floor(value);
-    if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
-  };
-  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow, true);
-  for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
-  for (const [name, provider] of Object.entries(cfg.providers)) {
-    for (const model of ("models" in provider && provider.models) || []) {
-      put(model.id, model.contextWindow);
-      if (declaredBy(model.id, cfg).length > 1) put(`${name}:${model.id}`, model.contextWindow);
-    }
-  }
-  for (const id of Object.keys(cfg.routes)) put(id);
-  for (const id of Object.keys(cfg.aliases)) put(id);
-  return { windows, catalogWindows, resolvedWindows };
+async function contextWindows(deps: AdminDeps): Promise<ReturnType<typeof contextWindowSnapshot>> {
+  return contextWindowSnapshot(deps.config(), await claudeModelList(deps), deps.agentDir ? [deps.agentDir] : undefined);
 }
 
 function tailLines(file: string, n: number): string {
@@ -2191,6 +2155,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.compactAt !== undefined) {
           if (body.compactAt !== null && typeof body.compactAt !== "number") throw new ModSettingsInputError("compactAt must be a number of tokens or null");
           writeAutoCompactWindow(body.compactAt);
+          syncContextWindows(deps.config(), deps.agentDir ? [deps.agentDir] : undefined);
         }
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
@@ -2405,7 +2370,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;
         // otherwise the Clients screen shows a choice that only a later `install` would honour.
-        const slotWarning = syncModelSlotsForGui(parsed);
+        const slotWarning = syncModelSlotsForGui(parsed, deps.agentDir);
         sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(slotWarning ? { warning: slotWarning } : {}) });
         return;
       }

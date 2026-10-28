@@ -268,11 +268,12 @@ The router is the single source of the mod's settings, persisted in
 `{settings:<full normalized Settings>, revision, stored:boolean, compactAt:number|null}`.
 `compactAt` is Claude Code's own compaction point, read from `autoCompactWindow`
 in `~/.claude/settings.json` (`CLAUDE_SETTINGS_PATH` overrides the path): the
-top-level key, else the one value `/autocompact <n>` saved under
-`modelSettings.<model>` (a per-model value outranks the top-level one, per the
-2.1.304 settings schema); null means the model's default stands, or models
-disagree. A dashboard save also drops the per-model values, which would
-otherwise hide it. Compaction fires about 33k tokens before the window
+top-level key, else the one **user-owned** value `/autocompact <n>` saved under
+`modelSettings.<model>`; generated values never masquerade as a global preference.
+Null means no single user preference can be reported. A dashboard save changes only
+the global key and preserves user per-model preferences (2026-10-28); it also reconciles
+the router-owned values described in §4. The band's model-specific fallback comes from
+`GET /api/context-windows`, not this global dashboard field. Compaction fires about 33k tokens before the window
 (20k output reserve + 13k buffer), not at it. Before the first write it returns normalized defaults, revision 0 and
 `stored:false`, without creating storage. `PUT` accepts `{settings, revision?,
 compactAt?}`: a `compactAt` writes or removes that settings.json key directly
@@ -583,6 +584,45 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     `route.contextWindow` still wins; every non-chatgpt provider keeps the old
     fallback. The catalogue is now read at router start and every two hours, not
     only when the dashboard asks.
+  - **Effective compaction windows (2026-10-28, Claude Code 2.1.308).** The owner's
+    measured `/context` reported `30.7k / 600k` on `claude-opus-4-7` routed to Sol
+    (475000 capacity), despite bootstrap and `autoCompactWindowsCache` carrying 475000.
+    Bootstrap is only client-data defaults: the user's global `autoCompactWindow`
+    overrides it. A `--settings` model-specific 475000 changed that model to `/ 475k`
+    while native Opus 5.5 stayed `/ 600k` (owner-supplied measurement). Reproduced in
+    this change with generated temporary settings and an isolated `CLAUDE_CONFIG_DIR`,
+    `--setting-sources '' --no-session-persistence`, Desktop's 2.1.308 binary:
+    Opus 4.7 `31.8k / 475k`, native Opus 5.5 `16.7k / 600k`; `/context` only,
+    no inference turn and no operational settings/router changes.
+    `picker.ts:resolvedModelWindow` now supplies the capacity for bootstrap and the
+    context API; `bootstrapWindows` supplies their shared advertised key set, including
+    slot aliases, extra models and agent `@effort` ids. `effectiveCompactWindow` in
+    `cli/src/compact-windows.ts` computes `min(capacity, user model setting ?? user global
+    setting ?? capacity)`. Generated settings are excluded from user preferences, so a
+    lowered global setting can later rise again. Routed CLI windows are capped at
+    `CLI_WINDOW_MAX`; a result below the CLI's 100K minimum fails visibly, never rounds
+    above the model's capacity.
+    The router writes only routed, non-native `modelSettings[id].autoCompactWindow`:
+    on startup/config reload, immediately on GUI config/compact-setting saves, and every
+    15 seconds (also picks up settings, catalogue and agent-file changes). Unchanged
+    settings are not rewritten. Native Anthropic settings are never generated.
+    Exact generated values live in the existing settings-adjacent ownership store's
+    `homes[installation].compactWindows`; settings lock + atomic JSON replacement are
+    shared with CLI writers. Hand-written or user-edited values and other installations'
+    claims are preserved. A removed route or uninstall removes only unchanged owned
+    fields and keeps sibling keys. A user writing the exact generated value cannot be
+    distinguished from leaving it untouched. Explicit user model overrides above the
+    capacity are preserved, not silently corrected.
+    `GET /api/context-windows` keeps the real `contextWindow` and adds `compactWindow`
+    per provider-bound resolution, including native Claude catalogue models; unknown
+    capacity remains null. The remote host's figures prefer `compactWindow` even over
+    SDK `modelUsage` capacities, retaining old behavior when the field is absent. The
+    mod polls the same API; its fallback uses that model's effective window, while a
+    `/context` breakdown's `rawMaxTokens` always wins as the running CLI's actual value.
+    Higher-priority project/local/managed/command-line settings are outside this user-file
+    policy; an already-running CLI may retain its own window until it reloads settings.
+    Tests: `router/test/context-windows.test.ts`, `chatgpt-windows-api.test.ts`,
+    `remote/test/compact-windows.test.ts`, `test/mod/session.test.ts`.
   - Model self-introduction is not evidence of routing. Verify by upstream
     usage records.
   - **Implemented 2026-09-11** in `packages/router/src/providers/chatgpt/`.
@@ -1768,6 +1808,7 @@ plan unless marked otherwise.
 | Tool names over 64 characters were forwarded to the Responses API unchanged, so a single connected MCP server — the product's own use case (§2) — failed every request of that turn (found by reading the source, issue #1, 2026-09-17) | Any name a translated provider sends is mangled into the provider's constraint deterministically and restored on the way back (§4). A translator must validate what it forwards against the wire it forwards to, not only what it builds itself. |
 | Unknown-model context window defaulted to 200K, compaction fired at 151K; fixed via `CLAUDE_CODE_MAX_CONTEXT_TOKENS=272000` (applies only to models not in the CLI's built-in table; Claude models unaffected) | Installer sets this env for mapped models; document that it does not affect Claude models. |
 | That 272000 then capped every routed worker: Claude Code compacts a model it does not know at the smaller of this cap and the model's own `auto_compact_windows` entry, so 6.1 Sol's 475000 and DeepSeek's, MiniMax's and Gemini's million all compacted at 272000. Separately, an `auto_compact_windows` value outside the CLI's settings range (100K–1M) is dropped whole, so Gemini's 1,048,576 never applied and it fell back to the session's own setting (read from 2.1.308's resolver, 2026-10-24) | The cap is Claude Code's ceiling for a per-model window (`CLI_WINDOW_MAX`, 1,000,000): `install` writes it unless `--max-context-tokens` names another, and the bootstrap sends each window at most that. Every routed model the CLI can be asked for carries its own entry (picker models, agent-file ids, route aliases; the global `cli.autoCompactWindow` only where none is known), so the raised cap never stands in for a window. |
+| Global settings `autoCompactWindow: 600000` overrode bootstrap's per-model 475000 for a GPT-routed slot (owner `/context` measurement, CLI 2.1.308, 2026-10-28), so the upstream could overflow before compaction; mobile displayed native 1M beside desktop 600k | Bootstrap alone is not enforcement. Manage routed per-model settings with exact-value ownership, preserve user overrides and native settings, and expose the same effective compact window to host and mod; `/context` rawMaxTokens remains authoritative (§4). |
 | Server tools (`web_search`) were declared to translated providers as ordinary functions: a tool the model can call and nothing can run. Not observed live, because Claude Code currently routes its web search elsewhere (§4) — the failure was one server-side flag away, and its shape is an empty answer with nothing logged (issue #4, 2026-09-17) | A translator declares only what the provider can actually execute, and says in the log what it removed. A capability that silently disappears is worse than one that visibly fails. |
 | Routed workers were told to call the `advisor` after its declaration was dropped: Claude Code explains the tool in a user message the router left in place, so 26 of 28 worker transcripts reported it missing, every turn (issue #47, 2026-10-04) | Removing a capability includes withdrawing what was said about it. A translator that drops a tool adds one stable line saying so, rather than editing the caller's text. |
 | One context window was written to every routed model and every slot, because `cli.autoCompactWindow` is a single number while `auto_compact_windows` and `context_window_by_model` are per-model maps. Routed models do not share a window: set it high and the smaller model overflows before it compacts, set it low and the larger throws away most of its own (issue #2, 2026-09-17) | A window belongs to a model, not to the router. `CliModel.contextWindow` and `Route.contextWindow` win, then whatever the vendor's `/models` reported as `context_length`, then the global value as the fallback it always was. A value the config can only express once must not be injected into a map that is keyed per model. |

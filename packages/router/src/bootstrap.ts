@@ -9,7 +9,7 @@ import path from "node:path";
 import type { Config } from "./config.ts";
 import { agentAliases } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
-import { chatPickerModels, providerModelWindow } from "./picker.ts";
+import { chatPickerModels, providerModelWindow, resolvedModelWindow } from "./picker.ts";
 import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
 
 export const BOOTSTRAP_PATH = "/api/claude_cli/bootstrap";
@@ -59,7 +59,7 @@ function routable(id: string, cfg: Config): boolean {
   return cfg.direct.some((d) => base.startsWith(d.prefix));
 }
 
-export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[]): Buffer {
+export function bootstrapModels(cfg: Config, agentDirs?: string[]): ReturnType<typeof chatPickerModels> {
   const known = new Set(cfg.cli.extraModels.map((m) => m.model));
   // The agent files' derived aliases are the same set a marker resolves against, so an id an agent
   // file names (and its base) is routable here too — otherwise the CLI never lists it and the
@@ -76,14 +76,27 @@ export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[])
       const window = chatgptModelWindow({ ...cfg, aliases }, base ?? id) ?? named?.contextWindow ?? providerModelWindow({ ...cfg, aliases }, base ?? id);
       return { model: id, name: `${named?.name ?? base}${effort ? ` · ${effort}` : ""}`, ...(window ? { contextWindow: window } : {}) };
     });
-  const extra = chatPickerModels({ ...cfg, aliases, cli: { ...cfg.cli, extraModels: [...cfg.cli.extraModels, ...fromAgents] } });
-  const win = cfg.cli.autoCompactWindow;
-  // A slot's own window is the user's word; after it, a ChatGPT target follows the live catalogue
-  // (windows.ts) before the global value — 6.1 Sol runs 475000, not the 258400 copied into config.
-  const routeWindows = Object.entries(cfg.routes).map(([alias, route]) => [alias, route.contextWindow ?? chatgptModelWindow(cfg, alias) ?? win] as const);
-  // Routed models do not share a context window; the global value is only the fallback for entries
-  // that do not name their own, so a per-entry window alone is reason enough to write the map.
-  const anyWindow = win !== undefined || extra.some((m) => m.contextWindow) || routeWindows.some(([, w]) => w);
+  return chatPickerModels({ ...cfg, aliases, cli: { ...cfg.cli, extraModels: [...cfg.cli.extraModels, ...fromAgents] } });
+}
+
+/** Raw capacities for exactly the keys bootstrap advertises, shared with settings reconciliation. */
+export function bootstrapWindows(cfg: Config, extra = bootstrapModels(cfg)): Record<string, number> {
+  const windows: Record<string, number> = {};
+  for (const m of extra) {
+    const window = resolvedModelWindow(cfg, m.model).contextWindow ?? m.contextWindow ?? cfg.cli.autoCompactWindow;
+    if (window) windows[m.model] = window;
+  }
+  for (const alias of Object.keys(cfg.routes)) {
+    const window = resolvedModelWindow(cfg, alias).contextWindow ?? cfg.cli.autoCompactWindow;
+    if (window) windows[alias] = window;
+  }
+  return windows;
+}
+
+export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[]): Buffer {
+  const extra = bootstrapModels(cfg, agentDirs);
+  const windows = bootstrapWindows(cfg, extra);
+  const anyWindow = Object.keys(windows).length > 0;
   if (extra.length === 0 && !anyWindow) return body;
   let j: Record<string, unknown>;
   try {
@@ -98,13 +111,7 @@ export function injectBootstrap(body: Buffer, cfg: Config, agentDirs?: string[])
   }
   if (anyWindow) {
     const acw = { ...((j.auto_compact_windows as Record<string, number> | undefined) ?? {}) };
-    for (const m of extra) {
-      const w = m.contextWindow ?? win;
-      if (w) acw[m.model] = Math.min(w, CLI_WINDOW_MAX);
-    }
-    for (const [alias, w] of routeWindows) {
-      if (w) acw[alias] = Math.min(w, CLI_WINDOW_MAX);
-    }
+    for (const [id, window] of Object.entries(windows)) acw[id] = Math.min(window, CLI_WINDOW_MAX);
     j.auto_compact_windows = acw;
   }
   return Buffer.from(JSON.stringify(j));

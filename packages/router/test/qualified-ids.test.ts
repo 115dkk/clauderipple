@@ -110,8 +110,12 @@ test("metadata follows the qualified owner rather than the first matching bare i
 test("mod-options and context API retain each worker's real provider and original id", async t => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-qualified-admin-"));
   const previousHome = process.env.CLAUDERIPPLE_HOME;
+  const previousSettings = process.env.CLAUDE_SETTINGS_PATH;
   process.env.CLAUDERIPPLE_HOME = home;
+  process.env.CLAUDE_SETTINGS_PATH = path.join(home, "settings.json");
   t.after(() => {
+    if (previousSettings === undefined) delete process.env.CLAUDE_SETTINGS_PATH;
+    else process.env.CLAUDE_SETTINGS_PATH = previousSettings;
     if (previousHome === undefined) delete process.env.CLAUDERIPPLE_HOME;
     else process.env.CLAUDERIPPLE_HOME = previousHome;
     fs.rmSync(home, { recursive: true, force: true });
@@ -138,6 +142,6 @@ test("mod-options and context API retain each worker's real provider and origina
   ]);
   const context = await (await fetch(`http://127.0.0.1:${admin.port}/api/context-windows`)).json() as { windows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> };
   assert.equal(context.windows[id], undefined, "ambiguous bare ids have no guessed legacy window");
-  assert.deepEqual(context.resolvedWindows[`google-gemini:${id}`], { model: id, provider: "google-gemini", contextWindow: 1_000_000 });
-  assert.deepEqual(context.resolvedWindows[`opencode-go:${id}`], { model: id, provider: "opencode-go", contextWindow: 200_000 });
+  assert.deepEqual(context.resolvedWindows[`google-gemini:${id}`], { model: id, provider: "google-gemini", contextWindow: 1_000_000, compactWindow: 1_000_000 });
+  assert.deepEqual(context.resolvedWindows[`opencode-go:${id}`], { model: id, provider: "opencode-go", contextWindow: 200_000, compactWindow: 200_000 });
 });
