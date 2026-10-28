@@ -126,7 +126,9 @@ test("direct rejects corrupt snapshots without modifying their raw text or clien
   assert.equal(fs.readFileSync(c.settings, "utf8"), before);
 });
 
-test("snapshot save failure changes no client and settings save failure retains restoration evidence", () => {
+test("snapshot save failure changes no client and settings save failure retains restoration evidence", t => {
+  // The collision directory and backup writer must use the same second, even on a busy runner.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
   const c = setup();
   c.apply(c.a);
   const before = fs.readFileSync(c.settings, "utf8");
