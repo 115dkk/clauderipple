@@ -169,7 +169,28 @@ function applyMessageCache(messages: AnthropicMessage[]): void {
   }
 }
 
-function responseItems(value: unknown): AnthropicMessage[] {
+// Router-owned opaque replay format, NOT encryption or an OpenAI-compatible ciphertext.
+const COMPACTION_PREFIX = "clauderipple:compaction:v1:";
+
+export function hasCompactionTrigger(body: Json): boolean {
+  return Array.isArray(body.input) && body.input.some((item) => object(item)?.type === "compaction_trigger");
+}
+
+function restoreCompaction(value: unknown, onIgnored: () => void): string | null {
+  if (typeof value !== "string" || !value.startsWith(COMPACTION_PREFIX)) {
+    onIgnored();
+    return null;
+  }
+  const encoded = value.slice(COMPACTION_PREFIX.length);
+  // Buffer's base64 decoder is permissive; require our canonical encoding before parsing.
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.toString("base64") !== encoded) throw new Error("Invalid ClaudeRipple compaction encoding");
+  const payload = object(JSON.parse(decoded.toString("utf8")) as unknown);
+  if (typeof payload?.summary !== "string" || !payload.summary.trim()) throw new Error("Invalid ClaudeRipple compaction summary");
+  return `Summary of the earlier conversation: ${payload.summary}`;
+}
+
+function responseItems(value: unknown, onIgnoredCompaction: () => void): AnthropicMessage[] {
   if (typeof value === "string") return value ? [{ role: "user", content: [{ type: "text", text: value }] }] : [];
   if (!Array.isArray(value)) return [];
   const messages: AnthropicMessage[] = [];
@@ -186,6 +207,11 @@ function responseItems(value: unknown): AnthropicMessage[] {
     if (type === "function_call_output") {
       const callId = string(item.call_id) ?? "";
       if (callId) messages.push({ role: "user", content: [{ type: "tool_result", tool_use_id: callId, content: contentText(item.output) }] });
+      continue;
+    }
+    if (type === "compaction") {
+      const text = restoreCompaction(item.encrypted_content, onIgnoredCompaction);
+      if (text !== null) messages.push({ role: "user", content: [{ type: "text", text }] });
       continue;
     }
     if (type === "compaction_trigger") {
@@ -237,9 +263,9 @@ function placeInstructions(prefix: string | undefined, instructions: string[], m
   return text ? [{ type: "text", text, cache_control: EPHEMERAL }] : undefined;
 }
 
-export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string): AnthropicIngressRequest {
+export function responsesToAnthropic(body: Json, targetModel: string, systemPrefix?: string, onIgnoredCompaction: () => void = () => {}): AnthropicIngressRequest {
   const instructions = string(body.instructions);
-  const messages = responseItems(body.input);
+  const messages = responseItems(body.input, onIgnoredCompaction);
   endWithUserTurn(messages);
   const system = placeInstructions(systemPrefix, instructions ? [instructions] : [], messages);
   applyMessageCache(messages);
@@ -346,9 +372,13 @@ export class ResponsesEventMapper {
   private outputIndex = 0;
   private readonly toolNameFromWire: (name: string) => string;
 
-  constructor(model: string, toolNameFromWire: (name: string) => string = (name) => name) {
+  private summary = "";
+  private readonly compaction: boolean;
+
+  constructor(model: string, toolNameFromWire: (name: string) => string = (name) => name, compaction = false) {
     this.model = model;
     this.toolNameFromWire = toolNameFromWire;
+    this.compaction = compaction;
   }
 
   response(status: "in_progress" | "completed" = "in_progress"): Json {
@@ -364,6 +394,23 @@ export class ResponsesEventMapper {
   feed(event: Json): Json[] {
     const out = this.start();
     const type = string(event.type) ?? "";
+    if (this.compaction) {
+      if (type === "content_block_start") {
+        if (object(event.content_block)?.type === "tool_use") throw new Error("Compaction returned a tool call instead of a summary");
+        return out;
+      }
+      if (type === "content_block_delta") {
+        const delta = object(event.delta);
+        if (delta?.type === "text_delta") this.summary += string(delta.text) ?? "";
+        return out;
+      }
+      if (type === "content_block_stop") return out;
+      if (type === "message_delta") {
+        const reason = object(event.delta)?.stop_reason;
+        if (reason && reason !== "end_turn") throw new Error(`Compaction did not finish: ${String(reason)}`);
+      }
+      if (type === "error") throw new Error("Compaction upstream returned an error");
+    }
     if (type === "message_start") {
       const message = object(event.message);
       this.usage = usageFromAnthropic(message?.usage);
@@ -423,7 +470,7 @@ export class ResponsesEventMapper {
       this.usage = usageFromAnthropic(event.usage);
       return out;
     }
-    if (type === "message_stop") return [...out, ...this.finish()];
+    if (type === "message_stop") return [...out, ...this.finish(true)];
     if (type === "error") {
       const error = object(event.error);
       return [...out, { type: "error", error: { message: string(error?.message) ?? "Anthropic upstream error", type: string(error?.type) ?? "api_error", code: null } }];
@@ -431,8 +478,22 @@ export class ResponsesEventMapper {
     return out;
   }
 
-  finish(): Json[] {
+  finish(upstreamCompleted = false): Json[] {
     if (this.completed) return [];
+    if (this.compaction) {
+      if (!upstreamCompleted || !this.summary.trim()) throw new Error("Compaction ended without a complete summary");
+      const item: OutputItem = {
+        id: id("cmp"), type: "compaction",
+        encrypted_content: COMPACTION_PREFIX + Buffer.from(JSON.stringify({ summary: this.summary }), "utf8").toString("base64"),
+      };
+      this.output.push(item);
+      this.completed = true;
+      return [
+        { type: "response.output_item.added", output_index: 0, item },
+        { type: "response.output_item.done", output_index: 0, item },
+        { type: "response.completed", response: this.response("completed") },
+      ];
+    }
     this.completed = true;
     for (const state of this.blocks.values()) {
       state.item.status = "completed";

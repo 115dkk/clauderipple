@@ -1241,7 +1241,29 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   rather than a response item) becomes the user turn that asks for the summary,
   and a transcript that ends with the assistant gets one short user turn, because
   Anthropic reads that shape as prefill and models that take none refuse it
-  (#104, 2026-10-28).
+  (#104, 2026-10-28). For a translated Responses request with that trigger,
+  the mapper buffers the model's summary and emits exactly one output item
+  `{type:"compaction", id:"cmp_…", encrypted_content:"clauderipple:compaction:v1:…"}`
+  instead of message/text events, in `response.output_item.added`, then
+  `response.output_item.done`, then `response.completed` (whose `output` holds
+  the same item). Non-streaming JSON uses the same item. The suffix is base64
+  UTF-8 JSON `{summary:<text>}`: a router-owned opaque replay value, **not
+  encryption**, not an OpenAI ciphertext. Replayed `compaction` input restores
+  `Summary of the earlier conversation: <text>` as a user turn at that position;
+  foreign formats are dropped with a warning that never includes their content.
+  Malformed router-owned payloads fail visibly rather than discard context.
+  Empty, interrupted, truncated or tool-call compaction answers do not emit a
+  successful compaction item. GPT passthrough remains byte-for-byte unchanged;
+  the older `/responses/compact` endpoint is still GPT-only.
+  Behavioral source (no code copied): OpenAI Codex tag
+  [`rust-v0.164.0-alpha.11.1`](https://github.com/openai/codex/tree/rust-v0.164.0-alpha.11.1),
+  `codex-rs/protocol/src/models.rs` (`ResponseItem::Compaction`: required string
+  `encrypted_content`, optional `id` and internal metadata),
+  `codex-rs/codex-api/src/sse/responses.rs` (added/done deserialize `item`), and
+  `codex-rs/core/src/compact_remote_v2.rs::collect_compaction_output` (counts
+  exactly one compaction from OutputItemDone and requires Completed).
+  Verified by `packages/router/test/ingress-server.test.ts` round trips over
+  local HTTP/SSE and JSON, plus `ingress-translate.test.ts` edge cases.
 - Cache discipline: serialization has no timestamps; cache breakpoints are put
   on the system block, the final tool definition, and the final user content
   block. Upstream Anthropic usage maps `cache_read_input_tokens` to Responses
