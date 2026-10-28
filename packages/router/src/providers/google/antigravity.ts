@@ -84,8 +84,9 @@ export const ANTIGRAVITY_CLI_VERSION = "1.3.4";
  * `fetchAvailableModels` lists `gemini-4-argon-{low,medium,high}` under it and not under the IDE UA
  * (measured 2026-10-27 on both hosts, one Google AI Pro account), and opencodex measured Argon requests 404
  * under the IDE UA while `gemini-3.7-flash-tiered` and `gemini-3.1-pro-low` 404 under this one. So it
- * is used for Argon only, never in place of the IDE UA. The IDE override does not apply: it names the
- * IDE header, and letting it replace this one would lock Argon again. Source: opencodex
+ * is used for Argon generation and the quota summary, not other models' generation. The IDE
+ * override does not apply: it names the IDE header, and letting it replace this one would lock
+ * Argon again. Source: opencodex
  * `src/adapters/client-fingerprint.ts antigravityCliUserAgent`.
  */
 export function antigravityCliUserAgent(): string {

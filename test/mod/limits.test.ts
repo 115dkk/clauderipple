@@ -179,6 +179,34 @@ test('the whole row comes from /api/limits: every provider, in the router order'
   assert.deepEqual(routerLimitItems(null, NOW), [])
 })
 
+test('Argon weekly survives the router limits parser and keeps its own name in the view', () => {
+  const resetAt = (NOW + 2 * 3_600_000) / 1000
+  const body = { providers: [{ provider: 'ag', type: 'google', title: 'Gemini', accounts: [
+    { account: 0, at: NOW, windows: [
+      { kind: 'five_hour', used_percent: 13, window_minutes: 300, reset_at: resetAt },
+      { kind: 'seven_day', used_percent: 24, window_minutes: 10080, reset_at: resetAt },
+      { kind: 'scoped', label: 'Argon weekly', used_percent: 65, window_minutes: 10080, reset_at: resetAt },
+    ] },
+    { account: 1, at: NOW, windows: [
+      { kind: 'scoped', label: 'Argon weekly', used_percent: 35, window_minutes: 10080, reset_at: resetAt },
+    ] },
+  ] }] }
+  const items = routerLimitItems(body, NOW)
+  assert.deepEqual(items.map(i => [i.kind, i.label, i.percent]), [
+    ['five_hour', '', 13], ['seven_day', '', 24], ['scoped', 'Argon weekly', 65], ['scoped', 'Argon weekly', 35],
+  ])
+  const argon = items[2]!
+  assert.equal(argon.windowMinutes, 10080)
+  assert.equal(argon.resetsAt, new Date(resetAt * 1000).toISOString())
+  for (const lang of ['en', 'ko'] as const) assert.equal(limitItemName(argon, lang), 'Argon weekly')
+  const groups = limitGroups(items)
+  const numbered = limitGroupNumbered(groups)
+  assert.deepEqual(groups.map(g => limitGroupName(g, numbered(g))), ['Gemini 1', 'Gemini 2'])
+  const clock = new Date(resetAt * 1000)
+  const time = `${String(clock.getHours()).padStart(2, '0')}:${String(clock.getMinutes()).padStart(2, '0')}`
+  assert.equal(limitItemTip(argon, 'Gemini 1', 'en', NOW), `Gemini 1 Argon weekly 65% · resets ${time}`)
+})
+
 test('the groups name and order every provider; Claude first, accounts numbered per provider', () => {
   const items = [
     { provider: 'opencode-go', type: 'opencode-go', title: 'Go', account: 0, kind: 'five_hour' as const, label: '', percent: 3 },

@@ -345,7 +345,7 @@ function chatgptLimitAccounts(accounts: ChatGptAccountStatus[]): LimitsAccount[]
   return out;
 }
 
-/** Every Antigravity account's windows (Gemini's own plus the third-party ones), paused left out. */
+/** Every Antigravity account's windows (Gemini, Argon and selected third-party ones), paused left out. */
 async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<LimitsAccount[]> {
   const google = deps.google?.();
   if (!google) return [];
@@ -362,7 +362,8 @@ async function googleLimitAccounts(deps: AdminDeps, name: string): Promise<Limit
   kept.forEach((account, index) => {
     const quotient = groups[account.id];
     if (!quotient || !quotient.length) return;
-    const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped");
+    // Scoped is a display kind, not a third-party marker: Argon's own weekly quota is scoped too.
+    const windows: LimitsWindow[] = googleWindowsFromGroups(quotient).filter((w) => thirdParty || w.kind !== "scoped" || w.label !== "3P");
     if (windows.length) out.push({ account: index, windows, at });
   });
   return out;
