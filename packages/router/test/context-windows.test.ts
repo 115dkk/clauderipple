@@ -102,8 +102,10 @@ test("other installations' managed settings are not updated or removed; CLI boun
   syncCompactWindows(f.file, f.home, { large: 1000000 });
   assert.equal(syncCompactWindows(f.file, `${f.home}/other`, { large: 500000 }), false);
   assert.equal(f.models()?.large?.autoCompactWindow, 1000000);
-  assert.throws(() => syncCompactWindows(f.file, f.home, { tiny: 99999 }));
+  // Out of Claude Code's range: that model is skipped, and the others are still written.
+  syncCompactWindows(f.file, f.home, { tiny: 99999, large: 1000000 });
   assert.equal(f.models()?.tiny, undefined);
+  assert.equal(f.models()?.large?.autoCompactWindow, 1000000);
   f.cfg.cli.extraModels[0]!.contextWindow = 1048576;
   assert.equal(routedCompactWindows(f.cfg, [])["gpt-test"], 1000000);
 });

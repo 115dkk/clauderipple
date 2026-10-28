@@ -52,9 +52,10 @@ export function reconcileCompactWindows(file: string, home: string, windows: Rec
     if (elsewhere || value !== undefined && !ours) continue;
     if (models[id] !== undefined && !object(models[id])) continue;
     const capacity = windows[id];
-    if (capacity !== undefined) {
-      const window = effectiveCompactWindow(id, capacity, settings, record.store)!;
-      if (window < 100_000 || window > 1_000_000) throw new Error(`compact window for ${id} is outside Claude Code's 100K–1M range`);
+    const window = capacity === undefined ? null : effectiveCompactWindow(id, capacity, settings, record.store);
+    // Claude Code ignores values outside 100K–1M; such a model keeps Claude Code's own default
+    // rather than stopping every other model's entry from being written.
+    if (window !== null && window >= 100_000 && window <= 1_000_000) {
       models[id] = { ...current, autoCompactWindow: window };
       nextClaims[id] = window;
     } else if (ours) {
