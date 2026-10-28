@@ -94,10 +94,12 @@ test("an outside candidate is rejected before native path resolution", t => {
 test("a host-owned root accepts its native spelling without resolving rejected candidates", t => {
   const { cwd, sink } = fixture(t), parent = directory(t);
   const alias = path.join(parent, "nested", "short-root"); fs.mkdirSync(alias, { recursive: true });
-  const file = path.join(cwd, "safe.txt"); fs.writeFileSync(file, "safe");
   const native = fs.realpathSync.native;
+  // Ordinary realpath may retain an 8.3 TEMP spelling; the mocked root must match native file resolution.
+  const root = native(cwd);
+  const file = path.join(root, "safe.txt"); fs.writeFileSync(file, "safe");
   const mock = t.mock.method(fs.realpathSync, "native", (...args: Parameters<typeof fs.realpathSync.native>) => {
-    return String(args[0]) === alias ? cwd : native(...args);
+    return String(args[0]) === alias ? root : native(...args);
   });
   assert.equal(sessionFiles([file], { cwd: alias }, sink)[0]?.status, "ready");
   mock.mock.restore();

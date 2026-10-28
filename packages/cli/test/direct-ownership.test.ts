@@ -15,7 +15,7 @@ import { normalizeHome } from "../src/ownership.ts";
 
 // Native real path resolves macOS's /var link and Windows' 8.3 TEMP alias.
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-")));
-const keys = ["HOME", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
+const keys = ["HOME", "USERPROFILE", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
 const previous = keys.map(key => [key, process.env[key]] as const);
 after(() => {
   for (const [key, value] of previous) {
@@ -33,6 +33,8 @@ function setup() {
     fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 18791 }, cli: { models: { smallFast: "routed-model" } } }));
   }
   process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  assert.equal(os.homedir(), dir, "service locks must stay inside the fixture account");
   process.env.CLAUDE_SETTINGS_PATH = path.join(dir, "settings.json");
   process.env.CLAUDE_APP_SUPPORT = path.join(dir, "desktop");
   process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR = path.join(dir, "launch-agents");
