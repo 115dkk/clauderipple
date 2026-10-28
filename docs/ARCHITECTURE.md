@@ -1026,9 +1026,19 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     notices is the worse mistake. Only 401 parks.
   - An answer lifts a quarantine but does not cancel a live cooldown: requests overlap, and a 200
     arriving after a concurrent 429 does not mean the limit lifted.
-  - The conversation key is `conversationKey`, the same one the prompt cache uses. `metadata.user_id`
-    alone is one value for every conversation a user has, so using it raw dragged all of them onto
-    one credential at once — the opposite of what stickiness is for.
+  - **Pool affinity (2026-10-28, issue #101)** uses `requestConversationKey` captured before routing:
+    agent + session when available, otherwise session/user identity + the full first user message
+    (cache-control markers excluded). `conversationKey` truncates at 4000 characters, so workers
+    sharing injected instructions had shared one user's affinity indefinitely. New conversations
+    try the preferred/first usable configured key; a healthy existing affinity never moves merely
+    because an earlier key recovered. Provider cache/session keys remain unchanged. Metadata-less
+    one-message side requests without an agent keep their shared `conversationKey` class below.
+    Request records expose `credential` (configured label or 1-based ordinal, never runtime id/token);
+    `router.log` also records selection reason and candidate health, plus every same-turn retry.
+    The measured JSON `server_error` / `Upstream request failed: This Go model requires Global regions`
+    400 rests the workspace's key for 60s (or Retry-After) and permits another key before the first
+    response byte. Other 400s still neither penalise keys nor retry the pool. Tests: `pool.test.ts`
+    and `proxy-failover.test.ts`.
   - The same key has a second branch, because not every request is a conversation. What the CLI
     sends *beside* one — the web-search side request, a title, a summary — carries no `metadata` at
     all and one lone user message that is different every time, so seeding on that message minted a

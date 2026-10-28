@@ -811,7 +811,7 @@ export class Proxy {
       if (failed) this.stats.failed++;
       else this.stats.completed++;
       const ms = Date.now() - t0;
-      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${note ? " " + note : ""}`);
+      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${record.credential ? ` credential=${record.credential}` : ""}${note ? " " + note : ""}`);
       if (isLoggedRequest) {
         const numericStatus = Number(status);
         const usage = extra?.usage ?? observedUsage;
@@ -897,6 +897,21 @@ export class Proxy {
       }
       if (isAutoModeClassifier(json)) record.purpose = "auto-mode-classifier";
     }
+    // Pool affinity must distinguish workers whose injected first 4000 characters are identical.
+    // Capture before routing/sanitizing rewrites the prompt; retries use exactly this same identity.
+    // Metadata-less side requests retain their shared cache-class key, never a per-request id.
+    const cacheRequest = json && Array.isArray(json.messages) ? json as AnthropicRequest : null;
+    const sideRequest = cacheRequest && !subagent && !cacheRequest.metadata?.user_id && cacheRequest.messages.length <= 1;
+    const affinity = cacheRequest ? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined) ?? conversationKey(cacheRequest) : undefined;
+    const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false): void => {
+      // count_tokens on the translated adapter is local: no key was actually sent.
+      if (pathname === "/v1/messages/count_tokens" && cfg.providers[name]?.type === "openai-compatible") return;
+      record.credential = this.credentialLabel(name, using, credentials);
+      const first = this.pool.pick(name, credentials);
+      const reason = retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
+      const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
+      log.info(`KEY ${name} credential=${record.credential} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
+    };
     const search = json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
     let searchAttempted = false;
     const markSearchAttempted = (): void => { searchAttempted = true; };
@@ -1041,6 +1056,7 @@ export class Proxy {
       let compatChanges: string[] = [];
       /** The credential this attempt is using, and so the one a failure is charged to. */
       let chosen: Credential | null = null;
+      let credentialCandidates: readonly Credential[] = [];
       let penalised: { provider: string; id: string } | null = null;
       let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
       // Re-enter only for the one unwritten Google turn (prompt refusal or no model capacity). Each target sees the original
@@ -1107,17 +1123,18 @@ export class Proxy {
               finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
               return;
             }
-            const key = conversationKey(json as unknown as AnthropicRequest);
-            let using = this.pool.pick(route.provider, credentials, key) ?? credentials[0]!;
+            let using = this.pool.pick(route.provider, credentials, affinity) ?? credentials[0]!;
+            recordCredential(route.provider, using, credentials);
             const tried = new Set([using.id]);
             const poolName = route.provider;
             const next = credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
               if (!classify(status, undefined, body).retryable) return null;
-              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), key);
+              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), affinity);
               if (!candidate) return null;
               this.pool.penalise(poolName, using.id, status, retryAfter, body);
-              log.info(`RETRY ${poolName}: ${using.label ?? using.id} answered ${status}, trying ${candidate.label ?? candidate.id}`);
+              log.info(`RETRY ${poolName}: ${this.credentialLabel(poolName, using, credentials)} answered ${status}, trying ${this.credentialLabel(poolName, candidate, credentials)}`);
               using = candidate;
+              recordCredential(poolName, using, credentials, true);
               tried.add(using.id);
               return using.headers;
             } : undefined;
@@ -1242,9 +1259,11 @@ export class Proxy {
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
               break;
             }
-            chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+            chosen = this.pool.pick(route.provider, credentials, affinity);
             const using = chosen ?? credentials[0]!;
             chosen = using;
+            credentialCandidates = credentials;
+            recordCredential(route.provider, using, credentials);
             penalised = { provider: route.provider, id: using.id };
             target = {
               protocol: "https:",
@@ -1303,15 +1322,15 @@ export class Proxy {
             finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
             return;
           }
-          // The same key the prompt cache is keyed on. `metadata.user_id` alone is one value for every
-          // conversation a user has, so using it raw would drag all of them onto one credential at once
-          // — the opposite of what stickiness is for (see conversationKey and ARCHITECTURE §4).
-          chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+          // Use the original conversation/agent identity, not the truncated provider cache key.
+          chosen = this.pool.pick(route.provider, credentials, affinity);
           // Nothing usable means every credential is cooling, and the turn still has to go somewhere:
           // the first one, so the request carries real credentials rather than none, and so the answer
           // is charged to the credential that actually produced it.
           const using = chosen ?? credentials[0]!;
           chosen = using;
+          credentialCandidates = credentials;
+          recordCredential(route.provider, using, credentials);
           penalised = { provider: route.provider, id: using.id };
           target = {
             protocol,
@@ -1441,7 +1460,7 @@ export class Proxy {
         const available = native ? this.claudeAccounts.peekCredentials() : this.credentialsOf(route.provider, provider);
         const rest = available.filter((c) => !tried.has(c.id));
         if (rest.length === 0) return null;
-        const next = this.pool.pick(route.provider, rest, conversationKey(json as AnthropicRequest));
+        const next = this.pool.pick(route.provider, rest, affinity);
         return next && native ? { ...next, headers: withClientBetas(next.headers, req.headers["anthropic-beta"]) } : next;
       };
 
@@ -1505,15 +1524,14 @@ export class Proxy {
       const onUpstreamResponse = (upRes: http.IncomingMessage): void => {
         if (target.host === cfg.upstream) this.deps.health.success();
         const status = upRes.statusCode ?? 0;
-        // A 403 is the one status whose meaning is in its body. A relay reporting a broken upstream
-        // must not be charged to the credential — that is what made one working key answer every turn
-        // with an authentication error for a minute (2026-09-21). Every other status is judged from
-        // the status alone, and its body is left for the forward below, untouched.
+        // Read body-dependent refusals before committing headers. A relay 403 can report its own
+        // broken upstream, while the narrowly classified workspace-region 400 (#101) rests this key
+        // and can be answered by another. Other 400s remain request errors and never walk the pool.
         // 402 and 429 are read ahead as well: a definite billing/quota exhaustion must be answered
         // with `x-should-retry: false` before the headers go out, and only its body says whether a
         // 429 is exhausted or an ordinary rate limit (#89). A bootstrap response is never a model
         // turn and is forwarded as it arrives.
-        if (status === 403 || (!isBootstrap && (status === 402 || status === 429))) {
+        if (status === 403 || (!isBootstrap && (status === 400 || status === 402 || status === 429))) {
           bufferBody(upRes, ERROR_HEAD_MAX).then((whole) => onUpstreamJudged(upRes, status, whole)).catch((e: Error) => {
             log.warn(`upstream ${status}: could not read the body: ${e.message}`);
             finish(String(status), 0, `upstream ${status}: body read failed`);
@@ -1579,8 +1597,9 @@ export class Proxy {
         // turn is committed, because replacing a half-sent stream splices two answers together.
         const retry = status >= 400 ? nextCredential(status, errBody) : null;
         if (retry) {
-          const previousId = retry.ownerId ? penalised!.id.split(":", 1)[0]! : penalised!.id;
-          log.info(`RETRY ${route!.provider}: ${previousId} answered ${status}, trying ${retry.ownerId ?? retry.id}`);
+          const credentials = credentialCandidates;
+          log.info(`RETRY ${route!.provider}: ${this.credentialLabel(route!.provider, chosen!, credentials)} answered ${status}, trying ${this.credentialLabel(route!.provider, retry, credentials)}`);
+          recordCredential(route!.provider, retry, credentials, true);
           tried.add(retry.id);
           usedCredentialHeaders = { ...usedCredentialHeaders, ...(chosen?.headers ?? {}), ...retry.headers };
           chosen = retry;
@@ -1932,6 +1951,18 @@ export class Proxy {
     if (previous !== undefined && previous !== fingerprint) this.pool.clear(name, "default");
     this.implicitCredentialHeaders.set(name, fingerprint);
     return [{ id: "default", headers }];
+  }
+
+  /** Only explicit labels or configured ordinals are public; runtime ids may be secrets. */
+  private credentialLabel(name: string, credential: Credential, available: readonly Credential[]): string {
+    const provider = this.deps.config().providers[name];
+    const configured = provider && "credentials" in provider ? provider.credentials : undefined;
+    const credentials = configured?.length ? configured : available;
+    const index = credentials.findIndex((candidate) => candidate.id === credential.id);
+    const secrets = credentialHeaderValues(credentials.flatMap((candidate) => Object.entries(candidate.headers)));
+    // OAuth labels are derived from account emails, not operator-supplied key labels.
+    const label = !credential.ownerId && credential.label ? redactErrorText(credential.label, secrets, 80) : "";
+    return label || `#${index + 1}`;
   }
 
   clearCredentialCooldown(provider: string, id: string): void {
