@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { windowsPowerShellEnv } from "../../cli/src/windows-powershell.ts";
 import { EventLog } from "../src/eventlog.ts";
 import { attachmentContent, messageContent, sessionFiles, sessionFileTool } from "../src/images.ts";
 import { transcriptEvents } from "../src/desktop.ts";
@@ -19,6 +20,16 @@ function directory(t: TestContext): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ripple-files-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return fs.realpathSync(dir);
+}
+// The real user's TEMP may deliberately allow other principals to write. Give only this
+// test-owned root a private DACL; production must continue rejecting an unsafe ambient TEMP.
+function privateWindowsTemp(t: TestContext): string {
+  const temp = directory(t);
+  const script = `$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[System.Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); foreach($id in @($sid.Value,'S-1-5-18','S-1-5-32-544')) { $principal=[System.Security.Principal.SecurityIdentifier]::new($id); $rule=[System.Security.AccessControl.FileSystemAccessRule]::new($principal,'FullControl','ContainerInherit, ObjectInherit','None','Allow'); $acl.AddAccessRule($rule) }; Set-Acl -LiteralPath '${temp.replace(/'/g, "''")}' -AclObject $acl`;
+  const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { env: windowsPowerShellEnv(), timeout: 5000, windowsHide: true, stdio: "pipe" });
+  t.mock.method(os, "tmpdir", () => temp);
+  return temp;
 }
 function fixture(t: TestContext) {
   const cwd = directory(t), dir = directory(t);
@@ -64,6 +75,34 @@ test("session files reject outside roots, traversal, broad roots, directories an
   assert.deepEqual(sessionFiles(["link.png", "linked/outside.png"], { cwd }, sink).map(file => file.status), ["blocked", "blocked"]);
 });
 
+test("an outside candidate is rejected before native path resolution", t => {
+  const { cwd, sink } = fixture(t), outside = directory(t);
+  const file = path.join(outside, "outside.png"); fs.writeFileSync(file, png);
+  const native = fs.realpathSync.native;
+  const candidates: string[] = [];
+  const mock = t.mock.method(fs.realpathSync, "native", (...args: Parameters<typeof fs.realpathSync.native>) => {
+    candidates.push(String(args[0]));
+    return native(...args);
+  });
+  const result = sessionFiles([file], { cwd }, sink)[0];
+  assert.equal(result?.status, "blocked");
+  assert.equal(result?.blob, undefined);
+  assert.equal(candidates.includes(file), false, "an outside reparse point must not be followed just to reject it");
+  mock.mock.restore();
+});
+
+test("a host-owned root accepts its native spelling without resolving rejected candidates", t => {
+  const { cwd, sink } = fixture(t), parent = directory(t);
+  const alias = path.join(parent, "nested", "short-root"); fs.mkdirSync(alias, { recursive: true });
+  const file = path.join(cwd, "safe.txt"); fs.writeFileSync(file, "safe");
+  const native = fs.realpathSync.native;
+  const mock = t.mock.method(fs.realpathSync, "native", (...args: Parameters<typeof fs.realpathSync.native>) => {
+    return String(args[0]) === alias ? cwd : native(...args);
+  });
+  assert.equal(sessionFiles([file], { cwd: alias }, sink)[0]?.status, "ready");
+  mock.mock.restore();
+});
+
 test("only host metadata can authorize an additional folder or an exact scratchpad", t => {
   const { cwd, sink } = fixture(t), additional = directory(t), scratchpad = directory(t);
   const a = path.join(additional, "추가.txt"), s = path.join(scratchpad, "결과.txt");
@@ -89,6 +128,7 @@ test("image references use the same session boundary, never all of .claude or a 
 });
 
 test("a pasted image and a scratchpad file in the session's own Claude temp folder reach the phone", t => {
+  if (process.platform === "win32") privateWindowsTemp(t);
   const { cwd, sink } = fixture(t);
   const root = process.platform === "win32" ? path.join(os.tmpdir(), "claude")
     : path.join(fs.existsSync("/private/tmp") ? "/private/tmp" : "/tmp", `claude-${process.getuid!()}`);
@@ -111,6 +151,7 @@ test("a pasted image and a scratchpad file in the session's own Claude temp fold
 });
 
 test("Windows session temp rejects writable ACLs and junctions without opening other temp folders", { skip: process.platform !== "win32" }, t => {
+  privateWindowsTemp(t);
   const { cwd, sink } = fixture(t), outside = directory(t);
   const id = "0f0e0d0c-1111-4222-8333-944455556666";
   const project = path.join(os.tmpdir(), "claude", cwd.replace(/[^A-Za-z0-9]/g, "-"));
@@ -128,6 +169,27 @@ test("Windows session temp rejects writable ACLs and junctions without opening o
   assert.equal(sessionFiles([file], { cwd, sessionId: id }, sink)[0]?.status, "blocked");
   fs.unlinkSync(session);
   fs.renameSync(session + "-saved", session);
+});
+
+test("Windows session temp rejects junctions at TEMP and every session ancestor", { skip: process.platform !== "win32" }, t => {
+  const { cwd, sink } = fixture(t), temp = privateWindowsTemp(t);
+  const id = "0f0e0d0c-1111-4222-8333-944455556666";
+  const base = path.join(temp, "claude"), project = path.join(base, cwd.replace(/[^A-Za-z0-9]/g, "-"));
+  const session = path.join(project, id), file = path.join(session, "safe.png");
+  fs.mkdirSync(session, { recursive: true }); fs.writeFileSync(file, png);
+  assert.equal(sessionFiles([file], { cwd, sessionId: id }, sink)[0]?.status, "ready");
+  for (const ancestor of [temp, base, project, session]) {
+    const saved = ancestor + "-saved";
+    fs.renameSync(ancestor, saved);
+    try {
+      fs.symlinkSync(saved, ancestor, "junction");
+      try {
+        const result = sessionFiles([file], { cwd, sessionId: id }, sink)[0];
+        assert.equal(result?.status, "blocked", ancestor);
+        assert.equal(result?.blob, undefined);
+      } finally { fs.unlinkSync(ancestor); }
+    } finally { fs.renameSync(saved, ancestor); }
+  }
 });
 
 test("a project folder whose own name looks secret still sends its ordinary files", t => {
@@ -234,15 +296,20 @@ test("file MIME is sniffed, Korean names survive and source changes never change
   assert.deepEqual(sessionFiles(null, { cwd }, sink), []);
 });
 
-test("replacement between path validation and open is blocked", { skip: !fileSymlinks }, t => {
+// Windows swaps in a junction, which needs no symlink privilege.
+test("replacement between path validation and open is blocked", { skip: !fileSymlinks && process.platform !== "win32" }, t => {
   const { cwd, sink } = fixture(t), outside = directory(t);
   const folder = path.join(cwd, "out"); fs.mkdirSync(folder);
   fs.writeFileSync(path.join(folder, "file.txt"), "safe");
   fs.writeFileSync(path.join(outside, "file.txt"), "outside");
+  // The reader may open the file under another spelling of the same folder (Windows' long form
+  // of an 8.3 TEMP), so the swap triggers on either.
+  const key = (file: string) => process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file);
+  const targets = new Set([path.join(folder, "file.txt"), fs.realpathSync.native(path.join(folder, "file.txt"))].map(key));
   const open = fs.openSync;
   const mock = t.mock.method(fs, "openSync", (...args: Parameters<typeof fs.openSync>) => {
-    if (String(args[0]) !== path.join(folder, "file.txt")) return open(...args);
-    fs.renameSync(folder, folder + "-saved"); fs.symlinkSync(outside, folder);
+    if (!targets.has(key(String(args[0])))) return open(...args);
+    fs.renameSync(folder, folder + "-saved"); fs.symlinkSync(outside, folder, process.platform === "win32" ? "junction" : undefined);
     try { return open(...args); }
     finally { fs.unlinkSync(folder); fs.renameSync(folder + "-saved", folder); }
   });
