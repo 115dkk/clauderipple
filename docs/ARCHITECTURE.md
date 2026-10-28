@@ -1130,6 +1130,16 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   reads are cached for 60 seconds; ClaudeRipple **never refreshes or writes**
   Claude Code's own credential. Expiry becomes OpenAI-style 401 `Claude Code
   login expired — open Claude Code once to refresh`.
+- Headers ClaudeRipple manufactures itself (no observation, e.g. the Codex
+  ingress on a machine whose Code tab never passed through the router) name the
+  newest CLI this machine can vouch for, not a pinned one
+  (`providers/claude-cli-version.ts`): the `claude-cli/<version>` of a recent
+  observation, else the newest CLI the Desktop app has cached (version
+  directory names, cached 5 minutes, no child process), else the release's
+  constant. Issue #103: the pinned `claude-cli/2.1.266` made Opus 5.5 answer
+  `Claude Code 2.1.266 does not support this model; version 2.1.280 or newer is
+  required`. The version is a client fingerprint only; the model list and wire
+  shape are unaffected.
 - `clauderipple claude-login` (0.1.2) is ClaudeRipple's own browser sign-in:
   the OAuth authorization-code flow with PKCE (S256) against Claude Code's
   public client, exactly as Claude Code 2.1.271 does (read from its binary,
