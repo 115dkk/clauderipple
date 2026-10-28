@@ -406,7 +406,7 @@ export function agentPid(name = taskName(), opts: { home?: string; expectedRoute
 /**
  * The router process that belongs to this task's own launcher, for control decisions. Unlike
  * `agentPid`, this proves the process is under the task registered here: the launcher's command
- * line names this installation's home, and the router is its child. A direct router of the same
+ * line names this installation's home, and the router is its descendant. A direct router of the same
  * home, or another home's process, cannot satisfy both. Null when anything is unreadable.
  */
 export function taskRouterPid(name = taskName(), opts: { home?: string; deps?: TaskDeps } = {}): number | null {
@@ -416,7 +416,7 @@ export function taskRouterPid(name = taskName(), opts: { home?: string; deps?: T
   if (deps.routerPid) return deps.routerPid();
   const launcher = path.join(home, "clauderipple-router.ps1");
   const listed = invoke(
-    `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*clauderipple-router.ps1*' } | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress`,
+    `Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json -Compress`,
     deps,
   );
   if (!listed.ok) return null;
@@ -427,25 +427,39 @@ export function taskRouterPid(name = taskName(), opts: { home?: string; deps?: T
     return null;
   }
   const list = Array.isArray(rows) ? rows : rows !== null && typeof rows === "object" ? [rows] : [];
-  const pick = list.find((row) => {
-    const text = (row as { CommandLine?: unknown }).CommandLine;
-    return typeof text === "string" && text.includes(launcher);
-  }) as { ProcessId?: unknown } | undefined;
-  const launcherPid = Number(pick?.ProcessId);
-  if (!Number.isSafeInteger(launcherPid) || launcherPid <= 0) return null;
-  const child = invoke(
-    `$c = Get-CimInstance Win32_Process -Filter "ParentProcessId=${launcherPid}" | Where-Object { $_.CommandLine -like '*router\\src\\index.*' } | Select-Object -First 1; if ($null -eq $c) { 'null' } else { [pscustomobject]@{ pid = $c.ProcessId } | ConvertTo-Json -Compress }`,
-    deps,
-  );
-  if (!child.ok) return null;
-  const text = child.out.trim();
-  if (text === "null") return null;
-  try {
-    const pid = Number((JSON.parse(text) as { pid?: unknown }).pid);
-    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
+  type Process = { pid: number; commandLine: string };
+  const processes: Process[] = [];
+  const children = new Map<number, Process[]>();
+  for (const row of list) {
+    if (row === null || typeof row !== "object") return null;
+    const value = row as { ProcessId?: unknown; ParentProcessId?: unknown; CommandLine?: unknown };
+    const pid = Number(value.ProcessId);
+    const parent = Number(value.ParentProcessId);
+    if (!Number.isSafeInteger(pid) || pid < 0 || !Number.isSafeInteger(parent) || parent < 0) return null;
+    // Win32_Process includes System Idle Process (PID 0), never a launcher or a router.
+    if (pid === 0) continue;
+    const process = { pid, commandLine: typeof value.CommandLine === "string" ? value.CommandLine : "" };
+    processes.push(process);
+    const siblings = children.get(parent) ?? [];
+    siblings.push(process);
+    children.set(parent, siblings);
   }
+  const root = processes.find(process => process.commandLine.includes(launcher));
+  if (!root) return null;
+  // #100: conhost's command line also names the launcher. The router is then a grandchild,
+  // not a direct child. Walk the same snapshot's whole subtree, never the global router list.
+  const pending = [root.pid];
+  const visited = new Set<number>();
+  while (pending.length > 0) {
+    const pid = pending.pop()!;
+    if (visited.has(pid)) continue;
+    visited.add(pid);
+    for (const child of children.get(pid) ?? []) {
+      if (/router\\src\\index\./i.test(child.commandLine)) return child.pid;
+      pending.push(child.pid);
+    }
+  }
+  return null;
 }
 
 /**
