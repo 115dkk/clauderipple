@@ -56,7 +56,7 @@ import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
 import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts";
 import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
-import { catalogEntry } from "./catalog.ts";
+import { catalogEntry, catalogueWindow } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -1666,10 +1666,12 @@ export function measureUnsettledModels(deps: AdminDeps): number {
  *
  * OpenCode's `/models` reports ids alone, so a provider set up before the catalogue's `limit.context`
  * was read keeps no window and falls back to `cli.autoCompactWindow` — a quarter of a 1M model's real
- * window. The measurement folds the catalogue's window in, but only over the models it runs on and
- * only through its own write; this pass reaches the models already on disk, once, at start-up. Only
- * into a blank field, through the same validated write, so a window the user or the vendor set is
- * never overwritten. Returns the `provider/model` ids it filled.
+ * window. Hive's `/models` states even less, and it has no catalogue block of its own, so a model
+ * saved there is matched against the catalogue by id (`catalogueWindow`). The measurement folds the
+ * catalogue's window in, but only over the models it runs on and only through its own write; this
+ * pass reaches the models already on disk, once, at start-up. Only into a blank field, through the
+ * same validated write, so a window the user or the vendor set is never overwritten. Returns the
+ * `provider/model` ids it filled.
  */
 export async function backfillContextWindows(deps: AdminDeps): Promise<string[]> {
   const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
@@ -1690,11 +1692,11 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
     const preset = "preset" in provider ? provider.preset : undefined;
     for (const model of provider.models) {
       if (model.contextWindow !== undefined) continue;
-      const entry = catalogEntry(catalog, preset, model.id);
-      if (entry?.contextWindow === undefined) continue;
-      model.contextWindow = entry.contextWindow;
+      const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+      if (stated === undefined) continue;
+      model.contextWindow = stated;
       filled.push(`${name}/${model.id}`);
-      deps.log.info(`admin: ${name}/${model.id} context window ${entry.contextWindow} (catalogue)`);
+      deps.log.info(`admin: ${name}/${model.id} context window ${stated} (catalogue)`);
     }
   }
   if (filled.length === 0) return [];
@@ -1791,8 +1793,10 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
       if (facts.contextWindow !== undefined) measured.contextWindow = facts.contextWindow;
     }
     // The wire was answered, so the model exists: the catalogue's own window travels with the result
-    // and is written only into a model that has none (see applyMeasurements).
-    if (measured.wire && listed?.contextWindow !== undefined) measured.contextWindow = listed.contextWindow;
+    // and is written only into a model that has none (see applyMeasurements). A provider without a
+    // catalogue block of its own is matched by id instead (`catalogueWindow`).
+    const window = listed?.contextWindow ?? catalogueWindow(catalog, id);
+    if (measured.wire && window !== undefined) measured.contextWindow = window;
     job.results.push(measured);
     job.done++;
     deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : facts ? " (ollama)" : ""}` : ""}`}`);
@@ -2284,6 +2288,18 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
           ...(probe.wire === "chat" || probe.wire === "responses" ? { wire: probe.wire } : {}),
         }, deps.probeModelFetch ?? fetchWithTimeout);
+        // A provider being added gets the same blank-only fill as one already saved: Hive's `/models`
+        // names its models and nothing else, and the form saves what the probe returns. A window the
+        // vendor did report is kept, and one the catalogue cannot match is left blank.
+        const missing = result.models.filter((model) => model.contextWindow === undefined);
+        if (missing.length > 0 && deps.modelCatalog) {
+          const catalog = await deps.modelCatalog().catch(() => undefined);
+          const preset = typeof probe.preset === "string" && probe.preset ? probe.preset : undefined;
+          for (const model of missing) {
+            const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+            if (stated !== undefined) model.contextWindow = stated;
+          }
+        }
         sendJson(res, 200, result);
         return;
       }

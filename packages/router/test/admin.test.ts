@@ -1390,6 +1390,50 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
   }
 });
 
+// A provider being added is filled the same way, because what the form saves is what the probe
+// returned: Hive's `/models` names its models and nothing else.
+test("POST /api/providers/probe fills a window the vendor did not state from the model's catalogue entry", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v3/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ object: "list", data: [
+        { id: "deepseek-ai/deepseek-v4.1-flash-1017", object: "model", created: 1, owned_by: "deepseek-ai", shutdown_date: null },
+        { id: "jev-1.13", object: "model", created: 1, owned_by: "jev", shutdown_date: null },
+      ] }));
+      return;
+    }
+    if (req.url === "/v3/chat/completions") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}/v3`;
+  const modelCatalog = async (): Promise<unknown> => ({
+    "opencode-go": { models: { "deepseek-v4.1-flash": { limit: { context: 1000000 } } } },
+    scaleway: { models: { "deepseek-v4.1-flash": { limit: { context: 256000 } } } },
+  });
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: origin, headers: { authorization: "Bearer secret-key" }, modelsUrl: `${origin}/models`, modelsAuthHeader: "authorization-bearer" }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { models: { id: string; contextWindow?: number }[] };
+      assert.deepEqual(body.models.map((model) => [model.id, model.contextWindow]), [
+        ["deepseek-ai/deepseek-v4.1-flash-1017", 256000],
+        ["jev-1.13", undefined],
+      ]);
+    }, { modelCatalog });
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
+  }
+});
+
 // A provider entered by hand on the Responses wire may serve nothing else, so its test goes there.
 test("POST /api/providers/probe tests a hand-entered Responses provider on /responses", async () => {
   const seen: { path?: string | undefined; body?: Record<string, unknown> } = {};
@@ -2589,6 +2633,79 @@ test("backfillContextWindows fills only models without a window, leaving a set o
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+// Hive's `/models` states `object, created, owned_by, shutdown_date` and nothing else, and models.dev
+// has no block for it: the window comes from the same model filed under a provider it does know.
+test("backfillContextWindows fills a provider with no catalogue block from the same model's entry elsewhere", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-window-"));
+  try {
+    const cfg = makeCfg({
+      providers: {
+        hive: {
+          type: "openai-compatible",
+          url: "https://api-cdn.thehive.ai/api/v3",
+          headers: { authorization: "Bearer sk-test" },
+          models: [
+            { id: "deepseek-ai/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash" },
+            { id: "zai-org/glm-5.3-flash", name: "GLM-5.3 Flash", contextWindow: 111 },
+            { id: "jev-1.13", name: "JEV" },
+          ],
+        },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const lines: string[] = [];
+    const log = new Logger(null, 1_000_000, 1, false);
+    log.info = (msg: string) => { lines.push(msg); };
+    const modelCatalog = async (): Promise<unknown> => ({
+      "opencode-go": { models: { "deepseek-v4.1-flash": { limit: { context: 1000000 } }, "glm-5.3-flash": { limit: { context: 1000000 } } } },
+      scaleway: { models: { "deepseek-v4.1-flash": { limit: { context: 256000 } } } },
+    });
+    const deps = { config: () => cfg, configFile, log, modelCatalog } as unknown as AdminDeps;
+    assert.deepEqual(await backfillContextWindows(deps), ["hive/deepseek-ai/deepseek-v4.1-flash-1017"]);
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.hive!.models!;
+    assert.equal(models.find((m) => m.id === "deepseek-ai/deepseek-v4.1-flash-1017")?.contextWindow, 256000, "the smallest window the catalogue states");
+    assert.equal(models.find((m) => m.id === "zai-org/glm-5.3-flash")?.contextWindow, 111, "the operator's own window stands");
+    assert.equal("contextWindow" in (models.find((m) => m.id === "jev-1.13") ?? {}), false, "a model the catalogue does not list stays blank");
+    assert.ok(lines.some((line) => line === "admin: hive/deepseek-ai/deepseek-v4.1-flash-1017 context window 256000 (catalogue)"), `expected the catalogue log line, got ${JSON.stringify(lines)}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// The same fold on the measurement path, which is what a provider saved by hand goes through.
+test("measurement gives a provider with no catalogue block the window its model has elsewhere", async () => {
+  const cfg = makeCfg({
+    providers: {
+      hive: {
+        type: "openai-compatible",
+        url: "https://api-cdn.thehive.ai/api/v3",
+        wire: "chat",
+        headers: { authorization: "Bearer sk-test" },
+        models: [
+          { id: "deepseek-ai/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash" },
+          { id: "zai-org/glm-5.3-flash", name: "GLM-5.3 Flash", contextWindow: 777 },
+        ],
+      },
+    },
+  });
+  const modelCatalog = async (): Promise<unknown> => ({
+    "opencode-go": { models: { "deepseek-v4.1-flash": { limit: { context: 1000000 } }, "glm-5.3-flash": { limit: { context: 1000000 } } } },
+    scaleway: { models: { "deepseek-v4.1-flash": { limit: { context: 256000 } } } },
+  });
+  const measureFetch = async (): Promise<Response> => new Response("{}", { status: 200 });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "hive", models: ["deepseek-ai/deepseek-v4.1-flash-1017", "zai-org/glm-5.3-flash"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.hive!.models!;
+    assert.equal(models.find((m) => m.id === "deepseek-ai/deepseek-v4.1-flash-1017")?.contextWindow, 256000);
+    assert.equal(models.find((m) => m.id === "zai-org/glm-5.3-flash")?.contextWindow, 777, "a window already set is not overwritten");
+  }, { measureFetch, modelCatalog });
 });
 
 test("a model the plan refuses is still reported when the catalogue lists it", async () => {
