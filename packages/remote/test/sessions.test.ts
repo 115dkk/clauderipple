@@ -1824,6 +1824,73 @@ test("an idle handed-off session tails app turns without a phone attached", asyn
   assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "App answer").length, 1);
 });
 
+test("handoff stops reporting the SDK's stored permission mode, including after restart", async t => {
+  const boundary = controlledQueries();
+  let calls = 0;
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.sessions.create({ clientMsgId: "bypass-handoff", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping", permissionMode: "bypassPermissions" });
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-bypass", permissionMode: "bypassPermissions" });
+  await f.sessions.setMode(id, "bypassPermissions");
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, "bypassPermissions");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => calls === 1);
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, undefined, "the launcher did not confirm the app's permission mode");
+  f.sessions.shutdown();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  assert.equal(recovered.summaryOf(id)?.permissionMode, undefined);
+  await recovered.send(id, "host-again", "resume on host");
+  await waitFor(() => boundary.queries.length === 2);
+  assert.equal(boundary.queries[1]!.options.permissionMode, "bypassPermissions", "keep the user's choice for an actual SDK resume");
+  assert.equal(recovered.summaryOf(id)?.permissionMode, "bypassPermissions");
+});
+
+test("adopting an already open desktop session discards SDK-confirmed permission settings", async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "permission-adoption-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", handoff: async () => "opened", log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: sdkId });
+  await nextTick();
+  await f.sessions.setMode(id, "bypassPermissions");
+  registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => query.closed);
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, undefined);
+});
+
+test("desktop bridge adoption replaces SDK permission confirmation with desktop evidence", async t => {
+  const f = await modFixture(t);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  // A historical SDK confirmation must not outrank the new desktop transcript.
+  f.sessions.shutdown();
+  const recordsFile = path.join(f.dir, "sessions.json");
+  const records = JSON.parse(fs.readFileSync(recordsFile, "utf8")) as { confirmedSettings?: { permissionMode: string } }[];
+  records[0]!.confirmedSettings = { permissionMode: "bypassPermissions" };
+  fs.writeFileSync(recordsFile, JSON.stringify(records));
+  fs.appendFileSync(file, transcriptLine({ type: "user", cwd: f.cwd, uuid: "desktop-prompt", permissionMode: "plan", message: { content: "From desktop" } }));
+  f.registry.get(f.sdkId)!.bridgeSessionId = "bridge";
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (String(url).includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [], worker_status: "idle" });
+  } });
+  client.control = async () => {};
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", bridgeClient: client, onEvent() {}, onSessions() {} });
+  f.instances.push(active);
+  await active.pollDesktop();
+  assert.equal(active.summaryOf(f.id)?.desktopBridge, true);
+  assert.equal(active.summaryOf(f.id)?.permissionMode, "plan");
+  await active.setMode(f.id, "default");
+  assert.equal(active.summaryOf(f.id)?.permissionMode, "default", "a desktop-confirmed control can still override historical transcript settings");
+});
+
 test("a handed-off session the app is running shows the app's state, and a stop says to use the app", async t => {
   const f = await modFixture(t, 500, 500);
   assert.equal(f.sessions.summaryOf(f.id)?.state, "idle");

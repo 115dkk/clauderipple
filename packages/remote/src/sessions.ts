@@ -1227,8 +1227,11 @@ export class Sessions {
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
     const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
-    // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
-    const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
+    // The desktop launcher confirms opening, not permissions. Retain the SDK choice for a
+    // future host resume, but do not advertise it as the app's current mode after handoff.
+    const hostMode = this.live.has(r.id) || r.desktopHandoff !== "attempted" && r.desktopHandoff !== "opening";
+    const mode = r.desktopBridge ? r.confirmedSettings?.permissionMode ?? this.desktop?.permissionMode(r.sdkSessionId ?? r.id)
+      : hostMode ? r.confirmedSettings?.permissionMode ?? r.permissionMode ?? "auto" : undefined;
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
     return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
@@ -2073,6 +2076,8 @@ export class Sessions {
     this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
     for (const outcome of this.settings.replay(r.id)) this.append(r.id, { kind: "settings", ...outcome });
     r.desktopBridge = true;
+    // A control acknowledged by the SDK cannot confirm the replacement desktop worker's mode.
+    if (r.confirmedSettings) delete r.confirmedSettings.permissionMode;
     r.contextWindow = null;
     r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
     this.save();
