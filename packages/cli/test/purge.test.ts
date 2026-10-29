@@ -14,6 +14,15 @@ function scratch(t: import("node:test").TestContext): string {
   return root;
 }
 
+/**
+ * The cleaner's folder, once the test has its receipt. The cleaner writes the receipt and then exits,
+ * and until it has, Windows keeps its redirected logs open: removing the folder at once failed with
+ * EPERM on a CI runner (2026-10-29), so the removal retries for up to 5 s.
+ */
+function removeCleanerFolder(t: import("node:test").TestContext, resultFile: string): void {
+  t.after(() => fs.rmSync(path.dirname(resultFile), { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
+}
+
 test("purge removes an ordinary home and propagates a deletion failure", async t => {
   const root = scratch(t), home = path.join(root, "home");
   fs.mkdirSync(home); fs.writeFileSync(path.join(home, "config.json"), "{}");
@@ -41,7 +50,7 @@ test("Windows self-purge waits for its Node process to exit, reports pending non
   assert.equal(child.status, 2, child.stderr || child.stdout);
   const result = JSON.parse(child.stdout.trim()) as { status: string; resultFile: string };
   assert.equal(result.status, "deferred");
-  t.after(() => fs.rmSync(path.dirname(result.resultFile), { recursive: true, force: true }));
+  removeCleanerFolder(t, result.resultFile);
   let receipt: { exitCode?: number } = {};
   for (let i = 0; i < 150; i++) {
     if (fs.existsSync(result.resultFile)) receipt = JSON.parse(fs.readFileSync(result.resultFile, "utf8"));
@@ -75,7 +84,7 @@ test("the deferred cleaner records failure instead of success when another proce
     const child = spawnSync(node, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 60_000 });
     assert.equal(child.status, 2, child.stderr);
     const result = JSON.parse(child.stdout.trim()) as { resultFile: string };
-    t.after(() => fs.rmSync(path.dirname(result.resultFile), { recursive: true, force: true, maxRetries: 3 }));
+    removeCleanerFolder(t, result.resultFile);
     let receipt: { exitCode?: number; error?: string } = {};
     for (let i = 0; i < 150; i++) {
       receipt = JSON.parse(fs.readFileSync(result.resultFile, "utf8"));
