@@ -111,17 +111,18 @@ function loadSave(stored: Record<string, unknown> = { providers }) {
     const clone = (value) => JSON.parse(JSON.stringify(value)), t = (key) => key, toast = () => {};
     const routeFromTarget = (value) => { if (!value) return null; const [provider, model] = JSON.parse(value); return { provider, model }; };
     const $ = (selector) => {
+      if (selector === "#client-auto-classifier") return { replaceChildren: () => {} };
+      if (selector === "#client-auto-classifier-note") return null;
       const match = /data-classifier(-effort)?="(\\w+)"/.exec(selector);
       return match && !match[1] ? { value: h.rows[match[2]] } : { value: "" };
     };
+    // The page's own renderAutoClassifier runs below; drawing a row records what it would select.
+    const classifierGroups = () => [];
+    const classifierRow = (stage, saved) => { h.rows[stage] = saved ? JSON.stringify([saved.provider, saved.model]) : ""; return null; };
     const latestConfig = () => new Promise((resolve) => h.gets.push(() => resolve(currentConfig = clone(h.stored))));
     const configRequest = (next) => new Promise((resolve) => h.puts.push(() => { h.stored = clone(next); h.writes.push(clone(next)); resolve({}); }));
     ${block("/** The two rows a setting shows", "// Claude Code refuses these")}
-    const renderAutoClassifier = () => {
-      const rows = classifierRowsShown();
-      for (const stage of ["first", "rest"]) h.rows[stage] = rows[stage] ? JSON.stringify([rows[stage].provider, rows[stage].model]) : "";
-    };
-    ${block("function classifierRowValue(", "function clientPickerSelections(")}
+    ${block("function renderAutoClassifier(", "function clientPickerSelections(")}
     return { save: saveAutoClassifier, redraw: renderAutoClassifier };
   `)(h) as { save: () => Promise<void>; redraw: () => void };
   return { h, ...save };
