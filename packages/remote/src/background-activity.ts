@@ -15,8 +15,15 @@ export class BackgroundActivity {
   version = 0;
   known = false;
   at: number | null = null;
-  get active(): BackgroundTask[] { return [...this.entries.values()].filter(task => !task.state || task.state === "running" || task.state === "unknown").map(task => ({ ...task })); }
-  get history(): BackgroundTask[] { return [...this.entries.values()].filter(task => task.state === "done" || task.state === "failed" || task.state === "stopped").slice(-40).reverse().map(task => ({ ...task })); }
+  get active(): BackgroundTask[] { return [...this.entries.values()].filter(task => task.state === "running").map(task => ({ ...task })); }
+  get history(): BackgroundTask[] { return [...this.entries.values()].filter(task => task.state === "done" || task.state === "failed" || task.state === "stopped" || task.state === "unknown").slice(-40).reverse().map(task => ({ ...task })); }
+
+  /** A dead/replaced query cannot confirm any of its old work is still running. */
+  invalidate(): void {
+    for (const task of this.active) this.put({ ...task, state: "unknown" });
+    this.calls.clear();
+    this.known = false;
+  }
 
   call(id: string, name: string, input: Fields): void {
     if (activityTools.has(name)) this.calls.set(id, { name, input });
@@ -119,8 +126,7 @@ export class BackgroundActivity {
       this.known = event.known; this.at = event.at ?? null; this.version++;
     }
     if (event.kind === "notice" && (event.code === "host_restarted" || event.code === "interrupted")) {
-      for (const task of this.active) this.put({ ...task, state: "unknown" });
-      this.known = false;
+      this.invalidate();
     }
   }
 

@@ -79,7 +79,7 @@ interface SessionRecord {
   /** The initial launch allowance is immutable; mode changes must not add a bypass flag. */
   bypassAllowed?: boolean;
   /** Confirmed next-turn settings outrank historical assistant/user transcript metadata. */
-  confirmedSettings?: Omit<SettingsResult, "status" | "errors">;
+  confirmedSettings?: Omit<SettingsResult, "status" | "errors" | "pending">;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -654,6 +654,7 @@ export class Sessions {
       if (this.records.has(p.session)) this.append(p.session, { kind: "permission_decided", id: p.id, decision: "expired", reason: "host_restarted" });
     }
     for (const r of this.records.values()) {
+      if (!r.desktopBridge && r.desktopHandoff !== "attempted") this.invalidateActivity(r.id);
       // A host exit during the launcher call did not confirm delivery to Desktop.
       if (r.desktopHandoff === "opening") {
         r.desktopHandoff = (r.desktopHandoffAttempts ?? 0) < 3 ? "pending" : "failed";
@@ -1145,7 +1146,7 @@ export class Sessions {
     // The app's registry records the folder the conversation runs in now; the transcript's first
     // line keeps the one it started in (a conversation moved folders, issue #82).
     const cwd = this.desktop.liveProcess(id)?.cwd ?? s.cwd;
-    const r: SessionRecord = { id, sdkSessionId: id, cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
+    const r: SessionRecord = { id, sdkSessionId: id, cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "default", title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
     if (bridgeMode) { r.desktopBridge = true; r.transcriptOffset = this.desktop.transcriptSize(id); }
     Object.assign(r, this.desktopModels.get(id));
     this.desktopModels.delete(id);
@@ -1212,6 +1213,13 @@ export class Sessions {
     return { model: enabled || appSettings, effort: enabled || appSettings, permissionModes: enabled ? [...PERMISSION_MODES] : [] };
   }
 
+  /** The record keeps the requested launch choice; confirmation stays on the live query until restart. */
+  private effectiveSettings(r: SessionRecord): { model: string; effort: Effort | null; pendingSettings?: SettingsResult["pending"] } {
+    if (!this.live.get(r.id)?.restartAfterTurn) return { model: r.model, effort: r.effort };
+    return { model: r.confirmedSettings?.model ?? r.model, effort: r.confirmedSettings?.effort ?? null,
+      pendingSettings: { model: r.model, effort: r.effort } };
+  }
+
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
@@ -1233,7 +1241,7 @@ export class Sessions {
     const mode = r.desktopBridge ? r.confirmedSettings?.permissionMode ?? this.desktop?.permissionMode(r.sdkSessionId ?? r.id)
       : hostMode ? r.confirmedSettings?.permissionMode ?? r.permissionMode ?? "auto" : undefined;
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
-    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, ...this.effectiveSettings(r), ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -1325,6 +1333,13 @@ export class Sessions {
       if (!page.more) break;
     }
     return state;
+  }
+
+  private invalidateActivity(id: string): void {
+    const activity = this.taskState(id).activity;
+    if (!activity.active.length && !activity.known) return;
+    activity.invalidate();
+    this.append(id, { kind: "background", tasks: activity.history, known: false }, false);
   }
 
   /** `touch` false: the host noticing a session is no longer live is not the session being used (a restart moved every old one to "now"). */
@@ -1905,7 +1920,9 @@ export class Sessions {
       if (!s) throw new Error("no such session");
       // This is a fresh conversation, not an SDK /clear: carry its label separately from the
       // empty prompt so persistence, the first SDK launch and the desktop handoff all retain it.
-      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" }, s.title);
+      const record = this.records.get(id);
+      const permissionMode = record?.confirmedSettings?.permissionMode ?? record?.permissionMode ?? s.permissionMode ?? "default";
+      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode, text: "" }, s.title);
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
@@ -1993,7 +2010,8 @@ export class Sessions {
     // A message sent while a turn runs is queued by the CLI and starts no turn of its own yet.
     if (r.state !== "running" && r.state !== "waiting") {
       if (live) live.turnStart = this.now();
-      this.append(id, { kind: "turn", model: r.model, effort: r.effort });
+      const settings = this.effectiveSettings(r);
+      this.append(id, { kind: "turn", model: settings.model, effort: settings.effort });
       this.setState(r, "running");
     }
     const message: SdkUserMessage = { type: "user", uuid: uuidFrom(clientMsgId), message: { role: "user", content: converted.content }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } };
@@ -2654,7 +2672,11 @@ export class Sessions {
     const changedModel = r.model !== model;
     const changedEffort = r.effort !== effort;
     const live = this.live.get(id);
-    if (live && (changedModel || changedEffort && !isClaudeModel(model))) {
+    const needsRestart = !!live && isClaudeModel(model) && (changedModel || changedEffort || live.restartAfterTurn);
+    if (needsRestart && !live.restartAfterTurn) {
+      r.confirmedSettings = { ...r.confirmedSettings, model: r.model, effort: r.effort };
+    }
+    if (live && !needsRestart && (changedModel || changedEffort && !isClaudeModel(model))) {
       await live.ready;
       turn.check();
       if (this.live.get(id) !== live) throw new Error("The session stopped before its model changed. Try again.");
@@ -2665,15 +2687,20 @@ export class Sessions {
     r.model = model;
     r.effort = effort;
     this.save();
-    if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, effort);
-    this.append(id, { kind: "notice", code: "model_changed", text: effort ? `${model} · ${effort}` : model });
-    if (live) {
-      // Even when the model also changed, Claude's effort must reach a fresh SDK query.
-      if ((changedModel || changedEffort) && isClaudeModel(model)) live.restartAfterTurn = true;
-      if (live.restartAfterTurn && (r.state === "idle" || r.state === "error")) this.restartSettings(r, live);
+    if (live && needsRestart) live.restartAfterTurn = true;
+    else {
+      if (live) live.restartAfterTurn = false;
+      r.confirmedSettings = { ...r.confirmedSettings, model, effort };
     }
+    this.save();
+    if (!needsRestart && r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, effort);
+    if (live?.restartAfterTurn && (r.state === "idle" || r.state === "error")) this.restartSettings(r, live);
+    const effective = this.effectiveSettings(r);
+    if (!effective.pendingSettings) this.append(id, { kind: "notice", code: "model_changed", text: effort ? `${model} · ${effort}` : model });
     this.opts.onSessions();
-    return { status: "applied", model, effort };
+    return effective.pendingSettings
+      ? { status: "partial", model: effective.model, effort: effective.effort, pending: effective.pendingSettings }
+      : { status: "applied", model, effort };
   }
 
   private markTranscriptEnd(r: SessionRecord): void {
@@ -2689,6 +2716,7 @@ export class Sessions {
     const follow = r && !r.desktopBridge && !r.environmentBridgeId && r.desktopHandoff === "attempted";
     if (follow) this.closing.set(id, live);
     this.live.delete(id);
+    if (!this.shuttingDown) this.invalidateActivity(id);
     live.input.close();
     live.abort.abort();
     try { live.query?.close(); } catch { /* already ended */ }
@@ -2726,6 +2754,7 @@ export class Sessions {
       if (!this.handedOff(r.id)) throw new DesktopBlockedError();
       if (this.appBusy(r.sdkSessionId)) throw new DesktopBusyError();
     }
+    this.invalidateActivity(r.id);
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};
@@ -2744,6 +2773,7 @@ export class Sessions {
         const activity = this.taskState(r.id).activity;
         activity.inventory(input, this.now());
         this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
+        if (live.restartAfterTurn && this.sdkIdle(r, live)) this.restartSettings(r, live);
         return {};
       }] }] },
       settingSources: ["user", "project", "local"],
@@ -2788,6 +2818,7 @@ export class Sessions {
       this.markTranscriptEnd(r);
     }
     this.live.delete(r.id);
+    this.invalidateActivity(r.id);
     this.opts.permissions.expireSession(r.id, "aborted");
     if (failure) {
       const text = this.failureText(r.id, failure);
@@ -2829,7 +2860,7 @@ export class Sessions {
         const ev = msg.event as { type?: string; index?: number; message?: { id?: string }; content_block?: { type?: string }; delta?: { type?: string; text?: string; thinking?: string } } | undefined;
         if (ev?.type === "message_start" && ev.message?.id) {
           this.flush(r.id, live);
-          live.current = { msg: ev.message.id, text: "", tools: [], model: r.model, thinkingBlocks: [], nextThinkingBlock: 0 };
+          live.current = { msg: ev.message.id, text: "", tools: [], model: this.effectiveSettings(r).model, thinkingBlocks: [], nextThinkingBlock: 0 };
         } else if (ev?.type === "content_block_start" && ev.content_block?.type === "thinking" && live.current) {
           const index = ev.index ?? 0;
           if (!live.current.thinkingBlocks.includes(index)) live.current.thinkingBlocks.push(index);
@@ -2855,7 +2886,7 @@ export class Sessions {
         if (parent) { this.subAssistant(r, live, parent, message); return; }
         this.flush(r.id, live);
         const id = message.id ?? randomUUID();
-        if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? r.model, thinkingBlocks: [], nextThinkingBlock: 0 };
+        if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? this.effectiveSettings(r).model, thinkingBlocks: [], nextThinkingBlock: 0 };
         const cur = live.current;
         (message.content ?? []).forEach((block, index) => {
           if (block.type !== "thinking" || typeof block.thinking !== "string") return;
@@ -2895,14 +2926,17 @@ export class Sessions {
           const activity = this.taskState(r.id).activity;
           activity.notice(converted.text, this.now());
           this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
-          const taskId = /<task-id>([^<]+)<\/task-id>/.exec(converted.text)?.[1];
-          const task = activity.history.find(task => task.id === taskId);
-          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1] ?? task?.sub?.replace(/^sub-/, "");
-          const status = /<status>([^<]+)<\/status>/.exec(converted.text)?.[1];
-          if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
-            this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
-            live.subs.delete(tool);
+          for (const [notice] of converted.text.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
+            const taskId = /<task-id>([^<]+)<\/task-id>/.exec(notice)?.[1];
+            const task = activity.history.find(task => task.id === taskId);
+            const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1] ?? task?.sub?.replace(/^sub-/, "");
+            const status = /<status>([^<]+)<\/status>/.exec(notice)?.[1];
+            if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
+              this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
+              live.subs.delete(tool);
+            }
           }
+          if (live.restartAfterTurn && this.sdkIdle(r, live)) this.restartSettings(r, live);
           return;
         }
         // SDK user echoes normally already have a phone event; retain attachment-bearing echoes only.
@@ -2939,7 +2973,7 @@ export class Sessions {
         }
         const ok = msg.subtype === "success" && msg.is_error !== true;
         const usage = msg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
-        const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(r.model))?.[1].contextWindow;
+        const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(this.effectiveSettings(r).model))?.[1].contextWindow;
         r.contextWindow = typeof win === "number" && Number.isFinite(win) && win > 0 ? win : null;
         for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
         const error = ok ? undefined : this.failureText(r.id, String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"))).slice(0, 500);
@@ -2963,10 +2997,13 @@ export class Sessions {
   /** A settings restart shares the handoff inbox: preserve even prefetched accepted inputs,
    * and do not create another transcript writer until the old process has actually exited. */
   private restartSettings(r: SessionRecord, live: Live): void {
-    if (this.taskState(r.id).activity.active.length) return;
+    if (this.live.get(r.id) !== live || this.taskState(r.id).activity.active.length) return;
     const transfer = { messages: live.pendingMessages };
     this.handingOff.set(r.id, transfer);
     this.stop(r.id, live);
+    r.confirmedSettings = { ...r.confirmedSettings, model: r.model, effort: r.effort };
+    this.save();
+    if (r.sdkSessionId) this.queueAppChoice(r.id, r.sdkSessionId, r.model, r.effort);
     void Promise.resolve(live.query.processExited).then(async () => {
       this.handingOff.delete(r.id);
       if (this.shuttingDown) return;
@@ -3174,7 +3211,7 @@ export class Sessions {
   /** The mod's figures as events in the same log, so a phone that reconnects sees what it missed. Throttled to one read per 15 s while a turn runs. */
   private async refreshFigures(r: SessionRecord, force: boolean): Promise<void> {
     if (!r.sdkSessionId) return;
-    await this.readFigures(r.id, r.sdkSessionId, r.model, r.contextWindow, force, false);
+    await this.readFigures(r.id, r.sdkSessionId, this.effectiveSettings(r).model, r.contextWindow, force, false);
   }
 
   /**
@@ -3198,7 +3235,7 @@ export class Sessions {
     // A replaced log/model or a newer read owns the next event, not this late reply.
     if (this.shuttingDown || this.figuresAt.get(id) !== scope || epoch() !== scope.epoch) return;
     const current = this.records.get(id);
-    if (current && (current.model !== model || (current.sdkSessionId ?? id) !== cliId)) return;
+    if (current && (this.effectiveSettings(current).model !== model || (current.sdkSessionId ?? id) !== cliId)) return;
     if (mac && !hadFigures && !figures.route && !figures.effort && !figures.workers.length) return;
     const { at: _at, ...rest } = figures;
     const key = JSON.stringify(rest);

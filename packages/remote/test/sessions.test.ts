@@ -13,7 +13,7 @@ import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
 import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
-import type { DesktopProcess } from "../src/desktop.ts";
+import { transcriptEvents, type DesktopProcess, type SubagentState } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
 import { claudeAppData } from "./app-data.ts";
@@ -134,6 +134,100 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
     sessions.create({ clientMsgId, cwd, model, effort, text: "ping" });
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
+
+test("clear after handoff retains the stored restrictive choice despite an unknown app mode", async t => {
+  for (const mode of ["plan", "default"] as const) {
+    let calls = 0;
+    const f = fixture(t, {}, { handoff: async () => { calls++; return "opened"; }, log() {} });
+    const id = await f.sessions.create({ clientMsgId: "restrictive", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping", permissionMode: mode });
+    await waitFor(() => calls === 1);
+    assert.equal(f.sessions.summaryOf(id)?.permissionMode, undefined);
+    for (const command of ["/clear", "/new"]) {
+      const fresh = await f.sessions.send(id, command, command);
+      assert.equal(f.sessions.summaryOf(fresh)?.permissionMode, mode);
+      await f.sessions.send(fresh, `first-${command}`, "continue");
+      await waitFor(() => f.fake.options.length === (command === "/clear" ? 2 : 3));
+      assert.equal(f.fake.options.at(-1)?.permissionMode, mode);
+      assert.equal(f.fake.options.at(-1)?.allowDangerouslySkipPermissions, undefined);
+    }
+  }
+});
+
+function launchBackground(query: ReturnType<typeof controlledQueries>["queries"][number]): void {
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-background" });
+  query.emit({ type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  query.emit({ type: "result", subtype: "success" });
+}
+
+test("a dead previous SDK worker cannot block recovered handoff", async t => {
+  const boundary = controlledQueries();
+  let calls = 0;
+  const handoff: NonNullable<SessionsOptions["handoff"]> = async () => { calls++; return "opened"; };
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, handoff, log() {} });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  launchBackground(boundary.queries[0]!);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1);
+  assert.equal(calls, 0);
+  f.sessions.shutdown();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, handoff, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered); recovered.recover();
+  assert.equal(recovered.summaryOf(id)?.tasks, 0);
+  await recovered.pollDesktop(); await waitFor(() => calls === 1);
+});
+
+for (const model of ["claude-test", "claude-next"]) for (const completion of ["inventory", "notification"] as const) test(`deferred ${model} settings stay honest until background ${completion} permits restart`, async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  launchBackground(query);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const result = await f.sessions.setModel(id, model, "max", "deferred-pick");
+  assert.deepEqual(result, { status: "partial", model: "claude-test", effort: "high", pending: { model, effort: "max" } });
+  assert.equal(f.sessions.summaryOf(id)?.model, "claude-test");
+  assert.equal(f.sessions.summaryOf(id)?.effort, "high");
+  assert.deepEqual(f.sessions.summaryOf(id)?.pendingSettings, { model, effort: "max" });
+  const settingsEvent = f.sessions.log(id).tail().events.find(event => event.kind === "settings" && event.reqId === "deferred-pick");
+  assert.ok(settingsEvent?.kind === "settings");
+  assert.equal(settingsEvent.status, "partial");
+  assert.deepEqual(settingsEvent.pending, { model, effort: "max" });
+  await f.sessions.send(id, "during-pending", "keep working");
+  await waitFor(() => query.users.length === 2);
+  assert.equal(query.closed, false, "do not kill a genuinely running worker");
+  assert.equal(query.options.effort, "high");
+  const turn = f.sessions.log(id).tail().events.filter(event => event.kind === "turn").at(-1);
+  assert.equal(turn?.effort, "high");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  if (completion === "inventory") {
+    const hooks = query.options.hooks as { Stop: { hooks: ((input: Record<string, unknown>) => Promise<unknown>)[] }[] };
+    await hooks.Stop[0]!.hooks[0]!({ background_tasks: [], session_crons: [] });
+  } else query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" } });
+  await waitFor(() => query.closed);
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 0);
+  assert.equal(f.sessions.summaryOf(id)?.pendingSettings, undefined);
+  await f.sessions.send(id, "after-pending", "use max now");
+  await waitFor(() => boundary.queries.length === 2);
+  assert.equal(boundary.queries[1]!.options.model, model);
+  assert.equal(boundary.queries[1]!.options.effort, "max");
+});
+
+test("all combined desktop terminal notifications close their own worker cards", () => {
+  const state = new Map<string, SubagentState>();
+  const resolve = () => ({ model: "test", steps: 1, description: "worker", terminal: null });
+  const convert = (value: unknown) => transcriptEvents(JSON.stringify(value), "/isolated", () => "worker", undefined, { state, resolve });
+  for (const id of ["one", "two"]) {
+    convert({ type: "assistant", message: { content: [{ type: "tool_use", id: `tool-${id}`, name: "Agent", input: {} }] } });
+    convert({ type: "user", toolUseResult: { isAsync: true, agentId: id }, message: { content: [{ type: "tool_result", tool_use_id: `tool-${id}`, content: "async launched" }] } });
+  }
+  const content = ["one", "two"].map(id => `<task-notification><task-id>${id}</task-id><status>stopped</status><result>${id} stopped</result></task-notification>`).join("\n");
+  const result = convert({ type: "user", isMeta: true, message: { content } });
+  assert.equal(state.size, 0);
+  assert.deepEqual(result.bodies.filter(event => event.kind === "subagent").map(event => [event.toolUseId, event.status]), [["tool-one", "stopped"], ["tool-two", "stopped"]]);
+  assert.deepEqual(result.bodies.filter(event => event.kind === "tool_result").map(event => event.text), ["one stopped", "two stopped"]);
+});
 
 test("an async SDK launch stays active until its own terminal notification, with stopped separate from failure", async t => {
   const boundary = controlledQueries();
@@ -268,7 +362,7 @@ test("a model plus effort change waits for writer exit and carries inputs accept
   const first = boundary.queries[0]!;
   first.emit({ type: "system", subtype: "init", session_id: "sdk-model-effort" });
   await nextTick();
-  assert.deepEqual(await f.sessions.setModel(id, "claude-next", "max", "model-and-effort"), { status: "applied", model: "claude-next", effort: "max" });
+  assert.deepEqual(await f.sessions.setModel(id, "claude-next", "max", "model-and-effort"), { status: "partial", model: "claude-test", effort: "high", pending: { model: "claude-next", effort: "max" } });
   await f.sessions.send(id, "next-turn", "use the new settings");
   first.emit({ type: "result", subtype: "success" });
   await waitFor(() => first.closed);
