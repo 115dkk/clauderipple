@@ -972,6 +972,7 @@ function renderClients() {
   };
   renderClientPickerModels(picker.enabled);
   renderModelSlots();
+  renderAutoClassifier();
   const modEnabled = Boolean(status.statusMod);
   const modSwitch = $("#client-status-mod-toggle");
   modSwitch.checked = modEnabled;
@@ -1225,6 +1226,158 @@ async function saveModelSlots() {
     const warning = owners.length && providerCannotSearch(owners[0], savedModels.smallFast) ? t("slots.noWebSearchWarn") : undefined;
     configSaved(out, t("slots.slotSaved"), warning);
   } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+}
+
+// ---- Auto mode classifier ---------------------------------------------------------------
+//
+// `autoModeClassifier` (ARCHITECTURE §2) takes Auto mode's security check off the model Claude Code
+// picked for it. The two rows are its two stages: the first stage's quick yes/no, and the second
+// stage together with every other classifier request. Each row is a provider and model, or Claude
+// Code's own choice. The config can spell the same two rows several ways, so the two functions
+// below are the only translation between them.
+
+/** The two rows a setting shows, `{ first, rest }`: each a target, or null for Claude Code's own. */
+function classifierRowsOf(settings) {
+  if (!settings || typeof settings !== "object") return { first: null, rest: null };
+  const pick = (target) => ({ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}) });
+  const rest = settings.provider && settings.model ? pick(settings) : null;
+  const stage1 = settings.stage1;
+  // Without `stage1` the first stage follows the main target, so both rows show it.
+  if (stage1 === undefined) return { first: rest, rest };
+  return { first: stage1 && typeof stage1 === "object" ? pick(stage1) : null, rest };
+}
+/** The setting two rows save, or undefined when both are Claude Code's own and the field goes. */
+function classifierSettingOf(first, rest) {
+  if (!first && !rest) return undefined;
+  if (!rest) return { stage1: first };
+  if (!first) return { ...rest, stage1: "native" };
+  const same = first.provider === rest.provider && first.model === rest.model && (first.effort || "") === (rest.effort || "");
+  return same ? { ...rest } : { ...rest, stage1: first };
+}
+/** Whether either row of a setting names this provider. */
+function classifierNames(settings, provider) {
+  const rows = classifierRowsOf(settings);
+  return [rows.first, rows.rest].some((row) => row && row.provider === provider);
+}
+/** The setting once this provider is gone: a row that named it is Claude Code's own again, and the
+ * other row is kept. Undefined when neither row has a target left. */
+function classifierWithout(settings, provider) {
+  const rows = classifierRowsOf(settings);
+  const kept = (row) => (row && row.provider === provider ? null : row);
+  return classifierSettingOf(kept(rows.first), kept(rows.rest));
+}
+
+// Claude Code refuses these as its own classifier because the API's safeguards refuse the second
+// stage on them (CLI 2.1.310; measured for Sonnet 5.5, ARCHITECTURE §2). They answer the first.
+const CLASSIFIER_REFUSES_STAGE2 = new Set(["claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5"]);
+
+// A Claude account-pool provider answers with whatever the signed-in account can use, so one without
+// a model list is offered with the Claude catalogue. A list would make it the routing owner of those
+// ids for every request, not just this one, which is why a classifier's own provider has none.
+function classifierGroups(config) {
+  const groups = groupedModels(config);
+  for (const [name, provider] of Object.entries(config.providers || {})) {
+    if (provider.type !== "anthropic" || !provider.accountPool || modelsOf(provider).length) continue;
+    groups.push({ name, provider, models: claudeModels.map((model) => ({ id: model.id, name: labelOf(model) })) });
+  }
+  return groups;
+}
+
+function classifierRow(stage, saved, groups) {
+  const target = el("select", {});
+  target.appendChild(selectOption("", t("classifier.native")));
+  let found = false;
+  for (const group of groups) {
+    const optgroup = el("optgroup", { label: providerLabel(group.name, group.provider) });
+    for (const model of group.models) {
+      const option = selectOption(JSON.stringify([group.name, model.id]), labelOf(model));
+      if (stage === "rest" && CLASSIFIER_REFUSES_STAGE2.has(model.id)) option.textContent += ` (${t("classifier.refusesStage2")})`;
+      if (saved && saved.provider === group.name && saved.model === model.id) found = true;
+      optgroup.appendChild(option);
+    }
+    target.appendChild(optgroup);
+  }
+  // A target the config names but no provider offers any more must not read as Claude Code's own:
+  // saving the row unchanged would then quietly hand the check back.
+  if (saved && !found) target.appendChild(selectOption(JSON.stringify([saved.provider, saved.model]), `${saved.provider} / ${saved.model} (?)`));
+  target.value = saved ? JSON.stringify([saved.provider, saved.model]) : "";
+
+  const effort = el("select", { class: "classifier-effort" });
+  // "" saves no effort, and the request keeps the effort Claude Code gave it. A saved level the
+  // catalogue does not list is kept on first draw, so opening the page never rewrites it.
+  const sync = (prior, keepUnlisted) => {
+    const picked = routeFromTarget(target.value);
+    const levels = picked ? effortLevelsFor(picked.provider, picked.model) : [];
+    const shown = keepUnlisted && prior && !levels.includes(prior) ? [...levels, prior] : levels;
+    effort.replaceChildren(selectOption("", t("classifier.effortDefault")), ...shown.map((level) => selectOption(level, level)));
+    effort.value = shown.includes(prior) ? prior : "";
+    effort.disabled = shown.length === 0;
+  };
+  sync(saved && saved.effort, true);
+  target.onchange = () => { sync(effort.value, false); void saveAutoClassifier(); };
+  effort.onchange = () => void saveAutoClassifier();
+  target.dataset.classifier = stage;
+  effort.dataset.classifierEffort = stage;
+  target.setAttribute("aria-label", t(`classifier.${stage}`));
+  effort.setAttribute("aria-label", t("slots.th.effort"));
+  return cell(t(`classifier.${stage}`), [target, effort], t(`classifier.${stage}Help`), "slot-row classifier-row");
+}
+
+function renderAutoClassifier() {
+  const box = $("#client-auto-classifier");
+  if (!box || !currentConfig) return;
+  const rows = classifierRowsShown();
+  const groups = classifierGroups(currentConfig);
+  box.replaceChildren(classifierRow("first", rows.first, groups), classifierRow("rest", rows.rest, groups));
+  const note = $("#client-auto-classifier-note");
+  const pool = Object.values(currentConfig.providers || {}).some((provider) => provider.type === "anthropic" && provider.accountPool);
+  if (note) note.hidden = pool;
+}
+
+function classifierRowValue(stage) {
+  const target = $(`#client-auto-classifier select[data-classifier="${stage}"]`);
+  const effort = $(`#client-auto-classifier select[data-classifier-effort="${stage}"]`);
+  const picked = target ? routeFromTarget(target.value) : null;
+  if (!picked) return null;
+  return effort && effort.value ? { ...picked, effort: effort.value } : picked;
+}
+
+// A choice is read from the rows when it is made, before anything is awaited: a save that lands
+// redraws the rows from what it stored, so a later choice read after that would be the earlier one.
+// Saves run one at a time, and one that a newer choice has overtaken is dropped, so the last choice
+// is the one stored. Until it is stored the rows are drawn from it: the five-second status refresh
+// redraws them too, and drawn from the stored setting it would put the earlier value back in a row
+// that the next choice then reads and saves.
+let classifierSaveGeneration = 0;
+let classifierSaving = Promise.resolve();
+let classifierPending = null;
+function classifierRowsShown() {
+  return classifierRowsOf(classifierPending ? classifierPending.setting : currentConfig.autoModeClassifier);
+}
+function saveAutoClassifier() {
+  if (!currentConfig) return classifierSaving;
+  const setting = classifierSettingOf(classifierRowValue("first"), classifierRowValue("rest"));
+  classifierPending = { setting };
+  const generation = ++classifierSaveGeneration;
+  classifierSaving = classifierSaving.then(async () => {
+    if (generation !== classifierSaveGeneration) return;
+    try {
+      const next = clone(await latestConfig());
+      if (generation !== classifierSaveGeneration) return;
+      if (setting) next.autoModeClassifier = setting;
+      else delete next.autoModeClassifier;
+      await configRequest(next);
+      currentConfig = next;
+      if (generation !== classifierSaveGeneration) return;
+      classifierPending = null;
+      renderAutoClassifier();
+      toast(t("classifier.saved"));
+    } catch (error) {
+      if (generation === classifierSaveGeneration) classifierPending = null;
+      toast(t("common.saveFailed"), true, error.message);
+    }
+  });
+  return classifierSaving;
 }
 
 function clientPickerSelections() {
@@ -2323,7 +2476,7 @@ function providerUsages(config, name) {
     direct: (config.direct || []).filter((rule) => rule && rule.provider === name).length,
     picker: extraModels.length,
     search: Boolean(config.webSearch && config.webSearch.provider === name),
-    classifier: Boolean(config.autoModeClassifier && config.autoModeClassifier.provider === name),
+    classifier: classifierNames(config.autoModeClassifier, name),
   };
 }
 /** The usage line's extra clauses, each absent when the config does not name this provider there. */
@@ -2359,9 +2512,14 @@ async function removeProvider(name, provider) {
   }));
   next.direct = (next.direct || []).filter((rule) => rule.provider !== name);
   // The search and the Auto-mode classifier name a provider of their own; left behind, they are the
-  // same unknown-provider error as a fallback.
+  // same unknown-provider error as a fallback. The classifier's two stages are cleared one by one, so
+  // a first stage on another provider outlives the removal of the rest's, and the reverse.
   if (next.webSearch && next.webSearch.provider === name) delete next.webSearch;
-  if (next.autoModeClassifier && next.autoModeClassifier.provider === name) delete next.autoModeClassifier;
+  if (classifierNames(next.autoModeClassifier, name)) {
+    const kept = classifierWithout(next.autoModeClassifier, name);
+    if (kept) next.autoModeClassifier = kept;
+    else delete next.autoModeClassifier;
+  }
   try {
     const out = await configRequest(next);
     currentConfig = next;
