@@ -569,6 +569,36 @@ test("admin mod-settings refuses to overwrite corrupt persistence", async () => 
   });
 });
 
+test("admin mod-settings renames a rung and an allow-list entry saved under the 0.12.18 worker name (#111)", async () => {
+  const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agent-renames-"));
+  const cfg = makeCfg({ providers: { deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "deepseek-ai/DeepSeek-V4.1-Flash-1017" }] } } });
+  const old = "deepseek-ai--eep-eek--4-1--lash-1017";
+  const now = "deepseek-ai-deepseek-v4-1-flash-1017";
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const steps = (agent: string) => [{ target: { agent }, effort: "high" }];
+      const saved = {
+        rules: { general: { mode: "ladder", rungs: { light: steps(old), standard: steps("gpt-6-1-sol") } } },
+        modes: [{ id: "saved", name: "Saved mode", rungs: { hard: steps(old) }, delegation: "normal", until: "none" }],
+        allow: [old, "gpt-6-1-sol"],
+        allowKnown: [old, "gpt-6-1-sol"],
+      };
+      fs.writeFileSync(path.join(home, "mod-settings.json"), JSON.stringify({ revision: 3, settings: normalizeSettings(saved) }));
+
+      const response = await fetch(`${base()}:${port}/api/mod-settings`);
+      assert.equal(response.status, 200);
+      const settings = ((await response.json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(settings.rules.general.rungs.light, steps(now), "the renamed worker, not a missing one");
+      assert.deepEqual(settings.rules.general.rungs.standard, steps("gpt-6-1-sol"), "a name that did not change is left alone");
+      assert.deepEqual(settings.modes[0]!.rungs.hard, steps(now), "a saved mode's rung too");
+      assert.deepEqual(settings.allow, [now, "gpt-6-1-sol"], "the ticked worker keeps its tick");
+      assert.deepEqual(settings.allowKnown, [now, "gpt-6-1-sol"]);
+    }, { agentDir: agents });
+  } finally {
+    fs.rmSync(agents, { recursive: true, force: true });
+  }
+});
+
 test("admin mod-options offers owned workers, every provider model, judge candidates and attributed AA scores", async () => {
   const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-mod-options-"));
   const full = { rate_limits: { primary: { used_percent: 100, reset_after_seconds: 600 } } };

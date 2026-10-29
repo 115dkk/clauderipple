@@ -36,12 +36,12 @@ import type { Config, Provider, ProviderCredential, ProviderModel } from "./conf
 import { withFileLock } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
-import { generatedAgents } from "./agents.ts";
+import { agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
-import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
+import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import { declaredBy, resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
@@ -815,10 +815,43 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
 }
 
 /**
+ * Worker names saved by the build that sanitised a model id without lower-casing it first (#111):
+ * the ladder, the allow-list and the fallback name workers by their generated name, so a renamed
+ * worker would read as missing and its rung skipped. Migrated wherever settings are read or written,
+ * so a ladder the user saved keeps the worker it named; the next save stores the new name.
+ */
+function migrateWorkerNames(settings: Settings, renames: Record<string, string>): Settings {
+  if (Object.keys(renames).length === 0) return settings;
+  const agent = (name: string): string => renames[name] ?? name;
+  const steps = (list: Step[] | undefined): Step[] | undefined =>
+    list?.map(step => ({ ...step, target: { ...step.target, agent: agent(step.target.agent) } }));
+  const rungs = (saved: Rungs): Rungs =>
+    Object.fromEntries(Object.entries(saved).map(([rung, list]) => [rung, steps(list)])) as Rungs;
+  const domains = (rules: DomainRules): DomainRules =>
+    Object.fromEntries(Object.entries(rules).map(([domain, rule]) => [domain, { mode: "ladder", rungs: rungs(rule.rungs) }])) as DomainRules;
+  const names = (list: string[]): string[] => [...new Set(list.map(agent))];
+  const modes = settings.modes.map(mode => ({
+    ...mode,
+    rungs: rungs(mode.rungs),
+    ...(mode.domainRules ? { domainRules: domains(mode.domainRules) } : {}),
+  }));
+  return {
+    ...settings,
+    rules: { general: { mode: "ladder", rungs: rungs(settings.rules.general.rungs) } },
+    ...(settings.domainRules ? { domainRules: domains(settings.domainRules) } : {}),
+    modes,
+    allow: names(settings.allow),
+    allowKnown: names(settings.allowKnown),
+    fallback: { ...settings.fallback, agent: agent(settings.fallback.agent) },
+  };
+}
+
+/**
  * Fill empty ordered lists in Base and saved modes from the same ticked, connected choices.
  * Existing lists survive availability and allow-list changes; dispatch handles skips.
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
+  settings = migrateWorkerNames(settings, agentRenames(deps.config()));
   const general = settings.rules.general;
   const sets = [settings, ...settings.modes];
   const domains = sets.flatMap(set => Object.values(set.domainRules ?? {}));

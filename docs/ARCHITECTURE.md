@@ -439,9 +439,17 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
 - **Worker definitions derive from the same list (2026-09-20).** A ticked model is
   also a subagent the operator can name: for every non-ingress provider's declared
   id, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
-  `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
+  `name` = the id lower-cased, then anything outside `[a-z0-9-]` folded to `-`, runs
+  of `-` collapsed to one and the ends trimmed, frontmatter
   `model:` = the exact id, `@high` when the provider offers any effort level —
-  `@medium` until 2026-10-02). For a duplicate id, the first outbound provider in
+  `@medium` until 2026-10-02). Without the lower-casing step a hosted id lost its
+  model name to dashes (`deepseek-ai/DeepSeek-V4.1-Flash-1017` →
+  `deepseek-ai--eep-eek--4-1--lash-1017`, fixed after 0.12.18, #111). A name the
+  0.12.18 algorithm gave a worker that now differs stays resolvable as a marker
+  alias, rungs and allow-list entries saved under it are renamed when the mod's
+  settings are read (admin.ts), and its file is removed like any stale generated
+  file — by the manifest, or, when that record is lost, by the generated mark and
+  the same `model:` line. For a duplicate id, the first outbound provider in
   config key order keeps that name; later providers use `<name>-<provider>` (the
   same filename sanitisation applies). **All** duplicate workers carry a qualified
   `model:` (`google-gemini:gemini-4-argon@high`), including the one keeping its old
