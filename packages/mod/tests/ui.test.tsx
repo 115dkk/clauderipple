@@ -1604,7 +1604,11 @@ test('the desktop limits row is a button that opens the limits pane', async ($, 
   await ui.unmount()
 })
 
-test('making the limits row pressable adds no in-flow height or vertical air', async ($, on) => {
+// 2026-10-29: the row's light sat in an empty absolute Box laid over it, which the app never drew:
+// every other button on the band showed a box under the pointer and the limits row none. The row
+// now carries the same light as the effort chip, in flow, with no vertical air, and gives back the
+// light's round edge from the air above it so the band keeps its height and the figures their place.
+test('the pressable limits row lights as the band\'s other buttons do, at the same height', async ($, on) => {
   const limits: DashboardView['limits'] = [
     { provider: 'claude', account: 0, kind: 'five_hour', label: '', percent: 28 },
     { provider: 'chatgpt', account: 0, kind: 'seven_day', label: '', percent: 8 },
@@ -1614,35 +1618,36 @@ test('making the limits row pressable adds no in-flow height or vertical air', a
     drawPane(on, id, el => renderBand(el, frameOf('desktop', columns, 12, skin), { ...DASH, extras: ['limits'], limits }, { ...BAND_ACTIONS, ...(active ? { toggleLimits: () => undefined } : {}) }))
   }
   for (const skin of SKINS) for (const columns of [94, 200]) {
-    const rows: string[] = []
+    const at: { left: number; top: number }[] = []
     for (const active of [false, true]) {
       const ui = await mount($, ['limits-height', skin, columns, active].join('-'), 'desktop', columns)
-      const tree = await ui.drawn()
-      // Compare the actual in-flow tree with the unpressable row (1837316's layout):
-      // absolute paint and hit targets cannot add height, including round-border default padding.
-      const flow = (node: unknown): unknown => {
-        if (!node || typeof node !== 'object') return node
-        const n = node as Drawn
-        if (n.props?.position === 'absolute') return null
-        const { key, ...props } = n.props ?? {}
-        return { type: n.type, props, children: (n.children ?? []).map(flow).filter(n => n !== null) }
-      }
-      const row = await ui.find({ key: 'band-limits' })
-      expect(row?.props.paddingTop).toBe(0.5)
-      let rowTree: Drawn | undefined
-      walk(tree, n => { if (n.props?.key === 'band-limits') rowTree = n })
-      rows.push(JSON.stringify(flow(rowTree)))
-      const light = await ui.find({ key: 'limits-light' })
+      // A drawn node carries its hover beside its props.
+      const nodes = new Map<string, Drawn & { hover?: Record<string, unknown> }>()
+      walk(await ui.drawn(), n => { if (typeof n.props?.key === 'string') nodes.set(n.props.key, n) })
+      const outer = nodes.get('band-limits')!.props!
+      const rowNode = nodes.get('limits-row')!
+      const row = rowNode.props!
+      expect(nodes.has('limits-light')).toBe(false)
       if (active) {
-        expect(light?.props.position).toBe('absolute')
-        expect(light?.props.paddingY).toBe(0)
-        expect(light?.props.top).toBe(0)
-        expect(light?.props.bottom).toBe(0)
-      } else expect(light).toBeUndefined()
-      expect((await ui.find({ key: 'limits-row' }))?.props.borderStyle).toBeUndefined()
+        // The effort chip's light, in the same skin: its edge at rest and under the pointer.
+        const effortNode = nodes.get('fact-effort')!
+        expect(row.borderStyle, skin).toBe(effortNode.props!.borderStyle)
+        expect(row.borderColor, skin).toBe(effortNode.props!.borderColor)
+        const { scope: _effortScope, ...effortHover } = effortNode.hover!
+        const { scope, ...rowHover } = rowNode.hover!
+        expect(rowHover, skin).toEqual(effortHover)
+        expect(scope).toBe('ripple-tip-limits-open')
+        // No host air above or below the figures; a fact's air either side.
+        expect(row.paddingY).toBe(0)
+        expect(row.paddingX).toBe(0.5)
+        expect(await ui.find({ type: 'Button', key: 'limits-open' })).toBeDefined()
+      } else expect(row.borderStyle).toBeUndefined()
+      at.push({ left: (outer.paddingLeft as number) + ((row.paddingX as number | undefined) ?? 0), top: (outer.paddingTop as number) + (active ? 2 / (19 / 2) : 0) })
       await ui.unmount()
     }
-    expect(rows[1], skin + ' ' + columns + ' in-flow layout').toBe(rows[0])
+    // The figures start where they did, and the row with its edge is as tall as it was.
+    expect(Math.abs(at[1]!.left - at[0]!.left) < 1e-9, skin + ' ' + columns + ' left').toBe(true)
+    expect(Math.abs(at[1]!.top - at[0]!.top) < 1e-9, skin + ' ' + columns + ' top').toBe(true)
   }
 })
 
