@@ -461,7 +461,11 @@ for (const error of [
   test(`Google HTTP 400 ${JSON.stringify(error)} ${auth ? "rotates" : "does not rotate"} (#112)`, async () => {
     const r = await rig({ provider: pooledGoogle, reply: n => n === 1 ? { status: 400, body: JSON.stringify({ error }) } : undefined });
     try {
-      assert.equal((await r.send(poolTurn)).status, auth ? 200 : 400);
+      // The client-facing status of a refusal is mapHttpError's call (it reads text loosely); what
+      // this pins is whether the pool rotated.
+      const status = (await r.send(poolTurn)).status;
+      if (auth) assert.equal(status, 200);
+      else assert.notEqual(status, 200);
       assert.equal(r.seen.length, auth ? 2 : 1);
       assert.equal(r.health().google![0]!.state, auth ? "quarantined" : "ready");
     } finally { await r.stop(); }

@@ -113,6 +113,15 @@ function vendorMessage(text: string): string {
  */
 export function googleLooksLikeAuth(status: number, text: string): boolean {
   if (status === 401) return true;
+  if (/\b(API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|API key not valid|invalid api key)\b/i.test(text)) return true;
+  return false;
+}
+
+/**
+ * Stricter than `googleLooksLikeAuth`, for walking an api-key pool on HTTP 400/403 only: the
+ * structured error must name an auth reason, so a prompt that merely quotes one never rotates keys.
+ */
+export function googleKeyRejected(status: number, text: string): boolean {
   if (status !== 400 && status !== 403) return false;
   try {
     const error = (JSON.parse(text) as { error?: { status?: unknown; details?: { reason?: unknown }[] } } | null)?.error;

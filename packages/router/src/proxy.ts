@@ -35,7 +35,7 @@ import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
-import { GoogleAdapter, googleLooksLikeAuth, type GoogleAccountStatus } from "./providers/google/index.ts";
+import { GoogleAdapter, googleKeyRejected, type GoogleAccountStatus } from "./providers/google/index.ts";
 import type { QuotaGroup } from "./providers/google/usage.ts";
 import { OpenCodeUsage, isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import { GrokAdapter } from "./providers/grok/index.ts";
@@ -1204,7 +1204,7 @@ export class Proxy {
             // again inside the turn instead of being handed to the user to retry by hand.
             // Google can reject a key with HTTP 400. Only structured auth evidence makes that
             // a credential refusal; an ordinary invalid request must never walk the pool.
-            const poolStatus = (status: number, body: string): number => status === 400 && googleLooksLikeAuth(status, body) ? 401 : status;
+            const poolStatus = (status: number, body: string): number => status === 400 && googleKeyRejected(status, body) ? 401 : status;
             const next = using && credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
               const judgedStatus = poolStatus(status, body);
               if (!classify(judgedStatus, undefined, body).retryable) return null;
