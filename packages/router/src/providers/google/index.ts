@@ -83,6 +83,13 @@ export function isModelCapacityExhausted(status: number, text: string): boolean 
   }
 }
 
+/** Include escaped/folded spellings that a transport exception may echo. */
+function redactGoogleError(text: string, secrets: readonly string[]): string {
+  return redactErrorText(text, secrets.flatMap(secret => [
+    secret, secret.replace(/\s+/g, " ").trim(), JSON.stringify(secret).slice(1, -1),
+  ]), 2000);
+}
+
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
 }
@@ -591,9 +598,7 @@ export class GoogleAdapter {
     ];
     // Header-parser exceptions may quote escaped bytes or fold whitespace before echoing a key.
     // Supply those spellings to the shared redactor rather than maintaining another redactor here.
-    const redact = (text: string): string => redactErrorText(text, upstreamSecrets.flatMap(secret => [
-      secret, secret.replace(/\s+/g, " ").trim(), JSON.stringify(secret).slice(1, -1),
-    ]), 2000);
+    const redact = (text: string): string => redactGoogleError(text, upstreamSecrets);
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
@@ -656,8 +661,11 @@ export class GoogleAdapter {
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
 
+    const upstreamSecrets = new Set<string>();
+    const redact = (text: string): string => redactGoogleError(text, [...upstreamSecrets]);
     const sent = await this.sendToAnAccount({
       conversation: key,
+      redact,
       signal: controller.signal,
       system: upstreamRequest.systemInstruction,
       model,
@@ -670,7 +678,9 @@ export class GoogleAdapter {
           antigravity: { accessToken: credential.accessToken, projectId: credential.projectId, conversationKey: key },
           antigravityBaseUrl: host,
         });
-        return { built, secrets: [credential.accessToken, ...credentialHeaderValues(Object.entries(built.headers))] };
+        const secrets = [credential.accessToken, ...credentialHeaderValues(Object.entries(built.headers))];
+        for (const secret of secrets) upstreamSecrets.add(secret);
+        return { built };
       },
     });
 
@@ -731,11 +741,11 @@ export class GoogleAdapter {
       };
     }
 
-    return this.streamBack(res, sent.upstream, transport, json, model, wantStream, key, startInput, controller, onClose, signatures);
+    return this.streamBack(res, sent.upstream, transport, json, model, wantStream, key, startInput, controller, onClose, signatures, redact);
   }
 
   /** Stream (or buffer) an already-ok upstream response back to the client as Anthropic SSE. */
-  private async streamBack(res: http.ServerResponse, upstream: Response, transport: GoogleTransport, json: AnthropicRequest, model: string, wantStream: boolean, key: string, startInput: number, controller: AbortController, onClose: () => void, signatures: ThoughtSignatureSink = this.thoughtSignatures, redact: (text: string) => string = text => text): Promise<GoogleOutcome> {
+  private async streamBack(res: http.ServerResponse, upstream: Response, transport: GoogleTransport, json: AnthropicRequest, model: string, wantStream: boolean, key: string, startInput: number, controller: AbortController, onClose: () => void, signatures: ThoughtSignatureSink, redact: (text: string) => string): Promise<GoogleOutcome> {
     const mapper = new GoogleStreamMapper(model, startInput, toolNameRestoreMap(json), (info) => {
       if (info.signature) signatures.set(info.id, info.signature);
     });
@@ -845,12 +855,13 @@ export class GoogleAdapter {
    */
   private async sendToAnAccount(spec: {
     conversation: string | undefined;
+    redact: (text: string) => string;
     signal: AbortSignal;
     system: GeminiRequest["systemInstruction"];
     model: string;
     /** The CCA host this turn goes to; quota evidence is read from the same host. */
     host: string;
-    build: (credential: GoogleCredential) => { built: { url: string; headers: Record<string, string>; body: string }; secrets: string[] };
+    build: (credential: GoogleCredential) => { built: { url: string; headers: Record<string, string>; body: string } };
   }): Promise<SendResult> {
     const tried = new Set<string>();
     const replayed = new Set<string>();
@@ -872,7 +883,7 @@ export class GoogleAdapter {
         return { kind: "all-resting", ...(backMs ? { backMs } : {}), ...(resting ? { group: resting } : {}) };
       }
 
-      const { built, secrets } = spec.build(credential);
+      const { built } = spec.build(credential);
       let upstream: Response;
       try {
         // Retried on the same account, before any status or byte reaches the client, so a relay's
@@ -882,13 +893,14 @@ export class GoogleAdapter {
           headers: built.headers,
           body: built.body,
           signal: spec.signal,
-        }, { log: (line) => this.log.info(`google ${this.name}: ${line}`), stopOn: isModelCapacityExhausted });
+        }, { log: (line) => this.log.info(`google ${this.name}: ${spec.redact(line)}`), stopOn: isModelCapacityExhausted });
       } catch (e) {
         if (spec.signal.aborted) return { kind: "aborted" };
         this.pool.penalise(this.name, credential.id, 0);
         tried.add(credential.ownerId);
         lastThrown = e as Error;
-        this.log.info(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} unreachable (${(e as Error).message}); trying another`);
+        lastThrown.message = spec.redact(lastThrown.message);
+        this.log.info(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} unreachable (${lastThrown.message}); trying another`);
         continue;
       }
 
@@ -900,7 +912,7 @@ export class GoogleAdapter {
       }
 
       const text = await upstream.text().catch(() => "");
-      const safeText = redactErrorText(text, secrets);
+      const safeText = spec.redact(text);
       const status = upstream.status;
       this.log.warn(`google ${this.name}: account ${credential.ownerId.slice(0, 8)} answered ${status}: ${safeText.slice(0, 400)}`);
       // The model, not the account, is out of capacity: resting the account refused every other turn
