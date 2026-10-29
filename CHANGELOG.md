@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.20 — 2026-10-29
 
 ### Fixed
 
@@ -58,7 +58,7 @@
 ### Known
 
 - When a provider recovers after a reroute, thinking the fallback signed may still be sent back to the
-  original provider. This predates 0.12.19 and is fixed in Unreleased.
+  original provider. This predates 0.12.19 and is fixed in 0.12.20.
 
 ## 0.12.18 — 2026-10-28
 
