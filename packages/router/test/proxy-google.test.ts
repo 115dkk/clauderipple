@@ -30,7 +30,7 @@ function freePort(): Promise<number> {
   });
 }
 
-type Rig = { home: string; logs: () => string; send: (body: unknown, path?: string) => Promise<{ status: number; headers: string; body: string }>; records: () => RequestRecord[]; stop: () => Promise<void>; seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] };
+type Rig = { health: () => ReturnType<Proxy["credentialHealth"]>; home: string; logs: () => string; send: (body: unknown, path?: string) => Promise<{ status: number; headers: string; body: string }>; records: () => RequestRecord[]; stop: () => Promise<void>; seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] };
 
 /** What the fake upstream answers: fixed, or decided per request (1-based) — a credential differs per key. */
 type Reply = { status: number; body: string; headers?: Record<string, string> };
@@ -40,7 +40,8 @@ type RigOptions = {
   promptRefusal?: boolean;
   /** Which google wire the test drives: a native `google` provider, or OpenCode's folded `google` model. */
   argon?: "google" | "opencode";
-  reply?: (n: number, headers: http.IncomingHttpHeaders) => Reply;
+  reply?: (n: number, headers: http.IncomingHttpHeaders) => Reply | undefined;
+  provider?: (url: string) => Config["providers"][string];
   /** Several keys on the OpenCode provider, in configured order; `headers` mirrors the first. */
   credentials?: { id: string; label?: string; headers: Record<string, string> }[];
 };
@@ -103,6 +104,7 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
     direct: [],
     aliases: {},
   };
+  if (options.provider) cfg.providers = { google: options.provider(`http://127.0.0.1:${upstreamPort}`) };
   const requests = new RequestLog(path.join(home, "requests.jsonl"));
   const proxy = new Proxy({
     config: () => cfg,
@@ -175,6 +177,7 @@ async function rig(options: RigOptions = {}): Promise<Rig> {
 
   return {
     home,
+    health: () => proxy.credentialHealth(),
     logs: () => fs.readFileSync(path.join(home, "router.log"), "utf8"),
     send,
     records: () => requests.list(20),
@@ -329,6 +332,162 @@ test("a spent key on the google wire retries the next key before anything is wri
     await r.stop();
   }
 });
+
+const poolKeys = ["synthetic-pool-first", "synthetic-pool-second"];
+const poolTurn = { model: "gemini-3-pro-preview", max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] };
+const limited: Reply = { status: 429, body: JSON.stringify({ error: { message: "rate limit" } }) };
+const pooledGoogle: NonNullable<RigOptions["provider"]> = url => ({
+  type: "google", auth: "api-key", apiKey: "synthetic-provider-key", url,
+  headers: { Authorization: "Bearer synthetic-base-auth", "X-Goog-Api-Key": "synthetic-base-google", "X-Vendor": "keep" },
+  credentials: poolKeys.map((key, i) => ({ id: `key-${i}`, headers: { "X-Api-Key": key } })),
+  models: [{ id: poolTurn.model }],
+});
+
+for (const stream of [true, false]) {
+  test(`Google ${stream ? "SSE" : "buffered"} errors redact every attempted key and provider secret (#112)`, async () => {
+    const secrets = [...poolKeys, "synthetic-provider-key", "synthetic-base-auth", "synthetic-base-google"];
+    const error = { error: { status: "RESOURCE_EXHAUSTED", message: `rejected ${secrets.join(" and ")}` } };
+    const r = await rig({ provider: pooledGoogle, reply: n => n === 1 ? limited : {
+      status: 200, headers: { "content-type": stream ? "text/event-stream" : "application/json" },
+      body: stream ? `data: ${JSON.stringify(error)}\n\n` : JSON.stringify(error),
+    } });
+    try {
+      const result = await r.send({ ...poolTurn, stream });
+      assert.equal(result.status, stream ? 200 : 429);
+      assert.match(result.body, /rate_limit_error/);
+      assert.equal(r.seen.length, 2, "a committed error must not rotate again");
+      for (const text of [result.body, r.logs(), fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8")]) {
+        for (const secret of secrets) assert.ok(!text.includes(secret), `leaked ${secret}`);
+      }
+      assert.equal(r.records()[0]!.ok, false);
+    } finally { await r.stop(); }
+  });
+}
+
+test("single-key Google stream errors are redacted without changing outbound authentication (#112)", async () => {
+  const r = await rig({ provider: url => ({
+    type: "google", auth: "api-key", url, apiKey: "synthetic-single-key",
+    headers: { Authorization: "Bearer synthetic-extra-auth", "X-Vendor": "keep" }, models: [{ id: poolTurn.model }],
+  }), reply: () => ({ status: 200, headers: { "content-type": "text/event-stream" },
+    body: `data: ${JSON.stringify({ error: { message: "rejected synthetic-single-key synthetic-extra-auth", status: "UNAVAILABLE" } })}\n\n`,
+  }) });
+  try {
+    const result = await r.send(poolTurn);
+    assert.equal(r.seen[0]!.headers["x-goog-api-key"], "synthetic-single-key");
+    assert.equal(r.seen[0]!.headers.authorization, "Bearer synthetic-extra-auth", "same headers as before pooling");
+    assert.equal(r.seen[0]!.headers["x-vendor"], "keep");
+    for (const text of [result.body, r.logs(), JSON.stringify(r.records())]) {
+      assert.ok(!text.includes("synthetic-single-key"));
+      assert.ok(!text.includes("synthetic-extra-auth"));
+    }
+  } finally { await r.stop(); }
+});
+
+test("Google header-parser exceptions and retry diagnostics redact all attempted credentials (#112)", async () => {
+  const invalid = "synthetic-invalid\ncredential-value";
+  const r = await rig({ provider: url => ({ ...pooledGoogle(url), credentials: [
+    { id: "first", headers: { "x-api-key": poolKeys[0]! } },
+    { id: "second", headers: { "x-api-key": invalid } },
+  ] }), reply: () => limited });
+  try {
+    const result = await r.send(poolTurn);
+    assert.equal(result.status, 502);
+    assert.equal(r.seen.length, 1);
+    assert.match(r.logs(), /retrying/);
+    for (const text of [result.body, r.logs(), fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8")]) {
+      for (const secret of [poolKeys[0]!, invalid, invalid.replace(/\s+/g, " "), JSON.stringify(invalid).slice(1, -1)]) assert.ok(!text.includes(secret));
+    }
+  } finally { await r.stop(); }
+});
+
+test("a pooled Google credential replaces base authentication without duplicate header values (#112)", async () => {
+  const r = await rig({ provider: pooledGoogle, reply: n => n === 1 ? limited : undefined });
+  try {
+    assert.equal((await r.send(poolTurn)).status, 200);
+    assert.deepEqual(r.seen.map(row => row.headers["x-goog-api-key"]), poolKeys);
+    for (const row of r.seen) {
+      assert.equal(row.headers.authorization, undefined);
+      assert.equal(row.headers["x-api-key"], undefined);
+      assert.equal(row.headers["x-vendor"], "keep");
+    }
+  } finally { await r.stop(); }
+});
+
+test("folded Google credentials replace case-varied vendor headers (#112)", async () => {
+  const r = await rig({ argon: "opencode", credentials: [
+    { id: "a", headers: { Authorization: `Bearer ${poolKeys[0]}`, "X-Workspace": "workspace-a" } },
+    { id: "b", headers: { authorization: `Bearer ${poolKeys[1]}`, "x-workspace": "workspace-b" } },
+  ], reply: n => n === 1 ? limited : undefined });
+  try {
+    assert.equal((await r.send({ ...poolTurn, model: "gemini-4-argon-contributor" })).status, 200);
+    assert.deepEqual(r.seen.map(row => row.headers["x-workspace"]), ["workspace-a", "workspace-b"]);
+    assert.deepEqual(r.seen.map(row => row.headers["x-goog-api-key"]), poolKeys);
+  } finally { await r.stop(); }
+});
+
+test("pooled Google headers replace a case-varied generated session header (#112)", async () => {
+  const r = await rig({ provider: url => ({ ...pooledGoogle(url), sessionHeader: "X-Session", credentials: [
+    { id: "one", headers: { "x-api-key": poolKeys[0]!, "x-session": "credential-session" } },
+  ] }) });
+  try {
+    assert.equal((await r.send(poolTurn)).status, 200);
+    assert.equal(r.seen[0]!.headers["x-session"], "credential-session");
+  } finally { await r.stop(); }
+});
+
+test("a final Google HTTP error redacts all attempted and provider credentials (#112)", async () => {
+  const secrets = [...poolKeys, "synthetic-provider-key", "synthetic-base-auth", "synthetic-base-google"];
+  const r = await rig({ provider: pooledGoogle, reply: () => ({ status: 429,
+    body: JSON.stringify({ error: { message: `rejected ${secrets.join(" and ")}` } }),
+  }) });
+  try {
+    const result = await r.send(poolTurn);
+    assert.equal(result.status, 429);
+    assert.equal(r.seen.length, 2);
+    for (const text of [result.body, r.logs(), fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8")]) {
+      for (const secret of secrets) assert.ok(!text.includes(secret));
+    }
+  } finally { await r.stop(); }
+});
+
+for (const error of [
+  { status: "API_KEY_INVALID" },
+  { status: "INVALID_ARGUMENT", details: [{ reason: "API_KEY_INVALID" }] },
+  { status: "PERMISSION_DENIED" },
+  { status: "INVALID_ARGUMENT", message: "malformed request" },
+  { status: "INVALID_ARGUMENT", message: "request text mentions API_KEY_INVALID and PERMISSION_DENIED" },
+]) {
+  const auth = error.status !== "INVALID_ARGUMENT" || "details" in error;
+  test(`Google HTTP 400 ${JSON.stringify(error)} ${auth ? "rotates" : "does not rotate"} (#112)`, async () => {
+    const r = await rig({ provider: pooledGoogle, reply: n => n === 1 ? { status: 400, body: JSON.stringify({ error }) } : undefined });
+    try {
+      // The client-facing status of a refusal is mapHttpError's call (it reads text loosely); what
+      // this pins is whether the pool rotated.
+      const status = (await r.send(poolTurn)).status;
+      if (auth) assert.equal(status, 200);
+      else assert.notEqual(status, 200);
+      assert.equal(r.seen.length, auth ? 2 : 1);
+      assert.equal(r.health().google![0]!.state, auth ? "quarantined" : "ready");
+    } finally { await r.stop(); }
+  });
+}
+
+for (const refusal of [
+  { status: 429, headers: { "retry-after": "3600" }, body: JSON.stringify({ error: { message: "rate limit" } }) },
+  { status: 400, body: JSON.stringify({ error: { type: "server_error", message: "Upstream request failed: This Go model requires Global regions" } }) },
+]) {
+  test(`the final Google ${refusal.status} preserves upstream cooldown evidence (#112)`, async () => {
+    const r = await rig({ provider: pooledGoogle, reply: () => refusal });
+    try {
+      assert.equal((await r.send(poolTurn)).status, refusal.status);
+      assert.equal(r.seen.length, 2);
+      for (const key of r.health().google!) {
+        assert.equal(key.state, "cooling");
+        assert.ok(key.cooldownSeconds! >= (refusal.status === 429 ? 3590 : 50));
+      }
+    } finally { await r.stop(); }
+  });
+}
 
 test("a google model is refused a web_search side request, not sent upstream", async () => {
   const r = await rig();

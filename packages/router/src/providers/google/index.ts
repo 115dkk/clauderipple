@@ -37,7 +37,7 @@ const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
 const MODELS_CACHE_MS = 60 * 60 * 1000;
 
-export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined; modelUnavailable?: ModelUnavailable | undefined } & (
+export type GoogleOutcome = { upstreamStatus?: number; retryAfterMs?: number | undefined; errorBody?: string; status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined; modelUnavailable?: ModelUnavailable | undefined } & (
   | { kind?: "response" }
   // No status or bytes have reached the client; the proxy may try one route fallback.
   | { kind: "prompt-incompatible"; status: 400; bytes: 0; errorBody: string }
@@ -115,6 +115,22 @@ export function googleLooksLikeAuth(status: number, text: string): boolean {
   if (status === 401) return true;
   if (/\b(API_KEY_INVALID|PERMISSION_DENIED|UNAUTHENTICATED|API key not valid|invalid api key)\b/i.test(text)) return true;
   return false;
+}
+
+/**
+ * Stricter than `googleLooksLikeAuth`, for walking an api-key pool on HTTP 400/403 only: the
+ * structured error must name an auth reason, so a prompt that merely quotes one never rotates keys.
+ */
+export function googleKeyRejected(status: number, text: string): boolean {
+  if (status !== 400 && status !== 403) return false;
+  try {
+    const error = (JSON.parse(text) as { error?: { status?: unknown; details?: { reason?: unknown }[] } } | null)?.error;
+    const authReasons = new Set(["API_KEY_INVALID", "PERMISSION_DENIED", "UNAUTHENTICATED"]);
+    return typeof error?.status === "string" && authReasons.has(error.status) ||
+      Array.isArray(error?.details) && error.details.some(detail => typeof detail?.reason === "string" && authReasons.has(detail.reason));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -533,7 +549,9 @@ export class GoogleAdapter {
     // (`apiKey`, or the environment). A single-key provider declares no key on its credential, so this
     // is exactly the key it always sent.
     let credentialHeaders = credential?.headers;
-    const firstKey = credentialParts(credentialHeaders).apiKey ?? resolveApiKey(this.cfg.apiKey);
+    const pooled = !!this.cfg.credentials?.length || Object.keys(credentialHeaders ?? {}).length > 0;
+    const providerApiKey = resolveApiKey(this.cfg.apiKey);
+    const firstKey = credentialParts(credentialHeaders).apiKey ?? providerApiKey;
     if (!firstKey) {
       const out = anthropicError(401, "authentication_error", "Google provider: no API key; set apiKey or GEMINI_API_KEY");
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
@@ -545,12 +563,20 @@ export class GoogleAdapter {
     // credential states none.
     const attempt = (headers: Record<string, string> | undefined): { built: { url: string; headers: Record<string, string>; body: string }; secrets: string[] } => {
       const parts = credentialParts(headers);
-      const apiKey = parts.apiKey ?? resolveApiKey(this.cfg.apiKey);
+      const apiKey = parts.apiKey ?? providerApiKey;
       const wire = createTransport("api-key", {
+        pooled,
         ...(apiKey ? { apiKey } : {}),
         ...(this.cfg.url ? { url: this.cfg.url } : {}),
         ...(this.cfg.sessionHeader ? { sessionHeader: this.cfg.sessionHeader } : {}),
-        headers: { ...(this.cfg.headers ?? {}), ...parts.headers },
+        // Only explicit pool credentials replace base authentication. The implicit single-key
+        // path keeps the provider's headers byte-for-byte, including its auth conventions.
+        headers: pooled
+          ? Object.fromEntries([
+              ...Object.entries(this.cfg.headers ?? {}).filter(([name]) => !/^(authorization|x-api-key|x-goog-api-key)$/i.test(name)),
+              ...Object.entries(parts.headers),
+            ].map(([name, value]) => [name.toLowerCase(), value]))
+          : this.cfg.headers ?? {},
       });
       const built = wire.build(upstreamRequest, { model, stream: wantStream, conversationKey: key });
       return { built, secrets: [...(apiKey ? [apiKey] : []), ...credentialHeaderValues(Object.entries(built.headers))] };
@@ -558,7 +584,16 @@ export class GoogleAdapter {
 
     // Every credential sent on any attempt: after a retry the vendor's error may still echo the
     // first one.
-    const upstreamSecrets: string[] = [];
+    const upstreamSecrets = [
+      ...(providerApiKey ? [providerApiKey] : []),
+      ...credentialHeaderValues(Object.entries(this.cfg.headers ?? {})),
+      ...Object.entries(this.cfg.headers ?? {}).filter(([name]) => /^x-goog-api-key$/i.test(name)).map(([, value]) => value),
+    ];
+    // Header-parser exceptions may quote escaped bytes or fold whitespace before echoing a key.
+    // Supply those spellings to the shared redactor rather than maintaining another redactor here.
+    const redact = (text: string): string => redactErrorText(text, upstreamSecrets.flatMap(secret => [
+      secret, secret.replace(/\s+/g, " ").trim(), JSON.stringify(secret).slice(1, -1),
+    ]), 2000);
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
@@ -573,7 +608,7 @@ export class GoogleAdapter {
           headers: built.headers,
           body: built.body,
           signal: controller.signal,
-        }, { log: (line) => this.log.info(`google ${this.name}: ${line}`) });
+        }, { log: (line) => this.log.info(`google ${this.name}: ${redact(line)}`) });
         // Nothing has been written to the client, so a refusal another key could answer is asked
         // again here rather than handed to the user as a 429 they would have to retry by hand. The
         // proxy decides which key is next and charges the refusal to the one that answered (§4
@@ -588,6 +623,7 @@ export class GoogleAdapter {
     } catch (error) {
       res.off("close", onClose);
       if (controller.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
+      (error as Error).message = redact((error as Error).message);
       const out = anthropicError(502, "api_error", `Google provider unreachable: ${(error as Error).message}`);
       if (!res.headersSent) res.writeHead(out.status, { "content-type": "application/json" }).end(out.body);
       throw error;
@@ -595,17 +631,18 @@ export class GoogleAdapter {
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
-      const safeText = redactErrorText(text, upstreamSecrets);
+      const safeText = redact(text);
       const out = mapHttpError(upstream.status, safeText);
       this.log.warn(`google ${this.name}: upstream ${upstream.status} for ${model}: ${safeText.slice(0, 400)}`);
       res.off("close", onClose);
       // A spending cap or a used-up quota: the client is told not to retry, in the same answer.
       const exhaustion = providerExhaustion(upstream.status, text, retryAfterMs(Object.fromEntries(upstream.headers)) ?? googleRetryDelayMs(text));
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(out.body);
-      return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion, modelUnavailable: modelDeprecation(upstream.status, text) };
+      return { upstreamStatus: upstream.status, retryAfterMs: retryAfterMs(Object.fromEntries(upstream.headers)) ?? googleRetryDelayMs(text), errorBody: text,
+        status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion, modelUnavailable: modelDeprecation(upstream.status, text) };
     }
 
-    return this.streamBack(res, upstream, transport, json, model, wantStream, key, startInput, controller, onClose);
+    return this.streamBack(res, upstream, transport, json, model, wantStream, key, startInput, controller, onClose, this.thoughtSignatures, redact);
   }
 
   /**
@@ -698,10 +735,11 @@ export class GoogleAdapter {
   }
 
   /** Stream (or buffer) an already-ok upstream response back to the client as Anthropic SSE. */
-  private async streamBack(res: http.ServerResponse, upstream: Response, transport: GoogleTransport, json: AnthropicRequest, model: string, wantStream: boolean, key: string, startInput: number, controller: AbortController, onClose: () => void, signatures: ThoughtSignatureSink = this.thoughtSignatures): Promise<GoogleOutcome> {
+  private async streamBack(res: http.ServerResponse, upstream: Response, transport: GoogleTransport, json: AnthropicRequest, model: string, wantStream: boolean, key: string, startInput: number, controller: AbortController, onClose: () => void, signatures: ThoughtSignatureSink = this.thoughtSignatures, redact: (text: string) => string = text => text): Promise<GoogleOutcome> {
     const mapper = new GoogleStreamMapper(model, startInput, toolNameRestoreMap(json), (info) => {
       if (info.signature) signatures.set(info.id, info.signature);
     });
+    mapper.redactError = redact;
     const parser = new SseParser();
     const reader = upstream.body!.getReader();
     const decoder = new TextDecoder();

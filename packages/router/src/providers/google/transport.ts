@@ -98,7 +98,7 @@ export function antigravityBaseUrl(configured?: string): string {
   return (configured?.trim() || GOOGLE_OAUTH.dailyApi).replace(/\/+$/, "");
 }
 
-export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?: string; url?: string; sessionHeader?: string; headers?: Record<string, string> }): GoogleTransport {
+export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?: string; url?: string; sessionHeader?: string; headers?: Record<string, string>; pooled?: boolean }): GoogleTransport {
   if (mode === "antigravity") {
     const base = antigravityBaseUrl(opts.url);
     return {
@@ -181,7 +181,7 @@ export function createTransport(mode: "api-key" | "antigravity", opts: { apiKey?
           "content-type": "application/json",
           accept: o.stream ? "text/event-stream" : "application/json",
           ...(userAgent ? { "user-agent": userAgent } : {}),
-          ...(sessionHeader && o.conversationKey ? { [sessionHeader]: o.conversationKey } : {}),
+          ...(sessionHeader && o.conversationKey ? { [opts.pooled ? sessionHeader.toLowerCase() : sessionHeader]: o.conversationKey } : {}),
           ...(opts.headers ?? {}),
           // Kept after the vendor's own headers so nothing can shadow the credential on this wire.
           "x-goog-api-key": apiKey,
