@@ -854,7 +854,7 @@ function migrateWorkerNames(settings: Settings, renames: Record<string, string>)
  * Existing lists survive availability and allow-list changes; dispatch handles skips.
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
-  settings = migrateWorkerNames(settings, agentRenames(deps.config()));
+  settings = migrateWorkerNames(settings, agentRenames(deps.config(), deps.agentDir, deps.log));
   const general = settings.rules.general;
   const sets = [settings, ...settings.modes];
   const domains = sets.flatMap(set => Object.values(set.domainRules ?? {}));
