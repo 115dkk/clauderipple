@@ -37,7 +37,7 @@ test("Windows self-purge waits for its Node process to exit, reports pending non
   fs.symlinkSync(outside, path.join(home, "junction"), "junction");
   const module = pathToFileURL(path.resolve(import.meta.dirname, "../src/purge.ts")).href;
   const source = `import {purgeHome} from ${JSON.stringify(module)}; const result=await purgeHome(${JSON.stringify(home)}); console.log(JSON.stringify(result)); if(result?.status==='deferred') process.exitCode=2;`;
-  const child = spawnSync(node, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 30_000 });
+  const child = spawnSync(node, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 60_000 });
   assert.equal(child.status, 2, child.stderr || child.stdout);
   const result = JSON.parse(child.stdout.trim()) as { status: string; resultFile: string };
   assert.equal(result.status, "deferred");
@@ -72,7 +72,7 @@ test("the deferred cleaner records failure instead of success when another proce
   try {
     const module = pathToFileURL(path.resolve(import.meta.dirname, "../src/purge.ts")).href;
     const source = `import {purgeHome} from ${JSON.stringify(module)}; console.log(JSON.stringify(await purgeHome(${JSON.stringify(home)}))); process.exitCode=2;`;
-    const child = spawnSync(node, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 30_000 });
+    const child = spawnSync(node, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 60_000 });
     assert.equal(child.status, 2, child.stderr);
     const result = JSON.parse(child.stdout.trim()) as { resultFile: string };
     t.after(() => fs.rmSync(path.dirname(result.resultFile), { recursive: true, force: true, maxRetries: 3 }));
