@@ -1580,14 +1580,14 @@ test('the limits pane names each window\'s exact reset and the time left', async
       // One head per provider account, numbered when a provider has several.
       'Claude', 'GPT 1', 'GPT 2',
       // Every share, and how many windows are at 80% or more.
-      '28%', '8%', '12%', '64%', '97%', '80% 이상 사용한 한도가 1개 있습니다.',
+      '28%', '8%', '12%', '64%', '97%', '사용률이 80% 이상인 한도가 1개 있습니다.',
       // Each reset to the minute in local time, and the time left.
       '10월 10일 (토) 오후 3:32 초기화', '2시간 12분 남음',
       '10월 13일 (화) 오후 1:20 초기화', '3일 남음',
       '10월 10일 (토) 오후 2:05 초기화', '45분 남음',
       // A reset already passed says so; a window without one says that.
-      '초기화 시각(10월 10일 (토) 오후 1:05)이 지났습니다.', '표시된 사용률은 초기화 전 값일 수 있습니다.',
-      '이 한도는 초기화 시각이 제공되지 않습니다.',
+      '초기화 시간(10월 10일 (토) 오후 1:05)이 지났습니다.', '표시된 사용률은 초기화 전 값일 수 있습니다.',
+      '이 한도는 초기화 시간을 확인할 수 없습니다.',
       // Save mode, under Claude's own windows, until when it holds.
       '절약 모드가 켜져 있습니다. 10월 10일 (토) 오후 3:20까지 자동 추론 강도를 중간 이하로 유지합니다.',
     ]) expect(said, surface + ' ' + text).toContain(text)
@@ -1603,9 +1603,9 @@ test('the limits pane names each window\'s exact reset and the time left', async
   // The desktop heads the pane with the window closest to its cap, as a dial and in words, and draws
   // each share as a bar.
   const desktop = await mount($, 'limits-desktop', 'desktop', 80)
-  expect(await desktop.find({ type: 'Text', text: '가장 높은 사용률' })).toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: '최고 사용률' })).toBeDefined()
   expect(await desktop.find({ type: 'Text', text: 'GPT 2 주간 97%' })).toBeDefined()
-  expect(await svgByAlt(desktop, '가장 높은 사용률 GPT 2 주간 97%')).toBeDefined()
+  expect(await svgByAlt(desktop, '최고 사용률 GPT 2 주간 97%')).toBeDefined()
   for (const alt of ['5시간 28%', '주간 8%', '5시간 12%', '5시간 64%', '주간 97%']) expect(await svgByAlt(desktop, alt), alt).toBeDefined()
   await desktop.unmount()
   const en = await mount($, 'limits-en', 'desktop', 80)
@@ -1626,7 +1626,7 @@ test('the desktop limits row is a button that opens the limits pane', async ($, 
   drawPane(on, 'limits-row', el => renderBand(el, { ...frameOf('desktop', 94), lang: 'ko' }, { ...DASH, extras: ['limits'], limits }, actions))
   const ui = await mount($, 'limits-row', 'desktop', 94)
   expect(await ui.find({ type: 'Button', key: 'limits-open' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '눌러서 기간별 사용률과 초기화 시각 보기' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '눌러서 기간별 사용률과 초기화 시간 보기' })).toBeDefined()
   // The shares are on the row; the reset times are the pane's.
   for (const figure of ['28%', '8%']) expect(await ui.find({ type: 'Text', text: figure }), figure).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /뒤$/ })).toBeUndefined()
