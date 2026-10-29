@@ -1784,6 +1784,19 @@ They were not live-tested during the original implementation. Files are under `s
     window kind shows the **higher used percent** of the two (`mergeHostGroups`, lower remaining
     fraction wins) — the quota closest to running out. `hasRemainingQuota` evidence is per host and
     per account/project: it is true only for the host the model's request is sent to.
+  - **Argon's Pro quota (measured 2026-10-28, one Google AI Pro account).** On both hosts,
+    `retrieveUserQuotaSummary` under the CLI UA adds `Gemini 4 Argon`, with the single weekly
+    bucket `gemini-argon-wtu-weekly`; the IDE UA omits it. The CLI answer also carries the existing
+    Gemini and Claude/GPT groups. The measured Argon bucket was exhausted while the ordinary
+    Gemini windows still had quota. Its description explicitly says paid Pro has separate Argon
+    quota, whereas Ultra includes it in a larger Gemini bucket; Ultra has not been live-tested.
+    Quota reads use the CLI UA, falling back to the IDE answer when the CLI lookup is unreadable.
+    The limits row names the reported bucket `Argon weekly`, even when no third-party models are
+    selected. An absent Argon bucket is unknown: it is not evidence of Ultra or permission to use
+    the ordinary Gemini buckets as Argon's positive-quota evidence. `fetchAvailableModels`
+    is not a substitute: in the same measurement, production's Argon High quota metadata matched
+    the ordinary Gemini five-hour window while the explicit summary reported spent Argon weekly
+    quota, and other Argon catalogue entries omitted `remainingFraction`.
 - Model ids. CCA's wire ids carry the tier as a suffix (`gemini-3.8-flash-low`) or a
   `-tiered` rename (`gemini-3.7-flash-tiered`), while the picker shows a collapsed base id.
   Resolution, from `providers/antigravity-models.ts`: `gemini-3.8-flash` → its suffix per
@@ -1820,11 +1833,11 @@ They were not live-tested during the original implementation. Files are under `s
   and is not retried. The exception is the model-capacity 503 below, which rests nothing.
   **A 429 that proves one quota group spent rests only that group** (`isGroupQuotaExhausted`:
   an ErrorInfo `reason: "QUOTA_EXHAUSTED"` whose `metadata.model` is in the turn's group;
-  `antigravityQuotaScope`: `gemini` for gemini-*, `3p` for claude-*/gpt-oss*, the two groups
-  `retrieveUserQuotaSummary` reports, usage.ts; and `argon` for gemini-4-argon*, which draws on a
-  quota of its own — measured 2026-10-27, `fetchAvailableModels` gave Argon's tiers a remaining
-  fraction and reset that match neither Gemini bucket, and the summary lists no group for it, so it
-  has no limits-row window and no `hasRemainingQuota` evidence). Measured 2026-10-23: one such 429 for
+  `antigravityQuotaScope`: `gemini` for other gemini-*, `3p` for claude-*/gpt-oss*, and `argon`
+  for gemini-4-argon*. The distinct Argon scope preserves the measured Pro quota boundary;
+  its positive-quota evidence requires its own explicitly reported weekly bucket, never the
+  ordinary Gemini windows (see the 2026-10-28 measurement above). This does not infer a shared
+  Ultra quota scope from a missing bucket). Measured 2026-10-23: one such 429 for
   `claude-opus-5-5-low` ("Individual quota reached … Resets in 4h51m35s"), while the limits row read
   the 3P weekly window at 100% and Gemini's at 0.3%, rested the whole account, so every
   `gemini-3.8-flash` turn for the next five hours was refused "every signed-in account is at its
@@ -1878,8 +1891,9 @@ They were not live-tested during the original implementation. Files are under `s
   every request, and Google can use the same generic 429 for real limits. `prompt-refusal.ts`
   checks the outbound paragraph, exact generic `RESOURCE_EXHAUSTED` JSON, and absence of a
   retry header or nonempty error details. The adapter additionally requires a **fresh successful
-  usage snapshot for the attempted account and project**, with quota remaining in both the 5h
-  and weekly windows of the requested model's known quota group (Gemini or Claude/GPT).
+  usage snapshot for the attempted account and project**, with quota remaining in every required
+  window of the requested model's known quota group: both 5h and weekly for Gemini or Claude/GPT,
+  or the single explicitly reported weekly bucket for Argon.
   Evidence expires after five minutes or a bucket's reset time, and a failed refresh invalidates
   it even when the dashboard retains old values. Missing, malformed, ambiguous, stale or exhausted
   evidence follows ordinary 429 cooldown/account rotation. This is a cache-only check; it does

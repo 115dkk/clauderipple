@@ -7,9 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULTS, type Config, type ProviderModel } from "../src/config.ts";
 import { Logger } from "../src/log.ts";
-import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps } from "../src/admin.ts";
+import { backfillContextWindows, effortLevelsForModel, googleHealth, measureUnsettledModels, parseUpdateCheck, startAdmin, type AdminDeps, type LimitsProvider } from "../src/admin.ts";
 import type { ImageRequest } from "../src/providers/chatgpt/index.ts";
 import type { GoogleAccountStatus } from "../src/providers/google/index.ts";
+import type { QuotaGroup } from "../src/providers/google/usage.ts";
 import type { OpenCodeWindow } from "../src/providers/opencode-usage.ts";
 import { RequestLog } from "../src/requestlog.ts";
 import { PRESETS } from "../src/presets.ts";
@@ -3203,6 +3204,67 @@ test("POST /api/providers/probe[grok] without a session says to sign in and call
     { probeFetch: async () => { called = true; return new Response("{}", { status: 200 }); } },
   );
   assert.equal(called, false);
+});
+
+test("GET /api/limits keeps Argon weekly separate from Gemini and hides only unselected 3P windows", async () => {
+  const now = Date.now();
+  const resetAt = Math.floor((now + 7 * 86_400_000) / 1000);
+  const resetTime = new Date(resetAt * 1000).toISOString();
+  const bucket = (bucketId: string, window: string, remainingFraction: number) => ({ bucketId, displayName: window, window, remainingFraction, resetTime });
+  const gemini: QuotaGroup = { displayName: "Gemini Models", buckets: [bucket("gemini-5h", "5h", 0.87), bucket("gemini-weekly", "weekly", 0.76)] };
+  const argon: QuotaGroup = { displayName: "Gemini 4 Argon", buckets: [bucket("gemini-argon-wtu-weekly", "weekly", 0.35)] };
+  const thirdParty: QuotaGroup = { displayName: "Claude and GPT models", buckets: [bucket("3p-5h", "5h", 0.45), bucket("3p-weekly", "weekly", 0.25)] };
+  const account = (id: string, state: GoogleAccountStatus["state"] = "ready"): GoogleAccountStatus => ({
+    id, label: id, projectId: `project-${id}`, expiresAt: now + 3_600_000, needsReauth: state === "needs-login",
+    paused: state === "paused", preferred: false, inUse: id === "a", state, active: id === "a",
+  });
+  const groups: Record<string, QuotaGroup[]> = {
+    a: [gemini, thirdParty, argon],
+    // Missing Argon stays unknown, not a copy of this account's general Gemini windows.
+    b: [gemini, thirdParty],
+    c: [argon],
+    paused: [gemini, thirdParty, argon],
+    login: [gemini, thirdParty, argon],
+  };
+  const cfg = makeCfg({ providers: { gem: { type: "google", auth: "antigravity", models: [{ id: "gemini-4-argon" }] } } });
+  const generalWindows = [
+    { kind: "five_hour", used_percent: 13, window_minutes: 300, reset_at: resetAt },
+    { kind: "seven_day", used_percent: 24, window_minutes: 10080, reset_at: resetAt },
+  ];
+  const argonWindow = { kind: "scoped", label: "Argon weekly", used_percent: 65, window_minutes: 10080, reset_at: resetAt };
+  const thirdPartyWindows = [
+    { kind: "scoped", label: "3P", used_percent: 55, window_minutes: 300, reset_at: resetAt },
+    { kind: "scoped", label: "3P", used_percent: 75, window_minutes: 10080, reset_at: resetAt },
+  ];
+  await withAdmin(cfg, async ({ port, setCfg }) => {
+    const read = async () => {
+      const response = await fetch(`${base()}:${port}/api/limits`);
+      assert.equal(response.status, 200);
+      const body = await response.json() as { providers: LimitsProvider[] };
+      assert.deepEqual(body.providers.map(p => [p.provider, p.type, p.title]), [["gem", "google", "Gemini"]]);
+      return body.providers[0]!.accounts;
+    };
+    // Selecting no models, Argon alone, or any other Gemini model never makes Argon a 3P quota.
+    for (const ids of [[], ["gemini-4-argon"], ["gemini-3.8-flash"], ["gemini-3.8-flash", "gemini-4-argon"]]) {
+      setCfg({ ...cfg, providers: { gem: { type: "google", auth: "antigravity", models: ids.map(id => ({ id })) } } });
+      const accounts = await read();
+      assert.deepEqual(accounts.map(a => a.account), [0, 1, 2], "paused and needs-login accounts are omitted");
+      assert.deepEqual(accounts.map(a => a.windows), [
+        [...generalWindows, argonWindow], generalWindows, [argonWindow],
+      ], `Gemini and Argon remain independent with ${JSON.stringify(ids)} selected`);
+    }
+    // Either supported third-party family enables its windows without relabeling Argon or Gemini.
+    for (const id of ["claude-sonnet-5-5-low", "gpt-oss-120b-medium"]) {
+      setCfg({ ...cfg, providers: { gem: { type: "google", auth: "antigravity", models: [{ id: "gemini-4-argon" }, { id }] } } });
+      const accounts = await read();
+      assert.deepEqual(accounts.map(a => a.windows), [
+        [...generalWindows, ...thirdPartyWindows, argonWindow], [...generalWindows, ...thirdPartyWindows], [argonWindow],
+      ]);
+    }
+  }, { google: () => ({
+    accounts: () => ({ gem: [account("paused", "paused"), account("a"), account("login", "needs-login"), account("b"), account("c")] }),
+    usage: async (name: string) => { assert.equal(name, "gem"); return groups; },
+  }) });
 });
 
 test("GET /api/limits assembles every readable provider and honours limits:false", async () => {
