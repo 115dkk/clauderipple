@@ -36,6 +36,7 @@ async function withAdmin(
     clearCredentialCooldown?: NonNullable<AdminDeps["clearCredentialCooldown"]>;
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
+    modelHealth?: NonNullable<AdminDeps["modelHealth"]>;
     shutdown?: () => void;
     instance?: NonNullable<AdminDeps["instance"]>;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
@@ -177,6 +178,25 @@ test("credential cooldown HTTP endpoint clears one key and status exposes all th
     assert.equal((await post({ provider: true, id: "default" })).status, 400);
     assert.equal((await post(null)).status, 400);
   }, { credentials: () => ({ p: pool.report("p", entries) }), clearCredentialCooldown: (provider, id) => pool.clear(provider, id) });
+});
+
+test('status and ladder options expose retirement without disabling sibling models (#94)', async () => {
+  const { ModelHealth, modelDeprecation } = await import('../src/health.ts');
+  const health = new ModelHealth();
+  health.observe('p', 'retired', modelDeprecation(410, 'ModelDeprecated', 100));
+  assert.equal(modelDeprecation(410, 'endpoint gone'), undefined);
+  assert.equal(modelDeprecation(429, 'ModelDeprecated'), undefined);
+  assert.equal(modelDeprecation(404, 'thread_not_found'), undefined);
+  assert.equal(modelDeprecation(404, 'model_not_found')?.reason, 'model_deprecated');
+  const cfg = makeCfg({ providers: { p: { type: 'anthropic-compatible', url: 'http://127.0.0.1:1', models: [{ id: 'retired' }, { id: 'active' }] } } });
+  await withAdmin(cfg, async ({ port }) => {
+    const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.equal(options.providers[0]?.usable, true);
+    assert.deepEqual(options.providers[0]?.models, { retired: { reason: 'model_deprecated', exhaustedAt: 100 } });
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { providers: Record<string, { models: unknown }> };
+    assert.deepEqual(status.providers.p?.models, { retired: { usable: false, reason: 'model_deprecated', at: 100 } });
+  }, { modelHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+  assert.deepEqual(new ModelHealth().snapshot(), {}, 'a router restart clears retirement');
 });
 
 test("mod options and status expose runtime provider exhaustion and clear it on recovery", async () => {

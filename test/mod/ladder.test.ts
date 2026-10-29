@@ -94,6 +94,16 @@ test('a runtime-exhausted rung climbs once and retains its provider and reason',
   assert.equal(ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'ko', [], recovered.providers).rung, 'light')
 })
 
+test('a retired model stays skipped without a timer and keeps sibling models usable (#94)', async () => {
+  const { liveProviders } = await import('../../packages/mod/hooks/workers.ts')
+  const providers = { 'opencode-go': { usable: true, models: { 'deepseek-v4.1-flash': { reason: 'model_deprecated' } } } }
+  const later = liveProviders(providers, Number.MAX_SAFE_INTEGER)
+  const result = ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'en', [], later)
+  assert.equal(result.target?.agent, 'gpt-6-1-sol')
+  assert.deepEqual(result.skipped, [{ rung: 'light', position: 1, model: 'deepseek-v4.1-flash', reason: 'opencode-go: model_deprecated' }])
+  assert.equal(candidateUsable({ ...candidates[0]!, model: 'another-model' }, DEFAULTS, true, later), true)
+})
+
 test('pins become ladders with Plan one effort above Hard; Auto becomes a ladder to fill and field rules are dropped', () => {
   // The owner's stored settings of 2026-10-11 (revision 24).
   const stored = { rules: {

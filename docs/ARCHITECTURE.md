@@ -1017,6 +1017,16 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   (char/4, floored by the last measured total for the conversation) so the app's
   token counter and the CLI's context accounting are not zero.
 
+- **Retired models (2026-10-29, #94).** Explicit `ModelDeprecated`, `model_deprecated`,
+  `model_not_found`, or "Model … has been deprecated" on HTTP 404/410 records
+  `model_deprecated` by provider and exact upstream model id in `ModelHealth`.
+  A generic endpoint/thread 404/410 does not. `/api/status.providers[name].models[id]`
+  exposes `{usable:false, reason, at}`; `/api/mod-options` supplies the same exclusion
+  to the existing ladder's per-model skip path. Sibling models remain usable.
+  Retirement has **no TTL**: only a router restart clears it (after fixing the model
+  configuration); a successful sibling or unrelated config save cannot revive it.
+  This is process-memory advisory state, not a persisted blacklist.
+
 - **Credential pools (`providers.<name>.credentials`, 2026-09-17).** A provider may hold several
   credentials, each a complete header set. The conversation keeps the one it is on while that one
   is healthy — moving it moves the prompt cache with it, and ≥90% cache hit is an acceptance metric

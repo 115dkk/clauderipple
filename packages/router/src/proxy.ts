@@ -22,7 +22,7 @@ import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
 import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
-import { exhaustionHeaders, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
+import { exhaustionHeaders, ModelHealth, modelDeprecation, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
@@ -266,6 +266,7 @@ export class Proxy {
   /** Recent non-Anthropic answers whose vendor ids cannot identify the route by their shape. */
   private readonly routedMessageIds = new Set<string>();
   readonly providerHealth = new ProviderHealth();
+  readonly modelHealth = new ModelHealth();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
@@ -1142,7 +1143,10 @@ export class Proxy {
               const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { headers: using.headers, ...(next ? { next } : {}) });
               if (o.status >= 400) this.pool.penalise(poolName, using.id, o.upstreamStatus ?? o.status, o.retryAfterMs, o.errorBody);
               else if (o.status > 0) this.pool.succeed(poolName, using.id);
-              if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+              if (!path.startsWith("/v1/messages/count_tokens")) {
+                this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+                this.modelHealth.observe(route.provider, route.model, o.modelUnavailable);
+              }
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
               if (!res.destroyed && !req.aborted) this.pool.penalise(poolName, using.id, 0);
@@ -1192,7 +1196,10 @@ export class Proxy {
                 return;
               }
               this.recordOutcome(route.provider, o.status);
-              if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+              if (!path.startsWith("/v1/messages/count_tokens")) {
+                this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+                this.modelHealth.observe(route.provider, route.model, o.modelUnavailable);
+              }
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
               this.recordOutcome(route.provider, 0);
@@ -1740,6 +1747,7 @@ export class Proxy {
           const errorBody = status >= 400 ? decodeBodyToText(Buffer.concat(errorHead), upRes.headers["content-encoding"]) : "";
           if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
             this.providerHealth.observe(route.provider, status, providerExhaustion(status, errorBody, retryAfterMs(upRes.headers)));
+            this.modelHealth.observe(route.provider, route.model, modelDeprecation(status, errorBody));
           }
           const note = status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], [...errorSecrets], upRes.headers["content-type"])}` : undefined;
           // Anthropic forgets a conversation's server-side thread after a few idle minutes, and the CLI
