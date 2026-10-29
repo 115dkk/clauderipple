@@ -25,7 +25,7 @@ import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
 import { fetchWithRetry } from "../retry.ts";
 import { estimateTokens, formatSse, GoogleStreamMapper, toGeminiRequest, type GeminiRequest } from "./translate.ts";
-import { antigravityBaseUrl, createTransport, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
+import { antigravityBaseUrl, createTransport, credentialParts, googleBaseUrl, resolveApiKey, type GoogleTransport } from "./transport.ts";
 import { ThoughtSignatureStore, type ThoughtSignatureSink } from "./thoughtSignatures.ts";
 import { conversationKey, serverToolNames, toolNameRestoreMap, type AnthropicRequest } from "../chatgpt/translate.ts";
 import { GoogleAccountPool, type GoogleAccountSummary, type GoogleCredential, type FetchLike } from "./accounts.ts";
@@ -44,6 +44,17 @@ export type GoogleOutcome = { status: number; bytes: number; note?: string; usag
   // Google has no capacity for the model (see `isModelCapacityExhausted`). Unwritten as above.
   | { kind: "model-capacity"; status: 529; bytes: 0; errorBody: string }
 );
+
+/**
+ * The credential this turn goes out on (`Credential.headers` from the provider's pool), and how to
+ * ask for the next one when the upstream refuses this one. The same handoff the OpenAI-compatible
+ * adapter takes: the proxy owns the pool, and nothing has reached the client here yet, so another
+ * key can still answer the first ask (#112).
+ */
+export type GoogleCredentialHandoff = {
+  headers: Record<string, string>;
+  next?: (status: number, retryAfterMs: number | undefined, body: string) => Record<string, string> | null;
+};
 
 /**
  * How often a turn asks again when Google says it has no capacity for the model, and how long it
@@ -464,7 +475,7 @@ export class GoogleAdapter {
   }
 
   /** Handle a fully-read Messages request. Model/effort have already been resolved by routing. */
-  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined): Promise<GoogleOutcome> {
+  async handle(req: http.IncomingMessage, res: http.ServerResponse, path: string, json: AnthropicRequest, model: string, effort: string | undefined, credential?: GoogleCredentialHandoff): Promise<GoogleOutcome> {
     if (path.startsWith("/v1/messages/count_tokens")) {
       const body = JSON.stringify({ input_tokens: estimateTokens(json) });
       res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) }).end(body);
@@ -518,35 +529,62 @@ export class GoogleAdapter {
       return this.handleAntigravity(res, json, upstreamRequest, transport, model, useEffort, wantStream, key, startInput, host!, signatures);
     }
 
-    const apiKey = resolveApiKey(this.cfg.apiKey);
-    if (!apiKey) {
+    // The key this attempt goes out on: the pool's own when the proxy chose one, else the provider's
+    // (`apiKey`, or the environment). A single-key provider declares no key on its credential, so this
+    // is exactly the key it always sent.
+    let credentialHeaders = credential?.headers;
+    const firstKey = credentialParts(credentialHeaders).apiKey ?? resolveApiKey(this.cfg.apiKey);
+    if (!firstKey) {
       const out = anthropicError(401, "authentication_error", "Google provider: no API key; set apiKey or GEMINI_API_KEY");
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
       return { status: out.status, bytes: Buffer.byteLength(out.body), note: "no api key", upstreamCalled: false, refusal: "no-account" };
     }
 
-    let built;
-    try {
-      built = transport.build(upstreamRequest, { model, stream: wantStream, conversationKey: key });
-    } catch (error) {
-      const out = anthropicError(400, "invalid_request_error", (error as Error).message);
-      res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)) }).end(out.body);
-      return { status: out.status, bytes: Buffer.byteLength(out.body), note: (error as Error).message };
-    }
+    // One attempt's wire, rebuilt per credential because moving to another key moves the key header
+    // with it. Never throws for a missing key: `firstKey` above proves `apiKey` answers if this
+    // credential states none.
+    const attempt = (headers: Record<string, string> | undefined): { built: { url: string; headers: Record<string, string>; body: string }; secrets: string[] } => {
+      const parts = credentialParts(headers);
+      const apiKey = parts.apiKey ?? resolveApiKey(this.cfg.apiKey);
+      const wire = createTransport("api-key", {
+        ...(apiKey ? { apiKey } : {}),
+        ...(this.cfg.url ? { url: this.cfg.url } : {}),
+        ...(this.cfg.sessionHeader ? { sessionHeader: this.cfg.sessionHeader } : {}),
+        headers: { ...(this.cfg.headers ?? {}), ...parts.headers },
+      });
+      const built = wire.build(upstreamRequest, { model, stream: wantStream, conversationKey: key });
+      return { built, secrets: [...(apiKey ? [apiKey] : []), ...credentialHeaderValues(Object.entries(built.headers))] };
+    };
 
-    const upstreamSecrets = [apiKey, ...credentialHeaderValues(Object.entries(built.headers))];
+    // Every credential sent on any attempt: after a retry the vendor's error may still echo the
+    // first one.
+    const upstreamSecrets: string[] = [];
     const controller = new AbortController();
     const onClose = (): void => controller.abort();
     res.on("close", onClose);
 
     let upstream: Response;
     try {
-      upstream = await fetchWithRetry(built.url, {
-        method: "POST",
-        headers: built.headers,
-        body: built.body,
-        signal: controller.signal,
-      }, { log: (line) => this.log.info(`google ${this.name}: ${line}`) });
+      for (;;) {
+        const { built, secrets } = attempt(credentialHeaders);
+        for (const secret of secrets) if (!upstreamSecrets.includes(secret)) upstreamSecrets.push(secret);
+        upstream = await fetchWithRetry(built.url, {
+          method: "POST",
+          headers: built.headers,
+          body: built.body,
+          signal: controller.signal,
+        }, { log: (line) => this.log.info(`google ${this.name}: ${line}`) });
+        // Nothing has been written to the client, so a refusal another key could answer is asked
+        // again here rather than handed to the user as a 429 they would have to retry by hand. The
+        // proxy decides which key is next and charges the refusal to the one that answered (§4
+        // Credential pools); an answer that is the request's own fault is never retried.
+        if (upstream.ok || !upstream.body || res.headersSent || controller.signal.aborted || !credential?.next) break;
+        const text = await upstream.clone().text().catch(() => "");
+        const next = credential.next(upstream.status, retryAfterMs(Object.fromEntries(upstream.headers)) ?? googleRetryDelayMs(text), text);
+        if (!next) break;
+        await upstream.body.cancel().catch(() => { /* already closed */ });
+        credentialHeaders = next;
+      }
     } catch (error) {
       res.off("close", onClose);
       if (controller.signal.aborted) return { status: 0, bytes: 0, note: "client closed" };
