@@ -56,8 +56,11 @@ async function deferPurge(home: string): Promise<PurgeResult> {
     // Windows PowerShell exits without executing when launched as a console-less detached
     // process. Start-Process is the same independent Windows launch used by our supervisor.
     const launch = `$ErrorActionPreference='Stop'; Start-Process -FilePath ${quote(program)} -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',${quote(`"${scriptFile}"`)}) -WindowStyle Hidden -RedirectStandardOutput ${quote(path.join(dir, "cleanup.log"))} -RedirectStandardError ${quote(path.join(dir, "cleanup.err.log"))} | Out-Null`;
-    execFileSync(program, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(launch, "utf16le").toString("base64")], { cwd: os.tmpdir(), env: windowsPowerShellEnv(), stdio: "ignore", windowsHide: true, timeout: 10_000 });
-    for (let i = 0; i < 50; i++) {
+    // A Windows CI runner's cleanup PowerShell did not write "running" within 5 s (2026-10-29, the
+    // run of #116), and on a desktop with a build holding the CPU a PowerShell start took over 5 s
+    // the same day. Both waits allow a slow start; a working one returns as soon as it answers.
+    execFileSync(program, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(launch, "utf16le").toString("base64")], { cwd: os.tmpdir(), env: windowsPowerShellEnv(), stdio: "ignore", windowsHide: true, timeout: 20_000 });
+    for (let i = 0; i < 150; i++) {
       if (fs.readFileSync(resultFile, "utf8").includes('"running"')) return { status: "deferred", resultFile };
       await new Promise(resolve => setTimeout(resolve, 100));
     }
