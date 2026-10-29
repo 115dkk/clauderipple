@@ -746,6 +746,8 @@ export class Sessions {
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
+      const live = this.live.get(r.id);
+      if (live?.restartAfterTurn && this.sdkIdle(r, live)) { this.restartSettings(r, live); continue; }
       if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed" && this.now() >= (r.desktopHandoffRetryAt ?? 0)) this.handoff(r);
       if (!this.desktop) continue;
       const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
@@ -1225,8 +1227,11 @@ export class Sessions {
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
     const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
-    // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
-    const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
+    // The desktop launcher confirms opening, not permissions. Retain the SDK choice for a
+    // future host resume, but do not advertise it as the app's current mode after handoff.
+    const hostMode = this.live.has(r.id) || r.desktopHandoff !== "attempted" && r.desktopHandoff !== "opening";
+    const mode = r.desktopBridge ? r.confirmedSettings?.permissionMode ?? this.desktop?.permissionMode(r.sdkSessionId ?? r.id)
+      : hostMode ? r.confirmedSettings?.permissionMode ?? r.permissionMode ?? "auto" : undefined;
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
     return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
@@ -2071,6 +2076,8 @@ export class Sessions {
     this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
     for (const outcome of this.settings.replay(r.id)) this.append(r.id, { kind: "settings", ...outcome });
     r.desktopBridge = true;
+    // A control acknowledged by the SDK cannot confirm the replacement desktop worker's mode.
+    if (r.confirmedSettings) delete r.confirmedSettings.permissionMode;
     r.contextWindow = null;
     r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
     this.save();
@@ -2888,7 +2895,9 @@ export class Sessions {
           const activity = this.taskState(r.id).activity;
           activity.notice(converted.text, this.now());
           this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
-          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1];
+          const taskId = /<task-id>([^<]+)<\/task-id>/.exec(converted.text)?.[1];
+          const task = activity.history.find(task => task.id === taskId);
+          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1] ?? task?.sub?.replace(/^sub-/, "");
           const status = /<status>([^<]+)<\/status>/.exec(converted.text)?.[1];
           if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
             this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
@@ -2954,6 +2963,7 @@ export class Sessions {
   /** A settings restart shares the handoff inbox: preserve even prefetched accepted inputs,
    * and do not create another transcript writer until the old process has actually exited. */
   private restartSettings(r: SessionRecord, live: Live): void {
+    if (this.taskState(r.id).activity.active.length) return;
     const transfer = { messages: live.pendingMessages };
     this.handingOff.set(r.id, transfer);
     this.stop(r.id, live);
@@ -2992,7 +3002,7 @@ export class Sessions {
   }
 
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
-    return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
+    return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0) && this.taskState(r.id).activity.active.length === 0;
   }
 
   private handoff(r: SessionRecord, live = this.live.get(r.id)): void {
@@ -3019,6 +3029,13 @@ export class Sessions {
     void new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
       if (this.shuttingDown) { this.handingOff.delete(r.id); return; }
       try {
+        // SDK events can arrive between result and this deferred callback. Recheck before aborting.
+        if (BUSY.has(r.state) || this.taskState(r.id).activity.active.length || this.live.get(r.id) !== live) {
+          r.desktopHandoff = "pending";
+          r.desktopHandoffAttempts!--;
+          this.save();
+          return;
+        }
         this.stop(r.id, live);
         // close() and iterator completion alone do not prove the writer has stopped.
         // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.

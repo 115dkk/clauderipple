@@ -208,6 +208,7 @@ export interface SessionSummary {
   cwd: string;
   model: string;
   effort: Effort | null;
+  /** Absent means unknown, including a desktop handoff whose mode the host cannot confirm. */
   permissionMode?: PermissionMode;
   /** Absent on older hosts: controls must stay disabled. Values above describe the next turn. */
   controls?: SessionControls;
