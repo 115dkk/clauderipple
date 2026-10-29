@@ -37,7 +37,7 @@ export function defaultAgentDir(): string {
  */
 export function withAgentAliases(cfg: Config, dir: string, log?: AgentLog): Config {
   const derived = agentAliases(dir, log);
-  return { ...cfg, aliases: { ...legacyAgentAliases(cfg), ...derived, ...cfg.aliases } };
+  return { ...cfg, aliases: { ...legacyAgentAliases(cfg, dir, log), ...derived, ...cfg.aliases } };
 }
 
 /** The body every generated worker carries, verbatim. */
@@ -79,7 +79,7 @@ export function imageLine(port: number): string {
 const TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch", "WebSearch", "Skill"];
 
 /** One parsed agent file. `model` is null when the file has no `model:` line. */
-type AgentEntry = { name: string; model: string | null; mtimeMs: number };
+type AgentEntry = { name: string; model: string | null; generated: boolean; mtimeMs: number };
 
 /**
  * Parsed `*.md` frontmatter per directory, keyed by file mtime so a request never re-reads the whole
@@ -140,7 +140,7 @@ function scanDir(dir: string, log?: AgentLog): Map<string, AgentEntry> {
       log?.warn(`agent ${file}: frontmatter has no name; skipped`);
       continue;
     }
-    next.set(file, { name, model: fm.model ?? null, mtimeMs: st.mtimeMs });
+    next.set(file, { name, model: fm.model ?? null, generated: isGenerated(text), mtimeMs: st.mtimeMs });
   }
   if (changed || prev.size !== next.size) cache.set(dir, next);
   return next;
@@ -214,23 +214,61 @@ function agentTargets(cfg: Config, log?: AgentLog): Map<string, AgentTarget> {
   return targets;
 }
 
-/** Every target whose 0.12.18 name differs and is not now some other target's name. */
-function* renamedTargets(cfg: Config): Generator<{ name: string; legacy: string; modelId: string }> {
+/** The names in `dir` whose file is a person's own, not one this router wrote: no generated mark. */
+function handAgentNames(dir: string, log?: AgentLog): Set<string> {
+  const names = new Set<string>();
+  for (const entry of scanDir(dir, log).values()) if (!entry.generated) names.add(entry.name);
+  return names;
+}
+
+/**
+ * Whether the 0.12.18 name `legacy` already belongs to a worker the rename is not about: a hand
+ * file's name, or any file at that name that is not our generated file for exactly `modelId`. Only
+ * that file is the duplicate the rename replaces; the same evidence dropRenamedAgent removes it by.
+ */
+function otherWorkerAt(dir: string, legacy: string, modelId: string, hand: Set<string>): boolean {
+  if (hand.has(legacy)) return true;
+  const file = path.join(dir, `${legacy}.md`);
+  let text: string;
+  try {
+    if (!fs.lstatSync(file).isFile()) return false;
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return false;
+  }
+  return !(isGenerated(text) && parseFrontmatter(text)?.model?.replace(/@[a-z]+$/i, "") === modelId);
+}
+
+/**
+ * Every target the name change renamed (#111), provided its 0.12.18 name is still free: no current
+ * worker name, no model any provider declares, no explicit alias, and no hand file (or another
+ * worker's file) holding the name. An alias or a rename for such a name would take it over — two
+ * ids that collapse to one name (`a//b` and `a--b` both shorten to `a-b`) leave the skipped one
+ * declared, and `a--b -> a//b` would send the real `a--b`'s markers to a different model — and a
+ * saved ladder rung naming a person's own worker would be rewritten to the generated one.
+ */
+function* renamedTargets(cfg: Config, dir: string, log?: AgentLog): Generator<{ name: string; legacy: string; modelId: string }> {
   const targets = agentTargets(cfg);
   const current = new Set(targets.keys());
+  let hand: Set<string> | undefined;
   for (const [name, t] of targets) {
-    if (t.legacy !== name && !current.has(t.legacy)) yield { name, legacy: t.legacy, modelId: t.modelId };
+    if (t.legacy === name || current.has(t.legacy)) continue;
+    if (Object.hasOwn(cfg.aliases, t.legacy) || declaredBy(t.legacy, cfg).length > 0) continue;
+    hand ??= handAgentNames(dir, log);
+    if (otherWorkerAt(dir, t.legacy, t.modelId, hand)) continue;
+    yield { name, legacy: t.legacy, modelId: t.modelId };
   }
 }
 
 /**
  * `{ [0.12.18 name]: model id }` for the workers the name change renamed (#111): a marker or a saved
  * script that still says the old name resolves to the model instead of going out as a model id no
- * provider declares. Derived from config, not the files, so it holds once the old file is gone.
+ * provider declares. Derived from config, not the files, so it holds once the old file is gone —
+ * except for a name a hand file holds, which stays that file's own.
  */
-export function legacyAgentAliases(cfg: Config): Record<string, string> {
+export function legacyAgentAliases(cfg: Config, dir = defaultAgentDir(), log?: AgentLog): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const { legacy, modelId } of renamedTargets(cfg)) if (!(legacy in out)) out[legacy] = modelId;
+  for (const { legacy, modelId } of renamedTargets(cfg, dir, log)) if (!(legacy in out)) out[legacy] = modelId;
   return out;
 }
 
@@ -238,9 +276,9 @@ export function legacyAgentAliases(cfg: Config): Record<string, string> {
  * `{ [0.12.18 name]: current name }` for the same workers, so a ladder rung or an allow-list entry
  * saved before the change keeps pointing at its worker (admin.ts migrates them on read).
  */
-export function agentRenames(cfg: Config): Record<string, string> {
+export function agentRenames(cfg: Config, dir = defaultAgentDir(), log?: AgentLog): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const { name, legacy } of renamedTargets(cfg)) if (!(legacy in out)) out[legacy] = name;
+  for (const { name, legacy } of renamedTargets(cfg, dir, log)) if (!(legacy in out)) out[legacy] = name;
   return out;
 }
 
