@@ -179,8 +179,14 @@ const THIRD_PARTY_GROUP = { name: "claude and gpt models", ids: { "5h": "3p-5h",
  * The quota group a model draws on, as a pool scope (pool.ts): `gemini` for gemini-*, `3p` for
  * claude-* and gpt-oss*, undefined for anything else. A spent group rests only its own models.
  */
-export function antigravityQuotaScope(model: string): "gemini" | "3p" | undefined {
+export function antigravityQuotaScope(model: string): "argon" | "gemini" | "3p" | undefined {
   const id = model.toLowerCase().replace(/@[^@]*$/, "");
+  // Gemini 4 Argon draws on a quota of its own: `fetchAvailableModels` gives its tiers a remaining
+  // fraction and reset time that match neither Gemini bucket (measured 2026-10-27, daily host:
+  // Argon 0.9997 resetting in a week, Flash and `gemini-5h` 0.9566 resetting that day). So a spent
+  // Argon rests only Argon, and a spent Gemini group leaves Argon answering. The summary lists no
+  // group for it, so the limits row shows none and `hasRemainingQuota` has no evidence for it.
+  if (/^gemini-4-argon(?:-|$)/.test(id)) return "argon";
   if (/^gemini-/.test(id)) return "gemini";
   if (/^claude-/.test(id) || /^gpt-oss(-|$)/.test(id)) return "3p";
   return undefined;

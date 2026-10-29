@@ -552,6 +552,10 @@ const BAR_W = 36
 const BAR_H = 6
 /** The air between the row's groups, in cells (a rule stands in it, as on the first row). */
 const LIMITS_GAP = 2
+/** The air above the row, in the host's vertical units (half a row each, 9.5 px). */
+const LIMITS_TOP = 0.5
+/** A lit Box's round edge above and below (1 px each), in those units: what the pressable row gives back. */
+const LIGHT_EDGE = 2 / (ROW_PX / 2)
 
 /** Cells a window's figure takes: whatever it shows, the slot fits the widest ("100%"). */
 function figureCells(): number {
@@ -661,10 +665,13 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
   // Save mode's word sat beside the first row's limit; with this row drawn it follows Claude's windows.
   const save = !!view.limit?.save
   const width = (density: LimitDensity) => (gs: readonly LimitGroup[]) => gs.reduce((n, g) => n + limitGroupCells(g, limitGroupName(g, numbered(g)), frame.lang, density, save), 0) + RULE_CELLS * Math.max(0, gs.length - 1) + LIMITS_GAP * Math.max(0, 2 * gs.length - 2)
+  // Pressable, the row's light keeps a fact's air either side of the figures, which the row takes
+  // from its budget.
+  const room = onPress ? budget - PRESS_PAD * 2 : budget
   // Every provider at the roomiest density that holds them all; past compact, windows and then
   // groups give way (narrowLimitGroups), compact as the row is then.
-  const density = DENSITIES.find(d => width(d)(all) <= budget) ?? 'compact'
-  const groups = narrowLimitGroups(all, budget, width(density))
+  const density = DENSITIES.find(d => width(d)(all) <= room) ?? 'compact'
+  const groups = narrowLimitGroups(all, room, width(density))
   if (!groups) return null
   const drawn = groups.map(g => limitGroupDrawn(el, frame, g, limitGroupName(g, numbered(g)), save, density))
   const children: RenderNode[] = []
@@ -672,18 +679,21 @@ function limitsRowDrawn(el: Els, frame: Frame, view: DashboardView, budget: numb
     if (i > 0) children.push(rule(el, frame, 'limits-' + groups[i]!.key))
     children.push(d.node)
   })
-  // The press is laid over the row exactly as it draws — a box of the row's own width, so a press
-  // anywhere on the figures takes it — and lit under the pointer as a control is. It takes no width
-  // of its own: what the row holds is decided by its figures alone.
+  // Pressable, the row is lit under the pointer exactly as the band's other buttons are (the route,
+  // the effort and context chips): its own Box carries the skin's light, with a fact's air either
+  // side, and the press is laid over it. The light first sat in an empty absolute Box laid over the
+  // row so its edge could not grow the row; the app never drew it, and the row showed no box under
+  // the pointer where every other control did (the owner, 2026-10-29). A bordered host Box adds
+  // 8 px above and below unless paddingY is set, so it is set to none, and the row starts its
+  // round edge's two pixels higher, so the band stays the height it was. The figures start where
+  // they did: the row's own air is taken from the indent before it.
+  const lit = onPress ? { ...hoverLight(frame, tipScope('limits-open')), paddingX: PRESS_PAD, paddingY: 0 } : {}
   return {
     node: (
-      <Box key="band-limits" flexDirection="row" alignItems="center" paddingLeft={CREST_CELLS} paddingTop={0.5}>
-        <Box key="limits-row" position="relative" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} flexShrink={0} {...(onPress ? { hover: { scope: tipScope('limits-open') } } : {})}>
-          {/* A bordered host Box adds 8 px above and below unless paddingY is set. Keep the
-              light out of flow as well: even its two border pixels must not grow this text row. */}
-          {onPress ? <Box key="limits-light" position="absolute" top={0} bottom={0} left={0} right={0} paddingY={0} {...hoverLight(frame, tipScope('limits-open'))} /> : null}
+      <Box key="band-limits" flexDirection="row" alignItems="center" paddingLeft={onPress ? CREST_CELLS - PRESS_PAD : CREST_CELLS} paddingTop={onPress ? LIMITS_TOP - LIGHT_EDGE : LIMITS_TOP}>
+        <Box key="limits-row" position="relative" flexDirection="row" alignItems="center" columnGap={LIMITS_GAP} flexShrink={0} {...lit}>
           {children}
-          {onPress ? press(el, 'limits-open', width(density)(groups) * CELL_PX, onPress) : null}
+          {onPress ? press(el, 'limits-open', (width(density)(groups) + PRESS_PAD * 2) * CELL_PX, onPress) : null}
         </Box>
       </Box>
     ),

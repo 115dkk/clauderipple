@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.12.21 — 2026-10-29
+
+### Changed
+
+- **The limits pane says exactly when each window resets, in the mod's own look.** It was a bare
+  table of shares and short reset hints ("6시간 뒤", "수 15:35"). It now sits in the same graphite
+  capsule as the context pane: a gauge of the window closest to its cap and how many are at 80% or
+  more, then a card per provider account with a bar per window, the reset as a full local date and
+  time ("10월 12일 (월) 오후 6:20 초기화") and the time left ("5시간 남음"), refreshed while open. A
+  window past its reset, one with no reset time, and Claude's save mode each say so in a sentence.
+  The terminal draws the same content as text.
+
+### Fixed
+
+- **The band's limits row lights under the pointer like its other buttons.** Its highlight was an
+  empty overlay box, which the app does not draw; the row now uses the same hover style as the
+  effort and context chips.
+- **The mod preview draws each picture at the size laid out for it**, so the band's controls no
+  longer overlap there.
+
+## 0.12.20 — 2026-10-29
+
+### Fixed
+
+- **A recovered provider no longer receives thinking signed by its fallback** (#89, #94).
+  Native Anthropic and Anthropic-compatible targets drop signed thinking and redacted-thinking
+  blocks known to belong only to another provider, even when the request is no longer rerouted.
+  Unknown origins remain unchanged on ordinary requests; reroutes still keep only target-owned
+  blocks. Replayed history stays stable across recovery turns and a later fallback keeps its own blocks.
+
 ## 0.12.19 — 2026-10-29
 
 ### Fixed
@@ -48,7 +78,7 @@
 ### Known
 
 - When a provider recovers after a reroute, thinking the fallback signed may still be sent back to the
-  original provider. This predates 0.12.19 and is tracked separately.
+  original provider. This predates 0.12.19 and is fixed in 0.12.20.
 
 ## 0.12.18 — 2026-10-28
 

@@ -1332,7 +1332,7 @@ function classifierRow(stage, saved, groups) {
 function renderAutoClassifier() {
   const box = $("#client-auto-classifier");
   if (!box || !currentConfig) return;
-  const rows = classifierRowsOf(currentConfig.autoModeClassifier);
+  const rows = classifierRowsShown();
   const groups = classifierGroups(currentConfig);
   box.replaceChildren(classifierRow("first", rows.first, groups), classifierRow("rest", rows.rest, groups));
   const note = $("#client-auto-classifier-note");
@@ -1351,12 +1351,19 @@ function classifierRowValue(stage) {
 // A choice is read from the rows when it is made, before anything is awaited: a save that lands
 // redraws the rows from what it stored, so a later choice read after that would be the earlier one.
 // Saves run one at a time, and one that a newer choice has overtaken is dropped, so the last choice
-// is the one stored.
+// is the one stored. Until it is stored the rows are drawn from it: the five-second status refresh
+// redraws them too, and drawn from the stored setting it would put the earlier value back in a row
+// that the next choice then reads and saves.
 let classifierSaveGeneration = 0;
 let classifierSaving = Promise.resolve();
+let classifierPending = null;
+function classifierRowsShown() {
+  return classifierRowsOf(classifierPending ? classifierPending.setting : currentConfig.autoModeClassifier);
+}
 function saveAutoClassifier() {
   if (!currentConfig) return classifierSaving;
   const setting = classifierSettingOf(classifierRowValue("first"), classifierRowValue("rest"));
+  classifierPending = { setting };
   const generation = ++classifierSaveGeneration;
   classifierSaving = classifierSaving.then(async () => {
     if (generation !== classifierSaveGeneration) return;
@@ -1368,9 +1375,13 @@ function saveAutoClassifier() {
       await configRequest(next);
       currentConfig = next;
       if (generation !== classifierSaveGeneration) return;
+      classifierPending = null;
       renderAutoClassifier();
       toast(t("classifier.saved"));
-    } catch (error) { toast(t("common.saveFailed"), true, error.message); }
+    } catch (error) {
+      if (generation === classifierSaveGeneration) classifierPending = null;
+      toast(t("common.saveFailed"), true, error.message);
+    }
   });
   return classifierSaving;
 }

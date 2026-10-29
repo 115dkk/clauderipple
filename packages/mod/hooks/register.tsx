@@ -33,7 +33,7 @@ import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { displayText } from './ui/display'
 import { EFFORTS, isRich, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
-import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
+import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, LimitsActions, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
 const phoneQueue = atom({ plugin: 'ripple', key: 'phoneQueue' } as const, null)
@@ -138,6 +138,8 @@ let ticking = false
 let forking = false
 let forkUsage: TurnUsage | null = null
 let countdownTimer: { at: number; cancel: () => void } | null = null
+/** The limits pane's next redraw, while it is open (scheduleLimitsRedraw). */
+let limitsTimer: { at: number; cancel: () => void } | null = null
 let judgeSequence = 0
 /** Jev's network blips and timeouts in a row. */
 let jevBlips = 0
@@ -497,6 +499,29 @@ function countsHere(mark: FullMark, basis: number | null, model: string, at: num
  * and when it resets, which the row has no room to say. Opened again it closes, as does the pane's
  * own close. The windows are read afresh on the way in, once a minute at most (refreshLimits).
  */
+function limitsActions($: EngineInterface): LimitsActions {
+  return { close: () => $.ui.close({ id: LIMITS_PANE }) }
+}
+/**
+ * The limits pane says the time left to each reset to the minute, so it is drawn again when the
+ * soonest of those minutes turns over (or a reset passes), while it stays open. Nothing else
+ * redraws it on time: the windows themselves are read once a minute and only a change is written.
+ */
+function scheduleLimitsRedraw($: EngineInterface, items: readonly LimitItem[], now: number): void {
+  const turns = items.map(item => nextMinuteChange(item.resetsAt ? Date.parse(item.resetsAt) : NaN, now)).filter((at): at is number => at !== null && Number.isFinite(at))
+  const at = turns.length ? Math.min(...turns) : null
+  if (limitsTimer?.at === at) return
+  limitsTimer?.cancel()
+  limitsTimer = null
+  if (at === null) return
+  const timer = $.clock.after(Math.max(1, at - now), () => {
+    limitsTimer = null
+    void (async () => {
+      if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.invalidate('ui.render')
+    })().catch(error => report($, 'limits redraw', error))
+  })
+  limitsTimer = { at, cancel: () => timer.cancel() }
+}
 async function toggleLimits($: EngineInterface): Promise<void> {
   const language = await read($, lang)
   if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.close({ id: LIMITS_PANE })
@@ -2508,7 +2533,10 @@ export const register: Register = on => {
       startTimers($)
       frame = await frameOf($, e)
       // The row the band gauges: the same reading, every provider account's windows.
-      return renderLimits($.ui.resolve(e), frame, { items: await read($, limits) ?? [] }) as RenderElement
+      const items = await read($, limits) ?? []
+      const save = await read($, saveUntil)
+      scheduleLimitsRedraw($, items, frame.now)
+      return renderLimits($.ui.resolve(e), frame, { items, ...(save !== null && save > frame.now ? { saveUntil: save } : {}) }, limitsActions($)) as RenderElement
     } catch (error) { return limitsRenderFailure($, e, error, frame) }
   }).catch(($, e, next) => limitsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

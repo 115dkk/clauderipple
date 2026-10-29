@@ -60,6 +60,33 @@ test("JSON provenance skips long reasoning text and nested tool-input impostors"
   assert.equal(origins.owns("q", { type: "thinking", signature: "impostor" }), false);
 });
 
+test("recovery keeps unknown and shared origins, but drops known foreign blocks", () => {
+  const origins = new ThinkingOrigins(2);
+  const signed = { type: "thinking", signature: "q-sig" };
+  const redacted = { type: "redacted_thinking", data: "q-data" };
+  const unknown = { type: "thinking", signature: "unknown" };
+  origins.remember("q", signed);
+  origins.remember("q", redacted);
+  const json = { messages: [{ role: "assistant", content: [signed, redacted, unknown] }] };
+  assert.equal(origins.dropKnownForeign(json, "p"), 2);
+  assert.deepEqual(json.messages[0]?.content, [unknown]);
+  origins.remember("p", signed);
+  const shared = { messages: [{ role: "assistant", content: [signed] }] };
+  assert.equal(origins.dropKnownForeign(shared, "p"), 0);
+  assert.equal(origins.dropKnownForeign(shared, "q"), 0);
+  origins.remember("q", unknown); // evicts signed: unknown again, not known foreign
+  assert.equal(origins.dropKnownForeign(shared, "p"), 0);
+  assert.equal(new ThinkingOrigins().dropKnownForeign(shared, "p"), 0);
+});
+
+test("single-provider history is never inspected by the recovery filter", () => {
+  const origins = new ThinkingOrigins();
+  const json = { get messages(): unknown { throw new Error("common path inspected history"); } };
+  assert.equal(origins.dropKnownForeign(json, "p"), 0);
+  origins.remember("p", { type: "thinking", signature: "p-sig" });
+  assert.equal(origins.dropKnownForeign(json, "p"), 0);
+});
+
 test("a conversation with nothing foreign is left untouched", () => {
   const messages = [{ role: "assistant", content: [{ type: "thinking", thinking: "x", signature: "sig" }] }];
   const json: Record<string, unknown> = { messages };

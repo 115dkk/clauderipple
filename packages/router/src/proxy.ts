@@ -1140,11 +1140,14 @@ export class Proxy {
           const provider = providerFor(configured, route.model);
           // Translators scope reasoning themselves. A native/compatible fallback cannot validate
           // the original provider's opaque signatures, whether selected by a ladder or a route.
-          if (resolved && (provider.type === "anthropic-compatible" || provider.type === "anthropic") &&
-              (route.provider !== resolved.provider || route.model !== resolved.model)) {
+          if (provider.type === "anthropic-compatible" || provider.type === "anthropic") {
             const targetProvider = route.provider;
-            dropForeignThinking(json, targetProvider !== resolved.provider
-              ? block => this.thinkingOrigins.owns(targetProvider, block) : undefined);
+            if (resolved && (targetProvider !== resolved.provider || route.model !== resolved.model)) {
+              dropForeignThinking(json, targetProvider !== resolved.provider
+                ? block => this.thinkingOrigins.owns(targetProvider, block) : undefined);
+            } else {
+              this.thinkingOrigins.dropKnownForeign(json, targetProvider);
+            }
           }
           // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
           if (!pristine && provider.type === "google") pristine = structuredClone(json);
@@ -1471,7 +1474,10 @@ export class Proxy {
           target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
           tag = `PASS ${typeof model === "string" ? model : "-"}`;
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
-          if (json && dropForeignThinking(json) > 0) body = Buffer.from(JSON.stringify(json));
+          if (json) {
+            const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");
+            if (dropForeignThinking(json) + removed > 0) body = Buffer.from(JSON.stringify(json));
+          }
         } else {
           target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
           tag = `WEB ${reqHost}`;

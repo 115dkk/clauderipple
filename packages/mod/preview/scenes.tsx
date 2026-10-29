@@ -49,14 +49,17 @@ const DASH: DashboardView = {
 
 const SETTINGS: Settings = normalizeSettings({ judge: 'jev', judgeModel: 'deepseek-v4.1-flash', modes: [{ id: 'm1', name: 'GPT 우선' }, { id: 'm2', name: '절약' }], activeMode: 'm1' } as never)
 
-/** Every plan window the limits row gauges: Claude's 5-hour, weekly and Fable, then two GPT accounts. */
+/**
+ * Every plan window the limits row gauges: Claude's 5-hour (no reset given), weekly (near its cap)
+ * and Fable, then two GPT accounts, the second's 5-hour past its reset and its weekly nearly spent.
+ */
 const LIMITS: LimitItem[] = [
   { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour', label: '', percent: 1 },
   { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day', label: '', percent: 88, resetsAt: '2026-10-12T18:20:00' },
   { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'scoped', label: 'Fable', percent: 2, resetsAt: '2026-10-15T10:59:59+00:00' },
   { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 23, resetsAt: '2026-10-19T13:20:00' },
-  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'five_hour', label: '', windowMinutes: 300, percent: 64 },
-  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: '2026-10-19T13:20:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'five_hour', label: '', windowMinutes: 300, percent: 64, resetsAt: '2026-10-12T13:05:00' },
+  { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day', label: '', windowMinutes: 10080, percent: 97, resetsAt: '2026-10-14T09:42:00' },
 ]
 
 /** Every readable provider at once, for the general limits row: Claude, GPT, Gemini and OpenCode Go. */
@@ -309,12 +312,15 @@ const SCENES: Scene[] = [
   { name: 'band-limits-94', columns: 94, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
   { name: 'band-limits-70', columns: 70, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS }) },
-  // The limits pane the row opens (2026-10-25): every window's share, and when it resets — the time
-  // left while it is close, else a weekday and the clock.
-  { name: 'limits-pane', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS }) },
-  { name: 'limits-pane-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS }) },
-  { name: 'limits-pane-all', columns: 100, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ALL }) },
-  { name: 'limits-pane-none', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: [] }) },
+  // The limits pane the row opens (2026-10-25, redrawn 2026-10-29): a dial of the window closest to
+  // its cap, a tile per provider account, each window's bar and share, the exact local date and
+  // time it resets and the time left; a passed reset says so, a window without one says that, and
+  // save mode says until when.
+  { name: 'limits-pane', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: LIMITS, saveUntil: Date.parse('2026-10-12T18:20:00') }, noop) },
+  { name: 'limits-pane-narrow', columns: PANE_NARROW, draw: (el, f) => renderLimits(el, f, { items: LIMITS }, noop) },
+  { name: 'limits-pane-all', columns: 100, draw: (el, f) => renderLimits(el, f, { items: LIMITS_ALL }, noop) },
+  { name: 'limits-pane-none', columns: PANE, draw: (el, f) => renderLimits(el, f, { items: [] }, noop) },
+  { name: 'flat-limits-pane', columns: PANE, skin: 'flat', draw: (el, f) => renderLimits(el, f, { items: LIMITS }, noop) },
   // Every readable provider (2026-10-15): Claude, GPT, Gemini and OpenCode Go in one row, at the
   // two real widths. Narrow, the scoped windows go first, then a later provider's group.
   { name: 'band-limits-all-100', columns: 100, draw: (el, f) => site(el, f, { ...DASH, limit: { kind: 'seven_day', percent: 88, resetsAt: '2026-10-12T18:20:00', save: false }, extras: ['context', 'limits'], limits: LIMITS_ALL }) },
