@@ -187,7 +187,8 @@ test('status and ladder options expose retirement without disabling sibling mode
   assert.equal(modelDeprecation(410, 'endpoint gone'), undefined);
   assert.equal(modelDeprecation(429, 'ModelDeprecated'), undefined);
   assert.equal(modelDeprecation(404, 'thread_not_found'), undefined);
-  assert.equal(modelDeprecation(404, 'model_not_found')?.reason, 'model_deprecated');
+  assert.equal(modelDeprecation(404, 'model_not_found'), undefined, 'a key without access is not a retirement');
+  assert.equal(modelDeprecation(404, 'Model x has been deprecated.')?.reason, 'model_deprecated');
   const cfg = makeCfg({ providers: { p: { type: 'anthropic-compatible', url: 'http://127.0.0.1:1', models: [{ id: 'retired' }, { id: 'active' }] } } });
   await withAdmin(cfg, async ({ port }) => {
     const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;

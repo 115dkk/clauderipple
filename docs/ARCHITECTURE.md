@@ -1018,7 +1018,7 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   token counter and the CLI's context accounting are not zero.
 
 - **Retired models (2026-10-29, #94).** Explicit `ModelDeprecated`, `model_deprecated`,
-  `model_not_found`, or "Model … has been deprecated" on HTTP 404/410 records
+  or "Model … has been deprecated" on HTTP 404/410 records
   `model_deprecated` by provider and exact upstream model id in `ModelHealth`.
   A generic endpoint/thread 404/410 does not. `/api/status.providers[name].models[id]`
   exposes `{usable:false, reason, at}`; `/api/mod-options` supplies the same exclusion

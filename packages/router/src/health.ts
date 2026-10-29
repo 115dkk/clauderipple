@@ -69,10 +69,13 @@ export class ProviderHealth {
 
 export type ModelUnavailable = { reason: "model_deprecated"; at: number };
 
-/** Explicit model retirement, not a missing endpoint or a temporary failure. */
+/**
+ * Explicit model retirement, not a missing endpoint or a temporary failure. `model_not_found` is
+ * not one: it also answers a key without access or a relay mid-deploy, and this record has no TTL.
+ */
 export function modelDeprecation(status: number, body: string, now = Date.now()): ModelUnavailable | undefined {
   if (status !== 404 && status !== 410) return undefined;
-  return /\b(?:ModelDeprecated|model_deprecated|model_not_found)\b|\bmodel\b[^\n]*\bhas been deprecated\b/i.test(body)
+  return /\b(?:ModelDeprecated|model_deprecated)\b|\bmodel\b[^\n]*\bhas been deprecated\b/i.test(body)
     ? { reason: "model_deprecated", at: now } : undefined;
 }
 
