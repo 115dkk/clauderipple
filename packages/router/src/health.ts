@@ -61,6 +61,10 @@ export class ProviderHealth {
     else if (status >= 200 && status < 300) this.exhausted.delete(provider);
   }
 
+  clear(provider: string): void {
+    this.exhausted.delete(provider);
+  }
+
   snapshot(now = Date.now()): Record<string, ProviderExhaustion> {
     for (const [name, value] of this.exhausted) if (value.until <= now) this.exhausted.delete(name);
     return Object.fromEntries(this.exhausted);
@@ -80,7 +84,7 @@ export function modelDeprecation(status: number, body: string, now = Date.now())
 }
 
 /** Provider + exact upstream model id. No timer or successful sibling clears a retirement;
- * restarting the router explicitly permits another probe after the operator fixes configuration.
+ * a success on that exact target or a change to its provider's configuration permits another probe.
  */
 export class ModelHealth {
   private readonly unavailable: Record<string, Record<string, ModelUnavailable>> = Object.create(null);
@@ -89,6 +93,17 @@ export class ModelHealth {
     if (!state) return;
     const models = this.unavailable[provider] ??= Object.create(null);
     models[model] = state;
+  }
+
+  success(provider: string, model: string): void {
+    const models = this.unavailable[provider];
+    if (!models) return;
+    delete models[model];
+    if (!Object.keys(models).length) delete this.unavailable[provider];
+  }
+
+  clear(provider: string): void {
+    delete this.unavailable[provider];
   }
 
   get(provider: string, model: string): ModelUnavailable | undefined {

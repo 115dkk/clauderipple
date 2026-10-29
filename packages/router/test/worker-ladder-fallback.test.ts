@@ -15,6 +15,8 @@ import { Logger } from '../src/log.ts';
 import { RequestLog } from '../src/requestlog.ts';
 import { workerLadderLine } from '../../mod/hooks/ladder.ts';
 import { encodeEnvelope } from '../src/reasoning.ts';
+import { syncAgentFiles } from '../src/agents.ts';
+import { normalizeSettings } from '../../mod/hooks/settings.ts';
 
 for (const type of ['anthropic-compatible', 'openai-compatible', 'google'] as const) {
   for (const failure of ['billing', 'deprecated', 'rate'] as const) {
@@ -54,6 +56,8 @@ for (const type of ['anthropic-compatible', 'openai-compatible', 'google'] as co
         p: type === 'google' ? { type, url, auth: 'api-key', apiKey: 'test', models: [{ id: 'retired' }] } : { type, url, models: [{ id: 'retired' }] },
         q: { type: 'anthropic-compatible', url, identity: false, models: [{ id: 'next', effortLevels: ['low', 'high'] }, { id: 'retired' }] },
       } };
+      syncAgentFiles(cfg, home, undefined, { manifestPath: path.join(home, 'generated-agents.json') });
+      fs.writeFileSync(path.join(home, 'mod-settings.json'), JSON.stringify({ revision: 1, settings: normalizeSettings({ rules: { general: { mode: 'ladder', rungs: { standard: [{ target: { agent: 'next' }, effort: 'low' }] } } } }) }));
       const requests = new RequestLog(path.join(home, 'requests.jsonl'));
       const proxy = new Proxy({ config: () => cfg, home, agentDir: home, log: new Logger(path.join(home, 'router.log'), 1e6, 1, false), certs: new CertStore(home), health: new UpstreamHealth(() => 100, () => {}), requests });
       await proxy.listen();
