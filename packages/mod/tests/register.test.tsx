@@ -1001,9 +1001,11 @@ test('the limits row opens the limits pane, which says when each window resets',
   const pane = await $.ui.mount({ plugin: 'ripple', component: 'Pane', requestId: 'ripple-limits', surface: 'terminal', props: { title: 'Limits', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} } })
   expect(await pane.find({ type: 'Text', text: 'Claude' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^(28%|8%)$/ })).toBeDefined()
-  // Two hours out reads as the time left, a week out as the weekday and the clock.
-  expect((await pane.findAll({ type: 'Text' })).some(text => /^(in 2h|2시간 뒤)$/.test(text.text)), 'the near reset').toBe(true)
-  expect((await pane.findAll({ type: 'Text' })).some(text => /^\w{3} \d\d:\d\d$|^[월화수목금토일] \d\d:\d\d$/.test(text.text)), 'the far reset').toBe(true)
+  // Each reset reads as its local date and time to the minute, and the time left beside it (2026-10-29).
+  const said = (await pane.findAll({ type: 'Text' })).map(text => text.text).join('\n')
+  expect(/2h left|2시간 남음/.test(said), 'the near reset').toBe(true)
+  expect(/7d left|7일 남음/.test(said), 'the far reset').toBe(true)
+  expect(/Resets \w{3}, \w{3} \d{1,2}, \d{1,2}:\d\d [AP]M|\d{1,2}월 \d{1,2}일 \([월화수목금토일]\) 오[전후] \d{1,2}:\d\d 초기화/.test(said), 'the moment').toBe(true)
   await pane.unmount()
   await ui.press({ key: 'limits-open' })
   expect(b.panes.has('ripple-limits')).toBe(false)

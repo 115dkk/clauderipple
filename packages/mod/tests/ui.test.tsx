@@ -1550,37 +1550,68 @@ test('with the limits row drawn, save mode\'s word follows Claude\'s windows', a
 })
 
 
-// 2026-10-25: the owner moved the reset times off the band into a pane the row opens. Each window
-// reads there with its share and when it resets — the time left while close, the weekday and clock
-// once far — under its provider account's head.
-test('the limits pane reads every window\'s share and reset', async ($, on) => {
+// 2026-10-25: the owner moved the reset times off the band into a pane the row opens. 2026-10-29:
+// that pane was a bare table of "4시간 뒤" and "수 15:35"; it now says each reset's exact local date
+// and time to the minute and the time left, both, under its provider account's head, with the
+// window closest to its cap first, a passed reset and a missing one said plainly, and save mode's
+// end. NOW is Saturday 10 October 2026, 13:20 local.
+test('the limits pane names each window\'s exact reset and the time left', async ($, on) => {
   const limits = [
-    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 28, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString() },
+    { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'five_hour' as const, label: '', percent: 28, resetsAt: new Date(NOW + 2 * 3_600_000 + 12 * 60_000).toISOString() },
     { provider: 'claude', type: 'anthropic', title: 'Claude', account: 0, kind: 'seven_day' as const, label: '', percent: 8, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() },
     { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 0, kind: 'five_hour' as const, label: '', windowMinutes: 300, percent: 12, resetsAt: new Date(NOW + 45 * 60_000).toISOString() },
+    { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'five_hour' as const, label: '', windowMinutes: 300, percent: 64, resetsAt: new Date(NOW - 15 * 60_000).toISOString() },
     { provider: 'chatgpt', type: 'chatgpt', title: 'GPT', account: 1, kind: 'seven_day' as const, label: '', windowMinutes: 10080, percent: 97 },
   ]
+  const { calls, fn } = recorder()
+  const actions = { close: fn('close') }
+  const view = { items: limits, saveUntil: NOW + 2 * 3_600_000 }
   // Every pane answered before the first mount: the hooks beneath the plugins register first.
   for (const surface of SURFACES) {
-    drawPane(on, 'limits-' + surface, el => renderLimits(el, { ...frameOf(surface), lang: 'ko' }, { items: limits }))
-    drawPane(on, 'limits-none-' + surface, el => renderLimits(el, { ...frameOf(surface), lang: 'ko' }, { items: [] }))
+    drawPane(on, 'limits-' + surface, el => renderLimits(el, { ...frameOf(surface, 80), lang: 'ko' }, view, actions))
+    drawPane(on, 'limits-none-' + surface, el => renderLimits(el, { ...frameOf(surface, 80), lang: 'ko' }, { items: [] }, actions))
   }
+  drawPane(on, 'limits-en', el => renderLimits(el, frameOf('desktop', 80), view, actions))
   for (const surface of SURFACES) {
-    const ui = await mount($, 'limits-' + surface, surface)
-    expect(await ui.find({ type: 'Text', text: '기간별 한도' }), surface).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '기간별 사용률과 초기화 시각입니다.' }), surface).toBeDefined()
-    // One head per provider account, numbered when a provider has several.
-    for (const head of ['Claude', 'GPT 1', 'GPT 2']) expect(await ui.find({ type: 'Text', text: head }), surface + ' ' + head).toBeDefined()
-    // Every window: its name, its share, and when it resets ("2시간 뒤", "45분 뒤"; a weekday past
-    // twenty hours — 13 October 2026 at 13:20 is a Tuesday).
-    for (const text of ['28%', '8%', '12%', '97%', '2시간 뒤', '45분 뒤', '화 13:20']) expect(await ui.find({ type: 'Text', text }), surface + ' ' + text).toBeDefined()
-    // A window the router gave no reset for says nothing about one.
-    expect((await ui.findAll({ type: 'Text' })).filter(text => /뒤$|^초기화 중$/.test(text.text)), surface).toHaveLength(2)
+    const ui = await mount($, 'limits-' + surface, surface, 80)
+    const said = (await ui.findAll({ type: 'Text' })).map(text => text.text).join('\n')
+    for (const text of [
+      '플랜 한도',
+      // One head per provider account, numbered when a provider has several.
+      'Claude', 'GPT 1', 'GPT 2',
+      // Every share, and how many windows are at 80% or more.
+      '28%', '8%', '12%', '64%', '97%', '80% 이상 사용한 한도가 1개 있습니다.',
+      // Each reset to the minute in local time, and the time left.
+      '10월 10일 (토) 오후 3:32 초기화', '2시간 12분 남음',
+      '10월 13일 (화) 오후 1:20 초기화', '3일 남음',
+      '10월 10일 (토) 오후 2:05 초기화', '45분 남음',
+      // A reset already passed says so; a window without one says that.
+      '초기화 시각(10월 10일 (토) 오후 1:05)이 지났습니다.', '표시된 사용률은 초기화 전 값일 수 있습니다.',
+      '이 한도는 초기화 시각이 제공되지 않습니다.',
+      // Save mode, under Claude's own windows, until when it holds.
+      '절약 모드가 켜져 있습니다. 10월 10일 (토) 오후 3:20까지 자동 추론 강도를 중간 이하로 유지합니다.',
+    ]) expect(said, surface + ' ' + text).toContain(text)
+    // Save mode is Claude's alone.
+    expect(said.split('절약 모드가 켜져 있습니다.').length - 1, surface).toBe(1)
+    await ui.press({ key: 'limits-close' })
     await ui.unmount()
-    const none = await mount($, 'limits-none-' + surface, surface)
+    const none = await mount($, 'limits-none-' + surface, surface, 80)
     expect(await none.find({ type: 'Text', text: '아직 한도 사용량을 확인할 수 없습니다.' }), surface).toBeDefined()
     await none.unmount()
   }
+  expect(calls).toEqual(['close', 'close'])
+  // The desktop heads the pane with the window closest to its cap, as a dial and in words, and draws
+  // each share as a bar.
+  const desktop = await mount($, 'limits-desktop', 'desktop', 80)
+  expect(await desktop.find({ type: 'Text', text: '가장 높은 사용률' })).toBeDefined()
+  expect(await desktop.find({ type: 'Text', text: 'GPT 2 주간 97%' })).toBeDefined()
+  expect(await svgByAlt(desktop, '가장 높은 사용률 GPT 2 주간 97%')).toBeDefined()
+  for (const alt of ['5시간 28%', '주간 8%', '5시간 12%', '5시간 64%', '주간 97%']) expect(await svgByAlt(desktop, alt), alt).toBeDefined()
+  await desktop.unmount()
+  const en = await mount($, 'limits-en', 'desktop', 80)
+  const english = (await en.findAll({ type: 'Text' })).map(text => text.text).join('\n')
+  for (const text of ['Plan limits', 'Resets Sat, Oct 10, 3:32 PM', '2h 12m left', 'Resets Tue, Oct 13, 1:20 PM', '3d left', 'Its reset time (Sat, Oct 10, 1:05 PM) has passed.', 'One window is at 80% or more.']) expect(english, text).toContain(text)
+  await en.unmount()
 })
 
 // 2026-10-25: the row itself is the way in. It lights under the pointer and says what pressing it
