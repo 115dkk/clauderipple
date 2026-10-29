@@ -24,6 +24,8 @@ type Block = ThinkingBlock;
 export class ThinkingOrigins {
   private readonly origins = new Map<string, Set<string>>();
   private readonly max: number;
+  private firstProvider: string | undefined;
+  private multipleProviders = false;
   constructor(max = 100_000) { this.max = max; }
 
   private key(block: ThinkingBlock): string | undefined {
@@ -35,10 +37,23 @@ export class ThinkingOrigins {
   remember(provider: string, block: ThinkingBlock): void {
     const key = this.key(block);
     if (!key) return;
+    if (this.firstProvider === undefined) this.firstProvider = provider;
+    else if (this.firstProvider !== provider) this.multipleProviders = true;
     const providers = this.origins.get(key) ?? new Set<string>();
     providers.add(provider);
     this.origins.set(key, providers);
     if (this.origins.size > this.max) this.origins.delete(this.origins.keys().next().value!);
+  }
+
+  /** Ordinary requests do no history hashing until another provider has minted a block. */
+  dropKnownForeign(json: Record<string, unknown>, provider: string): number {
+    if (!this.multipleProviders && (this.firstProvider === undefined || this.firstProvider === provider)) return 0;
+    return dropForeignThinking(json, block => {
+      const key = this.key(block);
+      const owners = key === undefined ? undefined : this.origins.get(key);
+      // Unknown/evicted origins survive recovery; a target observed minting the same block owns it too.
+      return owners === undefined || owners.has(provider);
+    });
   }
 
   owns(provider: string, block: ThinkingBlock): boolean {

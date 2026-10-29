@@ -1071,12 +1071,19 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   or redacted-thinking block is retained only if its signature/data digest was observed in
   a response from the TARGET provider. The side-band JSON/SSE response observer records
   provenance in a process-local, globally bounded 100,000-entry digest map, never rewriting
-  response bytes or retaining reasoning text. Unknown/evicted origins (including after a
-  restart) are foreign and dropped. This per-block decision preserves the fallback's own
+  response bytes or retaining reasoning text. On a reroute, unknown/evicted origins (including
+  after a restart) are foreign and dropped. This per-block decision preserves the fallback's own
   replayed prefix across tool turns instead of stripping it again on every reroute.
   Configured route FAILOVER uses this same cross-provider filter (including native Claude
-  account-pool targets); same-provider native signatures and never-rerouted requests retain
-  their existing behavior. Translated adapters still scope their own envelopes. A changed provider's
+  account-pool targets); same-provider reroutes retain their existing behavior. After recovery,
+  ordinary native/compatible requests (including Anthropic passthrough) also drop blocks whose
+  known owners do NOT include the target. Unknown/evicted origins are kept on these requests;
+  a digest observed from both providers belongs to both. The decision is per block, so repeated
+  recovery turns keep the same history prefix, and switching back to the fallback keeps its own
+  blocks. A constant-space process-local summary of observed providers gates this recovery scan:
+  before any other provider has minted a block, no history is inspected or hashed. No body is
+  reserialized solely for this check unless a block was removed. Existing unsigned/envelope
+  cleanup on native Anthropic remains unchanged. Translated adapters still scope their own envelopes. A changed provider's
   credentials clear its exhaustion advisory on config reload. An explicitly configured key
   pool with a ready credential also overrides that advisory at preflight; otherwise the
   existing 30-minute/default or stated Retry-After exhaustion lifetime is unchanged.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A recovered provider no longer receives thinking signed by its fallback** (#89, #94).
+  Native Anthropic and Anthropic-compatible targets drop signed thinking and redacted-thinking
+  blocks known to belong only to another provider, even when the request is no longer rerouted.
+  Unknown origins remain unchanged on ordinary requests; reroutes still keep only target-owned
+  blocks. Replayed history stays stable across recovery turns and a later fallback keeps its own blocks.
+
 ## 0.12.19 — 2026-10-29
 
 ### Fixed
@@ -48,7 +58,7 @@
 ### Known
 
 - When a provider recovers after a reroute, thinking the fallback signed may still be sent back to the
-  original provider. This predates 0.12.19 and is tracked separately.
+  original provider. This predates 0.12.19 and is fixed in Unreleased.
 
 ## 0.12.18 — 2026-10-28
 
