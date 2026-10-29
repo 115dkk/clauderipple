@@ -25,6 +25,7 @@ import type { Logger } from "./log.ts";
 import { exhaustionHeaders, ModelHealth, modelDeprecation, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
+import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder.ts";
 import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
@@ -267,6 +268,8 @@ export class Proxy {
   private readonly routedMessageIds = new Set<string>();
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
+  /** Agent/session-scoped spawn snapshots survive compaction, never shared by model id. */
+  private readonly workerLadders = new Map<string, WorkerLadderRoute>();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
@@ -974,7 +977,10 @@ export class Proxy {
         delete output.effort;
         json.output_config = output;
       }
-      const resolved = fetchTarget ?? (json ? resolve(model, json, cfg) : null);
+      let resolved = fetchTarget ?? (json ? resolve(model, json, cfg) : null);
+      if (!fetchTarget && subagent && resolved && json) {
+        resolved = this.workerFallbacks(resolved, json, cfg, typeof model === "string" ? model : "", record.session && `${record.session}:${agentId}`);
+      }
 
       // A non-Claude model this router cannot route is refused here, by name, instead of being
       // forwarded to Anthropic. `PASS` on such a request answers 404 from Anthropic and looks like
@@ -1005,6 +1011,9 @@ export class Proxy {
       // limited for the next hour is skipped rather than rediscovered once per request. A distinct
       // prompt refusal can also select one fallback below, but only before any response is written.
       let route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
+      if (resolved?.ladderPick && route && (route.provider !== resolved.provider || route.model !== resolved.model)) {
+        unwrittenFallbackNote = `ladder pick=${resolved.ladderPick} fallback ${resolved.provider}/${resolved.model} → ${route.provider}/${route.model}: ${this.unavailableReason(resolved) ?? "provider_unusable"}`;
+      }
       /** The request before any target rewrote it, kept only when a Google target may hand the turn back. */
       let pristine: typeof json | undefined;
       const source = typeof model === "string" ? model : "-";
@@ -1077,6 +1086,10 @@ export class Proxy {
           // several protocols is one provider, and this is where the model's own shape is folded in so
           // the branches below pick the adapter it actually needs.
           const provider = providerFor(configured, route.model);
+          // Translators scope reasoning themselves; a compatible wire must not receive a
+          // translated model's envelope when a worker moves to its fallback.
+          if (resolved?.ladderPick && provider.type === "anthropic-compatible" &&
+              (route.provider !== resolved.provider || route.model !== resolved.model)) dropForeignThinking(json);
           // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
           if (!pristine && provider.type === "google") pristine = structuredClone(json);
           rewriteBody(json, route, cfg.effortClamp);
@@ -1875,6 +1888,38 @@ export class Proxy {
     return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).serverTools;
   }
 
+  /** Bind the task's spawn snapshot to its agent, not to x@effort (several tiers can use it). */
+  private workerFallbacks(resolved: Resolved, json: Record<string, unknown>, cfg: Config, model: string, key?: string): Resolved {
+    let snapshot = key ? this.workerLadders.get(key) : undefined;
+    if (!snapshot && Array.isArray(json.messages)) {
+      for (const message of json.messages.slice(0, 8)) {
+        if (!message || typeof message !== "object" || message.role !== "user") continue;
+        const content: unknown = message.content;
+        const texts = typeof content === "string" ? [content] : Array.isArray(content)
+          ? content.flatMap((block: unknown) => block && typeof block === "object" && "text" in block && typeof block.text === "string" ? [block.text] : []) : [];
+        snapshot = texts.map(text => readWorkerLadder(text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ""))).find(Boolean);
+        if (snapshot) break;
+      }
+    }
+    // Never override an explicit marker/rule that resolved somewhere other than the spawn's model.
+    if (!snapshot || snapshot.model !== model) return resolved;
+    const picked = resolve(snapshot.model, {}, cfg);
+    if (!picked || picked.provider !== resolved.provider || picked.model !== resolved.model || picked.effort !== resolved.effort) return resolved;
+    if (key && !this.workerLadders.has(key)) {
+      this.workerLadders.set(key, snapshot);
+      if (this.workerLadders.size > 10_000) this.workerLadders.delete(this.workerLadders.keys().next().value!);
+    }
+    const fallbacks = snapshot.fallbacks.flatMap(id => {
+      const target = resolve(id, {}, cfg);
+      return target ? [{ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}) }] : [];
+    });
+    return { ...resolved, fallbacks, ladderPick: snapshot.pick };
+  }
+
+  private unavailableReason(target: Pick<Resolved, "provider" | "model">): string | undefined {
+    return this.modelHealth.get(target.provider, target.model)?.reason ?? this.providerHealth.snapshot()[target.provider]?.reason;
+  }
+
   /**
    * The provider this turn actually goes to. The primary unless every one of its credentials is
    * cooling or quarantined, in which case the first fallback that has something usable takes it.
@@ -1884,11 +1929,17 @@ export class Proxy {
    */
   private chooseTarget(resolved: Resolved, cfg: Config, log: Logger): Resolved {
     if (!resolved.fallbacks?.length) return resolved;
+    const reason = this.unavailableReason(resolved);
+    const provider = cfg.providers[resolved.provider];
+    // An ordinary API rate limit is not definite exhaustion. OAuth adapters additionally know
+    // when every account (or the model's quota group) is unavailable without a billing error.
+    const accounts = provider?.type === "chatgpt" || provider?.type === "anthropic" || provider?.type === "google" && provider.auth === "antigravity";
+    if (resolved.ladderPick && !reason && !accounts) return resolved;
     if (this.targetUsable(resolved, cfg)) return resolved;
     for (const f of resolved.fallbacks) {
       if (f.provider === resolved.provider && f.model === resolved.model) continue;
       if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
-      log.info(`FAILOVER ${resolved.provider}/${resolved.model} exhausted → ${f.provider}/${f.model}`);
+      log.info(`${resolved.ladderPick ? `LADDER pick=${resolved.ladderPick}` : "FAILOVER"} ${resolved.provider}/${resolved.model} → ${f.provider}/${f.model} reason=${reason ?? "provider_unusable"}`);
       // The tag names the model that answers, not the one that could not: a log line saying `->m1`
       // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
       const asked = resolved.tag.split("->")[0] ?? resolved.model;
@@ -1917,7 +1968,7 @@ export class Proxy {
 
   private targetUsable(target: Pick<Resolved, "provider" | "model"> & { effort?: string | undefined }, cfg: Config): boolean {
     const configured = cfg.providers[target.provider];
-    if (!configured) return false;
+    if (!configured || this.unavailableReason(target)) return false;
     const provider = providerFor(configured, target.model);
     if (provider.type === "anthropic") {
       if (!provider.accountPool || provider.auth !== "claude-code") return false;

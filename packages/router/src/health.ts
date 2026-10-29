@@ -88,6 +88,10 @@ export class ModelHealth {
     models[model] = state;
   }
 
+  get(provider: string, model: string): ModelUnavailable | undefined {
+    return this.unavailable[provider]?.[model];
+  }
+
   snapshot(): Record<string, Record<string, ModelUnavailable>> {
     return structuredClone(this.unavailable);
   }

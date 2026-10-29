@@ -94,6 +94,28 @@ test('a runtime-exhausted rung climbs once and retains its provider and reason',
   assert.equal(ladderPick(v('light'), DEFAULTS.rules.general, DEFAULTS, candidates, true, 'ko', [], recovered.providers).rung, 'light')
 })
 
+test('worker fallback metadata snapshots only the remaining allowed entries of the selected tier (#89)', async () => {
+  const { ladderFallbackModels } = await import('../../packages/mod/hooks/workers.ts')
+  const { workerLadderLine, readWorkerLadder } = await import('../../packages/mod/hooks/ladder.ts')
+  const s = normalizeSettings({ rules: { general: { mode: 'ladder', rungs: {
+    standard: [
+      { target: candidates[0]!.target, effort: 'low' },
+      { target: { agent: 'missing' }, effort: 'high' },
+      { target: candidates[1]!.target, effort: 'medium' },
+      { target: candidates[2]!.target, effort: 'high' },
+    ], hard: [{ target: opus, effort: 'max' }],
+  } } }, allow: ['deepseek-v4-1-flash', 'gpt-6-astra'], allowKnown: ['gpt-6-1-sol'] })
+  const fallbacks = ladderFallbackModels(s.rules.general, { rung: 'standard', position: 1, effort: 'low' }, candidates, s)
+  assert.deepEqual(fallbacks, ['gpt-6-astra@high'], 'no earlier, missing, unticked or higher-tier entry')
+  const route = { pick: 'pick-1', model: 'opencode-go:deepseek-v4.1-flash@low', fallbacks }
+  const line = workerLadderLine(route)
+  assert.deepEqual(readWorkerLadder(line + '\nTask'), route)
+  assert.equal(readWorkerLadder('Quoted later\n' + line), undefined)
+  assert.equal(readWorkerLadder('<!-- clauderipple-ladder %broken -->'), undefined)
+  assert.deepEqual(ladderFallbackModels(s.rules.general, { rung: 'standard', position: 4, effort: 'high' }, candidates, s), [])
+  assert.deepEqual(ladderFallbackModels(s.rules.general, { rung: 'standard', position: 1, effort: 'low' }, candidates, { ...s, providers: { chatgpt: false } }), [])
+})
+
 test('a retired model stays skipped without a timer and keeps sibling models usable (#94)', async () => {
   const { liveProviders } = await import('../../packages/mod/hooks/workers.ts')
   const providers = { 'opencode-go': { usable: true, models: { 'deepseek-v4.1-flash': { reason: 'model_deprecated' } } } }

@@ -1027,6 +1027,38 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   configuration); a successful sibling or unrelated config save cannot revive it.
   This is process-memory advisory state, not a persisted blacklist.
 
+- **Running worker ladder fallback (2026-10-29, #89).** A model id such as `x@high`
+  does not identify a tier: several modes/domain ladders can select it concurrently,
+  and `worker-picks.jsonl` originally had no request-side join. The mod now snapshots
+  the selected tier's remaining installed, allowed entries (including each effort)
+  in an encoded `clauderipple-ladder` comment at the task's top. Its pick id and
+  fallback ids also go into the existing pick log. Explicit model/pin choices that
+  did not use the ladder get no snapshot. No tier is inferred from the model id.
+  Only a request with the subagent header consumes it; it must match the original
+  requested model and resolved provider/model/effort. The router binds the snapshot
+  to session + agent (bounded to 10,000 entries), so later compacted requests retain
+  it without sharing another worker's tier. Restart loses this binding; a request
+  still carrying the task comment can recreate it. Already-running workers created
+  by an older mod, or compacted ones whose binding was lost/evicted, do not acquire
+  a guessed ladder. Changed settings apply to new picks, not these spawn snapshots.
+  Before sending upstream, definite provider exhaustion, model retirement, or an
+  OAuth adapter with no usable account/quota group permits the existing `chooseTarget`
+  path to select the first usable remaining entry. Ordinary API-key rate limits do
+  not trigger this worker preflight. The first request that *discovers* exhaustion
+  still returns the existing non-retryable error; the next request skips it.
+  Fallback ids must still resolve through current config: ambiguous, removed, and
+  ingress-only native Claude targets are not invented as outbound providers (§5).
+  With no usable fallback the original provider keeps its existing refusal contract.
+  A `LADDER` line and the request note name pick/from/to/reason. All adapters, cache
+  identity, thread replay, and Google's one-unwritten-fallback cap remain on the
+  existing path; a started response is never replaced. Translators scope reasoning
+  to their own provider/model as before. An Anthropic-compatible worker fallback
+  additionally runs the existing `dropForeignThinking` filter, so a translated
+  reasoning envelope cannot leak into a wire that cannot decode it.
+  These fake-upstream tests verify routing and cached-prefix preservation, not a live
+  vendor cache-hit percentage. The engine's `turn.complete` error has no API detail;
+  terminal worker outcome records still say `reason:error` (proposal 3 is deferred).
+
 - **Credential pools (`providers.<name>.credentials`, 2026-09-17).** A provider may hold several
   credentials, each a complete header set. The conversation keeps the one it is on while that one
   is healthy — moving it moves the prompt cache with it, and ≥90% cache hit is an acceptance metric

@@ -281,6 +281,16 @@ export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Setting
   return { effort, rung: wanted, skipped, fallbackReason: reasons.join('; ') || t(lang, 'workers.none') }
 }
 
+/** Only allowed, installed entries after this pick in the same tier. Availability is rechecked by the router. */
+export function ladderFallbackModels(rule: Rule, pick: Resolution, candidates: readonly WorkerCandidate[], settings: Settings): string[] {
+  if (!pick.rung || !pick.position) return []
+  return (rule.rungs[pick.rung] ?? []).slice(pick.position).flatMap(step => {
+    const candidate = candidateOf(step.target, candidates)
+    if (!candidate || settings.providers[candidate.provider] === false || !allowed(candidate, settings.allow, settings.allowKnown)) return []
+    return [`${baseModel(candidate.model)}@${step.effort}`]
+  })
+}
+
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {
   return fileModel && target.agent !== 'general-purpose' ? `${baseModel(fileModel)}@${effort}` : target.model
 }
