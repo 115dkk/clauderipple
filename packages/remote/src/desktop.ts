@@ -200,14 +200,15 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
     const p = queued || (content.startsWith("<task-notification>") || sidechain ? content : prompt(r));
     const notification = /^<task-notification>[\s\S]*<\/task-notification>$/.test(p);
     if (notification) {
-      const taskId = /<task-id>([^<]+)<\/task-id>/.exec(p)?.[1];
-      const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(p)?.[1] ??
-        (taskId ? [...(state ?? [])].find(([, worker]) => worker.taskId === taskId)?.[0] : undefined);
-      const result = /<result>([\s\S]*)<\/result>/.exec(p)?.[1];
-      const status = /<status>([^<]+)<\/status>/.exec(p)?.[1];
-      // A notification without its tool call has nothing to attach to; it is not the user's words.
-      if (toolUseId) {
-        bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? p });
+      for (const [notice] of p.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
+        const taskId = /<task-id>([^<]+)<\/task-id>/.exec(notice)?.[1];
+        const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1] ??
+          (taskId ? [...(state ?? [])].find(([, worker]) => worker.taskId === taskId)?.[0] : undefined);
+        const result = /<result>([\s\S]*?)<\/result>/.exec(notice)?.[1];
+        const status = /<status>([^<]+)<\/status>/.exec(notice)?.[1];
+        // A notification without its tool call has nothing to attach to; it is not the user's words.
+        if (!toolUseId) continue;
+        bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? notice });
         const running = state?.get(toolUseId);
         if (running && resolve) {
           const info = resolve(toolUseId, running.input);
