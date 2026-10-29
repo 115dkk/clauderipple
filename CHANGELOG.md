@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.22 — 2026-10-29
+
+### Added
+
+- **The Auto mode classifier's two stages can each take their own model** (#91, thanks @115dkk).
+  The dashboard shows a row for the first stage and one for the rest; a setting with a single target
+  keeps working as before. A choice still being saved stays on screen through the five-second status
+  refresh, so the last choice is the one stored.
+- **Gemini 4 Argon through Antigravity** (#106, thanks @csa906). Cloud Code Assist lists and serves
+  Argon only to the Antigravity CLI client, so Argon alone is asked for and called with the CLI's
+  User-Agent; every other model and call keeps the IDE profile. Antigravity's terms warning still
+  applies.
+
+### Fixed
+
+- **Gemini 4 Argon's separate weekly quota shows in the limits** (#107, thanks @csa906). The quota
+  summary under the CLI profile carries Argon's own weekly bucket, which the IDE profile leaves out,
+  so the limits no longer show Gemini quota as available once Argon's week is spent.
+- **A failed Antigravity CLI model lookup is logged.** When the CLI-profile lookup fails or is cut
+  off, the IDE list still answers and Argon used to vanish from the model list without a trace; the
+  router now logs the host and the reason (no body or credential).
+
 ## 0.12.21 — 2026-10-29
 
 ### Changed
