@@ -7,6 +7,8 @@ import { UsageHistory, addConversations, emptyConversations, finishConversations
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_CARRY = 64 * 1024;
+// All thinking fields one response may hold while their blocks are open.
+const MAX_THINKING_HELD = 4 * MAX_CARRY;
 
 export type RequestUsage = {
   input: number;
@@ -256,6 +258,7 @@ export class ResponseUsageTap {
   private blockValue = false;
   private thinkingBlock: ThinkingBlock = {};
   private readonly thinkingBlocks = new Map<number, ThinkingBlock>();
+  private thinkingHeld = 0;
 
   private readonly onThinking: ((block: ThinkingBlock) => void) | undefined;
 
@@ -381,22 +384,43 @@ export class ResponseUsageTap {
   private observeThinkingEvent(body: Record<string, unknown>): void {
     const index = body.index;
     if (typeof index !== "number") return;
+    // Held fields are bounded per block and across the response: a block that would exceed either
+    // is forgotten, which only makes its origin unknown (dropped on a reroute), never wrong.
     if (body.type === "content_block_start") {
       const block = body.content_block as ThinkingBlock | undefined;
       if (block?.type !== "thinking" && block?.type !== "redacted_thinking") return;
-      if (this.thinkingBlocks.size < 1024) this.thinkingBlocks.set(index, { type: block.type, signature: block.signature, data: block.data });
+      const held = { type: block.type, signature: block.signature, data: block.data };
+      const size = this.heldSize(held);
+      if (this.thinkingBlocks.size < 1024 && size <= MAX_CARRY && this.thinkingHeld + size <= MAX_THINKING_HELD) {
+        this.thinkingBlocks.set(index, held);
+        this.thinkingHeld += size;
+      }
     } else if (body.type === "content_block_delta") {
       const block = this.thinkingBlocks.get(index);
       const delta = body.delta as { type?: unknown; signature?: unknown } | undefined;
       if (!block || delta?.type !== "signature_delta" || typeof delta.signature !== "string") return;
       const signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
-      if (signature.length > MAX_CARRY) this.thinkingBlocks.delete(index);
-      else block.signature = signature;
+      if (signature.length > MAX_CARRY || this.thinkingHeld + delta.signature.length > MAX_THINKING_HELD) this.forgetThinking(index);
+      else {
+        block.signature = signature;
+        this.thinkingHeld += delta.signature.length;
+      }
     } else if (body.type === "content_block_stop") {
       const block = this.thinkingBlocks.get(index);
       if (block) this.onThinking?.(block);
-      this.thinkingBlocks.delete(index);
+      this.forgetThinking(index);
     }
+  }
+
+  private heldSize(block: ThinkingBlock): number {
+    return (typeof block.signature === "string" ? block.signature.length : 0) + (typeof block.data === "string" ? block.data.length : 0);
+  }
+
+  private forgetThinking(index: number): void {
+    const block = this.thinkingBlocks.get(index);
+    if (!block) return;
+    this.thinkingHeld -= this.heldSize(block);
+    this.thinkingBlocks.delete(index);
   }
 
   private feedJson(text: string): void {
