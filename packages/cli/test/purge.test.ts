@@ -16,11 +16,32 @@ function scratch(t: import("node:test").TestContext): string {
 
 /**
  * The cleaner's folder, once the test has its receipt. The cleaner writes the receipt and then exits,
- * and until it has, Windows keeps its redirected logs open: removing the folder at once failed with
- * EPERM on a CI runner (2026-10-29), so the removal retries for up to 5 s.
+ * and until it has, its redirected logs stay open without delete sharing: removing the folder at once
+ * failed with EPERM on a CI runner (2026-10-29). rmSync's maxRetries does not cover that EPERM on
+ * Node 24 (it failed after 0 ms, measured the same day), so the retry is here, for up to 15 s.
  */
+/** The receipt as it stands, or null while the cleaner is between truncating and writing it. */
+function readReceipt(resultFile: string): { exitCode?: number; error?: string } | null {
+  try {
+    return JSON.parse(fs.readFileSync(resultFile, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function removeCleanerFolder(t: import("node:test").TestContext, resultFile: string): void {
-  t.after(() => fs.rmSync(path.dirname(resultFile), { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
+  t.after(async () => {
+    for (let waited = 0; ; waited += 200) {
+      try {
+        fs.rmSync(path.dirname(resultFile), { recursive: true, force: true });
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code !== "EPERM" && code !== "EBUSY") || waited >= 15_000) throw error;
+        await delay(200);
+      }
+    }
+  });
 }
 
 test("purge removes an ordinary home and propagates a deletion failure", async t => {
@@ -53,7 +74,7 @@ test("Windows self-purge waits for its Node process to exit, reports pending non
   removeCleanerFolder(t, result.resultFile);
   let receipt: { exitCode?: number } = {};
   for (let i = 0; i < 150; i++) {
-    if (fs.existsSync(result.resultFile)) receipt = JSON.parse(fs.readFileSync(result.resultFile, "utf8"));
+    receipt = readReceipt(result.resultFile) ?? receipt;
     if (receipt.exitCode !== undefined) break;
     await delay(100);
   }
@@ -87,7 +108,7 @@ test("the deferred cleaner records failure instead of success when another proce
     removeCleanerFolder(t, result.resultFile);
     let receipt: { exitCode?: number; error?: string } = {};
     for (let i = 0; i < 150; i++) {
-      receipt = JSON.parse(fs.readFileSync(result.resultFile, "utf8"));
+      receipt = readReceipt(result.resultFile) ?? receipt;
       if (receipt.exitCode !== undefined) break;
       await delay(100);
     }
