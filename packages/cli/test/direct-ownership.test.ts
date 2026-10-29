@@ -11,9 +11,10 @@ import * as launchd from "../src/launchd.ts";
 import * as systemd from "../src/systemd.ts";
 import * as schtasks from "../src/schtasks.ts";
 import { stopWindowsRouter, restartWindowsRouter, type WindowsRouterOps } from "../src/supervisor.ts";
+import { normalizeHome } from "../src/ownership.ts";
 
-// Real path: macOS's TMPDIR is under /var, a link to /private/var, and the recorded home is resolved.
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-")));
+// Native real path resolves macOS's /var link and Windows' 8.3 TEMP alias.
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-")));
 const keys = ["HOME", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
 const previous = keys.map(key => [key, process.env[key]] as const);
 after(() => {
@@ -75,7 +76,7 @@ test("direct double on/off restores owned values and protects shared claims", as
   assert.equal(fs.readFileSync(directStatePath(c.a), "utf8"), snapshot);
   await directOff(deps(c.a));
   assert.equal(settingsEnv().ANTHROPIC_SMALL_FAST_MODEL, "routed-model");
-  assert.equal(currentAppProxy().installationHome, c.a);
+  assert.equal(currentAppProxy().installationHome, normalizeHome(c.a));
   await directOff(deps(c.a));
   c.apply(c.b);
   directOn(c.a);
