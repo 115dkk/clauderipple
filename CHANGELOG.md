@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.12.19 — 2026-10-29
+
+### Fixed
+
+- **Windows install, start and repair no longer stop on `Cannot read properties of null (reading
+  'pid')`** (#110, #62). Right after the scheduled task was registered, the router lookup printed
+  `null` when no router had started yet, and the pid was read off it. An update could leave the router
+  off until the next reboot.
+- **A worker name keeps the model's capitals as lower case** (#111).
+  `deepseek-ai/DeepSeek-V4.1-Flash-1017` is now `deepseek-ai-deepseek-v4-1-flash-1017`, not
+  `deepseek-ai--eep-eek--4-1--lash-1017`. Ladder rungs and allow lists saved under the old name move to
+  the new one, a marker that still says the old name resolves to the same model, and the old generated
+  worker file is removed. A hand-written worker that happens to use an old name, and a name that is
+  some declared model's id, are left alone.
+- **`wire: google` models use the provider's key pool** (#112). They sent the first key only, so a
+  spent key answered 429 to every turn. Keys are now picked and rotated like every other wire, with
+  `KEY`/`RETRY` lines and the `credential` field. Google's invalid-key 400 also rotates, the last key's
+  `Retry-After` is kept, and every key sent on a request (and Antigravity's tokens) is masked in
+  streamed errors, logs, exceptions and the request record. Single-key providers send what they sent.
+- **Responses-wire reasoning that arrives only as text is passed back** (#109). Reasoning without
+  `encrypted_content`, and a completed item addressed by `output_index` alone, were not carried to the
+  next turn. A `content[].thinking must be passed back` 400 now logs the assistant turns' block kinds
+  and counts (no content) and tells the client not to retry it.
+- **A retired model is skipped instead of picked again** (#94). An explicit `ModelDeprecated` / "has
+  been deprecated" 404 or 410 marks that provider's model unusable, the ladder skips it with
+  `model_deprecated`, and `/api/status` shows it. A config change for the provider or a success from
+  the model clears it.
+- **A running worker moves to the next rung of its ladder when its provider is exhausted** (#89).
+  After the router records the worker's target as exhausted or retired, the worker's next request goes
+  to the next usable rung of the same tier, logged as `LADDER pick=… A → B reason=…`. Only the ladder
+  snapshot the mod writes at the start of the spawn prompt is read, and every fallback must still be on
+  the saved ladder. Thinking blocks another provider signed are not forwarded on a reroute; the target's
+  own are kept. A fresh key added to an exhausted provider clears its exhaustion.
+- **The Desktop handoff waits for running background workers** (#114). Handing a session to the app
+  stopped the host's SDK and killed a worker still running; the handoff and settings restarts now wait
+  for the live query's background tasks, and a worker the app reports `stopped` shows as stopped on the
+  phone.
+- **The phone no longer shows a stored permission mode as the app's** (#113). After a handoff the
+  mode is omitted rather than claimed, `/clear` and `/new` keep the session's own choice (a desktop
+  session's latest one), and a model or effort change waiting on a background task is reported as
+  pending instead of applied.
+- **A question card no longer reaches the phone ahead of the text before it.** The Remote Control
+  permission stream could beat the transcript watcher, so the assistant's preamble arrived after the
+  card.
+
+### Known
+
+- When a provider recovers after a reroute, thinking the fallback signed may still be sent back to the
+  original provider. This predates 0.12.19 and is tracked separately.
+
 ## 0.12.18 — 2026-10-28
 
 ### Fixed
