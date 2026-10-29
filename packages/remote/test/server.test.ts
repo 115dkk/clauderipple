@@ -17,7 +17,6 @@ import { FrameAssembler } from "../src/chunks.ts";
 import { HostServer } from "../src/server.ts";
 import type { Peer as ServerPeer, ServerOptions } from "../src/server.ts";
 import { VISIBLE_MS } from "../src/push.ts";
-import { windowsDrives } from "../src/folders.ts";
 import { Sessions } from "../src/sessions.ts";
 import type { QueryFn, SdkUserMessage } from "../src/sessions.ts";
 import { bridgeFixture, bridgeId, tick } from "./bridge-fixture.ts";
@@ -1386,7 +1385,7 @@ test("large image blobs round-trip in capped frames without inlining bytes in ev
   assert.deepEqual(Buffer.from(combined, "base64"), bytes);
 });
 
-test("browse req lists drives, then only visible subdirectories in sorted order", { timeout: 4500 }, async t => {
+test("browse req lists only visible subdirectories in sorted order", { timeout: 4500 }, async t => {
   const f = await fixture(t);
   const dir = path.join(f.dir, "browse");
   fs.mkdirSync(dir);
@@ -1400,9 +1399,7 @@ test("browse req lists drives, then only visible subdirectories in sorted order"
   assert.equal(result.path, dir);
   assert.equal(result.parent, f.dir);
   assert.equal(result.truncated, false);
-  const drives = (await windowsDrives()).filter(root => root.toLowerCase() !== dir.toLowerCase()).map(root => ({ name: root, path: root }));
-  const folders = ["Alpha", "folder2", "folder10", "zeta"].map(name => ({ name, path: path.join(dir, name) }));
-  assert.deepEqual(result.entries, [...drives, ...folders]);
+  assert.deepEqual(result.entries, ["Alpha", "folder2", "folder10", "zeta"].map(name => ({ name, path: path.join(dir, name) })));
 });
 
 test("host info carries the mod's status, refreshes limits once a minute, and reaches connected phones when it changes", { timeout: 6000 }, async t => {

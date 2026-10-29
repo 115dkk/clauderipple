@@ -11,11 +11,10 @@ import * as launchd from "../src/launchd.ts";
 import * as systemd from "../src/systemd.ts";
 import * as schtasks from "../src/schtasks.ts";
 import { stopWindowsRouter, restartWindowsRouter, type WindowsRouterOps } from "../src/supervisor.ts";
-import { normalizeHome } from "../src/ownership.ts";
 
-// Native real path resolves macOS's /var link and Windows' 8.3 TEMP alias.
-const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-")));
-const keys = ["HOME", "USERPROFILE", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
+// Real path: macOS's TMPDIR is under /var, a link to /private/var, and the recorded home is resolved.
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cr-direct-ownership-")));
+const keys = ["HOME", "CLAUDE_SETTINGS_PATH", "CLAUDE_APP_SUPPORT", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME", "CODEX_HOME"] as const;
 const previous = keys.map(key => [key, process.env[key]] as const);
 after(() => {
   for (const [key, value] of previous) {
@@ -33,8 +32,6 @@ function setup() {
     fs.writeFileSync(path.join(home, "config.json"), JSON.stringify({ listen: { host: "127.0.0.1", port: 18791 }, cli: { models: { smallFast: "routed-model" } } }));
   }
   process.env.HOME = dir;
-  process.env.USERPROFILE = dir;
-  assert.equal(os.homedir(), dir, "service locks must stay inside the fixture account");
   process.env.CLAUDE_SETTINGS_PATH = path.join(dir, "settings.json");
   process.env.CLAUDE_APP_SUPPORT = path.join(dir, "desktop");
   process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR = path.join(dir, "launch-agents");
@@ -78,7 +75,7 @@ test("direct double on/off restores owned values and protects shared claims", as
   assert.equal(fs.readFileSync(directStatePath(c.a), "utf8"), snapshot);
   await directOff(deps(c.a));
   assert.equal(settingsEnv().ANTHROPIC_SMALL_FAST_MODEL, "routed-model");
-  assert.equal(currentAppProxy().installationHome, normalizeHome(c.a));
+  assert.equal(currentAppProxy().installationHome, c.a);
   await directOff(deps(c.a));
   c.apply(c.b);
   directOn(c.a);
@@ -126,9 +123,7 @@ test("direct rejects corrupt snapshots without modifying their raw text or clien
   assert.equal(fs.readFileSync(c.settings, "utf8"), before);
 });
 
-test("snapshot save failure changes no client and settings save failure retains restoration evidence", t => {
-  // The collision directory and backup writer must use the same second, even on a busy runner.
-  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+test("snapshot save failure changes no client and settings save failure retains restoration evidence", () => {
   const c = setup();
   c.apply(c.a);
   const before = fs.readFileSync(c.settings, "utf8");

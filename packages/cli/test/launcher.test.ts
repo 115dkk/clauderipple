@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { installLauncher, uninstallLauncher, macAppPath, desktopEntryPath, macLauncherScript, desktopEntry, windowsTrayLauncher, windowsTrayLauncherPath, windowsShortcutScript, windowsShortcutOwner } from "../src/launcher.ts";
 import type { Runtime } from "../src/runtime.ts";
-import { fileSymlinks } from "../../../test/capabilities.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-launcher-"));
 const previous = process.env.CLAUDERIPPLE_LAUNCHER_DIR;
@@ -19,7 +18,7 @@ let sequence = 0;
 function context(windows = false) {
   const dir = path.join(root, String(++sequence));
   process.env.CLAUDERIPPLE_LAUNCHER_DIR = path.join(dir, "shared");
-  const a = path.join(dir, windows || process.platform === "win32" ? "A 한글 ' 공백 홈" : "A 한글 ' 공백 \" 홈");
+  const a = path.join(dir, windows ? "A 한글 ' 공백 홈" : "A 한글 ' 공백 \" 홈");
   const b = path.join(dir, "B");
   fs.mkdirSync(a, { recursive: true });
   fs.mkdirSync(b);
@@ -53,7 +52,7 @@ for (const platform of ["darwin", "linux"] as const) {
     assert.equal(uninstallLauncher(opts).paths.length, 1);
     assert.equal(uninstallLauncher(opts).detail, "no launcher was installed");
   });
-  test(`${platform}: exact legacy evidence, not id/marker alone; home symlink equivalence`, { skip: process.platform !== "win32" && !fileSymlinks }, () => {
+  test(`${platform}: exact legacy evidence, not id/marker alone; home symlink equivalence`, () => {
     const { a, b, rt } = context();
     const opts = { rt, home: a, platform, version: "1" };
     installLauncher(opts);
@@ -64,20 +63,16 @@ for (const platform of ["darwin", "linux"] as const) {
     assert.equal(installLauncher({ ...opts, home: b }).ok, false);
     assert.equal(fs.readFileSync(file, "utf8"), legacy);
     assert.equal(installLauncher(opts).ok, true);
-    // A linked home is the same installation where homes are POSIX paths, which `normalizeHome`
-    // resolves. On a Windows host the simulated homes are Windows paths, compared as text.
-    if (process.platform !== "win32") {
-      const alias = path.join(path.dirname(b), "alias");
-      fs.symlinkSync(a, alias, "dir");
-      assert.equal(installLauncher({ ...opts, home: alias }).ok, true);
-    }
+    const alias = path.join(path.dirname(b), "alias");
+    fs.symlinkSync(a, alias, "dir");
+    assert.equal(installLauncher({ ...opts, home: alias }).ok, true);
     fs.writeFileSync(file, platform === "linux" ? "[Desktop Entry]\nX-ClaudeRipple-Launcher=1\nExec=other\n" : "#!/bin/sh\nexec other\n");
     const unknown = fs.readFileSync(file, "utf8");
     assert.equal(uninstallLauncher(opts).ok, false);
     assert.equal(installLauncher(opts).ok, false);
     assert.equal(fs.readFileSync(file, "utf8"), unknown);
   });
-  test(`${platform}: broken symlink and inspection failure are not absence`, { skip: !fileSymlinks }, () => {
+  test(`${platform}: broken symlink and inspection failure are not absence`, () => {
     const { a, rt } = context();
     const opts = { rt, home: a, platform, version: "1" };
     const target = platform === "darwin" ? macAppPath() : desktopEntryPath();
@@ -163,7 +158,7 @@ test("Windows: foreign or unknown local script blocks even shortcut inspection",
     assert.equal(fake.mutations.length, 0);
   }
 });
-test("macOS: linked icon cannot redirect replacement into another installation", { skip: !fileSymlinks }, () => {
+test("macOS: linked icon cannot redirect replacement into another installation", () => {
   const { a, b, rt } = context();
   const opts = { rt, home: a, version: "1", platform: "darwin" as const };
   const icon = path.join(rt.repo, "packages/app/assets/icon.icns");

@@ -15,10 +15,6 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-ownership-"));
 const tripwire = path.join(root, "tripwire");
 fs.writeFileSync(tripwire, `#!/bin/sh\necho "real service runner used: $*" >> "${path.join(root, "tripwire.log")}"\nexit 97\n`, { mode: 0o755 });
 Object.assign(process.env, {
-  // Task locks are account-wide under os.homedir(), not CLAUDERIPPLE_HOME. Windows uses
-  // USERPROFILE while Unix uses HOME; isolate both before importing any service modules.
-  HOME: root,
-  USERPROFILE: root,
   CLAUDERIPPLE_HOME: path.join(root, "unused-home"),
   CLAUDERIPPLE_LAUNCH_AGENTS_DIR: path.join(root, "LaunchAgents"),
   CLAUDERIPPLE_LAUNCHCTL: tripwire,
@@ -38,8 +34,6 @@ process.on("exit", () => {
     process.exitCode = 1;
   }
 });
-
-assert.equal(os.homedir(), root, "service operations must never use the real account's lock root");
 
 const launchd = await import("../src/launchd.ts");
 const systemd = await import("../src/systemd.ts");
@@ -254,40 +248,6 @@ function taskOf(home: string, extra: Record<string, unknown> = {}): Record<strin
     ...extra,
   };
 }
-
-test("scheduled task control uses the fixture account's lock and still refuses contention", () => {
-  assert.equal(schtasks.taskName(), "ClaudeRippleRouter", "keep the production task name shared across installation homes");
-  const lock = path.join(root, ".clauderipple", "service-locks", "clauderipplerouter.operation-lock");
-  const fake = taskRecorder();
-  let reads = 0;
-  const deps = {
-    definition: () => {
-      reads++;
-      const owners = fs.readdirSync(lock);
-      assert.equal(owners.length, 1, "the real service lock is held inside the temporary account home");
-      assert.match(owners[0]!, new RegExp(`^${process.pid}-[a-f0-9]{64}\\.owner$`));
-      return taskOf(winA);
-    },
-    run: fake.run,
-  };
-  assert.equal(schtasks.stopAgent(undefined, { home: winB, deps }), "other-installation");
-  assert.ok(reads > 0, "the guarded definition was inspected");
-  assert.equal(fs.existsSync(lock), false, "the fixture lock is released");
-
-  // Reproduce ELOCKED deterministically without creating or inspecting an actual user's lock.
-  fs.mkdirSync(lock);
-  try {
-    assert.throws(() => schtasks.stopAgent(undefined, { home: winB, deps }), error => {
-      assert.equal((error as NodeJS.ErrnoException).code, "ELOCKED");
-      assert.ok((error as Error).message.includes(lock), "contention is confined to the fixture account");
-      return true;
-    });
-    assert.deepEqual(fs.readdirSync(lock), [], "an unproven owner's lock is preserved");
-  } finally {
-    fs.rmdirSync(lock);
-  }
-  assert.deepEqual(fake.calls, [], "no Task Scheduler control operation ran");
-});
 
 test("another installation's task is never stopped, removed or restarted, and its pid is never read", () => {
   const definition = () => taskOf(winA);

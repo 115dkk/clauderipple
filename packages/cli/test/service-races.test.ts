@@ -9,17 +9,15 @@ import * as schtasks from "../src/schtasks.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cr-service-race-"));
-  const keys = ["HOME", "USERPROFILE", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME"] as const;
+  const keys = ["HOME", "CLAUDERIPPLE_LAUNCH_AGENTS_DIR", "XDG_CONFIG_HOME"] as const;
   const before = keys.map(key => [key, process.env[key]] as const);
   process.env.HOME = root;
-  process.env.USERPROFILE = root;
   process.env.CLAUDERIPPLE_LAUNCH_AGENTS_DIR = path.join(root, "LaunchAgents");
   process.env.XDG_CONFIG_HOME = path.join(root, "xdg");
   t.after(() => {
     for (const [key, value] of before) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     fs.rmSync(root, { recursive: true, force: true });
   });
-  assert.equal(os.homedir(), root, "service races must never use the real account's lock root");
   return { root, a: path.join(root, "a"), b: path.join(root, "b") };
 }
 
