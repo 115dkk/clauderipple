@@ -19,7 +19,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { GoogleProvider, ProviderModel } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
-import { exhaustionHeaders, providerExhaustion, type ProviderExhaustion } from "../../health.ts";
+import { exhaustionHeaders, modelDeprecation, providerExhaustion, type ModelUnavailable, type ProviderExhaustion } from "../../health.ts";
 import { CredentialPool, retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
@@ -37,7 +37,7 @@ const PING_MS = 15_000;
 /** How long the CCA model list is reused before asking again. */
 const MODELS_CACHE_MS = 60 * 60 * 1000;
 
-export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined } & (
+export type GoogleOutcome = { status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; upstreamCalled?: false; refusal?: "no-account" | "prompt-incompatible"; exhaustion?: ProviderExhaustion | undefined; modelUnavailable?: ModelUnavailable | undefined } & (
   | { kind?: "response" }
   // No status or bytes have reached the client; the proxy may try one route fallback.
   | { kind: "prompt-incompatible"; status: 400; bytes: 0; errorBody: string }
@@ -602,7 +602,7 @@ export class GoogleAdapter {
       // A spending cap or a used-up quota: the client is told not to retry, in the same answer.
       const exhaustion = providerExhaustion(upstream.status, text, retryAfterMs(Object.fromEntries(upstream.headers)) ?? googleRetryDelayMs(text));
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}) }).end(out.body);
-      return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion };
+      return { status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion, modelUnavailable: modelDeprecation(upstream.status, text) };
     }
 
     return this.streamBack(res, upstream, transport, json, model, wantStream, key, startInput, controller, onClose);
@@ -690,6 +690,7 @@ export class GoogleAdapter {
       return { status: err.status, bytes: Buffer.byteLength(err.body), note,
         ...(sent.kind === "no-account" ? { upstreamCalled: false as const, refusal: "no-account" as const } : {}),
         ...(exhaustion ? { exhaustion } : {}),
+        ...(sent.kind === "refused" ? { modelUnavailable: modelDeprecation(sent.status, sent.text) } : {}),
       };
     }
 

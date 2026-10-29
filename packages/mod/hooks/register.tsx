@@ -4,11 +4,11 @@ import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
-import { rungOf } from './ladder'
+import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
@@ -976,10 +976,12 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   }
   verdict = { ...verdict, effort: resolved.effort }
   const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
+  const fallbacks = ladderResult ? ladderFallbackModels(ladder, ladderResult, pinnedCandidates, routing) : []
+  const ladderLine = model && fallbacks.length ? workerLadderLine({ pick: id, model, fallbacks }) : undefined
   const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms: 0, id, ...(fallbackReason ? { fallbackReason } : {}) }
   // The decision behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: the tier it was given, the rung it landed on and what ran.
-  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(ladderLine ? { fallbacks } : {}), ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
   await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
   // The brief itself is never logged (it can hold anything); its length is. To read a pick again,
   // its brief is in the session's own transcript under the same description. A model's reason is
@@ -993,7 +995,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // A hook may change the definition and model, but cannot add disallowedTools to a spawn.
   // Direct general-purpose calls keep their own definition and existing behaviour.
   const executor = auto && (selected.agent === 'general-purpose' || /^(?:opus|sonnet|haiku)(?:@|$)|^claude-/.test(model ?? '')) ? 'ripple:auto' : selected.agent
-  return { input: { ...e, subagentType: executor, model, prompt }, pick: value }
+  return { input: { ...e, subagentType: executor, model, prompt: ladderLine ? `${ladderLine}\n${prompt}` : prompt }, pick: value }
 }
 
 async function toggleAuto($: EngineInterface): Promise<void> {

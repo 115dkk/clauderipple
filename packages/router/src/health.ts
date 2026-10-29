@@ -67,6 +67,39 @@ export class ProviderHealth {
   }
 }
 
+export type ModelUnavailable = { reason: "model_deprecated"; at: number };
+
+/**
+ * Explicit model retirement, not a missing endpoint or a temporary failure. `model_not_found` is
+ * not one: it also answers a key without access or a relay mid-deploy, and this record has no TTL.
+ */
+export function modelDeprecation(status: number, body: string, now = Date.now()): ModelUnavailable | undefined {
+  if (status !== 404 && status !== 410) return undefined;
+  return /\b(?:ModelDeprecated|model_deprecated)\b|\bmodel\b[^\n]*\bhas been deprecated\b/i.test(body)
+    ? { reason: "model_deprecated", at: now } : undefined;
+}
+
+/** Provider + exact upstream model id. No timer or successful sibling clears a retirement;
+ * restarting the router explicitly permits another probe after the operator fixes configuration.
+ */
+export class ModelHealth {
+  private readonly unavailable: Record<string, Record<string, ModelUnavailable>> = Object.create(null);
+
+  observe(provider: string, model: string, state: ModelUnavailable | undefined): void {
+    if (!state) return;
+    const models = this.unavailable[provider] ??= Object.create(null);
+    models[model] = state;
+  }
+
+  get(provider: string, model: string): ModelUnavailable | undefined {
+    return this.unavailable[provider]?.[model];
+  }
+
+  snapshot(): Record<string, Record<string, ModelUnavailable>> {
+    return structuredClone(this.unavailable);
+  }
+}
+
 export const EXIT_UPSTREAM_UNREACHABLE = 75;
 
 const CONNECT_ERRORS = new Set([

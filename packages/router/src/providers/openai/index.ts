@@ -6,7 +6,7 @@ import http from "node:http";
 import type { OpenAiCompatibleProvider } from "../../config.ts";
 import type { Logger } from "../../log.ts";
 import type { RequestUsage } from "../../requestlog.ts";
-import { exhaustionHeaders, providerExhaustion, type ProviderExhaustion } from "../../health.ts";
+import { exhaustionHeaders, modelDeprecation, providerExhaustion, type ModelUnavailable, type ProviderExhaustion } from "../../health.ts";
 import { retryAfterMs } from "../../pool.ts";
 import { credentialHeaderValues, redactErrorText } from "../../redact.ts";
 import { SseParser } from "../chatgpt/sse.ts";
@@ -24,7 +24,7 @@ export type OpenAiCredential = {
   next?: (status: number, retryAfterMs: number | undefined, body: string) => Record<string, string> | null;
 };
 
-export type OpenAiOutcome = { upstreamStatus?: number; retryAfterMs?: number | undefined; errorBody?: string; status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; servedTier?: string; exhaustion?: ProviderExhaustion | undefined };
+export type OpenAiOutcome = { upstreamStatus?: number; retryAfterMs?: number | undefined; errorBody?: string; status: number; bytes: number; note?: string; usage?: RequestUsage; stopReason?: string; messageId?: string; servedTier?: string; exhaustion?: ProviderExhaustion | undefined; modelUnavailable?: ModelUnavailable | undefined };
 
 function anthropicError(status: number, type: string, message: string): { status: number; body: string } {
   return { status, body: JSON.stringify({ type: "error", error: { type, message } }) };
@@ -290,7 +290,7 @@ export class OpenAiCompatibleAdapter {
       const missingThinking = requiresThinkingReplay(upstream.status, text);
       if (missingThinking) this.log.warn(`${this.tag} ${this.name}: missing required thinking for ${model}; assistantTurns=${JSON.stringify(assistantTurnShapes(json))}`);
       res.writeHead(out.status, { "content-type": "application/json", "content-length": String(Buffer.byteLength(out.body)), ...(exhaustion ? exhaustionHeaders(exhaustion) : {}), ...(missingThinking ? { "x-should-retry": "false" } : {}) }).end(out.body);
-      return { upstreamStatus: upstream.status, retryAfterMs: retryAfterMs(Object.fromEntries(upstream.headers)), errorBody: safeText, status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion };
+      return { upstreamStatus: upstream.status, retryAfterMs: retryAfterMs(Object.fromEntries(upstream.headers)), errorBody: safeText, status: out.status, bytes: Buffer.byteLength(out.body), note: `upstream ${upstream.status}`, exhaustion, modelUnavailable: modelDeprecation(upstream.status, text) };
     }
 
     const wantStream = json.stream === true;
