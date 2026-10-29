@@ -35,7 +35,7 @@ import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
-import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/index.ts";
+import { GoogleAdapter, googleLooksLikeAuth, type GoogleAccountStatus } from "./providers/google/index.ts";
 import type { QuotaGroup } from "./providers/google/usage.ts";
 import { OpenCodeUsage, isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import { GrokAdapter } from "./providers/grok/index.ts";
@@ -1202,12 +1202,16 @@ export class Proxy {
             const tried = new Set(using ? [using.id] : []);
             // Nothing has reached the client here yet, so a refusal another key could answer is asked
             // again inside the turn instead of being handed to the user to retry by hand.
+            // Google can reject a key with HTTP 400. Only structured auth evidence makes that
+            // a credential refusal; an ordinary invalid request must never walk the pool.
+            const poolStatus = (status: number, body: string): number => status === 400 && googleLooksLikeAuth(status, body) ? 401 : status;
             const next = using && credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
-              if (!classify(status, undefined, body).retryable) return null;
+              const judgedStatus = poolStatus(status, body);
+              if (!classify(judgedStatus, undefined, body).retryable) return null;
               const current = using!;
               const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), affinity);
               if (!candidate) return null;
-              this.pool.penalise(poolName, current.id, status, retryAfter, body);
+              this.pool.penalise(poolName, current.id, judgedStatus, retryAfter, body);
               log.info(`RETRY ${poolName}: ${this.credentialLabel(poolName, current, credentials)} answered ${status}, trying ${this.credentialLabel(poolName, candidate, credentials)}`);
               using = candidate;
               recordCredential(poolName, candidate, credentials, true);
@@ -1215,7 +1219,7 @@ export class Proxy {
               return candidate.headers;
             } : undefined;
             try {
-              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, using ? { headers: using.headers, ...(next ? { next } : {}) } : undefined);
+              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, using ? { headers: provider.credentials?.length ? using.headers : {}, ...(next ? { next } : {}) } : undefined);
               if (o.kind === "prompt-incompatible" || o.kind === "model-capacity") {
                 const why = o.kind === "prompt-incompatible" ? "prompt" : "capacity";
                 const alreadyRetried = unwrittenSeen;
@@ -1242,7 +1246,7 @@ export class Proxy {
               // The answer is charged to the key that actually produced it, which after a retry is a
               // later one than the turn started on.
               if (using) {
-                if (o.status >= 400) this.pool.penalise(poolName, using.id, o.status);
+                if (o.status >= 400) this.pool.penalise(poolName, using.id, poolStatus(o.upstreamStatus ?? o.status, o.errorBody ?? ""), o.retryAfterMs, o.errorBody);
                 else if (o.status > 0) this.pool.succeed(poolName, using.id);
               } else this.recordOutcome(route.provider, o.status);
               if (!path.startsWith("/v1/messages/count_tokens")) {
