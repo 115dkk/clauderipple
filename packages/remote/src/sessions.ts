@@ -2202,6 +2202,9 @@ export class Sessions {
   /** A permission prompt from Remote Control, live or replayed: one record, one card, one decision. */
   private openBridgePermission(id: string, connection: { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, BridgePending> }, r: SessionRecord, req: BridgePermissionRequest): void {
     if (connection.permissions.has(req.requestId) || this.wasAnsweredBridge(id, req.requestId)) return;
+    // The permission stream can beat the transcript watch/poll. Publish the assistant's
+    // completed blocks first, or its question reaches the phone without its preamble.
+    this.tailBridge(r);
     const { record, decision } = this.opts.permissions.request({ session: id, tool: req.tool, title: "", summary: summarize(req.tool, req.input, r.cwd), input: req.input }, connection.abort.signal);
     const rules = sessionPermissionRules(req.tool, req.permissionSuggestions, req.suppressAlwaysAllowRule);
     this.permissionRules.set(record.id, rules);
