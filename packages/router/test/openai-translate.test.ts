@@ -534,8 +534,8 @@ test("replay: false puts back the request without any reasoning", () => {
 });
 
 // The response path hands the client a carrier block whose envelope holds exactly the vendor's item,
-// so the next turn can put it back untouched. An item the backend never sealed has nothing to resume.
-test("a Responses reasoning item is sealed into a carrier block; an unsealed one is not", () => {
+// so the next turn can put it back untouched. A summary without full reasoning is display text only.
+test("a Responses reasoning item is sealed into a carrier block; a summary-only one is not", () => {
   const mapper = new OpenAiStreamMapper("muse-spark-1.3-contributor", 0, new Map(), env);
   mapper.wire = "responses";
   const evs: Record<string, unknown>[] = [
@@ -573,6 +573,40 @@ test("a Responses reasoning item is sealed into a carrier block; an unsealed one
   assert.deepEqual(plain.content, [{ type: "thinking", thinking: "just a summary", signature: "" }]);
   assert.equal(plain.reasoningCount, 0);
 });
+
+for (const shape of ["sealed-index", "content", "text-deltas"] as const) {
+  test(`Responses ${shape} reasoning survives a text-free parallel tool turn (#109)`, () => {
+    const env = { p: "opencode-go", m: "deepseek-v4.1-flash" };
+    const mapper = new OpenAiStreamMapper(env.m, 0, new Map(), env);
+    const reasoning = shape === "sealed-index"
+      ? { type: "reasoning", id: "rs_109", summary: [], encrypted_content: "sealed-109", content: [] }
+      : { type: "reasoning", id: "rs_109", summary: [], content: [{ type: "reasoning_text", text: "  inspect both files\n" }] };
+    const events = [
+      { type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_109", content: [] } },
+      ...(shape === "text-deltas" ? [{ type: "response.reasoning_text.delta", output_index: 0, delta: "  inspect both files\n" }] : []),
+      { type: "response.output_item.done", output_index: 0, item: shape === "sealed-index"
+        ? { type: "reasoning", summary: [], encrypted_content: "sealed-109" }
+        : shape === "text-deltas" ? { type: "reasoning", id: "rs_109", summary: [] } : reasoning },
+      ...["a", "b"].flatMap((id, index) => [
+        { type: "response.output_item.added", output_index: index + 1, item: { type: "function_call", id, call_id: id, name: "Read", arguments: "{}" } },
+        { type: "response.output_item.done", item: { id } },
+      ]),
+      { type: "response.completed" },
+    ].flatMap((event) => mapper.feed(event, "responses"));
+    assert.equal(mapper.reasoningCount, 1);
+    const signature = events.find((event) => (event.data.delta as { type?: string })?.type === "signature_delta")?.data.delta as { signature: string };
+    assert.deepEqual(decodeEnvelope(signature.signature), { w: "responses", ...env, r: reasoning });
+    const content = mapper.message().content as AnthropicRequest["messages"][number]["content"];
+    const carried = { replayed: 0, undecodable: 0 };
+    const next = toOpenAiRequest({ model: "m", messages: [
+      { role: "assistant", content },
+      { role: "user", content: ["a", "b"].map((id) => ({ type: "tool_result", tool_use_id: id, content: "ok" })) },
+    ] }, { model: env.m, wire: "responses", env, carried }) as ResponsesRequest;
+    assert.deepEqual(next.input.map((item) => item.type), ["reasoning", "function_call", "function_call", "function_call_output", "function_call_output"]);
+    assert.deepEqual(next.input[0], reasoning);
+    assert.equal(carried.replayed, 1);
+  });
+}
 
 // A vendor whose preset measured that it seals reasoning on request is asked on every turn, the first
 // included — waiting until a conversation already carried some would never start one. Anyone else
