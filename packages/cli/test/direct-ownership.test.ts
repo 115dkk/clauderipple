@@ -132,9 +132,12 @@ test("snapshot save failure changes no client and settings save failure retains 
   assert.throws(() => directOn(c.a));
   assert.equal(fs.readFileSync(c.settings, "utf8"), before);
   fs.rmdirSync(directStatePath(c.a));
-  // Backup creation fails after the write-ahead snapshot, before settings replacement.
-  const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15);
-  fs.mkdirSync(`${c.settings}.bak-clauderipple-${stamp}`);
+  // Backup creation fails after the write-ahead snapshot, before settings replacement. The backup is
+  // named by the second, so this second's name and the next two are taken: one name alone missed
+  // when the second turned over before directOn made its backup (Windows CI, 2026-10-29).
+  const stampAt = (ms: number) => new Date(ms).toISOString().replace(/[-:]/g, "").slice(0, 15);
+  const now = Date.now();
+  for (const ms of [now, now + 1_000, now + 2_000]) fs.mkdirSync(`${c.settings}.bak-clauderipple-${stampAt(ms)}`);
   assert.throws(() => directOn(c.a));
   assert.equal(fs.readFileSync(c.settings, "utf8"), before);
   assert.equal(JSON.parse(fs.readFileSync(directStatePath(c.a), "utf8")).cli.HTTPS_PROXY, c.proxyUrl);
