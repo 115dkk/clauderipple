@@ -746,6 +746,8 @@ export class Sessions {
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
+      const live = this.live.get(r.id);
+      if (live?.restartAfterTurn && this.sdkIdle(r, live)) { this.restartSettings(r, live); continue; }
       if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed" && this.now() >= (r.desktopHandoffRetryAt ?? 0)) this.handoff(r);
       if (!this.desktop) continue;
       const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
@@ -2888,7 +2890,9 @@ export class Sessions {
           const activity = this.taskState(r.id).activity;
           activity.notice(converted.text, this.now());
           this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
-          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1];
+          const taskId = /<task-id>([^<]+)<\/task-id>/.exec(converted.text)?.[1];
+          const task = activity.history.find(task => task.id === taskId);
+          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1] ?? task?.sub?.replace(/^sub-/, "");
           const status = /<status>([^<]+)<\/status>/.exec(converted.text)?.[1];
           if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
             this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
@@ -2954,6 +2958,7 @@ export class Sessions {
   /** A settings restart shares the handoff inbox: preserve even prefetched accepted inputs,
    * and do not create another transcript writer until the old process has actually exited. */
   private restartSettings(r: SessionRecord, live: Live): void {
+    if (this.taskState(r.id).activity.active.length) return;
     const transfer = { messages: live.pendingMessages };
     this.handingOff.set(r.id, transfer);
     this.stop(r.id, live);
@@ -2992,7 +2997,7 @@ export class Sessions {
   }
 
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
-    return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
+    return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0) && this.taskState(r.id).activity.active.length === 0;
   }
 
   private handoff(r: SessionRecord, live = this.live.get(r.id)): void {
@@ -3019,6 +3024,13 @@ export class Sessions {
     void new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
       if (this.shuttingDown) { this.handingOff.delete(r.id); return; }
       try {
+        // SDK events can arrive between result and this deferred callback. Recheck before aborting.
+        if (BUSY.has(r.state) || this.taskState(r.id).activity.active.length || this.live.get(r.id) !== live) {
+          r.desktopHandoff = "pending";
+          r.desktopHandoffAttempts!--;
+          this.save();
+          return;
+        }
         this.stop(r.id, live);
         // close() and iterator completion alone do not prove the writer has stopped.
         // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.

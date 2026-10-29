@@ -906,6 +906,100 @@ test("desktop handoff waits for idle, holds new input, persists once and names t
   assert.equal(calls.length, 1);
 });
 
+for (const owner of ["new", "open", "bridge"] as const) test(`desktop handoff preserves active background work with ${owner} ownership`, async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-background-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  let calls = 0;
+  const bridgeClient = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async () => Response.json({ data: [], worker_status: "idle" }) });
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient,
+    handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: sdkId });
+  query.emit({ type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review", run_in_background: true } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  if (owner !== "new") registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(owner === "bridge" ? { bridgeSessionId: "bridge" } : {}) });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await f.sessions.pollDesktop(); await nextTick();
+  assert.equal(query.closed, false, "main result and desktop adoption must not abort the worker");
+  assert.equal(calls, 0);
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><tool-use-id>agent</tool-use-id><status>completed</status><result>Review finished</result></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  await f.sessions.pollDesktop();
+  await waitFor(() => query.closed);
+  assert.equal(calls, owner === "new" ? 1 : 0);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "done");
+});
+
+test("a deferred handoff rechecks background activity before closing the SDK", async t => {
+  const boundary = controlledQueries();
+  let calls = 0;
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-race" });
+  query.emit({ type: "result", subtype: "success" });
+  query.emit({ type: "assistant", message: { id: "late-launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Late worker", run_in_background: true } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 1);
+  assert.equal(query.closed, false);
+  assert.equal(calls, 0);
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>stopped</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  await f.sessions.pollDesktop();
+  await waitFor(() => calls === 1);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+});
+
+test("settings restart waits for background work before closing the SDK", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 1);
+  await f.sessions.setModel(id, "claude-test", "max");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(query.closed, false);
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  await f.sessions.pollDesktop();
+  await waitFor(() => query.closed);
+});
+
+for (const toolId of [true, false]) test(`a handed-off SDK worker's stopped transcript notification closes its existing card (${toolId ? "tool id" : "task id"})`, async t => {
+  const f = await modFixture(t);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  const launch = { type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review", run_in_background: true } }] } };
+  const started = { type: "user", toolUseResult: { isAsync: true, agentId: "worker" }, message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } };
+  // Reproduce a pre-fix host record whose worker was handed off while still running.
+  f.sessions.log(f.id).append({ kind: "subagent", toolUseId: "agent", sub: "sub-agent", description: "Review", model: "sol", status: "running", steps: 3 });
+  f.sessions.log(f.id).append({ kind: "assistant", msg: "launch", model: "sol", text: "", tools: [{ id: "agent", name: "Agent", summary: "Review", input: JSON.stringify(launch.message.content[0]!.input) }] });
+  f.sessions.log(f.id).append({ kind: "tool_result", toolUseId: "agent", ok: true, text: started.message.content[0]!.content });
+  fs.appendFileSync(file, transcriptLine(launch) + transcriptLine(started));
+  // Starting the tail after the SDK's launch lines must still remember that worker.
+  const records = JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { transcriptOffset?: number }[];
+  f.sessions.shutdown();
+  records[0]!.transcriptOffset = fs.statSync(file).size;
+  fs.writeFileSync(path.join(f.dir, "sessions.json"), JSON.stringify(records));
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", onEvent() {}, onSessions() {} });
+  f.instances.push(active);
+  fs.appendFileSync(file, transcriptLine({ type: "user", isMeta: true, message: { content: `<task-notification><task-id>worker</task-id>${toolId ? "<tool-use-id>agent</tool-use-id>" : ""}<status>stopped</status><result>didn't finish before the previous session ended</result></task-notification>` } }));
+  await active.pollDesktop();
+  assert.equal(reduce(active.log(f.id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+  assert.equal(active.summaryOf(f.id)?.tasks, 0);
+  assert.equal(active.summaryOf(f.id)?.taskHistory?.[0]?.state, "stopped");
+});
+
 test("desktop handoff waits until already queued turns finish", async t => {
   const counts: number[] = [];
   const f = fixture(t, { permission: true }, { handoff: async () => { counts.push(f.fake.users.length); return "opened"; }, log: () => {} });
