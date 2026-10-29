@@ -470,7 +470,8 @@ export async function fetchUserEmail(accessToken: string, fetchImpl: FetchLike =
   }
 }
 
-async function fetchHostCatalogueAs(userAgent: string, accessToken: string, projectId: string, host: string, fetchImpl: FetchLike, signal?: AbortSignal): Promise<ParsedHostCatalogue | null> {
+/** `failed` hears why a null came back: the status, or the error's name or code, never a body or message. */
+async function fetchHostCatalogueAs(userAgent: string, accessToken: string, projectId: string, host: string, fetchImpl: FetchLike, signal?: AbortSignal, failed?: (reason: string) => void): Promise<ParsedHostCatalogue | null> {
   try {
     const response = await fetchImpl(`${host}/${GOOGLE_OAUTH.apiVersion}:fetchAvailableModels`, {
       method: "POST",
@@ -478,9 +479,15 @@ async function fetchHostCatalogueAs(userAgent: string, accessToken: string, proj
       body: JSON.stringify({ project: projectId }),
       signal: signalFor(signal),
     });
-    if (!response.ok) return null;
-    return parseHostCatalogue(await response.json().catch(() => undefined));
-  } catch {
+    if (!response.ok) {
+      failed?.(`HTTP ${response.status}`);
+      return null;
+    }
+    const parsed = parseHostCatalogue(await response.json().catch(() => undefined));
+    if (!parsed) failed?.("unreadable answer");
+    return parsed;
+  } catch (error) {
+    failed?.(signal?.aborted ? "cut off" : ((error as NodeJS.ErrnoException).code ?? (error as Error).name ?? "error"));
     return null;
   }
 }
@@ -494,12 +501,15 @@ export const CLI_CATALOGUE_GRACE_MS = 3_000;
  * before, and a second ask under the CLI UA adds only the CLI-served ones (Gemini 4 Argon). An
  * unreadable IDE answer is null as before, so a CLI-only list never replaces the static fallback.
  * The CLI ask is optional, so a stalled one is cut off `cliGraceMs` after the IDE answer instead of
- * holding the first turn after a restart for the full request timeout.
+ * holding the first turn after a restart for the full request timeout. Because the IDE catalogue
+ * still answers, a failed CLI ask is otherwise silent while Argon drops out of the list:
+ * `cliFailed` hears it, once the IDE answer is in.
  */
-export async function fetchHostCatalogue(accessToken: string, projectId: string, host: string, fetchImpl: FetchLike = fetch, signal?: AbortSignal, cliGraceMs = CLI_CATALOGUE_GRACE_MS): Promise<ParsedHostCatalogue | null> {
+export async function fetchHostCatalogue(accessToken: string, projectId: string, host: string, fetchImpl: FetchLike = fetch, signal?: AbortSignal, cliGraceMs = CLI_CATALOGUE_GRACE_MS, cliFailed?: (reason: string) => void): Promise<ParsedHostCatalogue | null> {
   const cliAbort = new AbortController();
   const cliSignal = signal ? AbortSignal.any([signal, cliAbort.signal]) : cliAbort.signal;
-  const pendingCli = fetchHostCatalogueAs(antigravityCliUserAgent(), accessToken, projectId, host, fetchImpl, cliSignal);
+  let cliFailure: string | undefined;
+  const pendingCli = fetchHostCatalogueAs(antigravityCliUserAgent(), accessToken, projectId, host, fetchImpl, cliSignal, (reason) => { cliFailure = reason; });
   const ide = await fetchHostCatalogueAs(antigravityUserAgent(), accessToken, projectId, host, fetchImpl, signal);
   if (!ide) {
     cliAbort.abort();
@@ -508,7 +518,10 @@ export async function fetchHostCatalogue(accessToken: string, projectId: string,
   const grace = setTimeout(() => cliAbort.abort(), cliGraceMs);
   const cli = await pendingCli;
   clearTimeout(grace);
-  if (!cli) return ide;
+  if (!cli) {
+    if (cliFailure && !signal?.aborted) cliFailed?.(cliFailure);
+    return ide;
+  }
   const ids = new Set(ide.models.map((m) => m.id));
   const models = [...ide.models, ...cli.models.filter((m) => servedToAntigravityCli(m.id) && !ids.has(m.id))];
   const wireIds = [...ide.wireIds, ...cli.wireIds.filter((id) => servedToAntigravityCli(id) && !ide.wireIds.includes(id))];
@@ -533,10 +546,10 @@ export type MergedCatalogue = {
 export async function fetchAvailableModels(
   accessToken: string,
   projectId: string,
-  opts: { hosts?: readonly string[]; fetchImpl?: FetchLike; signal?: AbortSignal } = {},
+  opts: { hosts?: readonly string[]; fetchImpl?: FetchLike; signal?: AbortSignal; cliFailed?: (host: string, reason: string) => void } = {},
 ): Promise<MergedCatalogue | null> {
   const hosts = opts.hosts ?? GOOGLE_OAUTH.hosts;
-  const results = await Promise.all(hosts.map(async (host) => [host, await fetchHostCatalogue(accessToken, projectId, host, opts.fetchImpl ?? fetch, opts.signal)] as const));
+  const results = await Promise.all(hosts.map(async (host) => [host, await fetchHostCatalogue(accessToken, projectId, host, opts.fetchImpl ?? fetch, opts.signal, CLI_CATALOGUE_GRACE_MS, opts.cliFailed && ((reason) => opts.cliFailed!(host, reason)))] as const));
   const byHost = new Map<string, ParsedHostCatalogue>();
   for (const [host, catalogue] of results) if (catalogue) byHost.set(host, catalogue);
   if (byHost.size === 0) return null;

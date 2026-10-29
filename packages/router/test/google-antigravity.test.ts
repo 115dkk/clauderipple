@@ -292,13 +292,17 @@ test("the host catalogue adds Argon from the CLI answer and keeps the IDE answer
       return r;
     }) as unknown as typeof fetch;
 
-  const both = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(Response.json(cliBody), Response.json(ideBody)));
+  const heard: string[] = [];
+  const hear = (reason: string): void => { heard.push(reason); };
+  const both = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(Response.json(cliBody), Response.json(ideBody)), undefined, undefined, hear);
+  assert.deepEqual(heard, [], "a CLI ask that answered is not reported");
   assert.deepEqual(both?.models.map((m) => m.id), ["gemini-3.8-flash", "gemini-4-argon"]);
   assert.deepEqual(both?.models.find((m) => m.id === "gemini-4-argon"), { id: "gemini-4-argon", name: "Gemini 4 Argon (Low)", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high"] });
   assert.deepEqual(both?.wireIds, ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"]);
 
-  const cliDown = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(new Response("no", { status: 404 }), Response.json(ideBody)));
+  const cliDown = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(new Response("no", { status: 404 }), Response.json(ideBody)), undefined, undefined, hear);
   assert.deepEqual(cliDown?.models.map((m) => m.id), ["gemini-3.8-flash"], "a failing CLI ask leaves the IDE catalogue as it was");
+  assert.deepEqual(heard.splice(0), ["HTTP 404"], "but says why Argon is missing");
 
   const ideDown = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(Response.json(cliBody), null));
   assert.equal(ideDown, null, "a failing IDE ask is unreadable as before, so the static fallback is not replaced by Argon alone");
@@ -310,8 +314,9 @@ test("the host catalogue adds Argon from the CLI answer and keeps the IDE answer
     return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
   }) as unknown as typeof fetch;
   const started = performance.now();
-  const cut = await fetchHostCatalogue("tok", "proj", "https://h.test", stalled, undefined, 20);
+  const cut = await fetchHostCatalogue("tok", "proj", "https://h.test", stalled, undefined, 20, hear);
   assert.deepEqual(cut?.models.map((m) => m.id), ["gemini-3.8-flash"]);
+  assert.deepEqual(heard.splice(0), ["cut off"]);
   assert.ok(performance.now() - started < 2_000, "the IDE catalogue is not held by a stalled CLI ask");
 });
 

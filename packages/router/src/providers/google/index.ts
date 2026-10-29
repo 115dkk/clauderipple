@@ -445,6 +445,8 @@ export class GoogleAdapter {
     const catalogue: MergedCatalogue | null = await fetchAvailableModels(credential.accessToken, credential.projectId, {
       hosts,
       ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+      // The IDE list still answers, so without this line Gemini 4 Argon just goes missing.
+      cliFailed: (host, reason) => this.log.warn(`google ${this.name}: CLI model list on ${host} failed (${reason}); models served only to the CLI client, such as Gemini 4 Argon, are left out`),
     });
     if (!catalogue) {
       this.log.warn(`google ${this.name}: fetchAvailableModels returned nothing; falling back to the static list`);
