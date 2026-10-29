@@ -53,7 +53,7 @@ for (const platform of ["darwin", "linux"] as const) {
     assert.equal(uninstallLauncher(opts).paths.length, 1);
     assert.equal(uninstallLauncher(opts).detail, "no launcher was installed");
   });
-  test(`${platform}: exact legacy evidence, not id/marker alone; home symlink equivalence`, { skip: !fileSymlinks }, () => {
+  test(`${platform}: exact legacy evidence, not id/marker alone`, () => {
     const { a, b, rt } = context();
     const opts = { rt, home: a, platform, version: "1" };
     installLauncher(opts);
@@ -64,18 +64,21 @@ for (const platform of ["darwin", "linux"] as const) {
     assert.equal(installLauncher({ ...opts, home: b }).ok, false);
     assert.equal(fs.readFileSync(file, "utf8"), legacy);
     assert.equal(installLauncher(opts).ok, true);
-    // A linked home is the same installation where homes are POSIX paths, which `normalizeHome`
-    // resolves. On a Windows host the simulated homes are Windows paths, compared as text.
-    if (process.platform !== "win32") {
-      const alias = path.join(path.dirname(b), "alias");
-      fs.symlinkSync(a, alias, "dir");
-      assert.equal(installLauncher({ ...opts, home: alias }).ok, true);
-    }
     fs.writeFileSync(file, platform === "linux" ? "[Desktop Entry]\nX-ClaudeRipple-Launcher=1\nExec=other\n" : "#!/bin/sh\nexec other\n");
     const unknown = fs.readFileSync(file, "utf8");
     assert.equal(uninstallLauncher(opts).ok, false);
     assert.equal(installLauncher(opts).ok, false);
     assert.equal(fs.readFileSync(file, "utf8"), unknown);
+  });
+  // A linked home is the same installation where homes are POSIX paths, which `normalizeHome`
+  // resolves. On a Windows host the simulated homes are Windows paths, compared as text.
+  test(`${platform}: home symlink equivalence`, { skip: process.platform === "win32" || !fileSymlinks }, () => {
+    const { a, b, rt } = context();
+    const opts = { rt, home: a, platform, version: "1" };
+    assert.equal(installLauncher(opts).ok, true);
+    const alias = path.join(path.dirname(b), "alias");
+    fs.symlinkSync(a, alias, "dir");
+    assert.equal(installLauncher({ ...opts, home: alias }).ok, true);
   });
   test(`${platform}: broken symlink and inspection failure are not absence`, { skip: !fileSymlinks }, () => {
     const { a, rt } = context();
