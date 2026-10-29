@@ -282,6 +282,11 @@ test("this installation's task stops, removes and reports only its own router pi
   assert.ok(calls.some((s) => s.includes("Unregister-ScheduledTask")));
 });
 
+test("#110: no router process yet is no pid, not a crash", () => {
+  const run = (script: string) => (script.includes("Get-CimInstance") ? { ok: true, out: "null\r\n" } : { ok: true, out: "ok" });
+  assert.equal(schtasks.agentPid(undefined, { home: winB, expectedRouter: "C:\\b\\router.js", deps: { definition: () => taskOf(winB), run } }), null);
+});
+
 test("a task definition with no installation in it is not replaced", () => {
   const deps = { definition: () => taskOf(winA, { arguments: "--headless powershell.exe -NoProfile" }), run: taskRecorder().run };
   assert.deepEqual(schtasks.taskOwnership(winB, deps), { state: "unknown", home: null });

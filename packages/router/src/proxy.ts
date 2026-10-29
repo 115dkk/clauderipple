@@ -22,9 +22,13 @@ import zlib from "node:zlib";
 import type { Duplex } from "node:stream";
 import type { Config, ProviderModel } from "./config.ts";
 import type { Logger } from "./log.ts";
-import { exhaustionHeaders, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
+import { exhaustionHeaders, ModelHealth, modelDeprecation, ProviderHealth, providerExhaustion, UpstreamHealth } from "./health.ts";
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
+import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder.ts";
+import { routingSettings } from "../../mod/hooks/modes.ts";
+import { candidateKey, isAllowed } from "../../mod/hooks/settings.ts";
+import { readModRoutingSettings } from "./mod-settings.ts";
 import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
@@ -34,7 +38,7 @@ import { classify, CredentialPool, retryAfterMs, type Credential } from "./pool.
 import { PRESETS } from "./presets.ts";
 import { ChatGptAdapter, type ChatGptAccountStatus, type ImageRequest, type ImageResult } from "./providers/chatgpt/index.ts";
 import { OpenAiCompatibleAdapter } from "./providers/openai/index.ts";
-import { GoogleAdapter, type GoogleAccountStatus } from "./providers/google/index.ts";
+import { GoogleAdapter, googleKeyRejected, type GoogleAccountStatus } from "./providers/google/index.ts";
 import type { QuotaGroup } from "./providers/google/usage.ts";
 import { OpenCodeUsage, isOpenCodeGo, type OpenCodeWindow } from "./providers/opencode-usage.ts";
 import { GrokAdapter } from "./providers/grok/index.ts";
@@ -53,7 +57,7 @@ import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage } from "./providers/anthropic-usage.ts";
 import { ClaudeCurrentIdentity } from "./providers/anthropic-identity.ts";
-import { dropForeignThinking } from "./thinking.ts";
+import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -265,7 +269,12 @@ export class Proxy {
   private readonly implicitCredentialHeaders = new Map<string, string>();
   /** Recent non-Anthropic answers whose vendor ids cannot identify the route by their shape. */
   private readonly routedMessageIds = new Set<string>();
+  private readonly thinkingOrigins = new ThinkingOrigins();
   readonly providerHealth = new ProviderHealth();
+  readonly modelHealth = new ModelHealth();
+  private readonly healthConfig = new Map<string, { config: string; credentials: string; keys: Record<string, string> }>();
+  /** Agent/session-scoped spawn snapshots survive compaction, never shared by model id. */
+  private readonly workerLadders = new Map<string, WorkerLadderRoute>();
 
   /** Latest rate-limit snapshot reported by any chatgpt provider (for the admin GUI). */
   get chatgptRateLimits(): Record<string, Record<string, unknown> | null> {
@@ -505,8 +514,40 @@ export class Proxy {
     return "unknown";
   }
 
+  /** ConfigStore calls this on reload; requests also reconcile injected/mutable configs. */
+  reconcileConfig(cfg: Config): void {
+    const digest = (value: unknown): string => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    for (const [name, provider] of Object.entries(cfg.providers)) {
+      const authentication = Object.entries(provider).filter(([field]) =>
+        ["type", "auth", "headers", "credentials", "apiKey", "accountPool", "home"].includes(field));
+      const credentials = digest(authentication);
+      const config = digest([...authentication, ...Object.entries(provider).filter(([field]) =>
+        ["url", "models", "wire"].includes(field))]);
+      const declared = "credentials" in provider ? provider.credentials : undefined;
+      const keys = declared?.length ? Object.fromEntries(declared.map(key => [key.id, digest(key.headers)])) : { default: credentials };
+      const previous = this.healthConfig.get(name);
+      if (previous && previous.config !== config) this.modelHealth.clear(name);
+      if (previous && previous.credentials !== credentials) {
+        this.providerHealth.clear(name);
+        // Preserve unchanged spent keys when a new one is added; only replaced generations revive.
+        for (const [id, generation] of Object.entries(previous.keys)) {
+          if (keys[id] !== generation) this.pool.clear(name, id);
+        }
+      }
+      this.healthConfig.set(name, { config, credentials, keys });
+    }
+    for (const name of this.healthConfig.keys()) {
+      if (cfg.providers[name]) continue;
+      this.healthConfig.delete(name);
+      this.modelHealth.clear(name);
+      this.providerHealth.clear(name);
+      this.pool.clear(name);
+    }
+  }
+
   constructor(deps: ProxyDeps) {
     this.deps = deps;
+    this.reconcileConfig(deps.config());
     this.claudeAccounts = new ClaudeAccountAuthPool({
       home: deps.home,
       log: deps.log,
@@ -750,6 +791,7 @@ export class Proxy {
     // The agent files' derived aliases join the config's own, so a marker naming a worker resolves
     // the same way here as it does everywhere else. Explicit aliases win; the scan is mtime-cached.
     const cfg = withAgentAliases(this.deps.config(), this.deps.agentDir ?? defaultAgentDir(), log);
+    this.reconcileConfig(cfg);
     const t0 = Date.now();
     const method = req.method ?? "?";
     const path = req.url ?? "/";
@@ -811,7 +853,7 @@ export class Proxy {
       if (failed) this.stats.failed++;
       else this.stats.completed++;
       const ms = Date.now() - t0;
-      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${note ? " " + note : ""}`);
+      log.info(`${tag} ${method} ${path} -> ${status} ${bytes}B ${(ms / 1000).toFixed(1)}s${record.credential ? ` credential=${record.credential}` : ""}${note ? " " + note : ""}`);
       if (isLoggedRequest) {
         const numericStatus = Number(status);
         const usage = extra?.usage ?? observedUsage;
@@ -842,6 +884,9 @@ export class Proxy {
             const oldest = this.routedMessageIds.values().next().value;
             if (oldest !== undefined) this.routedMessageIds.delete(oldest);
           }
+        }
+        if (completed.ok && completed.kind === "messages" && numericStatus >= 200 && numericStatus < 300 && extra?.upstreamCalled !== false) {
+          this.modelHealth.success(completed.provider, completed.target);
         }
         this.deps.requests.add(completed);
       }
@@ -897,6 +942,22 @@ export class Proxy {
       }
       if (isAutoModeClassifier(json)) record.purpose = "auto-mode-classifier";
     }
+    // Pool affinity must distinguish workers whose injected first 4000 characters are identical.
+    // Capture before routing/sanitizing rewrites the prompt; retries use exactly this same identity.
+    // Metadata-less side requests retain their shared cache-class key, never a per-request id.
+    const cacheRequest = json && Array.isArray(json.messages) ? json as AnthropicRequest : null;
+    const sideRequest = cacheRequest && !subagent && !cacheRequest.metadata?.user_id && cacheRequest.messages.length <= 1;
+    const affinity = cacheRequest ? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined) ?? conversationKey(cacheRequest) : undefined;
+    const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false): void => {
+      // count_tokens is answered locally by the translated adapters: no key was actually sent.
+      const type = cfg.providers[name]?.type;
+      if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
+      record.credential = this.credentialLabel(name, using, credentials);
+      const first = this.pool.pick(name, credentials);
+      const reason = retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
+      const states = this.pool.report(name, credentials).map((row, i) => `${this.credentialLabel(name, credentials[i]!, credentials)}:${row.paused ? "paused" : row.state}`).join(", ");
+      log.info(`KEY ${name} credential=${record.credential} conversation=${affinity ?? "-"} reason=${reason} candidates=[${states}]`);
+    };
     const search = json && isApiHost && pathname === "/v1/messages" ? webSearchQuery(json) : null;
     let searchAttempted = false;
     const markSearchAttempted = (): void => { searchAttempted = true; };
@@ -958,7 +1019,10 @@ export class Proxy {
         delete output.effort;
         json.output_config = output;
       }
-      const resolved = fetchTarget ?? (json ? resolve(model, json, cfg) : null);
+      let resolved = fetchTarget ?? (json ? resolve(model, json, cfg) : null);
+      if (!fetchTarget && subagent && resolved && json) {
+        resolved = this.workerFallbacks(resolved, json, cfg, typeof model === "string" ? model : "", record.session && `${record.session}:${agentId}`);
+      }
 
       // A non-Claude model this router cannot route is refused here, by name, instead of being
       // forwarded to Anthropic. `PASS` on such a request answers 404 from Anthropic and looks like
@@ -989,6 +1053,9 @@ export class Proxy {
       // limited for the next hour is skipped rather than rediscovered once per request. A distinct
       // prompt refusal can also select one fallback below, but only before any response is written.
       let route = resolved ? this.chooseTarget(resolved, cfg, log) : null;
+      if (resolved?.ladderPick && route && (route.provider !== resolved.provider || route.model !== resolved.model)) {
+        unwrittenFallbackNote = `ladder pick=${resolved.ladderPick} fallback ${resolved.provider}/${resolved.model} → ${route.provider}/${route.model}: ${this.unavailableReason(resolved) ?? "provider_unusable"}`;
+      }
       /** The request before any target rewrote it, kept only when a Google target may hand the turn back. */
       let pristine: typeof json | undefined;
       const source = typeof model === "string" ? model : "-";
@@ -1041,6 +1108,7 @@ export class Proxy {
       let compatChanges: string[] = [];
       /** The credential this attempt is using, and so the one a failure is charged to. */
       let chosen: Credential | null = null;
+      let credentialCandidates: readonly Credential[] = [];
       let penalised: { provider: string; id: string } | null = null;
       let target: { protocol: "http:" | "https:"; host: string; port: number; agent: http.Agent | https.Agent; extraHeaders: Record<string, string>; basePath?: string; dropClientAuth?: boolean; dropHeaders?: Set<string>; dropHeaderPrefixes?: string[] };
       // Re-enter only for the one unwritten Google turn (prompt refusal or no model capacity). Each target sees the original
@@ -1060,6 +1128,17 @@ export class Proxy {
           // several protocols is one provider, and this is where the model's own shape is folded in so
           // the branches below pick the adapter it actually needs.
           const provider = providerFor(configured, route.model);
+          // Translators scope reasoning themselves. A native/compatible fallback cannot validate
+          // the original provider's opaque signatures, whether selected by a ladder or a route.
+          if (provider.type === "anthropic-compatible" || provider.type === "anthropic") {
+            const targetProvider = route.provider;
+            if (resolved && (targetProvider !== resolved.provider || route.model !== resolved.model)) {
+              dropForeignThinking(json, targetProvider !== resolved.provider
+                ? block => this.thinkingOrigins.owns(targetProvider, block) : undefined);
+            } else {
+              this.thinkingOrigins.dropKnownForeign(json, targetProvider);
+            }
+          }
           // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
           if (!pristine && provider.type === "google") pristine = structuredClone(json);
           rewriteBody(json, route, cfg.effortClamp);
@@ -1107,17 +1186,18 @@ export class Proxy {
               finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
               return;
             }
-            const key = conversationKey(json as unknown as AnthropicRequest);
-            let using = this.pool.pick(route.provider, credentials, key) ?? credentials[0]!;
+            let using = this.pool.pick(route.provider, credentials, affinity) ?? credentials[0]!;
+            recordCredential(route.provider, using, credentials);
             const tried = new Set([using.id]);
             const poolName = route.provider;
             const next = credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
               if (!classify(status, undefined, body).retryable) return null;
-              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), key);
+              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), affinity);
               if (!candidate) return null;
               this.pool.penalise(poolName, using.id, status, retryAfter, body);
-              log.info(`RETRY ${poolName}: ${using.label ?? using.id} answered ${status}, trying ${candidate.label ?? candidate.id}`);
+              log.info(`RETRY ${poolName}: ${this.credentialLabel(poolName, using, credentials)} answered ${status}, trying ${this.credentialLabel(poolName, candidate, credentials)}`);
               using = candidate;
+              recordCredential(poolName, using, credentials, true);
               tried.add(using.id);
               return using.headers;
             } : undefined;
@@ -1125,7 +1205,10 @@ export class Proxy {
               const o = await this.openai(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, { headers: using.headers, ...(next ? { next } : {}) });
               if (o.status >= 400) this.pool.penalise(poolName, using.id, o.upstreamStatus ?? o.status, o.retryAfterMs, o.errorBody);
               else if (o.status > 0) this.pool.succeed(poolName, using.id);
-              if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+              if (!path.startsWith("/v1/messages/count_tokens")) {
+                this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+                this.modelHealth.observe(route.provider, route.model, o.modelUnavailable);
+              }
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
               if (!res.destroyed && !req.aborted) this.pool.penalise(poolName, using.id, 0);
@@ -1149,8 +1232,42 @@ export class Proxy {
             const routeEffort = effortOf(json);
             if (routeEffort) record.effort = routeEffort;
             tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
+            // The api-key wire takes its key from the provider's pool like every other translated
+            // wire: folding a relay's Gemini model into a `google` provider used to leave only its
+            // first key, so a spent key answered 429 to every turn, with no failover and no
+            // `credential` in the log (#112). The antigravity accounts are the adapter's own pool
+            // and rotate inside it, exactly as before.
+            const credentials = provider.auth === "api-key" ? this.credentialsOf(route.provider, provider) : [];
+            if (provider.auth === "api-key" && credentials.length === 0) {
+              const out = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "모든 API 키가 일시 중지되어 있습니다." } });
+              res.writeHead(503, { "content-type": "application/json" }).end(out);
+              finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
+              return;
+            }
+            const poolName = route.provider;
+            let using = provider.auth === "api-key" ? this.pool.pick(poolName, credentials, affinity) ?? credentials[0]! : null;
+            if (using) recordCredential(poolName, using, credentials);
+            const tried = new Set(using ? [using.id] : []);
+            // Nothing has reached the client here yet, so a refusal another key could answer is asked
+            // again inside the turn instead of being handed to the user to retry by hand.
+            // Google can reject a key with HTTP 400. Only structured auth evidence makes that
+            // a credential refusal; an ordinary invalid request must never walk the pool.
+            const poolStatus = (status: number, body: string): number => status === 400 && googleKeyRejected(status, body) ? 401 : status;
+            const next = using && credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
+              const judgedStatus = poolStatus(status, body);
+              if (!classify(judgedStatus, undefined, body).retryable) return null;
+              const current = using!;
+              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), affinity);
+              if (!candidate) return null;
+              this.pool.penalise(poolName, current.id, judgedStatus, retryAfter, body);
+              log.info(`RETRY ${poolName}: ${this.credentialLabel(poolName, current, credentials)} answered ${status}, trying ${this.credentialLabel(poolName, candidate, credentials)}`);
+              using = candidate;
+              recordCredential(poolName, candidate, credentials, true);
+              tried.add(candidate.id);
+              return candidate.headers;
+            } : undefined;
             try {
-              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, using ? { headers: provider.credentials?.length ? using.headers : {}, ...(next ? { next } : {}) } : undefined);
               if (o.kind === "prompt-incompatible" || o.kind === "model-capacity") {
                 const why = o.kind === "prompt-incompatible" ? "prompt" : "capacity";
                 const alreadyRetried = unwrittenSeen;
@@ -1174,11 +1291,20 @@ export class Proxy {
                 finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" } : undefined);
                 return;
               }
-              this.recordOutcome(route.provider, o.status);
-              if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+              // The answer is charged to the key that actually produced it, which after a retry is a
+              // later one than the turn started on.
+              if (using) {
+                if (o.status >= 400) this.pool.penalise(poolName, using.id, poolStatus(o.upstreamStatus ?? o.status, o.errorBody ?? ""), o.retryAfterMs, o.errorBody);
+                else if (o.status > 0) this.pool.succeed(poolName, using.id);
+              } else this.recordOutcome(route.provider, o.status);
+              if (!path.startsWith("/v1/messages/count_tokens")) {
+                this.providerHealth.observe(route.provider, o.status, o.exhaustion);
+                this.modelHealth.observe(route.provider, route.model, o.modelUnavailable);
+              }
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
-              this.recordOutcome(route.provider, 0);
+              if (using) this.pool.penalise(poolName, using.id, 0);
+              else this.recordOutcome(route.provider, 0);
               finish("-", 0, `google error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
               if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
               else res.destroy();
@@ -1242,9 +1368,11 @@ export class Proxy {
               tag = `CLAUDE ${route.tag} account=app (no usable pool account)`;
               break;
             }
-            chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+            chosen = this.pool.pick(route.provider, credentials, affinity);
             const using = chosen ?? credentials[0]!;
             chosen = using;
+            credentialCandidates = credentials;
+            recordCredential(route.provider, using, credentials);
             penalised = { provider: route.provider, id: using.id };
             target = {
               protocol: "https:",
@@ -1303,15 +1431,15 @@ export class Proxy {
             finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
             return;
           }
-          // The same key the prompt cache is keyed on. `metadata.user_id` alone is one value for every
-          // conversation a user has, so using it raw would drag all of them onto one credential at once
-          // — the opposite of what stickiness is for (see conversationKey and ARCHITECTURE §4).
-          chosen = this.pool.pick(route.provider, credentials, conversationKey(json as AnthropicRequest));
+          // Use the original conversation/agent identity, not the truncated provider cache key.
+          chosen = this.pool.pick(route.provider, credentials, affinity);
           // Nothing usable means every credential is cooling, and the turn still has to go somewhere:
           // the first one, so the request carries real credentials rather than none, and so the answer
           // is charged to the credential that actually produced it.
           const using = chosen ?? credentials[0]!;
           chosen = using;
+          credentialCandidates = credentials;
+          recordCredential(route.provider, using, credentials);
           penalised = { provider: route.provider, id: using.id };
           target = {
             protocol,
@@ -1337,7 +1465,10 @@ export class Proxy {
           target = { protocol: "https:", host: cfg.upstream, port: this.deps.upstreamPort ?? 443, agent: this.deps.upstreamAgent ?? this.upstreamAgent, extraHeaders: {} };
           tag = `PASS ${typeof model === "string" ? model : "-"}`;
           // Passthrough stays byte-exact unless another model's thinking would get the turn refused.
-          if (json && dropForeignThinking(json) > 0) body = Buffer.from(JSON.stringify(json));
+          if (json) {
+            const removed = this.thinkingOrigins.dropKnownForeign(json, "anthropic");
+            if (dropForeignThinking(json) + removed > 0) body = Buffer.from(JSON.stringify(json));
+          }
         } else {
           target = { protocol: "https:", host: reqHost, port: 443, agent: this.agentFor(`host:${reqHost}`, "https:"), extraHeaders: {} };
           tag = `WEB ${reqHost}`;
@@ -1441,7 +1572,7 @@ export class Proxy {
         const available = native ? this.claudeAccounts.peekCredentials() : this.credentialsOf(route.provider, provider);
         const rest = available.filter((c) => !tried.has(c.id));
         if (rest.length === 0) return null;
-        const next = this.pool.pick(route.provider, rest, conversationKey(json as AnthropicRequest));
+        const next = this.pool.pick(route.provider, rest, affinity);
         return next && native ? { ...next, headers: withClientBetas(next.headers, req.headers["anthropic-beta"]) } : next;
       };
 
@@ -1505,15 +1636,14 @@ export class Proxy {
       const onUpstreamResponse = (upRes: http.IncomingMessage): void => {
         if (target.host === cfg.upstream) this.deps.health.success();
         const status = upRes.statusCode ?? 0;
-        // A 403 is the one status whose meaning is in its body. A relay reporting a broken upstream
-        // must not be charged to the credential — that is what made one working key answer every turn
-        // with an authentication error for a minute (2026-09-21). Every other status is judged from
-        // the status alone, and its body is left for the forward below, untouched.
+        // Read body-dependent refusals before committing headers. A relay 403 can report its own
+        // broken upstream, while the narrowly classified workspace-region 400 (#101) rests this key
+        // and can be answered by another. Other 400s remain request errors and never walk the pool.
         // 402 and 429 are read ahead as well: a definite billing/quota exhaustion must be answered
         // with `x-should-retry: false` before the headers go out, and only its body says whether a
         // 429 is exhausted or an ordinary rate limit (#89). A bootstrap response is never a model
         // turn and is forwarded as it arrives.
-        if (status === 403 || (!isBootstrap && (status === 402 || status === 429))) {
+        if (status === 403 || (!isBootstrap && (status === 400 || status === 402 || status === 429))) {
           bufferBody(upRes, ERROR_HEAD_MAX).then((whole) => onUpstreamJudged(upRes, status, whole)).catch((e: Error) => {
             log.warn(`upstream ${status}: could not read the body: ${e.message}`);
             finish(String(status), 0, `upstream ${status}: body read failed`);
@@ -1579,8 +1709,9 @@ export class Proxy {
         // turn is committed, because replacing a half-sent stream splices two answers together.
         const retry = status >= 400 ? nextCredential(status, errBody) : null;
         if (retry) {
-          const previousId = retry.ownerId ? penalised!.id.split(":", 1)[0]! : penalised!.id;
-          log.info(`RETRY ${route!.provider}: ${previousId} answered ${status}, trying ${retry.ownerId ?? retry.id}`);
+          const credentials = credentialCandidates;
+          log.info(`RETRY ${route!.provider}: ${this.credentialLabel(route!.provider, chosen!, credentials)} answered ${status}, trying ${this.credentialLabel(route!.provider, retry, credentials)}`);
+          recordCredential(route!.provider, retry, credentials, true);
           tried.add(retry.id);
           usedCredentialHeaders = { ...usedCredentialHeaders, ...(chosen?.headers ?? {}), ...retry.headers };
           chosen = retry;
@@ -1682,6 +1813,8 @@ export class Proxy {
         const tap = new ResponseUsageTap(
           typeof upRes.headers["content-type"] === "string" ? upRes.headers["content-type"] : undefined,
           typeof upRes.headers["content-encoding"] === "string" ? upRes.headers["content-encoding"] : undefined,
+          status >= 200 && status < 300 && pathname === "/v1/messages"
+            ? block => this.thinkingOrigins.remember(route?.provider ?? "anthropic", block) : undefined,
         );
         // An error body is the only thing that says why the provider refused; keep its head for the
         // log and the Logs page. A DeepSeek 401 went unexplained for a day because only the status
@@ -1721,6 +1854,7 @@ export class Proxy {
           const errorBody = status >= 400 ? decodeBodyToText(Buffer.concat(errorHead), upRes.headers["content-encoding"]) : "";
           if (route && path.startsWith("/v1/messages") && !path.startsWith("/v1/messages/count_tokens")) {
             this.providerHealth.observe(route.provider, status, providerExhaustion(status, errorBody, retryAfterMs(upRes.headers)));
+            this.modelHealth.observe(route.provider, route.model, modelDeprecation(status, errorBody));
           }
           const note = status >= 400 ? `upstream ${status}: ${errorSnippet(Buffer.concat(errorHead), upRes.headers["content-encoding"], [...errorSecrets], upRes.headers["content-type"])}` : undefined;
           // Anthropic forgets a conversation's server-side thread after a few idle minutes, and the CLI
@@ -1848,6 +1982,68 @@ export class Proxy {
     return resolveCompatibleCaps(preset ? { ...(preset.serverTools ? { serverTools: true } : {}) } : undefined, provider.caps).serverTools;
   }
 
+  /** Bind the task's spawn snapshot to its agent, not to x@effort (several tiers can use it). */
+  private workerFallbacks(resolved: Resolved, json: Record<string, unknown>, cfg: Config, model: string, key?: string): Resolved {
+    let snapshot = key ? this.workerLadders.get(key) : undefined;
+    if (!snapshot && Array.isArray(json.messages)) {
+      // register.tsx prepends this line to the spawn prompt, not to later history or blocks.
+      // Only leading engine reminders may precede it; removing reminders elsewhere can expose prose.
+      const content: unknown = json.messages.find(message => message?.role === "user")?.content;
+      const first: unknown = Array.isArray(content) ? content[0] : undefined;
+      const text = typeof content === "string" ? content : first && typeof first === "object" &&
+        "type" in first && first.type === "text" && "text" in first && typeof first.text === "string" ? first.text : "";
+      snapshot = readWorkerLadder(text.replace(/^(?:\s*<system-reminder>[\s\S]*?<\/system-reminder>)+\s*/, ""));
+    }
+    // Never override an explicit marker/rule that resolved somewhere other than the spawn's model.
+    if (!snapshot || snapshot.model !== model) return resolved;
+    const picked = resolve(snapshot.model, {}, cfg);
+    if (!picked || picked.provider !== resolved.provider || picked.model !== resolved.model || picked.effort !== resolved.effort) return resolved;
+    if (key && !this.workerLadders.has(key)) {
+      this.workerLadders.set(key, snapshot);
+      if (this.workerLadders.size > 10_000) this.workerLadders.delete(this.workerLadders.keys().next().value!);
+    }
+    const allowed = this.savedLadderTargets(cfg);
+    const fallbacks = snapshot.fallbacks.flatMap(id => {
+      const target = resolve(id, {}, cfg);
+      return target && allowed.some(step => step.provider === target.provider && step.model === target.model && step.effort === target.effort)
+        ? [{ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}) }] : [];
+    });
+    return { ...resolved, fallbacks, ladderPick: snapshot.pick };
+  }
+
+  /** Task text is not authority: even a bound snapshot must remain on the current saved worker set. */
+  private savedLadderTargets(cfg: Config): Resolved[] {
+    try {
+      const saved = readModRoutingSettings(this.deps.home);
+      if (!saved.stored) return [];
+      const settings = routingSettings(saved.settings);
+      const rules = [settings.rules.general, ...Object.values(settings.domainRules ?? {})];
+      return rules.flatMap(rule => Object.values(rule.rungs).flatMap(steps => (steps ?? []).flatMap(step => {
+        const model = step.target.agent === "general-purpose" ? step.target.model : cfg.aliases[step.target.agent];
+        if (!model) return [];
+        const target = resolve(`${model.replace(/@[^@]*$/, "")}@${step.effort}`, {}, cfg);
+        return target && settings.providers[target.provider] !== false &&
+          isAllowed(candidateKey(step.target), target.provider, settings.allow, settings.allowKnown) ? [target] : [];
+      })));
+    } catch (error) {
+      this.deps.log.warn(`worker ladder: saved settings unavailable; not rerouting (${(error as Error).message})`);
+      return [];
+    }
+  }
+
+  private unavailableReason(target: Pick<Resolved, "provider" | "model">): string | undefined {
+    const retired = this.modelHealth.get(target.provider, target.model)?.reason;
+    if (retired) return retired;
+    const exhaustion = this.providerHealth.snapshot()[target.provider];
+    if (!exhaustion) return undefined;
+    const configured = this.deps.config().providers[target.provider];
+    const provider = configured && providerFor(configured, target.model);
+    // An explicit key pool knows more than a provider-wide advisory from one spent key.
+    if (provider && "credentials" in provider && provider.credentials?.length &&
+        this.pool.hasUsable(target.provider, this.credentialsOf(target.provider, provider))) return undefined;
+    return exhaustion.reason;
+  }
+
   /**
    * The provider this turn actually goes to. The primary unless every one of its credentials is
    * cooling or quarantined, in which case the first fallback that has something usable takes it.
@@ -1857,11 +2053,17 @@ export class Proxy {
    */
   private chooseTarget(resolved: Resolved, cfg: Config, log: Logger): Resolved {
     if (!resolved.fallbacks?.length) return resolved;
+    const reason = this.unavailableReason(resolved);
+    const provider = cfg.providers[resolved.provider];
+    // An ordinary API rate limit is not definite exhaustion. OAuth adapters additionally know
+    // when every account (or the model's quota group) is unavailable without a billing error.
+    const accounts = provider?.type === "chatgpt" || provider?.type === "anthropic" || provider?.type === "google" && provider.auth === "antigravity";
+    if (resolved.ladderPick && !reason && !accounts) return resolved;
     if (this.targetUsable(resolved, cfg)) return resolved;
     for (const f of resolved.fallbacks) {
       if (f.provider === resolved.provider && f.model === resolved.model) continue;
       if (!this.targetUsable({ ...f, effort: f.effort ?? resolved.effort }, cfg)) continue;
-      log.info(`FAILOVER ${resolved.provider}/${resolved.model} exhausted → ${f.provider}/${f.model}`);
+      log.info(`${resolved.ladderPick ? `LADDER pick=${resolved.ladderPick}` : "FAILOVER"} ${resolved.provider}/${resolved.model} → ${f.provider}/${f.model} reason=${reason ?? "provider_unusable"}`);
       // The tag names the model that answers, not the one that could not: a log line saying `->m1`
       // for a turn that ran on m2 is the kind of thing that costs an hour to disbelieve.
       const asked = resolved.tag.split("->")[0] ?? resolved.model;
@@ -1890,7 +2092,7 @@ export class Proxy {
 
   private targetUsable(target: Pick<Resolved, "provider" | "model"> & { effort?: string | undefined }, cfg: Config): boolean {
     const configured = cfg.providers[target.provider];
-    if (!configured) return false;
+    if (!configured || this.unavailableReason(target)) return false;
     const provider = providerFor(configured, target.model);
     if (provider.type === "anthropic") {
       if (!provider.accountPool || provider.auth !== "claude-code") return false;
@@ -1932,6 +2134,18 @@ export class Proxy {
     if (previous !== undefined && previous !== fingerprint) this.pool.clear(name, "default");
     this.implicitCredentialHeaders.set(name, fingerprint);
     return [{ id: "default", headers }];
+  }
+
+  /** Only explicit labels or configured ordinals are public; runtime ids may be secrets. */
+  private credentialLabel(name: string, credential: Credential, available: readonly Credential[]): string {
+    const provider = this.deps.config().providers[name];
+    const configured = provider && "credentials" in provider ? provider.credentials : undefined;
+    const credentials = configured?.length ? configured : available;
+    const index = credentials.findIndex((candidate) => candidate.id === credential.id);
+    const secrets = credentialHeaderValues(credentials.flatMap((candidate) => Object.entries(candidate.headers)));
+    // OAuth labels are derived from account emails, not operator-supplied key labels.
+    const label = !credential.ownerId && credential.label ? redactErrorText(credential.label, secrets, 80) : "";
+    return label || `#${index + 1}`;
   }
 
   clearCredentialCooldown(provider: string, id: string): void {

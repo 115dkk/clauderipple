@@ -202,6 +202,18 @@ function savedContextWindow(modelId) {
   const entry = ((currentConfig && currentConfig.cli && currentConfig.cli.extraModels) || []).find((item) => item.model === modelId);
   return entry && Number.isFinite(entry.contextWindow) ? entry.contextWindow : undefined;
 }
+// A model whose window neither its provider nor the live Codex catalogue states runs on the global
+// fallback (`cli.autoCompactWindow`) — a number nobody measured for it. Saying so on the model's own
+// row is the only place it shows: Hive's `/models` lists ids and nothing else, and a silent fallback
+// is what made a 1M model compact at a quarter of its window.
+function modelWindowNote(model) {
+  if (Number.isFinite(model.contextWindow)) return null;
+  if (Number.isFinite(pickerContextWindows.catalogWindows[model.id])) return null;
+  const fallback = currentConfig && currentConfig.cli ? currentConfig.cli.autoCompactWindow : undefined;
+  return Number.isFinite(fallback)
+    ? t("providers.windowUnknown", { fallback: formatNumber(fallback) })
+    : t("providers.windowUnknownNoFallback");
+}
 
 let currentConfig = null;
 let status = null;
@@ -2423,7 +2435,14 @@ function providerModelsPanel(name, provider) {
   const edit = el("button", { class: "btn secondary compact", type: "button", text: t("common.edit"), onclick: () => openProviderForm({ name, provider }) });
   return el("div", { class: "provider-panel" }, [
     section(t("providers.selectedModels"), models.length
-      ? models.map((model) => cell(labelOf(model), modelEffortTag(model) ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: modelEffortTag(model) }) : null, el("span", { class: "cell-sub mono", text: model.id }), "provider-model-row"))
+      ? models.map((model) => {
+          const tag = modelEffortTag(model);
+          const note = modelWindowNote(model);
+          return cell(labelOf(model), tag ? el("span", { class: `model-effort-tag ${model.effortLevels.length ? "has-effort" : "no-effort"}`, text: tag }) : null, [
+            el("span", { class: "cell-sub mono", text: model.id }),
+            note ? el("span", { class: "cell-sub warn-text", text: note }) : null,
+          ], "provider-model-row");
+        })
       : [el("div", { class: "cell-note", text: t("providers.noModels") })], t("providers.modelsHelp"), edit),
   ]);
 }
@@ -3215,6 +3234,9 @@ async function loadProviders() {
   try {
     await loadCatalogs();
     currentConfig = await api("/api/config");
+    // The Models tab says which models have no known window, and the live Codex catalogue's is not
+    // in the config. A router too old to answer leaves the note off rather than breaking the screen.
+    pickerContextWindows = await api("/api/context-windows").catch(() => pickerContextWindows);
     renderProviderWorkspace();
     void Promise.all(Object.entries(currentConfig.providers || {}).map(([name, provider]) => probeProvider(name, provider, () => {
       if ($("#view-providers").classList.contains("active")) renderProviderWorkspace();

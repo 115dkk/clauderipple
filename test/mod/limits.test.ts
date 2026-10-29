@@ -9,7 +9,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 const { claudeScopedFrom, CLAUDE_USAGE_STALE_MS, routerLimitItems } = await import('../../packages/mod/hooks/session.ts')
 const { chatgptProviders, gptLimitsFrom } = await import('../../packages/mod/hooks/modes.ts')
-const { limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetShort } = await import('../../packages/mod/hooks/ui/view.ts')
+const { limitGroupName, limitGroupNumbered, limitGroups, limitItemName, limitItemTip, narrowLimitGroups, resetMoment, resetShort, timeLeft } = await import('../../packages/mod/hooks/ui/view.ts')
 const { barArt } = await import('../../packages/mod/hooks/ui/art.ts')
 
 const NOW = Date.parse('2026-10-15T00:00:00Z')
@@ -90,6 +90,31 @@ test('the row names windows, groups accounts, and tips the reset', () => {
   assert.equal(limitGroupName(groups[2]!, true), 'GPT 2')
   assert.equal(limitItemTip({ ...items[1]!, provider: 'claude', account: 0, kind: 'seven_day', label: '', resetsAt: new Date(NOW + 30 * 60_000).toISOString() }, 'Claude', 'ko', NOW), 'Claude 주간 88% · 30분 뒤 초기화')
   assert.equal(limitItemTip({ ...items[0]!, provider: 'claude', account: 0, kind: 'five_hour', label: '' }, 'Claude', 'en', NOW), 'Claude 5-hour 1%')
+})
+
+// 2026-10-29: the limits pane names a reset whole — local date, weekday and time to the minute in
+// each language's own clock — and the time left beside it.
+test('a reset moment reads exactly, in local time, and the time left to the minute', () => {
+  const at = new Date(2026, 9, 30, 15, 35, 59).getTime()
+  assert.equal(resetMoment(at, 'ko'), '10월 30일 (금) 오후 3:35')
+  assert.equal(resetMoment(at, 'en'), 'Fri, Oct 30, 3:35 PM')
+  assert.equal(resetMoment(at, 'zh'), '10月30日（周五）下午3:35')
+  assert.equal(resetMoment(at, 'ja'), '10月30日（金）午後3:35')
+  assert.equal(resetMoment(at, 'es'), 'vie 30 oct, 15:35')
+  assert.equal(resetMoment(at, 'pt'), 'sex, 30 de out, 15:35')
+  // Midnight and noon on a twelve-hour clock; the early hours zero-padded on a twenty-four-hour one.
+  assert.equal(resetMoment(new Date(2026, 0, 2, 0, 5).getTime(), 'ko'), '1월 2일 (금) 오전 12:05')
+  assert.equal(resetMoment(new Date(2026, 0, 2, 12, 0).getTime(), 'en'), 'Fri, Jan 2, 12:00 PM')
+  assert.equal(resetMoment(new Date(2026, 0, 2, 7, 9).getTime(), 'es'), 'vie 2 ene, 07:09')
+  const m = 60_000
+  assert.equal(timeLeft((4 * 60 + 12) * m, 'ko'), '4시간 12분')
+  assert.equal(timeLeft(4 * 60 * m, 'ko'), '4시간')
+  assert.equal(timeLeft(35 * m, 'ko'), '35분')
+  // Counted up to the next whole minute: half a minute left still reads one.
+  assert.equal(timeLeft(30_000, 'ko'), '1분')
+  assert.equal(timeLeft((4 * 60 + 11) * m + 1, 'en'), '4h 12m')
+  assert.equal(timeLeft(((2 * 24 + 5) * 60 + 30) * m, 'ko'), '2일 5시간')
+  assert.equal(timeLeft(3 * 1440 * m, 'en'), '3d')
 })
 
 // 2026-10-25: the limits pane reads each window's reset short — the time left while close, the

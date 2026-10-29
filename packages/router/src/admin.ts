@@ -36,27 +36,27 @@ import type { Config, Provider, ProviderCredential, ProviderModel } from "./conf
 import { withFileLock } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
-import { generatedAgents } from "./agents.ts";
+import { agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
-import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
+import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import { declaredBy, resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
 import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
-import type { ProviderExhaustion } from "./health.ts";
+import type { ModelHealth, ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
 import { resolveCompatibleCaps } from "./compat.ts";
 import { redactErrorText } from "./redact.ts";
 import { CHATGPT_FALLBACK_MODELS } from "./providers/chatgpt/catalog.ts";
-import { chatgptModelWindow } from "./providers/chatgpt/windows.ts";
+import { contextWindowSnapshot, syncContextWindows } from "./context-windows.ts";
 import { measureModel, ollamaApiBase, ollamaModelFacts, refusedByPlan, type Measured, type WireCandidate } from "./capabilities.ts";
-import { catalogEntry } from "./catalog.ts";
+import { catalogEntry, catalogueWindow } from "./catalog.ts";
 import { ModelScoreCatalog, buildModelScores } from "./model-scores.ts";
 import { ClaudeCodeAuthStore, nativeAnthropicHeaders, type ClaudeCodeCredentialReaders } from "./providers/anthropic.ts";
 import type { ObservedClaudeCodeAuth } from "./providers/anthropic-observed.ts";
@@ -118,6 +118,7 @@ export type AdminDeps = {
   stats: () => Stats;
   health: () => number;
   providerHealth?: () => Record<string, ProviderExhaustion>;
+  modelHealth?: ModelHealth["snapshot"];
   version: string;
   /**
    * The installation identity this process captured at start: its home's opaque id (immutable for
@@ -669,7 +670,7 @@ export type ModOptions = {
 };
 
 /** One model out while its provider still answers others: a spent quota group, until it resets. */
-export type ModelUnavailable = { reason: string; exhaustedUntil: number };
+export type ModelUnavailable = { reason: string; exhaustedAt?: number; exhaustedUntil?: number };
 
 /**
  * An Antigravity provider's spent quota groups: a group resting on every account that is otherwise
@@ -770,14 +771,16 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     let out: { reason: string; exhaustedAt?: number; exhaustedUntil: number } | undefined;
     if (exhausted) out = { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until };
     if (usageOut && (!out || usageOut.until > out.exhaustedUntil)) out = { reason: usageOut.reason, exhaustedUntil: usageOut.until };
-    const modelsOut: Record<string, ModelUnavailable> = {};
+    const modelsOut: Record<string, ModelUnavailable> = Object.fromEntries(
+      Object.entries(deps.modelHealth?.()[name] ?? {}).map(([model, state]) => [model, { reason: state.reason, exhaustedAt: state.at }]),
+    );
     if (p.type === "google" && p.auth === "antigravity") {
       const groups = antigravityGroupsOut(google[name] ?? [], now);
       const scopeOf = deps.google?.().quotaScope;
       const ids = new Set([...(p.models ?? []).map(m => m.id), ...agents.filter(a => a.provider === name).map(a => a.model)]);
       for (const id of ids) {
         const scope = scopeOf?.(name, id);
-        if (scope && groups[scope]) modelsOut[id] = groups[scope];
+        if (scope && groups[scope] && !modelsOut[id]) modelsOut[id] = groups[scope];
       }
     }
     return { name, type: p.type, usable: usable && !out, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
@@ -816,10 +819,43 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
 }
 
 /**
+ * Worker names saved by the build that sanitised a model id without lower-casing it first (#111):
+ * the ladder, the allow-list and the fallback name workers by their generated name, so a renamed
+ * worker would read as missing and its rung skipped. Migrated wherever settings are read or written,
+ * so a ladder the user saved keeps the worker it named; the next save stores the new name.
+ */
+function migrateWorkerNames(settings: Settings, renames: Record<string, string>): Settings {
+  if (Object.keys(renames).length === 0) return settings;
+  const agent = (name: string): string => renames[name] ?? name;
+  const steps = (list: Step[] | undefined): Step[] | undefined =>
+    list?.map(step => ({ ...step, target: { ...step.target, agent: agent(step.target.agent) } }));
+  const rungs = (saved: Rungs): Rungs =>
+    Object.fromEntries(Object.entries(saved).map(([rung, list]) => [rung, steps(list)])) as Rungs;
+  const domains = (rules: DomainRules): DomainRules =>
+    Object.fromEntries(Object.entries(rules).map(([domain, rule]) => [domain, { mode: "ladder", rungs: rungs(rule.rungs) }])) as DomainRules;
+  const names = (list: string[]): string[] => [...new Set(list.map(agent))];
+  const modes = settings.modes.map(mode => ({
+    ...mode,
+    rungs: rungs(mode.rungs),
+    ...(mode.domainRules ? { domainRules: domains(mode.domainRules) } : {}),
+  }));
+  return {
+    ...settings,
+    rules: { general: { mode: "ladder", rungs: rungs(settings.rules.general.rungs) } },
+    ...(settings.domainRules ? { domainRules: domains(settings.domainRules) } : {}),
+    modes,
+    allow: names(settings.allow),
+    allowKnown: names(settings.allowKnown),
+    fallback: { ...settings.fallback, agent: agent(settings.fallback.agent) },
+  };
+}
+
+/**
  * Fill empty ordered lists in Base and saved modes from the same ticked, connected choices.
  * Existing lists survive availability and allow-list changes; dispatch handles skips.
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
+  settings = migrateWorkerNames(settings, agentRenames(deps.config(), deps.agentDir, deps.log));
   const general = settings.rules.general;
   const sets = [settings, ...settings.modes];
   const domains = sets.flatMap(set => Object.values(set.domainRules ?? {}));
@@ -859,6 +895,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         reachable,
         usable: reachable && !health[name],
         ...(health[name] ? { exhaustion: health[name] } : {}),
+        ...(deps.modelHealth ? { models: Object.fromEntries(Object.entries(deps.modelHealth()[name] ?? {}).map(([model, state]) => [model, { usable: false, ...state }])) } : {}),
         // Whether the router could run a `WebSearch` side request through this provider, so the
         // Clients screen can say so beside a model name. Nothing on that screen said which ones
         // those are, and a `smallFast` slot pointed at one turns every search into a visible failure
@@ -1002,7 +1039,7 @@ function providerCanSearch(name: string, cfg: Config): boolean {
  * does nothing is the exact bug this closes, so a failure has to come back to the screen rather
  * than being swallowed into the router log.
  */
-function syncModelSlotsForGui(cfg: Config): string | null {
+function syncModelSlotsForGui(cfg: Config, agentDir?: string): string | null {
   try {
     const home = homeDir();
     syncModelSlots({
@@ -1013,6 +1050,7 @@ function syncModelSlotsForGui(cfg: Config): string | null {
       // Claude, and `syncModelSlots` reads an absent `models` as "do not touch these".
       models: cfg.cli.models ?? {},
     });
+    syncContextWindows(cfg, agentDir ? [agentDir] : undefined);
     return null;
   } catch (e) {
     const message = (e as Error).message;
@@ -1616,7 +1654,7 @@ function applyMeasurements(configFile: string, providerName: string, results: Me
     if (model.wire === undefined) model.wire = result.wire;
     const blankEffort = model.effortLevels === undefined || (options.replaceEmptyEffort === true && model.effortLevels.length === 0);
     if (blankEffort && result.effortLevels !== undefined) model.effortLevels = result.effortLevels;
-    if (model.contextWindow === undefined && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
+    if (model.contextWindow == null && result.contextWindow !== undefined) model.contextWindow = result.contextWindow;
     if (`${model.wire ?? ""}|${model.effortLevels ? model.effortLevels.join(",") : "∅"}|${model.contextWindow ?? "∅"}` !== before) applied++;
   }
   const errors = validate(current);
@@ -1666,10 +1704,12 @@ export function measureUnsettledModels(deps: AdminDeps): number {
  *
  * OpenCode's `/models` reports ids alone, so a provider set up before the catalogue's `limit.context`
  * was read keeps no window and falls back to `cli.autoCompactWindow` — a quarter of a 1M model's real
- * window. The measurement folds the catalogue's window in, but only over the models it runs on and
- * only through its own write; this pass reaches the models already on disk, once, at start-up. Only
- * into a blank field, through the same validated write, so a window the user or the vendor set is
- * never overwritten. Returns the `provider/model` ids it filled.
+ * window. Hive's `/models` states even less, and it has no catalogue block of its own, so a model
+ * saved there is matched against the catalogue by id (`catalogueWindow`). The measurement folds the
+ * catalogue's window in, but only over the models it runs on and only through its own write; this
+ * pass reaches the models already on disk, once, at start-up. Only into a blank field, through the
+ * same validated write, so a window the user or the vendor set is never overwritten. Returns the
+ * `provider/model` ids it filled.
  */
 export async function backfillContextWindows(deps: AdminDeps): Promise<string[]> {
   const catalog = deps.modelCatalog ? await deps.modelCatalog().catch(() => undefined) : undefined;
@@ -1689,12 +1729,13 @@ export async function backfillContextWindows(deps: AdminDeps): Promise<string[]>
     if (!("models" in provider) || !provider.models) continue;
     const preset = "preset" in provider ? provider.preset : undefined;
     for (const model of provider.models) {
-      if (model.contextWindow !== undefined) continue;
-      const entry = catalogEntry(catalog, preset, model.id);
-      if (entry?.contextWindow === undefined) continue;
-      model.contextWindow = entry.contextWindow;
+      // A saved `null` is as blank as a missing field (configs written by older dashboards carry it).
+      if (model.contextWindow != null) continue;
+      const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+      if (stated === undefined) continue;
+      model.contextWindow = stated;
       filled.push(`${name}/${model.id}`);
-      deps.log.info(`admin: ${name}/${model.id} context window ${entry.contextWindow} (catalogue)`);
+      deps.log.info(`admin: ${name}/${model.id} context window ${stated} (catalogue)`);
     }
   }
   if (filled.length === 0) return [];
@@ -1791,8 +1832,10 @@ async function runMeasureJob(jobId: string, providerName: string, models: string
       if (facts.contextWindow !== undefined) measured.contextWindow = facts.contextWindow;
     }
     // The wire was answered, so the model exists: the catalogue's own window travels with the result
-    // and is written only into a model that has none (see applyMeasurements).
-    if (measured.wire && listed?.contextWindow !== undefined) measured.contextWindow = listed.contextWindow;
+    // and is written only into a model that has none (see applyMeasurements). A provider without a
+    // catalogue block of its own is matched by id instead (`catalogueWindow`).
+    const window = listed?.contextWindow ?? catalogueWindow(catalog, id);
+    if (measured.wire && window !== undefined) measured.contextWindow = window;
     job.results.push(measured);
     job.done++;
     deps.log.info(`admin: measured ${providerName}/${id} -> ${measured.error ? `error ${measured.error}` : `wire ${measured.wire}${measured.effortLevels ? ` effort ${measured.effortLevels.join(",")}${known ? " (catalogue)" : facts ? " (ollama)" : ""}` : ""}`}`);
@@ -1851,45 +1894,8 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
  * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
  * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
  */
-async function contextWindows(deps: AdminDeps): Promise<{ windows: Record<string, number>; catalogWindows: Record<string, number>; resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> }> {
-  const cfg = deps.config();
-  const windows: Record<string, number> = {};
-  const catalogWindows: Record<string, number> = {};
-  const resolvedWindows: Record<string, { model: string; provider: string | null; contextWindow: number | null }> = {};
-  const put = (id: string, fallback?: number, native = false): void => {
-    const base = id.split("@")[0]!;
-    const route = cfg.routes[base] ?? cfg.routes[base.replace(/-\d{8}$/, "")];
-    const live = chatgptModelWindow(cfg, id);
-    // Keep the legacy editor maps, but give usage readers a provider-bound resolution. A native
-    // alias's window and the global compaction setting are not the routed model's capacity.
-    const resolved = resolve(id, {}, cfg) ?? (cfg.aliases[base] ? resolve(cfg.aliases[base], {}, cfg) : null);
-    const model = resolved?.model.split("@")[0] ?? base;
-    const provider = resolved ? cfg.providers[resolved.provider] : undefined;
-    const explicit = resolved && !cfg.direct.some(d => base.startsWith(d.prefix)) ? route?.contextWindow : undefined;
-    const own = cfg.cli.extraModels.find(m => m.model.split("@")[0] === model)?.contextWindow
-      ?? provider?.models?.find(m => m.id === model || m.id === model.replace(/-\d{8}$/, ""))?.contextWindow;
-    const known = resolved ? explicit ?? live ?? own : native ? fallback : undefined;
-    if (!resolvedWindows[id]) resolvedWindows[id] = {
-      model, provider: resolved?.provider ?? null,
-      contextWindow: typeof known === "number" && Number.isFinite(known) && known > 0 ? Math.floor(known) : null,
-    };
-    if (!resolved && declaredBy(base, cfg).length > 1) return;
-    const value = route?.contextWindow ?? live ?? fallback;
-    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || windows[id] !== undefined) return;
-    windows[id] = Math.floor(value);
-    if (live !== undefined && route?.contextWindow === undefined) catalogWindows[id] = live;
-  };
-  for (const model of await claudeModelList(deps)) put(model.id, model.contextWindow, true);
-  for (const model of cfg.cli.extraModels) put(model.model, model.contextWindow ?? cfg.cli.autoCompactWindow);
-  for (const [name, provider] of Object.entries(cfg.providers)) {
-    for (const model of ("models" in provider && provider.models) || []) {
-      put(model.id, model.contextWindow);
-      if (declaredBy(model.id, cfg).length > 1) put(`${name}:${model.id}`, model.contextWindow);
-    }
-  }
-  for (const id of Object.keys(cfg.routes)) put(id);
-  for (const id of Object.keys(cfg.aliases)) put(id);
-  return { windows, catalogWindows, resolvedWindows };
+async function contextWindows(deps: AdminDeps): Promise<ReturnType<typeof contextWindowSnapshot>> {
+  return contextWindowSnapshot(deps.config(), await claudeModelList(deps), deps.agentDir ? [deps.agentDir] : undefined);
 }
 
 function tailLines(file: string, n: number): string {
@@ -2192,6 +2198,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         if (body && typeof body === "object" && body.compactAt !== undefined) {
           if (body.compactAt !== null && typeof body.compactAt !== "number") throw new ModSettingsInputError("compactAt must be a number of tokens or null");
           writeAutoCompactWindow(body.compactAt);
+          syncContextWindows(deps.config(), deps.agentDir ? [deps.agentDir] : undefined);
         }
         if (body && typeof body === "object" && body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
           // Checked before normalizing, which would drop a credential field the check is there to refuse.
@@ -2320,6 +2327,18 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
           ...(typeof probe.probeModel === "string" ? { probeModel: probe.probeModel } : {}),
           ...(probe.wire === "chat" || probe.wire === "responses" ? { wire: probe.wire } : {}),
         }, deps.probeModelFetch ?? fetchWithTimeout);
+        // A provider being added gets the same blank-only fill as one already saved: Hive's `/models`
+        // names its models and nothing else, and the form saves what the probe returns. A window the
+        // vendor did report is kept, and one the catalogue cannot match is left blank.
+        const missing = result.models.filter((model) => model.contextWindow == null);
+        if (missing.length > 0 && deps.modelCatalog) {
+          const catalog = await deps.modelCatalog().catch(() => undefined);
+          const preset = typeof probe.preset === "string" && probe.preset ? probe.preset : undefined;
+          for (const model of missing) {
+            const stated = catalogEntry(catalog, preset, model.id)?.contextWindow ?? catalogueWindow(catalog, model.id);
+            if (stated !== undefined) model.contextWindow = stated;
+          }
+        }
         sendJson(res, 200, result);
         return;
       }
@@ -2406,7 +2425,7 @@ export function startAdmin(deps: AdminDeps): Promise<{ port: number; close(): vo
         // `cli.models` cannot take effect through the router at all: Claude Code reads the slots
         // before a request exists. So a GUI save has to write them to settings.json itself;
         // otherwise the Clients screen shows a choice that only a later `install` would honour.
-        const slotWarning = syncModelSlotsForGui(parsed);
+        const slotWarning = syncModelSlotsForGui(parsed, deps.agentDir);
         sendJson(res, 200, { ok: true, configRevision: configSnapshot(deps).configRevision, ...(slotWarning ? { warning: slotWarning } : {}) });
         return;
       }

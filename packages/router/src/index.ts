@@ -31,6 +31,7 @@ import { VERSION } from "./version.ts";
 import { allowLongSilences } from "./providers/retry.ts";
 import { assetsFingerprint, readLocalAssets, spawnSsh, syncRemoteAssets } from "./remote-host.ts";
 import { RemoteTunnels, proxyConnectHost } from "./remote-tunnel.ts";
+import { syncContextWindows } from "./context-windows.ts";
 
 // Startup timing. Claude Desktop routes *all* its traffic through us in picker mode, so every
 // second before the socket is open is a second the app cannot reach anything (ERR_PROXY_-
@@ -48,8 +49,10 @@ let log: Logger | null = null;
 let tunnels: RemoteTunnels | null = null;
 /** The last config read's validation errors: the status and readiness report them (G-D14). */
 let configErrors: string[] = [];
+let reconcileProxyConfig: ((config: ReturnType<ConfigStore["get"]>) => void) | undefined;
 const store = new ConfigStore(undefined, (c, errors) => {
   configErrors = [...errors];
+  reconcileProxyConfig?.(c);
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
   log?.info(`config loaded: ${Object.keys(c.routes).length} routes, ${Object.keys(c.providers).length} providers, direct=${c.direct.map((d) => d.prefix).join(",") || "-"}`);
   // Keep the Codex app's model list in step with the models we serve (only while `codex on` is in effect).
@@ -66,6 +69,8 @@ const store = new ConfigStore(undefined, (c, errors) => {
   } catch (e) {
     (log ?? console).warn(`agent files: ${(e as Error).message}`);
   }
+  try { syncContextWindows(c); }
+  catch (e) { (log ?? console).warn(`compact windows: ${(e as Error).message}`); }
   // Remote hosts get the regenerated agent files too, and a hand edit of `remote.hosts` takes effect.
   tunnels?.reconcile(c.remote?.hosts ?? []);
   tunnels?.assetsChanged();
@@ -121,6 +126,7 @@ const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claud
 // Before any provider fetches: a reasoning model may stay silent past fetch's 300s default.
 allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth, hold });
+reconcileProxyConfig = config => proxy.reconcileConfig(config);
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), hold });
 
 // Lid-closed awake and hotspot failover (macOS and Windows; no-ops elsewhere, off until configured).
@@ -249,6 +255,14 @@ proxy
     const catalogEvery = 2 * 60 * 60_000;
     proxy.chatgptRefreshCatalog();
     setInterval(() => proxy.chatgptRefreshCatalog(), catalogEvery).unref();
+    // Also notices hand edits to global/model settings and catalogue/agent changes, without a restart.
+    const syncCompact = () => {
+      if (draining) return;
+      try { syncContextWindows(store.get()); }
+      catch (e) { log!.warn(`compact windows: ${(e as Error).message}`); }
+    };
+    syncCompact();
+    setInterval(syncCompact, 15_000).unref();
     // Captured once, at start: this process's installation id and pid are what it reports and what
     // a control request is checked against, whatever the files say later (B01/D6).
     const instance = {
@@ -271,6 +285,7 @@ proxy
       stats: () => proxy.stats,
       health: () => health.consecutiveFailures,
       providerHealth: () => proxy.providerHealth.snapshot(),
+      modelHealth: () => proxy.modelHealth.snapshot(),
       version: VERSION,
       requests,
       chatgpt: () => ({

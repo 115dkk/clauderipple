@@ -186,6 +186,12 @@ export type GoogleProvider = ProviderLabel & {
   sessionHeader?: string;
   /** Optional vendor headers to set on forwarded requests (never logged). The auth header is still `x-goog-api-key`. */
   headers?: Record<string, string>;
+  /**
+   * Several AI Studio keys sharing the same sticky credential pool as the other wires (#112). Each
+   * entry's key is sent on `x-goog-api-key`; `apiKey` mirrors the first entry, which stays the
+   * identity for probes and discovery. Absent, the provider keeps its single key.
+   */
+  credentials?: ProviderCredential[];
   /** Catalog preset used to populate this provider, if any (carried when a model folded into it). */
   preset?: string;
   /** Models offered in the GUI (the probe fills this from `GET /v1beta/models`). */
@@ -295,6 +301,16 @@ function reauthorized(headers: Record<string, string> | undefined, kind: "x-api-
 }
 
 /**
+ * The same re-send for the Gemini wire, whose convention is `x-goog-api-key` rather than either of
+ * the two above. Used on both the provider's own headers and every credential of its pool, so a
+ * many-key provider folded into a `google` provider keeps its keys (#112).
+ */
+function googleKeyed(headers: Record<string, string>): Record<string, string> {
+  const { key, kept } = credentialIn(headers);
+  return key === undefined ? headers : { "x-goog-api-key": key, ...kept };
+}
+
+/**
  * The provider shape a request for `model` is actually talking to.
  *
  * A model may speak another wire than the rest of its provider, on another path, under another auth
@@ -321,6 +337,11 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
     const { key, kept } = credentialIn("headers" in provider && provider.headers ? provider.headers : {});
     const apiKey = "apiKey" in provider && typeof provider.apiKey === "string" ? provider.apiKey : key;
     const sessionHeader = "sessionHeader" in provider ? provider.sessionHeader : undefined;
+    // The provider's pool travels with the key it mirrors: folding only `headers` left a many-key
+    // provider with one key on this wire, so a spent first key 429'd every Gemini turn (#112).
+    const credentials = "credentials" in provider && provider.credentials
+      ? provider.credentials.map((credential) => ({ ...credential, headers: googleKeyed(credential.headers) }))
+      : undefined;
     return {
       type: "google",
       auth: "api-key",
@@ -328,6 +349,7 @@ export function providerFor(provider: Provider, model: string | undefined): Prov
       url: url ?? "",
       ...(sessionHeader ? { sessionHeader } : {}),
       ...(Object.keys(kept).length > 0 ? { headers: kept } : {}),
+      ...(credentials && credentials.length > 0 ? { credentials } : {}),
       ...("models" in provider && provider.models ? { models: provider.models } : {}),
       ...("identity" in provider && provider.identity !== undefined ? { identity: provider.identity } : {}),
       ...("instructionsAppend" in provider && provider.instructionsAppend ? { instructionsAppend: provider.instructionsAppend } : {}),

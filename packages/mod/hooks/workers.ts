@@ -236,7 +236,7 @@ function unavailableReason(provider: string, providers: NonNullable<LadderOption
   const labels: Record<string, string> = lang === 'ko'
     ? { insufficient_balance: '잔액 부족', billing_exhausted: '결제 한도 소진', quota_exhausted: '사용량 한도 소진' }
     : { insufficient_balance: 'insufficient balance', billing_exhausted: 'billing exhausted', quota_exhausted: 'quota exhausted' }
-  return `${provider}: ${reason && labels[reason] || (lang === 'ko' ? '현재 사용 불가' : 'currently unavailable')}`
+  return `${provider}: ${reason === 'model_deprecated' ? reason : reason && labels[reason] || (lang === 'ko' ? '현재 사용 불가' : 'currently unavailable')}`
 }
 function sameTarget(a: TierTarget, b: TierTarget): boolean { return a.agent === b.agent && a.model === b.model }
 function candidateOf(target: TierTarget, candidates: readonly WorkerCandidate[]): WorkerCandidate | undefined {
@@ -279,6 +279,16 @@ export function ladderPick(verdict: WorkerVerdict, rule: Rule, settings: Setting
   }
   const effort = rule.rungs[wanted]?.[0]?.effort ?? verdict.effort
   return { effort, rung: wanted, skipped, fallbackReason: reasons.join('; ') || t(lang, 'workers.none') }
+}
+
+/** Only allowed, installed entries after this pick in the same tier. Availability is rechecked by the router. */
+export function ladderFallbackModels(rule: Rule, pick: Resolution, candidates: readonly WorkerCandidate[], settings: Settings): string[] {
+  if (!pick.rung || !pick.position) return []
+  return (rule.rungs[pick.rung] ?? []).slice(pick.position).flatMap(step => {
+    const candidate = candidateOf(step.target, candidates)
+    if (!candidate || settings.providers[candidate.provider] === false || !allowed(candidate, settings.allow, settings.allowKnown)) return []
+    return [`${baseModel(candidate.model)}@${step.effort}`]
+  })
 }
 
 export function spawnModel(target: TierTarget, effort: Effort, fileModel?: string): string | undefined {

@@ -79,7 +79,7 @@ interface SessionRecord {
   /** The initial launch allowance is immutable; mode changes must not add a bypass flag. */
   bypassAllowed?: boolean;
   /** Confirmed next-turn settings outrank historical assistant/user transcript metadata. */
-  confirmedSettings?: Omit<SettingsResult, "status" | "errors">;
+  confirmedSettings?: Omit<SettingsResult, "status" | "errors" | "pending">;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -279,6 +279,11 @@ const APP_STOP = "이 세션은 Claude 앱에서 실행 중입니다. Claude 앱
 /** The stricter permission mode the person picked was not confirmed by the app's worker. */
 class EnvironmentModeError extends Error {}
 const MOD_CLAIMED = "Claude 앱에서 메시지를 처리하고 있습니다. 처리가 완료된 후 다시 시도해 주세요.";
+/** A lane item checks its token before every outgoing call; a setting change also checks it after
+ * each await before recording. A message already handed on records its outcome regardless. */
+type LaneToken = { check(): void };
+/** How long one lane item may hold the items behind it, counted from when it starts. */
+const LANE_ITEM_MS = 15_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function sendFingerprint(text: string, attachments: Attachment[]): string {
   return digest({ text, attachments: attachments.map(a => [a.name, a.mediaType, a.blob.length]) });
@@ -527,7 +532,8 @@ export class Sessions {
     }) : null;
     this.desktop = opts.desktopProjects === undefined ? null : new DesktopSessions({
       ...(this.sidebar ? { sidebarIds: () => new Set(this.sidebar!.read().sessions.keys()) } : {}),
-      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
+      projects: opts.desktopProjects, now: this.now, summarize, figures: id => this.desktopFigures.get(id), userId: (id, uuid, text) => this.appUserId(id, uuid, text),
+      ...(opts.desktopProcesses ? { processes: opts.desktopProcesses } : {}),
       ...(opts.desktopRegistry ? { registry: opts.desktopRegistry } : {}),
       // Only transcripts the host is writing right now, or a phone session not yet handed to the
       // desktop app, are hidden; any other one may be open in the app and must stay reachable
@@ -575,7 +581,7 @@ export class Sessions {
   private syncAppSettings(id: string, app: AppSettings): void {
     const record = this.records.get(id);
     const guard = record?.appSettingsGuard;
-    if (this.settingsJobs.hasPending(app.appSessionId) || this.modeChanges.has(id)) return;
+    if (this.settingsJobs.hasPending(app.appSessionId) || this.sessionLanes.has(id)) return;
     // A restarted host lost its in-memory job; it cannot know whether the helper applied it.
     if (guard?.outcome === "pending") {
       guard.outcome = "failed";
@@ -648,6 +654,7 @@ export class Sessions {
       if (this.records.has(p.session)) this.append(p.session, { kind: "permission_decided", id: p.id, decision: "expired", reason: "host_restarted" });
     }
     for (const r of this.records.values()) {
+      if (!r.desktopBridge && r.desktopHandoff !== "attempted") this.invalidateActivity(r.id);
       // A host exit during the launcher call did not confirm delivery to Desktop.
       if (r.desktopHandoff === "opening") {
         r.desktopHandoff = (r.desktopHandoffAttempts ?? 0) < 3 ? "pending" : "failed";
@@ -740,6 +747,8 @@ export class Sessions {
     const reads = [...ids].map(id => this.pollBridgeState(id));
     for (const id of this.bridgeStates.keys()) if (!ids.has(id)) this.bridgeStates.delete(id);
     for (const r of this.records.values()) {
+      const live = this.live.get(r.id);
+      if (live?.restartAfterTurn && this.sdkIdle(r, live)) { this.restartSettings(r, live); continue; }
       if (r.desktopHandoff === "pending" || r.desktopHandoff === "failed" && this.now() >= (r.desktopHandoffRetryAt ?? 0)) this.handoff(r);
       if (!this.desktop) continue;
       const desktopProcess = r.sdkSessionId ? this.desktop.liveProcess(r.sdkSessionId) : undefined;
@@ -1137,7 +1146,7 @@ export class Sessions {
     // The app's registry records the folder the conversation runs in now; the transcript's first
     // line keeps the one it started in (a conversation moved folders, issue #82).
     const cwd = this.desktop.liveProcess(id)?.cwd ?? s.cwd;
-    const r: SessionRecord = { id, sdkSessionId: id, cwd, model: s.model, effort: s.effort, title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
+    const r: SessionRecord = { id, sdkSessionId: id, cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "default", title: s.title, createdAt: s.createdAt, updatedAt: this.now(), state: "stopped", createdBy: clientMsgId, contextWindow: null, desktopHandoff: "excluded" };
     if (bridgeMode) { r.desktopBridge = true; r.transcriptOffset = this.desktop.transcriptSize(id); }
     Object.assign(r, this.desktopModels.get(id));
     this.desktopModels.delete(id);
@@ -1204,6 +1213,13 @@ export class Sessions {
     return { model: enabled || appSettings, effort: enabled || appSettings, permissionModes: enabled ? [...PERMISSION_MODES] : [] };
   }
 
+  /** The record keeps the requested launch choice; confirmation stays on the live query until restart. */
+  private effectiveSettings(r: SessionRecord): { model: string; effort: Effort | null; pendingSettings?: SettingsResult["pending"] } {
+    if (!this.live.get(r.id)?.restartAfterTurn) return { model: r.model, effort: r.effort };
+    return { model: r.confirmedSettings?.model ?? r.model, effort: r.confirmedSettings?.effort ?? null,
+      pendingSettings: { model: r.model, effort: r.effort } };
+  }
+
   private summary(r: SessionRecord): SessionSummary {
     const log = this.log(r.id);
     const process = r.desktopBridge ? this.desktop?.liveProcess(r.sdkSessionId ?? r.id) : undefined;
@@ -1219,10 +1235,13 @@ export class Sessions {
     const taskHistory = r.desktopBridge ? this.desktop?.backgroundTaskHistory(r.sdkSessionId ?? r.id) ?? [] : activity?.history ?? [];
     const turnStartedAt = working ? this.desktop?.turnStartedAt(r.sdkSessionId ?? r.id) ?? null : null;
     const plan = r.desktopBridge ? this.desktop?.plan(r.sdkSessionId ?? r.id) ?? [] : this.taskState(r.id).tracker.list;
-    // A desktop session's mode is the Claude app's; it lives in the transcript, not the record.
-    const mode = r.confirmedSettings?.permissionMode ?? (r.desktopBridge ? this.desktop?.permissionMode(r.sdkSessionId ?? r.id) : (r.permissionMode ?? "auto"));
+    // The desktop launcher confirms opening, not permissions. Retain the SDK choice for a
+    // future host resume, but do not advertise it as the app's current mode after handoff.
+    const hostMode = this.live.has(r.id) || r.desktopHandoff !== "attempted" && r.desktopHandoff !== "opening";
+    const mode = r.desktopBridge ? r.confirmedSettings?.permissionMode ?? this.desktop?.permissionMode(r.sdkSessionId ?? r.id)
+      : hostMode ? r.confirmedSettings?.permissionMode ?? r.permissionMode ?? "auto" : undefined;
     const status = r.desktopBridge ? this.statusLine(r.id) : null;
-    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, model: r.model, effort: r.effort, ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
+    return { plan, tasks: taskList.length, taskList, taskHistory, backgroundKnown: activity?.known ?? false, activityAt: activity?.at ?? null, ...(r.desktopBridge ? { desktopBridge: true, turnStartedAt, ...(process ? { background: this.background(process) } : {}) } : {}), origin: "host", readOnly: false, controls: this.sessionControls(r.id), id: r.id, title: r.title, cwd: r.cwd, ...this.effectiveSettings(r), ...(mode ? { permissionMode: mode } : {}), ...(status ? { status } : {}), state, pending: this.opts.permissions.pending(r.id).length, ...this.queueSummary(r.id), ...(this.archived.has(r.id) ? { archived: true } : {}), attention: this.attention.get(r.id) ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, lastSeq: log.lastSeq, epoch: log.epoch };
   }
 
   log(id: string): EventLog {
@@ -1316,6 +1335,13 @@ export class Sessions {
     return state;
   }
 
+  private invalidateActivity(id: string): void {
+    const activity = this.taskState(id).activity;
+    if (!activity.active.length && !activity.known) return;
+    activity.invalidate();
+    this.append(id, { kind: "background", tasks: activity.history, known: false }, false);
+  }
+
   /** `touch` false: the host noticing a session is no longer live is not the session being used (a restart moved every old one to "now"). */
   private append(id: string, body: EventBody, touch = true): SessionEvent {
     const previous = this.taskPlans.get(id);
@@ -1346,8 +1372,9 @@ export class Sessions {
 
   // ---- the queue: messages a phone left for when the turn ends (queue.ts) ---------------------
 
-  /** Queue a message; a session that is not busy takes it at once. */
-  enqueue(id: string, clientMsgId: string, text: string, attachments: Attachment[] = []): void {
+  /** Queue a message; a session that is not busy takes it at once. An id still being sent answers
+   * with that send, so its failure reaches the phone rather than an "it is queued". */
+  enqueue(id: string, clientMsgId: string, text: string, attachments: Attachment[] = []): Promise<void> | undefined {
     if (!this.has(id)) throw new Error("no such session");
     if (!/^[\w-]{1,100}$/.test(clientMsgId)) throw new Error("Invalid message id.");
     if (typeof text !== "string" || (!text.trim() && !attachments.length)) throw new Error("Nothing to queue.");
@@ -1358,6 +1385,18 @@ export class Sessions {
       if (!data || typeof a.name !== "string" || typeof a.mediaType !== "string") throw new Error("Attachment missing or too large (8 MB limit).");
       return { name: a.name, mediaType: a.mediaType, data };
     });
+    // An id already sent, by the app or from here, is not queued again: whoever takes it from the
+    // queue would run it twice (a phone that lost the answer queues it again).
+    const key = `send:${id}:${clientMsgId}`;
+    const receipt = this.receipts.status(key);
+    if (receipt !== null) {
+      if (this.receipts.conflict(key, sendFingerprint(text, attachments))) throw new Error(SAME_ID_OTHER_CONTENT);
+      if (receipt === "completed") return;
+      const riding = this.sending.get(key) ?? this.bridgeSends.get(`${id}/${clientMsgId}`);
+      if (!riding) throw new OutcomeUnknownError();
+      return Promise.resolve(riding).then(() => {});
+    }
+    if (this.seen(id, clientMsgId)) return;
     if (!this.sendQueue.add(id, { id: clientMsgId, text, attachments: files }, this.now(), this.records.get(id)?.sdkSessionId ?? id)) return;
     this.watchQueueRegistry();
     this.opts.onSessions();
@@ -1391,15 +1430,28 @@ export class Sessions {
     if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
     for (const queued of this.sendQueue.items(id)) this.withdrawMod(id, queued.id);
     this.sendQueue.resume(id);
-    if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
-    // A send pressed on a queued message goes to the app too while it holds the session: run here,
-    // the turn never showed in the app (2026-10-27).
-    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
-    if (this.modEligible(id, desktopId, item)) {
-      const offer = this.offerMod(id, desktopId, item);
-      if (offer && await offer !== "expired") return id;
-    }
-    return this.dispatchQueued(id, item, false);
+    return this.inSessionLane(id, async token => {
+      if (this.handingOff.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "")) { this.opts.onSessions(); return id; }
+      // Only a completed dispatch, not an edit/removal, can satisfy this send while it waits.
+      if (!this.sendQueue.items(id).some(queued => queued.id === itemId) && this.receipts.status(`send:${id}:${itemId}`) === "completed") return id;
+      const mayGo = (): void => {
+        token.check();
+        const now = this.sendQueue.items(id).find(queued => queued.id === itemId);
+        if (now !== item) throw new Error("That message is no longer queued.");
+        if (this.sendQueue.items(id).some(queued => queued.claimedBy)) throw new Error(MOD_CLAIMED);
+        if (this.sendQueue.held(id)) throw new Error("대기열이 멈춰 메시지를 보내지 않았습니다. 대기열을 다시 시작한 후 보내 주세요.");
+      };
+      mayGo();
+      const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+      if (this.modEligible(id, desktopId, item)) {
+        const offer = this.offerMod(id, desktopId, item);
+        const state = offer ? await offer : null;
+        // Acceptance hands ownership to the app; its eventual result uses the receipt path.
+        if (state && state !== "expired") return id;
+        mayGo();
+      }
+      return this.dispatchQueued(id, item, false, token);
+    });
   }
 
   /** A message on its way into the app (offered to or claimed by the mod) is not shown as queued: it
@@ -1411,10 +1463,16 @@ export class Sessions {
     return queue.length ? { ...summary, queue } : {};
   }
 
-  /** The app holds this handed-off session without Remote Control and is idle: its mod can type it in. */
-  private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
+  /** The app owns the writer, independently of where the conversation was created. */
+  private appModSession(id: string, desktopId: string): boolean {
     const process = this.desktop?.liveProcess(desktopId);
-    return !!process && !process.bridgeSessionId && !this.live.has(id) && this.handedOff(id) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
+    return !process?.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id) &&
+      !!(process || this.desktop?.isOpen(desktopId));
+  }
+
+  /** An idle app session without Remote Control can receive plain text through its mod. */
+  private modEligible(id: string, desktopId: string, item: QueueItem): boolean {
+    return this.appModSession(id, desktopId) && !this.appBusy(desktopId) && !item.attachments.length && !item.text.trimStart().startsWith("/");
   }
 
   resumeQueue(id: string): void {
@@ -1423,7 +1481,16 @@ export class Sessions {
 
   /** The phone's Stop: what is queued waits for the person instead of going on its own. */
   holdQueue(id: string): void {
-    if (this.sendQueue.hold(id)) this.opts.onSessions();
+    if (!this.sendQueue.hold(id)) return;
+    for (const item of this.sendQueue.items(id)) this.withdrawMod(id, item.id);
+    this.opts.onSessions();
+  }
+  /** The socket send joins synchronously, including /clear's settings snapshot. */
+  orderedSend(id: string, clientMsgId: string, text: string, attachments?: Attachment[], behavior?: SendBehavior): Promise<string> {
+    return this.inSessionLane(id, token => {
+      token.check();
+      return this.send(id, clientMsgId, text, attachments, behavior, token);
+    }, false);
   }
 
   private draining = new Set<string>();
@@ -1469,19 +1536,36 @@ export class Sessions {
   }
 
   private async drainQueue(id: string, registryIdle = false): Promise<void> {
-    if (this.shuttingDown || this.handingOff.has(id) || this.closing.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.draining.has(id) || this.sendQueue.held(id)) return;
+    if (this.shuttingDown || this.draining.has(id)) return;
+    const head = this.queueHead(id, registryIdle);
+    if (!head) return;
+    const waited = this.sessionLanes.has(id);
+    this.draining.add(id);
+    try {
+      await this.inSessionLane(id, token => this.drainHead(id, head, registryIdle && !waited, token), false);
+    } catch (error) {
+      if (this.shuttingDown) return;
+      // Dispatch failures are already on the item; expiry also leaves it visible for review.
+      if (error instanceof OutcomeUnknownError && this.sendQueue.items(id).includes(head) && !head.claimedBy) {
+        this.sendQueue.fail(id, head.id, error.message);
+        this.opts.onSessions();
+      } else (this.opts.log ?? console.error)(`[queue drain] ${id}: ${String(error)}`);
+    } finally {
+      this.draining.delete(id);
+      if (head.claimedBy || !this.sendQueue.items(id).includes(head)) void this.drainQueue(id);
+    }
+  }
+
+  /** Recheck after a lane wait, without reserving a busy session on the cheap polling path. */
+  private queueHead(id: string, registryIdle: boolean): QueueItem | undefined {
+    if (this.handingOff.has(id) || this.closing.has(id) || this.creating.has(this.records.get(id)?.createdBy ?? "") || this.sendQueue.held(id)) return;
     const head = this.sendQueue.items(id)[0];
     if (!head || head.claimedBy) return;
     const desktopId = this.records.get(id)?.sdkSessionId ?? id;
     const process = this.desktop?.liveProcess(desktopId);
-    if (!this.live.has(id) && !this.handingOff.has(id) && !process?.bridgeSessionId && this.desktop?.isOpen(desktopId)) {
-      // A session this host started keeps going from the phone while the app only holds it open;
-      // one the app opened itself still needs its Remote Control (issue #102).
-      const ours = this.handedOff(id);
-      if (!ours || this.appBusy(desktopId)) {
-        if (this.sendQueue.wait(id, head.id, ours ? DESKTOP_BUSY : DESKTOP_WAITING)) this.opts.onSessions();
-        return;
-      }
+    if (this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
+      if (this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
+      return;
     }
     // Registry idle can precede the accepted bridge turn actually starting.
     const sent = process?.bridgeSessionId ? this.bridgeRunning.get(process.bridgeSessionId) : undefined;
@@ -1494,24 +1578,21 @@ export class Sessions {
     const record = this.records.get(id);
     const appIdle = !!record && !record.desktopBridge && this.canTailHandoff(record) && !this.appBusy(desktopId);
     if (awaiting && !this.sendQueue.settle(id, this.eventsAfter(id, awaiting.seq), this.now(), appIdle)) return;
-    this.draining.add(id);
-    let claimed = false;
-    try {
-      if (this.modEligible(id, desktopId, head)) {
-        const offer = this.offerMod(id, desktopId, head);
-        const state = offer ? await offer : null;
-        if (state === "claimed") claimed = true;
-        if (state && state !== "expired") return;
-        if (this.shuttingDown || this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
-      }
-      await this.dispatchQueued(id, head, true);
+    return head;
+  }
+
+  private async drainHead(id: string, head: QueueItem, registryIdle: boolean, token: LaneToken): Promise<void> {
+    token.check();
+    if (this.queueHead(id, registryIdle) !== head) return;
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (this.modEligible(id, desktopId, head)) {
+      const offer = this.offerMod(id, desktopId, head);
+      const state = offer ? await offer : null;
+      if (state && state !== "expired") return;
+      token.check();
+      if (this.sendQueue.items(id)[0] !== head || this.sendQueue.held(id)) return;
     }
-    catch { /* recorded on the item by dispatchQueued */ }
-    finally {
-      this.draining.delete(id);
-      // A message that arrived while this one was being offered was turned away by `draining`.
-      if (claimed) void this.drainQueue(id);
-    }
+    await this.dispatchQueued(id, head, true, token);
   }
 
   private eventsAfter(id: string, seq: number): SessionEvent[] {
@@ -1528,7 +1609,7 @@ export class Sessions {
     return out;
   }
 
-  private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean): Promise<string> {
+  private async dispatchQueued(id: string, item: QueueItem, fromQueue: boolean, token?: LaneToken): Promise<string> {
     const attachments: Attachment[] = [];
     for (const a of item.attachments) {
       const data = this.sendQueue.data(a);
@@ -1538,7 +1619,8 @@ export class Sessions {
     let before = 0;
     try { before = this.log(id).lastSeq; } catch { /* the send below creates it */ }
     try {
-      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true);
+      token?.check();
+      const sent = await this.deliver(id, item.id, item.text, attachments, "steer", true, token);
       this.sendQueue.remove(id, item.id);
       // Only a message sent from here waits for its own turn; one sent now rides the running turn.
       if (fromQueue) this.sendQueue.sent(id, before, this.now());
@@ -1570,6 +1652,23 @@ export class Sessions {
     this.modEchoes.set(offer.itemId, { id, text: offer.text, expires: this.now() + 60_000 });
   }
 
+  /**
+   * A recordless app session is a snapshot rebuilt from the app's transcript, so the phone's id for
+   * a message the mod typed in goes on the matching user line here: by text the first time, then by
+   * that line's uuid on every later rebuild. Without it the phone kept its own copy "sending" beside
+   * the app's for ten minutes (2026-10-28).
+   */
+  private appUserId(id: string, uuid: string, text: string): string | undefined {
+    const known = this.appUserIds.get(uuid);
+    if (known || this.records.has(id)) return known;
+    const itemId = this.takeModEcho(id, text);
+    if (!itemId) return undefined;
+    while (this.appUserIds.size >= Sessions.ECHO_CAP) this.appUserIds.delete(this.appUserIds.keys().next().value!);
+    this.appUserIds.set(uuid, itemId);
+    return itemId;
+  }
+  private appUserIds = new Map<string, string>();
+
   private takeModEcho(id: string, text: string): string | undefined {
     for (const [itemId, echo] of this.modEchoes) {
       if (echo.expires < this.now()) { this.modEchoes.delete(itemId); continue; }
@@ -1585,10 +1684,17 @@ export class Sessions {
     else {
       const key = `send:${id}:${offer.itemId}`;
       if (this.receipts.status(key) === null) this.receipts.begin(key, id, sendFingerprint(offer.text, []));
-      if (!this.seen(id, offer.itemId)) {
-        this.personMessage(id);
+      this.personMessage(id);
+      // A recordless session is a rebuilt transcript snapshot, not a host-owned event log.
+      // Its user event must come from the app: appending here would duplicate it until rebuild.
+      if (this.records.has(id) && !this.seen(id, offer.itemId)) {
         this.append(id, { kind: "user", text: offer.text, clientMsgId: offer.itemId, images: [] });
         this.rememberClientMsgId(id, offer.itemId);
+      }
+      if (!this.records.has(id)) {
+        // The echo stays: the snapshot rebuild puts the phone's id on the app's user line with it.
+        this.watchDesktop(id);
+        this.tailDesktop(id);
       }
       this.receipts.complete(key, id);
       // No "awaiting" settle: an app-run turn leaves no result in this log (the tail does not write
@@ -1762,17 +1868,18 @@ export class Sessions {
    * has accepted it; a resend of a completed id returns without running again, and a resend that
    * finds a pending receipt from before a host restart throws OutcomeUnknownError.
    * During Desktop handoff, ACK means durable queue ownership; its send receipt starts only at dispatch. */
-  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior?: SendBehavior): string | Promise<string> {
+  send(id: string, clientMsgId: string, text: string, attachments: Attachment[] = [], behavior?: SendBehavior, token?: LaneToken): string | Promise<string> {
+    token?.check();
     const key = `send:${id}:${clientMsgId}`;
-    if (this.receipts.status(key) !== null) return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer");
+    if (this.receipts.status(key) !== null) return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
     const existing = this.sendQueue.items(id).find(item => item.id === clientMsgId);
     if (existing) {
       if (existing.text !== text || existing.attachments.length !== attachments.length) throw new Error(SAME_ID_OTHER_CONTENT);
       return id;
     }
-    const desktopId = this.records.get(id)?.sdkSessionId;
-    const process = desktopId ? this.desktop?.liveProcess(desktopId) : undefined;
-    const eligible = desktopId && process && !process.bridgeSessionId && !this.live.has(id) && !this.handingOff.has(id) && this.handedOff(id);
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    const eligible = this.appModSession(id, desktopId);
+    if (eligible && !this.handedOff(id) && (behavior === "interrupt" || attachments.length || text.trimStart().startsWith("/"))) throw new DesktopBlockedError();
     if (eligible && this.seen(id, clientMsgId)) return id;
     if (eligible && this.sendQueue.items(id).some(item => item.claimedBy || this.modOwners.get(item.id) === id)) {
       if (this.sendQueue.items(id).some(item => item.id === clientMsgId)) return id;
@@ -1785,10 +1892,11 @@ export class Sessions {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
-    return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer");
+    return this.deliver(id, clientMsgId, text, attachments, behavior ?? "steer", false, token);
   }
 
-  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false): string | Promise<string> {
+  private deliver(id: string, clientMsgId: string, text: string, attachments: Attachment[], behavior: SendBehavior, queued = false, token?: LaneToken): string | Promise<string> {
+    token?.check();
     if (behavior !== "steer" && behavior !== "interrupt") throw new Error("Invalid send behavior.");
     const key = `send:${id}:${clientMsgId}`;
     const fingerprint = sendFingerprint(text, attachments);
@@ -1812,11 +1920,16 @@ export class Sessions {
       if (!s) throw new Error("no such session");
       // This is a fresh conversation, not an SDK /clear: carry its label separately from the
       // empty prompt so persistence, the first SDK launch and the desktop handoff all retain it.
-      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.permissionMode ?? "auto", text: "" }, s.title);
+      // A desktop session's mode is the app's latest, which the summary reads from its transcript;
+      // the record still holds the mode it was imported with. After a plain handoff the summary
+      // omits the mode, so the user's own choice on the record is what carries over.
+      const record = this.records.get(id);
+      const permissionMode = (record?.desktopBridge ? s.permissionMode : undefined) ?? record?.confirmedSettings?.permissionMode ?? record?.permissionMode ?? s.permissionMode ?? "default";
+      return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode, text: "" }, s.title);
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
     if (/^\/exit\s*$/.test(text)) { this.setArchived(id, true); return id; }
-    if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer"));
+    if (behavior === "interrupt") return this.interrupt(id).then(() => this.send(id, clientMsgId, text, attachments, "steer", token));
     // A Desktop handoff may finish before its RC transport exists. Acknowledge durable queue
     // ownership, not an in-memory transfer that would later fail despite the phone's ACK.
     if (!queued && this.records.get(id)?.environmentBridgeId && this.creating.has(this.records.get(id)!.createdBy)) {
@@ -1827,9 +1940,9 @@ export class Sessions {
       this.enqueue(id, clientMsgId, text, attachments);
       return id;
     }
-    // The same for a handed-off session while the app runs a turn in it: queue it, send it after.
-    const desktopId = this.records.get(id)?.sdkSessionId;
-    if (!queued && desktopId && !this.live.has(id) && this.handedOff(id) && !this.desktop?.liveProcess(desktopId)?.bridgeSessionId && this.appBusy(desktopId)) {
+    // The same for an app-held session while the app runs a turn in it: queue it, send it after.
+    const desktopId = this.records.get(id)?.sdkSessionId ?? id;
+    if (!queued && this.appModSession(id, desktopId) && this.appBusy(desktopId)) {
       this.enqueue(id, clientMsgId, text, attachments);
       const head = this.sendQueue.items(id)[0];
       if (head && this.sendQueue.wait(id, head.id, DESKTOP_BUSY)) this.opts.onSessions();
@@ -1837,7 +1950,7 @@ export class Sessions {
     }
     this.receipts.begin(key, id, fingerprint);
     try {
-      return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments));
+      return this.trackReceipt(key, this.sendAccepted(id, clientMsgId, text, attachments, token));
     } catch (error) {
       this.receipts.abandon(key);
       throw error;
@@ -1856,13 +1969,13 @@ export class Sessions {
     return tracked;
   }
 
-  private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[]): string | Promise<string> {
+  private sendAccepted(id: string, clientMsgId: string, text: string, attachments: Attachment[], token?: LaneToken): string | Promise<string> {
     // Stop closes this query's inbox before awaiting the SDK. Reject before recording the
     // user/seen id or converting attachments, so a retry can enter the next query exactly once.
     if (this.live.get(id)?.interrupted) throw new Error("Session interrupt is still in progress. Try again.");
     const existing = this.records.get(id);
     if (existing?.environmentCreateUnknown) throw new OutcomeUnknownError();
-    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId).then(sent => {
+    if (existing?.environmentBridgeId) return this.sendBridge(id, clientMsgId, text, attachments, existing.environmentBridgeId, token).then(sent => {
       if (!existing.sdkSessionId) this.pollEnvironmentAdoption(existing);
       return sent;
     });
@@ -1873,11 +1986,12 @@ export class Sessions {
         const key = `${id}/${clientMsgId}`;
         const pending = this.bridgeSends.get(key);
         if (pending) return pending;
-        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId).finally(() => this.bridgeSends.delete(key));
+        const sending = this.sendBridge(id, clientMsgId, text, attachments, process.bridgeSessionId, token).finally(() => this.bridgeSends.delete(key));
         this.bridgeSends.set(key, sending);
         return sending;
       }
-      if (process || this.desktop.isOpen(desktopId)) {
+      if (this.appModSession(id, desktopId)) {
+        // Preserve the legacy handed-off fallback, but never adopt an app-created writer.
         if (!this.handedOff(id)) throw new DesktopBlockedError();
         if (this.appBusy(desktopId)) throw new DesktopBusyError();
       }
@@ -1899,7 +2013,8 @@ export class Sessions {
     // A message sent while a turn runs is queued by the CLI and starts no turn of its own yet.
     if (r.state !== "running" && r.state !== "waiting") {
       if (live) live.turnStart = this.now();
-      this.append(id, { kind: "turn", model: r.model, effort: r.effort });
+      const settings = this.effectiveSettings(r);
+      this.append(id, { kind: "turn", model: settings.model, effort: settings.effort });
       this.setState(r, "running");
     }
     const message: SdkUserMessage = { type: "user", uuid: uuidFrom(clientMsgId), message: { role: "user", content: converted.content }, parent_tool_use_id: null, session_id: r.sdkSessionId ?? "", origin: { kind: "human" } };
@@ -1909,7 +2024,7 @@ export class Sessions {
     return id;
   }
 
-  private async sendBridge(id: string, clientMsgId: string, text: string, attachments: Attachment[], bridgeId: string): Promise<string> {
+  private async sendBridge(id: string, clientMsgId: string, text: string, attachments: Attachment[], bridgeId: string, token?: LaneToken): Promise<string> {
     if (attachments.some(a => !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(a?.mediaType))) {
       throw new Error("Only photos can be attached to Claude app sessions for now.");
     }
@@ -1943,6 +2058,7 @@ export class Sessions {
     const uuid = UUID_RE.test(clientMsgId) ? clientMsgId : uuidFrom(clientMsgId);
     while (this.bridgeEchoes.size >= Sessions.ECHO_CAP) this.bridgeEchoes.delete(this.bridgeEchoes.values().next().value!);
     this.bridgeEchoes.add(uuid);
+    token?.check();
     try { await this.bridge.send(bridgeId, uuid, converted.content); }
     catch (error) {
       this.noteBridge(bridgeId, error, "bridge send");
@@ -1981,6 +2097,8 @@ export class Sessions {
     this.logs.set(r.id, this.desktop.importInto(r.sdkSessionId ?? r.id, dir, this.now));
     for (const outcome of this.settings.replay(r.id)) this.append(r.id, { kind: "settings", ...outcome });
     r.desktopBridge = true;
+    // A control acknowledged by the SDK cannot confirm the replacement desktop worker's mode.
+    if (r.confirmedSettings) delete r.confirmedSettings.permissionMode;
     r.contextWindow = null;
     r.transcriptOffset = this.desktop.transcriptSize(r.sdkSessionId ?? r.id);
     this.save();
@@ -2105,6 +2223,9 @@ export class Sessions {
   /** A permission prompt from Remote Control, live or replayed: one record, one card, one decision. */
   private openBridgePermission(id: string, connection: { bridgeId: string; abort: AbortController; failed: boolean; permissions: Map<string, BridgePending> }, r: SessionRecord, req: BridgePermissionRequest): void {
     if (connection.permissions.has(req.requestId) || this.wasAnsweredBridge(id, req.requestId)) return;
+    // The permission stream can beat the transcript watch/poll. Publish the assistant's
+    // completed blocks first, or its question reaches the phone without its preamble.
+    this.tailBridge(r);
     const { record, decision } = this.opts.permissions.request({ session: id, tool: req.tool, title: "", summary: summarize(req.tool, req.input, r.cwd), input: req.input }, connection.abort.signal);
     const rules = sessionPermissionRules(req.tool, req.permissionSuggestions, req.suppressAlwaysAllowRule);
     this.permissionRules.set(record.id, rules);
@@ -2272,12 +2393,13 @@ export class Sessions {
   private implementPlan(id: string, permId: string): Promise<boolean> {
     const pending = this.planDecisions.get(permId);
     if (pending) return pending;
-    const change = this.scheduleModeChange(id, async () => {
+    const change = this.inSessionLane(id, async turn => {
       if (this.opts.permissions.get(permId)?.state !== "pending") return false;
       const r = this.records.get(id)!;
       const previousMode = r.permissionMode ?? "auto";
       const previousPrePlanMode = r.prePlanMode;
-      await this.changeMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits");
+      await this.changeMode(id, r.prePlanMode === "bypassPermissions" || r.permissionMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits", turn);
+      turn.check();
       let approved = false;
       try {
         approved = this.opts.permissions.decide(permId, "allow") !== null;
@@ -2287,7 +2409,8 @@ export class Sessions {
         if (!approved) {
           // Cancellation/expiry or a failed durable decision can win during the SDK request.
           // Roll back in this lane before a later user mode change runs.
-          await this.changeMode(id, previousMode);
+          await this.changeMode(id, previousMode, turn);
+          turn.check();
           if (previousPrePlanMode === undefined) delete r.prePlanMode;
           else r.prePlanMode = previousPrePlanMode;
           this.save();
@@ -2395,12 +2518,48 @@ export class Sessions {
     this.append(id, { kind: "notice", code: "interrupted" });
   }
 
-  private modeChanges = new Map<string, Promise<unknown>>();
+  private sessionLanes = new Map<string, Promise<void>>();
+
+  /** One FIFO per session. Only running time counts toward an item's single deadline.
+   * Expiry releases the lane and invalidates the token, even if upstream never answers, and the
+   * caller hears "not confirmed" unless `answerAtExpiry` is false (it then gets the work's own
+   * outcome). Either way the work goes on: a message already handed on still records its receipt
+   * and log entry, so only the token's pre-send checks stop one that was not. */
+  private inSessionLane<T>(id: string, work: (token: LaneToken) => T | Promise<T>, answerAtExpiry = true): Promise<T> {
+    const previous = this.sessionLanes.get(id);
+    const result = Promise.withResolvers<T>();
+    const released = Promise.withResolvers<void>();
+    const tail = released.promise.then(() => {
+      if (this.sessionLanes.get(id) === tail) this.sessionLanes.delete(id);
+    });
+    this.sessionLanes.set(id, tail);
+    const start = async (): Promise<void> => {
+      let current = true;
+      const token: LaneToken = { check: () => {
+        if (!current || this.shuttingDown) throw new OutcomeUnknownError();
+      } };
+      const timer = setTimeout(() => {
+        current = false;
+        released.resolve();
+        if (answerAtExpiry) result.reject(new OutcomeUnknownError());
+      }, LANE_ITEM_MS);
+      try {
+        token.check();
+        result.resolve(await work(token));
+      } catch (error) { result.reject(error); }
+      finally { current = false; clearTimeout(timer); released.resolve(); }
+    };
+    // Register before starting, and start synchronously when idle: frames in one read keep order.
+    if (previous) void previous.then(start);
+    else void start();
+    return result.promise;
+  }
 
   setMode(id: string, mode: PermissionMode, reqId: string = randomUUID()): Promise<SettingsResult> {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
-    return this.settings.run(id, reqId, JSON.stringify(["mode", mode]), "permissionMode", () => this.scheduleModeChange(id, async () => {
-      await this.changeMode(id, mode);
+    return this.settings.run(id, reqId, JSON.stringify(["mode", mode]), "permissionMode", () => this.inSessionLane(id, async turn => {
+      await this.changeMode(id, mode, turn);
+      turn.check();
       return { status: "applied", permissionMode: mode };
     }), result => { if (!this.shuttingDown) this.append(id, { kind: "settings", reqId, ...result }); });
   }
@@ -2424,21 +2583,14 @@ export class Sessions {
     return null;
   }
 
-  private scheduleModeChange<T>(id: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.modeChanges.get(id) ?? Promise.resolve();
-    const change = previous.catch(() => {}).then(work);
-    this.modeChanges.set(id, change);
-    void change.finally(() => { if (this.modeChanges.get(id) === change) this.modeChanges.delete(id); }).catch(() => {});
-    return change;
-  }
-
-  private async changeMode(id: string, mode: PermissionMode): Promise<void> {
+  private async changeMode(id: string, mode: PermissionMode, turn: LaneToken): Promise<void> {
     if (!PERMISSION_MODES.includes(mode)) throw new Error("invalid permission mode");
     const bridgeId = this.settingsBridge(id);
     const r = this.records.get(id) ?? this.continueDesktop(id, "");
     if (bridgeId) {
+      turn.check();
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_permission_mode", mode });
-      if (this.shuttingDown) throw new OutcomeUnknownError();
+      turn.check();
       this.recordMode(r, mode);
       return;
     }
@@ -2446,8 +2598,10 @@ export class Sessions {
     if (!live && mode === "bypassPermissions" && !(r.bypassAllowed ?? r.permissionMode === "bypassPermissions")) throw new Error("bypass_not_launched");
     if (live) {
       await live.ready;
+      turn.check();
       if (this.live.get(id) !== live) throw new Error("The session stopped before its mode changed. Try again.");
       await live.query.setPermissionMode(mode);
+      turn.check();
     }
     this.recordMode(r, mode);
   }
@@ -2467,17 +2621,18 @@ export class Sessions {
     if (!this.has(id)) return Promise.reject(new Error("no such session"));
     if (typeof model !== "string" || !model.trim() || model.length > 300 || /[@\s]/.test(model)) return Promise.reject(new Error("Invalid model"));
     if (effort !== null && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) return Promise.reject(new Error("Invalid effort"));
-    return this.settings.run(id, reqId, JSON.stringify(["model", model, effort]), "model", () => this.scheduleModeChange(id, () => this.changeModel(id, model, effort)),
+    return this.settings.run(id, reqId, JSON.stringify(["model", model, effort]), "model", () => this.inSessionLane(id, turn => this.changeModel(id, model, effort, turn)),
       result => { if (!this.shuttingDown) this.append(id, { kind: "settings", reqId, ...result }); });
   }
 
-  private async changeModel(id: string, model: string, effort: Effort | null): Promise<SettingsResult> {
+  private async changeModel(id: string, model: string, effort: Effort | null, turn: LaneToken): Promise<SettingsResult> {
     const bridgeId = this.settingsBridge(id, true);
     const m = modelArg(model, effort);
     if (bridgeId) {
       const r = this.records.get(id)!;
+      turn.check();
       await this.bridge.control(bridgeId, randomUUID(), { subtype: "set_model", model: m.model });
-      if (this.shuttingDown) throw new OutcomeUnknownError();
+      turn.check();
       if (r.model !== model) r.contextWindow = null;
       r.model = model;
       r.confirmedSettings = { ...r.confirmedSettings, model };
@@ -2486,14 +2641,18 @@ export class Sessions {
       // Claude's effort is a distinct CLI setting, never a thinking-token budget. Routed
       // models carry it ONLY in modelArg, so there cannot be a second conflicting setting.
       if (isClaudeModel(model)) {
-        try { await this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: effort } }); }
+        try {
+          turn.check();
+          await this.bridge.control(bridgeId, randomUUID(), { subtype: "apply_flag_settings", settings: { effortLevel: effort } });
+        }
         catch (error) {
           if (error instanceof OutcomeUnknownError) throw error;
+          turn.check();
           if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, r.effort);
           return { status: "partial", model, errors: { effort: error instanceof Error ? error.message : String(error) } };
         }
       }
-      if (this.shuttingDown) throw new OutcomeUnknownError();
+      turn.check();
       r.effort = effort;
       r.confirmedSettings = { ...r.confirmedSettings, effort };
       this.save();
@@ -2519,24 +2678,35 @@ export class Sessions {
     const changedModel = r.model !== model;
     const changedEffort = r.effort !== effort;
     const live = this.live.get(id);
-    if (live && (changedModel || changedEffort && !isClaudeModel(model))) {
+    const needsRestart = !!live && isClaudeModel(model) && (changedModel || changedEffort || live.restartAfterTurn);
+    if (needsRestart && !live.restartAfterTurn) {
+      r.confirmedSettings = { ...r.confirmedSettings, model: r.model, effort: r.effort };
+    }
+    if (live && !needsRestart && (changedModel || changedEffort && !isClaudeModel(model))) {
       await live.ready;
+      turn.check();
       if (this.live.get(id) !== live) throw new Error("The session stopped before its model changed. Try again.");
       await live.query.setModel(m.model);
+      turn.check();
     }
     if (changedModel) r.contextWindow = null;
     r.model = model;
     r.effort = effort;
     this.save();
-    if (r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, effort);
-    this.append(id, { kind: "notice", code: "model_changed", text: effort ? `${model} · ${effort}` : model });
-    if (live) {
-      // Even when the model also changed, Claude's effort must reach a fresh SDK query.
-      if ((changedModel || changedEffort) && isClaudeModel(model)) live.restartAfterTurn = true;
-      if (live.restartAfterTurn && (r.state === "idle" || r.state === "error")) this.restartSettings(r, live);
+    if (live && needsRestart) live.restartAfterTurn = true;
+    else {
+      if (live) live.restartAfterTurn = false;
+      r.confirmedSettings = { ...r.confirmedSettings, model, effort };
     }
+    this.save();
+    if (!needsRestart && r.sdkSessionId) this.queueAppChoice(id, r.sdkSessionId, model, effort);
+    if (live?.restartAfterTurn && (r.state === "idle" || r.state === "error")) this.restartSettings(r, live);
+    const effective = this.effectiveSettings(r);
+    if (!effective.pendingSettings) this.append(id, { kind: "notice", code: "model_changed", text: effort ? `${model} · ${effort}` : model });
     this.opts.onSessions();
-    return { status: "applied", model, effort };
+    return effective.pendingSettings
+      ? { status: "partial", model: effective.model, effort: effective.effort, pending: effective.pendingSettings }
+      : { status: "applied", model, effort };
   }
 
   private markTranscriptEnd(r: SessionRecord): void {
@@ -2552,6 +2722,7 @@ export class Sessions {
     const follow = r && !r.desktopBridge && !r.environmentBridgeId && r.desktopHandoff === "attempted";
     if (follow) this.closing.set(id, live);
     this.live.delete(id);
+    if (!this.shuttingDown) this.invalidateActivity(id);
     live.input.close();
     live.abort.abort();
     try { live.query?.close(); } catch { /* already ended */ }
@@ -2589,6 +2760,7 @@ export class Sessions {
       if (!this.handedOff(r.id)) throw new DesktopBlockedError();
       if (this.appBusy(r.sdkSessionId)) throw new DesktopBusyError();
     }
+    this.invalidateActivity(r.id);
     const abort = new AbortController();
     const input = new Inbox();
     const env: Record<string, string> = {};
@@ -2607,6 +2779,7 @@ export class Sessions {
         const activity = this.taskState(r.id).activity;
         activity.inventory(input, this.now());
         this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
+        if (live.restartAfterTurn && this.sdkIdle(r, live)) this.restartSettings(r, live);
         return {};
       }] }] },
       settingSources: ["user", "project", "local"],
@@ -2651,6 +2824,7 @@ export class Sessions {
       this.markTranscriptEnd(r);
     }
     this.live.delete(r.id);
+    this.invalidateActivity(r.id);
     this.opts.permissions.expireSession(r.id, "aborted");
     if (failure) {
       const text = this.failureText(r.id, failure);
@@ -2692,7 +2866,7 @@ export class Sessions {
         const ev = msg.event as { type?: string; index?: number; message?: { id?: string }; content_block?: { type?: string }; delta?: { type?: string; text?: string; thinking?: string } } | undefined;
         if (ev?.type === "message_start" && ev.message?.id) {
           this.flush(r.id, live);
-          live.current = { msg: ev.message.id, text: "", tools: [], model: r.model, thinkingBlocks: [], nextThinkingBlock: 0 };
+          live.current = { msg: ev.message.id, text: "", tools: [], model: this.effectiveSettings(r).model, thinkingBlocks: [], nextThinkingBlock: 0 };
         } else if (ev?.type === "content_block_start" && ev.content_block?.type === "thinking" && live.current) {
           const index = ev.index ?? 0;
           if (!live.current.thinkingBlocks.includes(index)) live.current.thinkingBlocks.push(index);
@@ -2718,7 +2892,7 @@ export class Sessions {
         if (parent) { this.subAssistant(r, live, parent, message); return; }
         this.flush(r.id, live);
         const id = message.id ?? randomUUID();
-        if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? r.model, thinkingBlocks: [], nextThinkingBlock: 0 };
+        if (!live.current || live.current.msg !== id) live.current = { msg: id, text: "", tools: [], model: message.model ?? this.effectiveSettings(r).model, thinkingBlocks: [], nextThinkingBlock: 0 };
         const cur = live.current;
         (message.content ?? []).forEach((block, index) => {
           if (block.type !== "thinking" || typeof block.thinking !== "string") return;
@@ -2758,12 +2932,17 @@ export class Sessions {
           const activity = this.taskState(r.id).activity;
           activity.notice(converted.text, this.now());
           this.append(r.id, { kind: "background", tasks: [...activity.active, ...activity.history], known: activity.known });
-          const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(converted.text)?.[1];
-          const status = /<status>([^<]+)<\/status>/.exec(converted.text)?.[1];
-          if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
-            this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
-            live.subs.delete(tool);
+          for (const [notice] of converted.text.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
+            const taskId = /<task-id>([^<]+)<\/task-id>/.exec(notice)?.[1];
+            const task = activity.history.find(task => task.id === taskId);
+            const tool = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1] ?? task?.sub?.replace(/^sub-/, "");
+            const status = /<status>([^<]+)<\/status>/.exec(notice)?.[1];
+            if (tool && live.subs.has(tool) && ["completed", "failed", "killed", "stopped"].includes(status ?? "")) {
+              this.workerEvent(r, live, tool, status === "completed" ? "done" : status === "failed" ? "failed" : "stopped");
+              live.subs.delete(tool);
+            }
           }
+          if (live.restartAfterTurn && this.sdkIdle(r, live)) this.restartSettings(r, live);
           return;
         }
         // SDK user echoes normally already have a phone event; retain attachment-bearing echoes only.
@@ -2800,7 +2979,7 @@ export class Sessions {
         }
         const ok = msg.subtype === "success" && msg.is_error !== true;
         const usage = msg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
-        const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(r.model))?.[1].contextWindow;
+        const win = Object.entries(usage ?? {}).find(([model]) => windowKey(model) === windowKey(this.effectiveSettings(r).model))?.[1].contextWindow;
         r.contextWindow = typeof win === "number" && Number.isFinite(win) && win > 0 ? win : null;
         for (const [model, u] of Object.entries(usage ?? {})) if (typeof u.contextWindow === "number") this.learnWindow(model, u.contextWindow);
         const error = ok ? undefined : this.failureText(r.id, String(msg.result ?? (Array.isArray(msg.errors) ? msg.errors.join("; ") : msg.subtype ?? "error"))).slice(0, 500);
@@ -2824,9 +3003,13 @@ export class Sessions {
   /** A settings restart shares the handoff inbox: preserve even prefetched accepted inputs,
    * and do not create another transcript writer until the old process has actually exited. */
   private restartSettings(r: SessionRecord, live: Live): void {
+    if (this.live.get(r.id) !== live || this.taskState(r.id).activity.active.length) return;
     const transfer = { messages: live.pendingMessages };
     this.handingOff.set(r.id, transfer);
     this.stop(r.id, live);
+    r.confirmedSettings = { ...r.confirmedSettings, model: r.model, effort: r.effort };
+    this.save();
+    if (r.sdkSessionId) this.queueAppChoice(r.id, r.sdkSessionId, r.model, r.effort);
     void Promise.resolve(live.query.processExited).then(async () => {
       this.handingOff.delete(r.id);
       if (this.shuttingDown) return;
@@ -2862,7 +3045,7 @@ export class Sessions {
   }
 
   private sdkIdle(r: SessionRecord, live = this.live.get(r.id)): boolean {
-    return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0);
+    return !this.handingOff.has(r.id) && !BUSY.has(r.state) && (!live || live.pendingMessages.length === 0) && this.taskState(r.id).activity.active.length === 0;
   }
 
   private handoff(r: SessionRecord, live = this.live.get(r.id)): void {
@@ -2889,6 +3072,13 @@ export class Sessions {
     void new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
       if (this.shuttingDown) { this.handingOff.delete(r.id); return; }
       try {
+        // SDK events can arrive between result and this deferred callback. Recheck before aborting.
+        if (BUSY.has(r.state) || this.taskState(r.id).activity.active.length || this.live.get(r.id) !== live) {
+          r.desktopHandoff = "pending";
+          r.desktopHandoffAttempts!--;
+          this.save();
+          return;
+        }
         this.stop(r.id, live);
         // close() and iterator completion alone do not prove the writer has stopped.
         // The SDK owns the graceful-exit/kill deadline; never launch another writer before exit.
@@ -3027,7 +3217,7 @@ export class Sessions {
   /** The mod's figures as events in the same log, so a phone that reconnects sees what it missed. Throttled to one read per 15 s while a turn runs. */
   private async refreshFigures(r: SessionRecord, force: boolean): Promise<void> {
     if (!r.sdkSessionId) return;
-    await this.readFigures(r.id, r.sdkSessionId, r.model, r.contextWindow, force, false);
+    await this.readFigures(r.id, r.sdkSessionId, this.effectiveSettings(r).model, r.contextWindow, force, false);
   }
 
   /**
@@ -3051,7 +3241,7 @@ export class Sessions {
     // A replaced log/model or a newer read owns the next event, not this late reply.
     if (this.shuttingDown || this.figuresAt.get(id) !== scope || epoch() !== scope.epoch) return;
     const current = this.records.get(id);
-    if (current && (current.model !== model || (current.sdkSessionId ?? id) !== cliId)) return;
+    if (current && (this.effectiveSettings(current).model !== model || (current.sdkSessionId ?? id) !== cliId)) return;
     if (mac && !hadFigures && !figures.route && !figures.effort && !figures.workers.length) return;
     const { at: _at, ...rest } = figures;
     const key = JSON.stringify(rest);

@@ -92,9 +92,13 @@ interface Client {
   /** last time this client said the app is visible; 0 once it said hidden */
   visibleAt: number;
   lastRx: number;
-  /** session → last seq sent to this client */
-  attached: Map<string, number>;
+  /** session → log epoch and last seq sent to this client */
+  attached: Map<string, { epoch: string; seq: number }>;
   pumping: Set<string>;
+  pendingTail: Set<string>;
+  retries: Map<string, ReturnType<typeof setTimeout>>;
+  /** The session list waiting for a backed-up connection to drain. */
+  sessionsRetry: ReturnType<typeof setTimeout> | null;
   features: ReturnType<typeof clientFeatures>;
 }
 
@@ -279,28 +283,55 @@ export class HostServer {
     if (this.sessionsTimer) return;
     this.sessionsTimer = setTimeout(() => {
       this.sessionsTimer = null;
-      try {
-        const msg: HostMsg = { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
-        for (const c of this.clients) if (c.authed) this.send(c, msg);
-      } catch (error) {
-        this.opts.log?.(`session list failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      const msg = this.sessionList();
+      if (!msg) return;
+      for (const c of this.clients) if (c.authed) this.sendSessions(c, msg);
     }, 150);
+  }
+
+  private sessionList(): Extract<HostMsg, { t: "sessions" }> | null {
+    try {
+      return { t: "sessions", sessions: this.opts.sessions.list(), groups: this.opts.sessions.groups() };
+    } catch (error) {
+      this.opts.log?.(`session list failed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /** A backed-up connection gets the list once it drains, and then only the newest one: a list per
+   * change would keep the buffer full and hold the conversation's own frames behind it. */
+  private sendSessions(c: Client, msg: Extract<HostMsg, { t: "sessions" }>): void {
+    if (c.ws.readyState !== c.ws.OPEN) return;
+    if (c.ws.bufferedAmount >= HIGH_WATER) {
+      c.sessionsRetry ??= setTimeout(() => {
+        c.sessionsRetry = null;
+        const latest = this.sessionList();
+        if (latest) this.sendSessions(c, latest);
+      }, 200);
+    } else this.send(c, msg);
+    // A rebase can replace the log without appending an event afterward.
+    for (const [id, cursor] of c.attached) {
+      const epoch = msg.sessions.find(session => session.id === id)?.epoch;
+      if (epoch && epoch !== cursor.epoch) this.pump(c, id);
+    }
   }
 
   private pump(c: Client, session: string): void {
     if (c.pumping.has(session)) return;
     c.pumping.add(session);
     try {
+      if (c.ws.readyState !== c.ws.OPEN || !c.attached.has(session)) return;
       const log = this.opts.sessions.log(session);
       for (;;) {
-        const after = c.attached.get(session);
-        if (after === undefined || after >= log.lastSeq) break;
-        if (c.ws.bufferedAmount > HIGH_WATER) { setTimeout(() => this.pump(c, session), 200); break; }
-        const page = log.readAfter(after);
+        const cursor = c.attached.get(session);
+        if (!cursor) break;
+        if (c.pendingTail.has(session) || cursor.epoch !== log.epoch) { this.sendTail(c, session, log); break; }
+        if (cursor.seq >= log.lastSeq) break;
+        if (c.ws.bufferedAmount >= HIGH_WATER) { this.retryPump(c, session); break; }
+        const page = log.readAfter(cursor.seq);
         // Skipped (superseded) deltas can leave a page empty; the cursor still moves to the end.
         const last = page.events.length ? page.events[page.events.length - 1]!.seq : log.lastSeq;
-        c.attached.set(session, page.more ? last : Math.max(last, log.lastSeq));
+        c.attached.set(session, { epoch: log.epoch, seq: page.more ? last : Math.max(last, log.lastSeq) });
         if (page.events.length) this.send(c, { t: "events", session, epoch: log.epoch, events: page.events, more: page.more });
         if (!page.more) break;
       }
@@ -318,7 +349,7 @@ export class HostServer {
       this.opts.log?.(`bridge sync failed: ${error instanceof Error ? error.message : String(error)}`);
     });
     const log = this.opts.sessions.log(session);
-    c.attached.set(session, c.attached.get(session) ?? 0);
+    c.attached.set(session, c.attached.get(session) ?? { epoch: log.epoch, seq: 0 });
     this.syncWatches();
     if (epoch === log.epoch && afterSeq !== undefined && afterSeq > 0 && afterSeq <= log.lastSeq) {
       // Resume by seq, unless the gap is so large that replaying it would be slower than starting from the tail.
@@ -330,13 +361,35 @@ export class HostServer {
         cursor = page.events.length ? page.events[page.events.length - 1]!.seq : log.lastSeq;
       }
       if (frames < CATCHUP_FRAMES) {
-        c.attached.set(session, afterSeq);
+        c.attached.set(session, { epoch: log.epoch, seq: afterSeq });
+        // Already up to date: say so, or a reader showing its own saved copy cannot tell that the
+        // copy is the computer's current one until something new happens.
+        if (afterSeq === log.lastSeq) this.send(c, { t: "events", session, epoch: log.epoch, events: [], more: false });
         this.pump(c, session);
         return;
       }
     }
+    this.sendTail(c, session, log);
+  }
+
+  private retryPump(c: Client, session: string): void {
+    if (c.retries.has(session)) return;
+    c.retries.set(session, setTimeout(() => {
+      c.retries.delete(session);
+      this.pump(c, session);
+    }, 200));
+  }
+
+  private sendTail(c: Client, session: string, log: ReturnType<Sessions["log"]>): void {
+    if (c.ws.readyState !== c.ws.OPEN || !c.attached.has(session)) return;
+    if (c.ws.bufferedAmount >= HIGH_WATER) {
+      c.pendingTail.add(session);
+      this.retryPump(c, session);
+      return;
+    }
+    c.pendingTail.delete(session);
     const tail = log.tail();
-    c.attached.set(session, log.lastSeq);
+    c.attached.set(session, { epoch: log.epoch, seq: log.lastSeq });
     this.send(c, { t: "events", session, epoch: log.epoch, events: tail.events, more: false, tail: { hasOlder: tail.hasOlder } });
   }
 
@@ -344,7 +397,7 @@ export class HostServer {
 
   /** A phone connected, directly or through the relay; it must say hello with the token within 10 s. */
   connected(ws: Peer): void {
-    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), features: new Set() };
+    const c: Client = { ws, authed: false, clientId: "", visibleAt: 0, lastRx: Date.now(), attached: new Map(), pumping: new Set(), pendingTail: new Set(), retries: new Map(), sessionsRetry: null, features: new Set() };
     this.clients.add(c);
     const helloTimer = setTimeout(() => { if (!c.authed) ws.close(4001, "hello"); }, 10_000);
     ws.on("message", (data) => {
@@ -357,6 +410,11 @@ export class HostServer {
     });
     ws.on("close", () => {
       clearTimeout(helloTimer);
+      for (const timer of c.retries.values()) clearTimeout(timer);
+      c.retries.clear();
+      c.pendingTail.clear();
+      if (c.sessionsRetry) clearTimeout(c.sessionsRetry);
+      c.sessionsRetry = null;
       if (c.authed && c.clientId) this.lastSeen.set(c.clientId, c.lastRx);
       this.clients.delete(c);
       this.syncWatches();
@@ -422,7 +480,15 @@ export class HostServer {
     switch (msg.t) {
       case "hello": return;
       case "attach": this.attach(c, msg.session, msg.epoch, msg.afterSeq); return;
-      case "detach": c.attached.delete(msg.session); this.syncWatches(); return;
+      case "detach": {
+        c.attached.delete(msg.session);
+        c.pendingTail.delete(msg.session);
+        const retry = c.retries.get(msg.session);
+        if (retry) clearTimeout(retry);
+        c.retries.delete(msg.session);
+        this.syncWatches();
+        return;
+      }
       case "seen":
         if (c.attached.has(msg.session) && c.visibleAt > 0 && this.now() - c.visibleAt < VISIBLE_MS && s.has(msg.session)) s.markSeen(msg.session);
         return;
@@ -436,8 +502,19 @@ export class HostServer {
         return;
       case "history": {
         if (!s.has(msg.session)) return;
-        const page = s.log(msg.session).before(msg.beforeSeq);
-        this.send(c, { t: "history", session: msg.session, reqId: msg.reqId, events: page.events, hasOlder: page.hasOlder });
+        const log = s.log(msg.session);
+        const mismatch = msg.epoch !== undefined && msg.epoch !== log.epoch;
+        const page = mismatch ? { events: [], hasOlder: false } : log.before(msg.beforeSeq);
+        this.send(c, { t: "history", session: msg.session, reqId: msg.reqId, epoch: log.epoch, events: page.events, hasOlder: page.hasOlder });
+        // Reading can rebuild a desktop snapshot before its watcher notices. Notify every reader,
+        // even when the requester is an older client that did not send an epoch.
+        const requesterCursor = c.attached.get(msg.session);
+        for (const peer of this.clients) {
+          const cursor = peer.attached.get(msg.session);
+          if (peer.authed && cursor && cursor.epoch !== log.epoch) this.pump(peer, msg.session);
+        }
+        if (mismatch && !requesterCursor) this.attach(c, msg.session, undefined, undefined);
+        else if (mismatch && requesterCursor?.epoch === log.epoch) this.sendTail(c, msg.session, log);
         return;
       }
       case "create":
@@ -452,10 +529,10 @@ export class HostServer {
           }
         }
         return;
-      case "send":
+      case "send": {
         try {
           const desktop = s.list().some(session => session.id === msg.session && session.origin === "desktop");
-          const id = await s.send(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
+          const id = await s.orderedSend(msg.session, msg.clientMsgId, msg.text, msg.attachments, msg.behavior);
           // A message the person sends after a Stop is them carrying on: the queue goes on after it.
           s.resumeQueue(msg.session);
           this.send(c, { t: "ack", clientMsgId: msg.clientMsgId, session: id });
@@ -468,6 +545,7 @@ export class HostServer {
           }
         }
         return;
+      }
       case "decide":
         try {
           if (msg.decision !== "allow" && msg.decision !== "allow_always" && msg.decision !== "deny") throw new Error("invalid decision");
@@ -563,7 +641,7 @@ export class HostServer {
         if (typeof op.path !== "string" || !op.path || op.path.length > 512) throw new Error("Invalid folder path.");
         return macConsent(summary.cwd, () => readSessionFolderFile(summary.cwd, op.path), { wait: 2500 });
       }
-      case "enqueue": s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
+      case "enqueue": await s.enqueue(op.session, op.clientMsgId, op.text, op.attachments ?? []); return { queued: true };
       case "queue_remove": return s.removeQueued(op.session, op.id);
       case "queue_send": return { session: await s.sendQueued(op.session, op.id) };
       case "queue_resume": s.resumeQueue(op.session); return null;

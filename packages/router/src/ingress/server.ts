@@ -28,6 +28,7 @@ import {
   chatToAnthropic,
   formatDataSse,
   formatSse,
+  hasCompactionTrigger,
   responsesEventsToChatChunks,
   responsesToAnthropic,
   responsesToChatCompletion,
@@ -405,7 +406,10 @@ export class OpenAiIngress {
       }
       const native = provider.type === "anthropic";
       const prefix = native && provider.auth === "claude-code" ? CLAUDE_CODE_IDENTITY : undefined;
-      const anthropic = path === "/v1/responses" ? responsesToAnthropic(body, route.model, prefix) : chatToAnthropic(body, route.model, prefix);
+      const compaction = path === "/v1/responses" && hasCompactionTrigger(body);
+      const anthropic = path === "/v1/responses" ? responsesToAnthropic(body, route.model, prefix, () => {
+        this.deps.log.warn("OPENAI ingress: ignored foreign compaction item; encrypted_content is not a ClaudeRipple summary");
+      }) : chatToAnthropic(body, route.model, prefix);
       const wire = native ? anthropic as unknown as Json : sanitizeForCompatible(anthropic as unknown as Json, resolveCompatibleCaps(
         provider.preset ? (() => { const preset = PRESETS.find((entry) => entry.id === provider.preset); return preset ? { effortLevels: preset.effortLevels, thinking: preset.thinking } : undefined; })() : undefined,
         provider.caps,
@@ -422,7 +426,7 @@ export class OpenAiIngress {
       wire.stream = stream;
       record = { kind: "messages", source: requested, target: route.model, provider: route.provider, ...(route.effort ? { effort: route.effort } : {}), stream };
       const kindNote = `openai-ingress ${path === "/v1/responses" ? "responses" : "chat"}`;
-      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, (done) => { terminal = { ...done, note: kindNote }; });
+      const outcome = await this.forward(res, provider, wire, route.model, path === "/v1/chat/completions", stream, compaction, (done) => { terminal = { ...done, note: kindNote }; });
       finish(outcome.status, outcome.bytes, { ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.stopReason ? { stopReason: outcome.stopReason } : {}), note: `${kindNote}${outcome.note ? `; ${outcome.note}` : ""}` });
     } catch (error) {
       if (completed) return; // already recorded (e.g. client closed after the terminal event)
@@ -437,7 +441,7 @@ export class OpenAiIngress {
     }
   }
 
-  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
+  private async forward(res: http.ServerResponse, provider: AnthropicCompatibleProvider | AnthropicProvider, wire: Json, model: string, chat: boolean, stream: boolean, compaction: boolean, onTerminal?: (outcome: Outcome) => void): Promise<Outcome> {
     const native = provider.type === "anthropic";
     const upstream = new URL(native ? (this.deps.nativeUpstream ?? "https://api.anthropic.com") : provider.url);
     const protocol = upstream.protocol === "https:" ? "https:" : "http:";
@@ -477,7 +481,7 @@ export class OpenAiIngress {
       const mapped = httpStatusError(response.statusCode ?? 502, safeText);
       return { status: mapped.status, bytes: sendJson(res, mapped.status, mapped.error), note: `upstream ${response.statusCode ?? 0}` };
     }
-    const mapper = new ResponsesEventMapper(model, native && provider.auth === "claude-code" ? fromClaudeCodeToolName : undefined);
+    const mapper = new ResponsesEventMapper(model, native && provider.auth === "claude-code" ? fromClaudeCodeToolName : undefined, compaction);
     let bytes = 0;
     const writeResponses = (events: Json[]): void => {
       for (const event of events) bytes += Buffer.byteLength(formatSse(event)), res.write(formatSse(event));
@@ -495,13 +499,18 @@ export class OpenAiIngress {
       const decoder = new TextDecoder();
       await new Promise<void>((resolveP, reject) => {
         response.on("data", (chunk: Buffer) => {
-          for (const event of parser.feed(decoder.decode(chunk, { stream: true }))) {
-            const mapped = mapper.feed(event);
-            if (stream) write(mapped);
-            if (stream && mapped.some((e) => e.type === "response.completed")) {
-              if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
-              onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call") ? "tool_use" : "end_turn" });
+          try {
+            for (const event of parser.feed(decoder.decode(chunk, { stream: true }))) {
+              const mapped = mapper.feed(event);
+              if (stream) write(mapped);
+              if (stream && mapped.some((e) => e.type === "response.completed")) {
+                if (chat) { bytes += Buffer.byteLength("data: [DONE]\n\n"); res.write("data: [DONE]\n\n"); }
+                onTerminal?.({ status: 200, bytes, usage: usage(mapper), stopReason: mapper.output.some((item) => item.type === "function_call") ? "tool_use" : "end_turn" });
+              }
             }
+          } catch (error) {
+            response.destroy();
+            reject(error);
           }
         });
         response.on("end", resolveP);

@@ -61,9 +61,57 @@ export class ProviderHealth {
     else if (status >= 200 && status < 300) this.exhausted.delete(provider);
   }
 
+  clear(provider: string): void {
+    this.exhausted.delete(provider);
+  }
+
   snapshot(now = Date.now()): Record<string, ProviderExhaustion> {
     for (const [name, value] of this.exhausted) if (value.until <= now) this.exhausted.delete(name);
     return Object.fromEntries(this.exhausted);
+  }
+}
+
+export type ModelUnavailable = { reason: "model_deprecated"; at: number };
+
+/**
+ * Explicit model retirement, not a missing endpoint or a temporary failure. `model_not_found` is
+ * not one: it also answers a key without access or a relay mid-deploy, and this record has no TTL.
+ */
+export function modelDeprecation(status: number, body: string, now = Date.now()): ModelUnavailable | undefined {
+  if (status !== 404 && status !== 410) return undefined;
+  return /\b(?:ModelDeprecated|model_deprecated)\b|\bmodel\b[^\n]*\bhas been deprecated\b/i.test(body)
+    ? { reason: "model_deprecated", at: now } : undefined;
+}
+
+/** Provider + exact upstream model id. No timer or successful sibling clears a retirement;
+ * a success on that exact target or a change to its provider's configuration permits another probe.
+ */
+export class ModelHealth {
+  private readonly unavailable: Record<string, Record<string, ModelUnavailable>> = Object.create(null);
+
+  observe(provider: string, model: string, state: ModelUnavailable | undefined): void {
+    if (!state) return;
+    const models = this.unavailable[provider] ??= Object.create(null);
+    models[model] = state;
+  }
+
+  success(provider: string, model: string): void {
+    const models = this.unavailable[provider];
+    if (!models) return;
+    delete models[model];
+    if (!Object.keys(models).length) delete this.unavailable[provider];
+  }
+
+  clear(provider: string): void {
+    delete this.unavailable[provider];
+  }
+
+  get(provider: string, model: string): ModelUnavailable | undefined {
+    return this.unavailable[provider]?.[model];
+  }
+
+  snapshot(): Record<string, Record<string, ModelUnavailable>> {
+    return structuredClone(this.unavailable);
   }
 }
 

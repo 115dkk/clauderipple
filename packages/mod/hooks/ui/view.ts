@@ -260,6 +260,12 @@ export type LogActions = {
 /** The limits pane: every plan window the router answered, grouped by provider account. */
 export type LimitsView = {
   items: readonly LimitItem[]
+  /** Save mode holds Auto down until then (epoch ms); absent while it is off. */
+  saveUntil?: number
+}
+
+export type LimitsActions = {
+  close: () => void
 }
 
 // ---- Helpers register.tsx and the drawings share ----------------------------------------------
@@ -433,9 +439,38 @@ function weekdayName(day: number, lang: Lang): string {
 const RESET_NEAR_MS = 20 * 3_600_000
 
 /**
- * A reset as a plan window's detail reads it: "2시간 뒤" while the window is close, else the
- * weekday and the local time ("목 09:00"), "초기화 중" once it has passed. The hover tips keep the
- * whole sentence (`resetsLabel`); this is its short form, for the limits pane. Twenty hours is
+ * A moment as the limits pane names it, in local time to the minute with its date and weekday:
+ * "10월 30일 (목) 오후 3:35", "Thu, Oct 30, 3:35 PM", "jue 30 oct, 15:35". A language keeps its
+ * own clock (`units.clockHours`: 12 with its morning and afternoon words, or 24).
+ */
+export function resetMoment(at: number, lang: Lang): string {
+  const d = new Date(at)
+  const hours = d.getHours()
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const twelve = t(lang, 'units.clockHours') === '12'
+  const time = t(lang, hours < 12 ? 'units.am' : 'units.pm', { time: (twelve ? String(hours % 12 || 12) : String(hours).padStart(2, '0')) + ':' + mm })
+  return t(lang, 'limits.date', { month: t(lang, 'units.month' + (d.getMonth() + 1)), day: d.getDate(), weekday: weekdayName(d.getDay(), lang), time })
+}
+
+/**
+ * The time from now to a reset: to the minute under a day ("4시간 12분", "35분"), to the hour past
+ * one ("2일 5시간"). Counted up to the next whole minute, so a reset 30 seconds off still reads
+ * "1분" until it passes.
+ */
+export function timeLeft(ms: number, lang: Lang): string {
+  const minutes = Math.max(1, Math.ceil(ms / 60_000))
+  const days = Math.floor(minutes / 1440)
+  const hours = Math.floor((minutes % 1440) / 60)
+  const rest = minutes % 60
+  if (days > 0) return hours > 0 ? t(lang, 'units.dayHour', { d: days, h: hours }) : t(lang, 'units.days', { n: days })
+  if (hours > 0) return rest > 0 ? t(lang, 'units.hourMin', { h: hours, m: rest }) : t(lang, 'units.hours', { n: hours })
+  return t(lang, 'units.minutes', { n: rest })
+}
+
+/**
+ * A reset as a short detail reads it: "2시간 뒤" while the window is close, else the weekday and
+ * the local time ("목 09:00"), "초기화 중" once it has passed. The hover tips keep the whole
+ * sentence (`resetsLabel`); the limits pane names the moment whole (`resetMoment`). Twenty hours is
  * where the router's own status label (`limitLabel` in session.ts) stops naming the clock and
  * names the day.
  */

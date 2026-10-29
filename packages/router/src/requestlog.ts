@@ -2,10 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
+import type { ThinkingBlock } from "./thinking.ts";
 import { UsageHistory, addConversations, emptyConversations, finishConversations, modelRowOf, recordConversations, addTotals, emptyTotals, finishTotals, recordTotals, sortByVolume, type BucketTotals, type SummaryBucket, type UsageSummary } from "./usage-history.ts";
 
 const DEFAULT_MAX_BYTES = 20 * 1024 * 1024;
 const MAX_CARRY = 64 * 1024;
+// All thinking fields one response may hold while their blocks are open.
+const MAX_THINKING_HELD = 4 * MAX_CARRY;
 
 export type RequestUsage = {
   input: number;
@@ -24,6 +27,8 @@ export type RequestRecord = {
   source: string;
   target: string;
   provider: string;
+  /** Actual responder's configured label or 1-based ordinal; never a credential id or token. */
+  credential?: string;
   effort?: string;
   upstreamRequestId?: string;
   messageId?: string;
@@ -248,7 +253,17 @@ export class ResponseUsageTap {
   private encodedBytes = 0;
   private static readonly MAX_ENCODED = 16 * 1024 * 1024;
 
-  constructor(contentType: string | undefined, contentEncoding: string | undefined) {
+  private contentArray = false;
+  private blockKey: string | undefined;
+  private blockValue = false;
+  private thinkingBlock: ThinkingBlock = {};
+  private readonly thinkingBlocks = new Map<number, ThinkingBlock>();
+  private thinkingHeld = 0;
+
+  private readonly onThinking: ((block: ThinkingBlock) => void) | undefined;
+
+  constructor(contentType: string | undefined, contentEncoding: string | undefined, onThinking?: (block: ThinkingBlock) => void) {
+    this.onThinking = onThinking;
     this.isSse = /^text\/event-stream\b/i.test(contentType ?? "");
     const enc = (contentEncoding ?? "").toLowerCase().trim();
     if (enc === "" || enc === "identity") this.encoding = null;
@@ -351,6 +366,7 @@ export class ResponseUsageTap {
     if (!this.data.length) return;
     try {
       const body = JSON.parse(this.data.join("\n")) as Record<string, unknown>;
+      if (this.onThinking) this.observeThinkingEvent(body);
       if (this.event === "message_start" || body.type === "message_start") {
         const message = body.message as { id?: unknown; usage?: unknown } | undefined;
         if (typeof message?.id === "string") this.messageId = message.id;
@@ -363,6 +379,48 @@ export class ResponseUsageTap {
     } catch {
       // A malformed upstream event is not a proxy error and must not affect delivery.
     }
+  }
+
+  private observeThinkingEvent(body: Record<string, unknown>): void {
+    const index = body.index;
+    if (typeof index !== "number") return;
+    // Held fields are bounded per block and across the response: a block that would exceed either
+    // is forgotten, which only makes its origin unknown (dropped on a reroute), never wrong.
+    if (body.type === "content_block_start") {
+      const block = body.content_block as ThinkingBlock | undefined;
+      if (block?.type !== "thinking" && block?.type !== "redacted_thinking") return;
+      const held = { type: block.type, signature: block.signature, data: block.data };
+      const size = this.heldSize(held);
+      if (this.thinkingBlocks.size < 1024 && size <= MAX_CARRY && this.thinkingHeld + size <= MAX_THINKING_HELD) {
+        this.thinkingBlocks.set(index, held);
+        this.thinkingHeld += size;
+      }
+    } else if (body.type === "content_block_delta") {
+      const block = this.thinkingBlocks.get(index);
+      const delta = body.delta as { type?: unknown; signature?: unknown } | undefined;
+      if (!block || delta?.type !== "signature_delta" || typeof delta.signature !== "string") return;
+      const signature = (typeof block.signature === "string" ? block.signature : "") + delta.signature;
+      if (signature.length > MAX_CARRY || this.thinkingHeld + delta.signature.length > MAX_THINKING_HELD) this.forgetThinking(index);
+      else {
+        block.signature = signature;
+        this.thinkingHeld += delta.signature.length;
+      }
+    } else if (body.type === "content_block_stop") {
+      const block = this.thinkingBlocks.get(index);
+      if (block) this.onThinking?.(block);
+      this.forgetThinking(index);
+    }
+  }
+
+  private heldSize(block: ThinkingBlock): number {
+    return (typeof block.signature === "string" ? block.signature.length : 0) + (typeof block.data === "string" ? block.data.length : 0);
+  }
+
+  private forgetThinking(index: number): void {
+    const block = this.thinkingBlocks.get(index);
+    if (!block) return;
+    this.thinkingHeld -= this.heldSize(block);
+    this.thinkingBlocks.delete(index);
   }
 
   private feedJson(text: string): void {
@@ -394,7 +452,9 @@ export class ResponseUsageTap {
         continue;
       }
       if (this.jsonString !== null) {
-        if (this.jsonString.length < 256) this.jsonString += char;
+        const limit = this.onThinking && this.contentArray && this.jsonDepth === 3 && this.blockValue &&
+          (this.blockKey === "signature" || this.blockKey === "data") ? MAX_CARRY : 256;
+        if (this.jsonString.length < limit) this.jsonString += char;
         if (this.jsonEscaped) this.jsonEscaped = false;
         else if (char === "\\") this.jsonEscaped = true;
         else if (char === '"') {
@@ -408,6 +468,13 @@ export class ResponseUsageTap {
               if (!this.jsonValue) this.jsonKey = undefined;
             }
           }
+          if (this.onThinking && this.contentArray && this.jsonDepth === 3) {
+            try {
+              const value: unknown = JSON.parse(this.jsonString);
+              if (!this.blockValue && typeof value === "string") this.blockKey = value;
+              else if (this.blockKey === "type" || this.blockKey === "signature" || this.blockKey === "data") this.thinkingBlock[this.blockKey] = value;
+            } catch { /* oversized or malformed field is not provenance */ }
+          }
           this.jsonString = null;
         }
       } else if (char === '"') this.jsonString = '"';
@@ -420,8 +487,20 @@ export class ResponseUsageTap {
           this.usageOverflow = false;
           continue;
         }
+        if (this.onThinking && this.jsonDepth === 1 && this.jsonKey === "content" && char === "[") this.contentArray = true;
+        if (this.contentArray && this.jsonDepth === 2 && char === "{") {
+          this.thinkingBlock = {};
+          this.blockKey = undefined;
+          this.blockValue = false;
+        }
         this.jsonDepth++;
-      } else if (char === "}" || char === "]") this.jsonDepth--;
+      } else if (char === "}" || char === "]") {
+        if (this.contentArray && this.jsonDepth === 3 && char === "}") this.onThinking?.(this.thinkingBlock);
+        if (this.jsonDepth === 2 && char === "]") this.contentArray = false;
+        this.jsonDepth--;
+      }
+      else if (this.contentArray && this.jsonDepth === 3 && char === ":") this.blockValue = true;
+      else if (this.contentArray && this.jsonDepth === 3 && char === ",") { this.blockValue = false; this.blockKey = undefined; }
       else if (this.jsonDepth === 1 && char === ":") this.jsonValue = true;
       else if (this.jsonDepth === 1 && char === ",") { this.jsonValue = false; this.jsonKey = undefined; }
     }

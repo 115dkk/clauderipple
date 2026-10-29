@@ -37,6 +37,7 @@ async function withAdmin(
     clearCredentialCooldown?: NonNullable<AdminDeps["clearCredentialCooldown"]>;
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
+    modelHealth?: NonNullable<AdminDeps["modelHealth"]>;
     shutdown?: () => void;
     instance?: NonNullable<AdminDeps["instance"]>;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
@@ -178,6 +179,26 @@ test("credential cooldown HTTP endpoint clears one key and status exposes all th
     assert.equal((await post({ provider: true, id: "default" })).status, 400);
     assert.equal((await post(null)).status, 400);
   }, { credentials: () => ({ p: pool.report("p", entries) }), clearCredentialCooldown: (provider, id) => pool.clear(provider, id) });
+});
+
+test('status and ladder options expose retirement without disabling sibling models (#94)', async () => {
+  const { ModelHealth, modelDeprecation } = await import('../src/health.ts');
+  const health = new ModelHealth();
+  health.observe('p', 'retired', modelDeprecation(410, 'ModelDeprecated', 100));
+  assert.equal(modelDeprecation(410, 'endpoint gone'), undefined);
+  assert.equal(modelDeprecation(429, 'ModelDeprecated'), undefined);
+  assert.equal(modelDeprecation(404, 'thread_not_found'), undefined);
+  assert.equal(modelDeprecation(404, 'model_not_found'), undefined, 'a key without access is not a retirement');
+  assert.equal(modelDeprecation(404, 'Model x has been deprecated.')?.reason, 'model_deprecated');
+  const cfg = makeCfg({ providers: { p: { type: 'anthropic-compatible', url: 'http://127.0.0.1:1', models: [{ id: 'retired' }, { id: 'active' }] } } });
+  await withAdmin(cfg, async ({ port }) => {
+    const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.equal(options.providers[0]?.usable, true);
+    assert.deepEqual(options.providers[0]?.models, { retired: { reason: 'model_deprecated', exhaustedAt: 100 } });
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { providers: Record<string, { models: unknown }> };
+    assert.deepEqual(status.providers.p?.models, { retired: { usable: false, reason: 'model_deprecated', at: 100 } });
+  }, { modelHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+  assert.deepEqual(new ModelHealth().snapshot(), {}, 'a router restart clears retirement');
 });
 
 test("mod options and status expose runtime provider exhaustion and clear it on recovery", async () => {
@@ -568,6 +589,70 @@ test("admin mod-settings refuses to overwrite corrupt persistence", async () => 
     assert.equal((await putModSettings(port, { settings: {} })).status, 500);
     assert.equal(fs.readFileSync(file, "utf8"), "{");
   });
+});
+
+test("admin mod-settings renames a rung and an allow-list entry saved under the 0.12.18 worker name (#111)", async () => {
+  const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agent-renames-"));
+  const cfg = makeCfg({ providers: { deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "deepseek-ai/DeepSeek-V4.1-Flash-1017" }] } } });
+  const old = "deepseek-ai--eep-eek--4-1--lash-1017";
+  const now = "deepseek-ai-deepseek-v4-1-flash-1017";
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const steps = (agent: string) => [{ target: { agent }, effort: "high" }];
+      const saved = {
+        rules: { general: { mode: "ladder", rungs: { light: steps(old), standard: steps("gpt-6-1-sol") } } },
+        modes: [{ id: "saved", name: "Saved mode", rungs: { hard: steps(old) }, delegation: "normal", until: "none" }],
+        allow: [old, "gpt-6-1-sol"],
+        allowKnown: [old, "gpt-6-1-sol"],
+      };
+      fs.writeFileSync(path.join(home, "mod-settings.json"), JSON.stringify({ revision: 3, settings: normalizeSettings(saved) }));
+
+      const response = await fetch(`${base()}:${port}/api/mod-settings`);
+      assert.equal(response.status, 200);
+      const settings = ((await response.json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(settings.rules.general.rungs.light, steps(now), "the renamed worker, not a missing one");
+      assert.deepEqual(settings.rules.general.rungs.standard, steps("gpt-6-1-sol"), "a name that did not change is left alone");
+      assert.deepEqual(settings.modes[0]!.rungs.hard, steps(now), "a saved mode's rung too");
+      assert.deepEqual(settings.allow, [now, "gpt-6-1-sol"], "the ticked worker keeps its tick");
+      assert.deepEqual(settings.allowKnown, [now, "gpt-6-1-sol"]);
+    }, { agentDir: agents });
+  } finally {
+    fs.rmSync(agents, { recursive: true, force: true });
+  }
+});
+
+test("admin mod-settings leaves a hand-written worker at a 0.12.18 name, and every entry naming it, alone", async () => {
+  const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agent-hand-rename-"));
+  // Never generated by the router: a person's own file that happens to carry the name 0.12.18 gave
+  // Vendor/Model, so a saved rung or tick naming it means that worker, not a stale generated one.
+  const legacy = "-endor--odel";
+  const hand = `---\nname: ${legacy}\nmodel: unrelated-model\n---\nMy hand-written worker\n`;
+  fs.writeFileSync(path.join(agents, `${legacy}.md`), hand);
+  const cfg = makeCfg({ providers: { vendor: { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "Vendor/Model" }] } } });
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const steps = (agent: string) => [{ target: { agent }, effort: "high" }];
+      const saved = normalizeSettings({ rules: { general: { mode: "ladder", rungs: { light: steps(legacy) } } }, allow: [legacy], allowKnown: [legacy] });
+      const store = path.join(home, "mod-settings.json");
+      fs.writeFileSync(store, JSON.stringify({ revision: 3, settings: saved }));
+      const before = fs.readFileSync(store, "utf8");
+
+      const read = ((await (await fetch(`${base()}:${port}/api/mod-settings`)).json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(read.rules.general.rungs.light, steps(legacy), "the rung keeps the hand worker");
+      assert.deepEqual(read.allow, [legacy], "and so does the tick");
+      assert.equal(fs.readFileSync(store, "utf8"), before, "reading persists no migration");
+
+      assert.equal((await putModSettings(port, { settings: saved, revision: 3 })).status, 200);
+      const stored = (JSON.parse(fs.readFileSync(store, "utf8")) as { settings: ModSettingsSnapshot["settings"] }).settings;
+      assert.deepEqual(stored.rules.general.rungs.light, steps(legacy), "saving keeps it too");
+      assert.deepEqual(stored.allow, [legacy]);
+      const again = ((await (await fetch(`${base()}:${port}/api/mod-settings`)).json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(again, stored, "a repeated migration is idempotent");
+      assert.equal(fs.readFileSync(path.join(agents, `${legacy}.md`), "utf8"), hand, "the hand file is untouched");
+    }, { agentDir: agents });
+  } finally {
+    fs.rmSync(agents, { recursive: true, force: true });
+  }
 });
 
 test("admin mod-options offers owned workers, every provider model, judge candidates and attributed AA scores", async () => {
@@ -1386,6 +1471,50 @@ test("POST /api/providers/probe discovers OpenAI-compatible models and probes Ch
     assert.equal(seen.model, "oai-model");
     // Above the floor some vendors set (B.ai refuses anything under 3, #57).
     assert.equal(seen.tokens, 16);
+  } finally {
+    await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
+  }
+});
+
+// A provider being added is filled the same way, because what the form saves is what the probe
+// returned: Hive's `/models` names its models and nothing else.
+test("POST /api/providers/probe fills a window the vendor did not state from the model's catalogue entry", async () => {
+  const upstream = http.createServer((req, res) => {
+    if (req.url === "/v3/models") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ object: "list", data: [
+        { id: "deepseek-ai/deepseek-v4.1-flash-1017", object: "model", created: 1, owned_by: "deepseek-ai", shutdown_date: null },
+        { id: "jev-1.13", object: "model", created: 1, owned_by: "jev", shutdown_date: null },
+      ] }));
+      return;
+    }
+    if (req.url === "/v3/chat/completions") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [] }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolveP) => upstream.listen(0, "127.0.0.1", resolveP));
+  const address = upstream.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}/v3`;
+  const modelCatalog = async (): Promise<unknown> => ({
+    "opencode-go": { models: { "deepseek-v4.1-flash": { limit: { context: 1000000 } } } },
+    scaleway: { models: { "deepseek-v4.1-flash": { limit: { context: 256000 } } } },
+  });
+  try {
+    await withAdmin(makeCfg(), async ({ port }) => {
+      const res = await fetch(`${base()}:${port}/api/providers/probe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "openai-compatible", url: origin, headers: { authorization: "Bearer secret-key" }, modelsUrl: `${origin}/models`, modelsAuthHeader: "authorization-bearer" }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { models: { id: string; contextWindow?: number }[] };
+      assert.deepEqual(body.models.map((model) => [model.id, model.contextWindow]), [
+        ["deepseek-ai/deepseek-v4.1-flash-1017", 256000],
+        ["jev-1.13", undefined],
+      ]);
+    }, { modelCatalog });
   } finally {
     await new Promise<void>((resolveP, reject) => upstream.close((error) => error ? reject(error) : resolveP()));
   }
@@ -2564,7 +2693,8 @@ test("backfillContextWindows fills only models without a window, leaving a set o
           preset: "opencode-go",
           headers: { authorization: "Bearer sk-test" },
           models: [
-            { id: "muse-spark-1.3-contributor", name: "Muse" },
+            // A saved null is blank too: the live config carried `"contextWindow": null` (2026-10-28).
+            { id: "muse-spark-1.3-contributor", name: "Muse", contextWindow: null as unknown as number },
             { id: "deepseek-v4.1-flash", name: "DeepSeek", contextWindow: 123 },
             { id: "not-listed", name: "Unlisted" },
           ],
@@ -2590,6 +2720,79 @@ test("backfillContextWindows fills only models without a window, leaving a set o
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+// Hive's `/models` states `object, created, owned_by, shutdown_date` and nothing else, and models.dev
+// has no block for it: the window comes from the same model filed under a provider it does know.
+test("backfillContextWindows fills a provider with no catalogue block from the same model's entry elsewhere", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-window-"));
+  try {
+    const cfg = makeCfg({
+      providers: {
+        hive: {
+          type: "openai-compatible",
+          url: "https://api-cdn.thehive.ai/api/v3",
+          headers: { authorization: "Bearer sk-test" },
+          models: [
+            { id: "deepseek-ai/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash" },
+            { id: "zai-org/glm-5.3-flash", name: "GLM-5.3 Flash", contextWindow: 111 },
+            { id: "jev-1.13", name: "JEV" },
+          ],
+        },
+      },
+    });
+    const configFile = path.join(home, "config.json");
+    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    const lines: string[] = [];
+    const log = new Logger(null, 1_000_000, 1, false);
+    log.info = (msg: string) => { lines.push(msg); };
+    const modelCatalog = async (): Promise<unknown> => ({
+      "opencode-go": { models: { "deepseek-v4.1-flash": { limit: { context: 1000000 } }, "glm-5.3-flash": { limit: { context: 1000000 } } } },
+      scaleway: { models: { "deepseek-v4.1-flash": { limit: { context: 256000 } } } },
+    });
+    const deps = { config: () => cfg, configFile, log, modelCatalog } as unknown as AdminDeps;
+    assert.deepEqual(await backfillContextWindows(deps), ["hive/deepseek-ai/deepseek-v4.1-flash-1017"]);
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.hive!.models!;
+    assert.equal(models.find((m) => m.id === "deepseek-ai/deepseek-v4.1-flash-1017")?.contextWindow, 256000, "the smallest window the catalogue states");
+    assert.equal(models.find((m) => m.id === "zai-org/glm-5.3-flash")?.contextWindow, 111, "the operator's own window stands");
+    assert.equal("contextWindow" in (models.find((m) => m.id === "jev-1.13") ?? {}), false, "a model the catalogue does not list stays blank");
+    assert.ok(lines.some((line) => line === "admin: hive/deepseek-ai/deepseek-v4.1-flash-1017 context window 256000 (catalogue)"), `expected the catalogue log line, got ${JSON.stringify(lines)}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// The same fold on the measurement path, which is what a provider saved by hand goes through.
+test("measurement gives a provider with no catalogue block the window its model has elsewhere", async () => {
+  const cfg = makeCfg({
+    providers: {
+      hive: {
+        type: "openai-compatible",
+        url: "https://api-cdn.thehive.ai/api/v3",
+        wire: "chat",
+        headers: { authorization: "Bearer sk-test" },
+        models: [
+          { id: "deepseek-ai/deepseek-v4.1-flash-1017", name: "DeepSeek V4.1 Flash" },
+          { id: "zai-org/glm-5.3-flash", name: "GLM-5.3 Flash", contextWindow: 777 },
+        ],
+      },
+    },
+  });
+  const modelCatalog = async (): Promise<unknown> => ({
+    "opencode-go": { models: { "deepseek-v4.1-flash": { limit: { context: 1000000 } }, "glm-5.3-flash": { limit: { context: 1000000 } } } },
+    scaleway: { models: { "deepseek-v4.1-flash": { limit: { context: 256000 } } } },
+  });
+  const measureFetch = async (): Promise<Response> => new Response("{}", { status: 200 });
+  await withAdmin(cfg, async ({ port, configFile }) => {
+    const started = await fetch(`${base()}:${port}/api/providers/measure`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "hive", models: ["deepseek-ai/deepseek-v4.1-flash-1017", "zai-org/glm-5.3-flash"] }),
+    });
+    const job = await pollMeasure(port, ((await started.json()) as { jobId: string }).jobId);
+    assert.equal(job.state, "done");
+    const models = (JSON.parse(fs.readFileSync(configFile, "utf8")) as Config).providers.hive!.models!;
+    assert.equal(models.find((m) => m.id === "deepseek-ai/deepseek-v4.1-flash-1017")?.contextWindow, 256000);
+    assert.equal(models.find((m) => m.id === "zai-org/glm-5.3-flash")?.contextWindow, 777, "a window already set is not overwritten");
+  }, { measureFetch, modelCatalog });
 });
 
 test("a model the plan refuses is still reported when the catalogue lists it", async () => {

@@ -20,6 +20,8 @@ export type Resolved = {
   tag: string;
   /** Where this turn goes when the provider above has nothing usable left. Carried from the route. */
   fallbacks?: { provider: string; model: string; effort?: string }[];
+  /** Spawn snapshot identity, for worker-only preflight and diagnostics. */
+  ladderPick?: string;
 };
 
 const REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;

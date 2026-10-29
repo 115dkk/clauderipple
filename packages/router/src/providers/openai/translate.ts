@@ -449,7 +449,7 @@ type ResponseItem = {
   emittedText: number;
 };
 /** A Responses reasoning item, as it arrives and as it is sealed for the client (reasoning.ts). */
-type ReasoningItem = { id?: string; encrypted?: string; summary: unknown; text: string };
+type ReasoningItem = { encrypted?: string; summary: unknown; content?: unknown; text: string; fullText: string };
 
 /** Maps standard OpenAI Chat Completion and Responses SSE records to Anthropic Messages SSE. */
 export class OpenAiStreamMapper {
@@ -658,24 +658,23 @@ export class OpenAiStreamMapper {
 
   /**
    * Put the finished Responses reasoning item into the envelope its block carries: the wire, this
-   * provider and model, and the item itself — type, id, summary and the backend's sealed blob,
-   * untouched (reasoning.ts). An item the backend did not seal has nothing to resume, so its block
-   * stays unsigned and only its summary survives, as display text.
+   * provider and model, and the item's sealed blob or full reasoning text, untouched (reasoning.ts).
+   * A summary alone is display text, not the original reasoning, and stays unsigned.
    */
   private sealReasoningItem(item: ResponseItem): void {
     const held = this.reasoningItems.get(item.id);
     const block = item.block as ThinkingOutputBlock;
-    block.thinking = held?.text.trim() || block.thinking.trim() || (typeof held?.summary === "string" ? held.summary.trim() : "");
-    if (!held?.encrypted) {
-      // An item the backend did not seal has nothing to resume. The block stays unsigned, so the
-      // client treats it as display text and never replays it (reasoning.ts).
+    const reasoning = replayableReasoning({
+      type: "reasoning", id: item.id, encrypted_content: held?.encrypted, summary: held?.summary,
+      content: Array.isArray(held?.content) && held.content.length > 0 ? held.content
+        : held?.fullText ? [{ type: "reasoning_text", text: held.fullText }] : held?.content,
+    });
+    block.thinking = held?.text.trim() || block.thinking.trim() || reasoning?.content?.map((part) => part.text).join("") || (typeof held?.summary === "string" ? held.summary.trim() : "");
+    if (!reasoning) {
       block.signature = "";
       return;
     }
-    const reasoning: ReplayedReasoning = { type: "reasoning", encrypted_content: held.encrypted };
-    if (item.id) reasoning.id = item.id;
-    if (Array.isArray(held.summary)) reasoning.summary = held.summary;
-    block.signature = encodeEnvelope({ w: "responses", p: this.env.p, m: this.env.m, r: reasoning as unknown as Record<string, unknown> });
+    block.signature = encodeEnvelope({ w: "responses", p: this.env.p, m: this.env.m, r: { ...reasoning } });
     this.reasoningCount++;
   }
 
@@ -756,7 +755,7 @@ export class OpenAiStreamMapper {
     const out = [...this.start()];
     const type = typeof ev.type === "string" ? ev.type : "";
     if (type === "response.output_item.added") {
-      const item = ev.item as { type?: unknown; id?: unknown; call_id?: unknown; name?: unknown; arguments?: unknown; encrypted_content?: unknown; summary?: unknown } | undefined;
+      const item = ev.item as { type?: unknown; id?: unknown; call_id?: unknown; name?: unknown; arguments?: unknown; encrypted_content?: unknown; summary?: unknown; content?: unknown } | undefined;
       const id = typeof item?.id === "string" ? item.id : typeof ev.output_index === "number" ? `output_${ev.output_index}` : undefined;
       if (id && item?.type === "message") {
         const block: TextOutputBlock = { type: "text", text: "" };
@@ -778,7 +777,9 @@ export class OpenAiStreamMapper {
         const reasoning: ReasoningItem = {
           ...(typeof item.encrypted_content === "string" && item.encrypted_content ? { encrypted: item.encrypted_content } : {}),
           summary: item.summary,
+          content: item.content,
           text: "",
+          fullText: "",
         };
         this.reasoningItems.set(id, reasoning);
         const block: ThinkingOutputBlock = { type: "thinking", thinking: "" };
@@ -821,22 +822,27 @@ export class OpenAiStreamMapper {
       if (item?.kind === "reasoning" && text) {
         const block = item.block as ThinkingOutputBlock;
         block.thinking += text;
-        if (this.reasoningItems.get(item.id)) this.reasoningItems.get(item.id)!.text += text;
+        const held = this.reasoningItems.get(item.id);
+        if (held) {
+          held.text += text;
+          if (type === "response.reasoning_text.delta") held.fullText += text;
+        }
         if (item.emitted && this.open?.kind === "thinking") {
           out.push({ event: "content_block_delta", data: { type: "content_block_delta", index: this.open.index, delta: { type: "thinking_delta", thinking: text } } });
           item.emittedText += text.length;
         }
       }
     } else if (type === "response.output_item.done") {
-      const done = ev.item as { id?: unknown; type?: unknown; arguments?: unknown; encrypted_content?: unknown; summary?: unknown } | undefined;
+      const done = ev.item as { id?: unknown; type?: unknown; arguments?: unknown; encrypted_content?: unknown; summary?: unknown; content?: unknown } | undefined;
       const item = this.responseItem(ev.item_id ?? done?.id ?? ev.output_index);
       out.push(...this.completeResponseArguments(item, done?.arguments));
-      if (done?.encrypted_content !== undefined || done?.summary !== undefined) {
-        // The backend may seal the reasoning only when the item completes; take it from there too.
-        const held = this.reasoningItems.get(typeof (ev.item_id ?? done?.id) === "string" ? String(ev.item_id ?? done?.id) : "");
+      if (item?.kind === "reasoning" && done) {
+        // Use the resolved item: compatible servers can address completion by output_index alone.
+        const held = this.reasoningItems.get(item.id);
         if (held) {
           if (typeof done.encrypted_content === "string" && done.encrypted_content) held.encrypted = done.encrypted_content;
           if (done.summary !== undefined) held.summary = done.summary;
+          if (done.content !== undefined) held.content = done.content;
         }
       }
       if (item) {

@@ -52,6 +52,16 @@ const MAX_COOLDOWN_MS = 6 * 60 * 60_000;
  */
 export function classify(status: number, retryAfterMs?: number, body = ""): Verdict {
   const bounded = (ms: number): number => Math.max(1_000, Math.min(MAX_COOLDOWN_MS, Math.round(ms)));
+  // #101: this relay 400 names the workspace's opt-in, not the request shape. Another key can
+  // answer it. Do not generalise to every relay/server_error 400: malformed requests still stop.
+  if (status === 400 && RELAY_UPSTREAM_FAILED.test(body)) {
+    let error: { type?: unknown; message?: unknown } | undefined;
+    try { error = (JSON.parse(body) as { error?: typeof error } | null)?.error; } catch { /* not the measured JSON refusal */ }
+    if (error?.type === "server_error" && typeof error.message === "string" &&
+        RELAY_UPSTREAM_FAILED.test(error.message) && /This Go model requires Global regions\b/i.test(error.message)) {
+      return { retryable: true, kind: "auth", cooldownMs: bounded(retryAfterMs ?? DEFAULT_RATE_LIMIT_MS), quarantine: false };
+    }
+  }
   // 401 is the credential being rejected, and that does not heal: park it.
   if (status === 401) return { retryable: true, kind: "auth", cooldownMs: 0, quarantine: true };
   // 403 is not only that. It is also a content policy, a blocked region, a model the account may

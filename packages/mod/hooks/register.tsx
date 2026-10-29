@@ -4,17 +4,17 @@ import { atom, read, update } from 'claude-code'
 import type { AgentSpawnInput, EngineInterface, ModelCompleteResult, ModelForkResult, Register, RenderElement, RenderInput, RenderNode, SessionCompactResult, SessionContextBreakdown, SessionContextUsage, SessionRateLimit, ToolCallInput, ToolCallResult, TurnStepInput, TurnUsage } from 'claude-code'
 import type { AgentRec, Effort, JudgeInput, JudgeKind, JudgeRun, LimitItem, ModSettingsSnapshot, Pick, Settings, StatusRequest, TierTarget, Verdict, WorkerCandidate, WorkerPick, WorkerVerdict } from '../types'
 import { MOD_SETTINGS_SCHEMA_VERSION, RUNG_EFFORT, applySettingsChanges, normalizeSettings, settingsChanges } from './settings'
-import { rungOf } from './ladder'
+import { rungOf, workerLadderLine } from './ladder'
 import { debugText, langFrom, t } from './i18n'
 import type { Lang } from './i18n'
 import { EFFORT_JUDGE_SYSTEM, finalEffort, isCacheSafeModel, jevEffortRequest, jevFailure, jevUsage, judgeContext, parseEffortVerdict, parseJevEffort, parseJevKey, shouldJudge } from './judge'
-import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
+import { AUTO_DESCRIPTION, NATIVE_AGENTS, TIER_MARKERS, agentProvider, candidateUsable, chatgptUsable, claudeCandidates, ladderOptionsFrom, ladderFallbackModels, ladderPick, liveProviders, markerDomain, modelReason, readMarker, routerModelOptions, ruleReason, spawnModel, spawnTitle, titleName, takesOver, tierOf, userSaid, withoutReason, withoutRouting, workerRule, zenJev } from './workers'
 import { MARKER, agentModel, delegationPin as parseDelegationPin, fixSpawn, humanText, pinInstruction, pinSaid } from './worker'
 import { activeModeOf, chatgptProviders, claudeWindow, eagerNote, gptLimitsFrom, modeKey, modeOver, quotaWindows, resetProvider, routingSettings } from './modes'
 import type { QuotaWindow } from './modes'
 import type { Spawn, WorkerFix } from './worker'
 import { afterPing, nextMemo, restoreFromResume, shouldPing } from './cache'
-import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
+import { HEAVY_PERCENT, bandPriority, claudeLimitsFrom, claudeScopedFrom, coldAlert, contextWindow, modelCompactWindow, hotAlert, hottest, hotWindowMoved, keptAlert, routerLimitItems, saveUntil as limitSaveUntil, swampAlert, swamped } from './session'
 import type { ScopedLimit } from './session'
 import { COMPACT_SYSTEM, compactResult, serializeTranscript } from './compact'
 import { QUICK_PROMPT, wrapForNewChat } from './handoff'
@@ -33,7 +33,7 @@ import { toolDetail } from './ui/tools'
 import { renderLog } from './ui/log'
 import { displayText } from './ui/display'
 import { EFFORTS, isRich, modelName, nextMinuteChange, routeOf, targetLabel } from './ui/view'
-import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, SettingsActions, SettingsView, SetupActions } from './ui/view'
+import type { AgentTalk, AgentsActions, AlertActions, AlertView, BandActions, DashboardView, Frame, LimitsActions, SettingsActions, SettingsView, SetupActions } from './ui/view'
 
 const line = atom({ plugin: 'ripple', key: 'line' } as const, null)
 const phoneQueue = atom({ plugin: 'ripple', key: 'phoneQueue' } as const, null)
@@ -138,6 +138,8 @@ let ticking = false
 let forking = false
 let forkUsage: TurnUsage | null = null
 let countdownTimer: { at: number; cancel: () => void } | null = null
+/** The limits pane's next redraw, while it is open (scheduleLimitsRedraw). */
+let limitsTimer: { at: number; cancel: () => void } | null = null
 let judgeSequence = 0
 /** Jev's network blips and timeouts in a row. */
 let jevBlips = 0
@@ -352,7 +354,14 @@ async function putSettings($: EngineInterface, admin: string, base: Settings): P
     if (attempt === 1) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: 409 }))
   }
 }
+let compactWindows: unknown = null
+async function currentCompactAt($: EngineInterface): Promise<number | null> {
+  return modelCompactWindow(compactWindows, await $.session.model()) ?? await read($, compactAt)
+}
 async function syncSettings($: EngineInterface, admin: string): Promise<void> {
+  const windows = await $.http.fetch(`${admin}/api/context-windows`)
+  if (windows.ok) compactWindows = JSON.parse(windows.text)
+  else if (windows.status !== 404) await report($, 'context windows', `HTTP ${windows.status}`)
   const response = await $.http.fetch(`${admin}/api/mod-settings`)
   if (!response.ok) throw new Error(t(await read($, lang), 'commands.routerHttp', { status: response.status }))
   const snapshot = settingsSnapshot(response.text)
@@ -490,6 +499,29 @@ function countsHere(mark: FullMark, basis: number | null, model: string, at: num
  * and when it resets, which the row has no room to say. Opened again it closes, as does the pane's
  * own close. The windows are read afresh on the way in, once a minute at most (refreshLimits).
  */
+function limitsActions($: EngineInterface): LimitsActions {
+  return { close: () => $.ui.close({ id: LIMITS_PANE }) }
+}
+/**
+ * The limits pane says the time left to each reset to the minute, so it is drawn again when the
+ * soonest of those minutes turns over (or a reset passes), while it stays open. Nothing else
+ * redraws it on time: the windows themselves are read once a minute and only a change is written.
+ */
+function scheduleLimitsRedraw($: EngineInterface, items: readonly LimitItem[], now: number): void {
+  const turns = items.map(item => nextMinuteChange(item.resetsAt ? Date.parse(item.resetsAt) : NaN, now)).filter((at): at is number => at !== null && Number.isFinite(at))
+  const at = turns.length ? Math.min(...turns) : null
+  if (limitsTimer?.at === at) return
+  limitsTimer?.cancel()
+  limitsTimer = null
+  if (at === null) return
+  const timer = $.clock.after(Math.max(1, at - now), () => {
+    limitsTimer = null
+    void (async () => {
+      if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.invalidate('ui.render')
+    })().catch(error => report($, 'limits redraw', error))
+  })
+  limitsTimer = { at, cancel: () => timer.cancel() }
+}
 async function toggleLimits($: EngineInterface): Promise<void> {
   const language = await read($, lang)
   if ((await $.ui.panes()).some(p => p.id === LIMITS_PANE)) await $.ui.close({ id: LIMITS_PANE })
@@ -510,7 +542,7 @@ async function toggleLimits($: EngineInterface): Promise<void> {
 async function countContext($: EngineInterface): Promise<void> {
   if ((await read($, contextFull))?.busy) return
   const basis = (await read($, context))?.basis ?? null
-  const at = await read($, compactAt)
+  const at = await currentCompactAt($)
   const model = await $.session.model()
   const gen = generation
   const epoch = contextEpoch
@@ -524,7 +556,7 @@ async function countContext($: EngineInterface): Promise<void> {
     // switch while it ran makes it another context's count, and it is dropped.
     const now = await $.session.usage().catch(error => { void report($, 'context check', error); return null })
     const nowModel = await $.session.model()
-    const nowAt = await read($, compactAt)
+    const nowAt = await currentCompactAt($)
     const nowBasis = (await read($, context))?.basis ?? null
     // Read the scope again after every await: a clear may have moved it while this ran.
     const live = run === contextRun && gen === generation && epoch === contextEpoch && model === nowModel && at === nowAt && basis === nowBasis && now !== null && now.context.window === window
@@ -969,10 +1001,12 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   }
   verdict = { ...verdict, effort: resolved.effort }
   const model = spawnModel(selected, verdict.effort, files.has(selected.agent) ? agentModel(files.get(selected.agent)!) : undefined)
+  const fallbacks = ladderResult ? ladderFallbackModels(ladder, ladderResult, pinnedCandidates, routing) : []
+  const ladderLine = model && fallbacks.length ? workerLadderLine({ pick: id, model, fallbacks }) : undefined
   const value: WorkerPick = { ...verdict, ...resolved, rule, target: selected, by, ms: 0, id, ...(fallbackReason ? { fallbackReason } : {}) }
   // The decision behind a pick is otherwise only in the agents panel; one debug line per pick keeps
   // it checkable: the tier it was given, the rung it landed on and what ran.
-  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
+  const entry = { task: e.description.slice(0, 200), domain: value.domain, level: value.level, kind: value.kind ?? 'do', rule: value.rule, rung: value.rung, position: value.position, skipped: value.skipped, target: value.target, model: model ?? null, effort: value.effort, by, ...(ladderLine ? { fallbacks } : {}), ...(mode ? { mode: mode.name } : {}), ...(fallbackReason ? { fallbackReason } : {}) }
   await $.ui.log('ClaudeRipple worker pick: ' + JSON.stringify(entry), { to: 'debug' })
   // The brief itself is never logged (it can hold anything); its length is. To read a pick again,
   // its brief is in the session's own transcript under the same description. A model's reason is
@@ -986,7 +1020,7 @@ async function requestPick($: EngineInterface, e: AgentSpawnInput, s: Settings):
   // A hook may change the definition and model, but cannot add disallowedTools to a spawn.
   // Direct general-purpose calls keep their own definition and existing behaviour.
   const executor = auto && (selected.agent === 'general-purpose' || /^(?:opus|sonnet|haiku)(?:@|$)|^claude-/.test(model ?? '')) ? 'ripple:auto' : selected.agent
-  return { input: { ...e, subagentType: executor, model, prompt }, pick: value }
+  return { input: { ...e, subagentType: executor, model, prompt: ladderLine ? `${ladderLine}\n${prompt}` : prompt }, pick: value }
 }
 
 async function toggleAuto($: EngineInterface): Promise<void> {
@@ -1333,7 +1367,7 @@ let shareMemo: { key: string; breakdown: SessionContextBreakdown | null } | null
  */
 async function contextShare($: EngineInterface, c: SessionContextUsage): Promise<{ percent: number; tokens: number; window: number; basis: number } | null> {
   if (c.tokens === undefined) return null
-  const at = await read($, compactAt)
+  const at = await currentCompactAt($)
   const model = await $.session.model()
   const full = await read($, contextFull)
   // The count stands only where it was taken: same response, model, window and chat. A stale one
@@ -1354,13 +1388,13 @@ async function contextShare($: EngineInterface, c: SessionContextUsage): Promise
       catch (error) { await report($, 'context summary', error) }
       // A clear or compaction while the summary ran outranks it: publish only for the state it was asked in.
       const modelNow = await $.session.model()
-      const atNow = await read($, compactAt)
+      const atNow = await currentCompactAt($)
       if (gen === generation && epoch === contextEpoch && model === modelNow && at === atNow) shareMemo = { key, breakdown: summary }
     }
     b = shareMemo?.key === key ? shareMemo.breakdown : null
   }
   if (b && b.rawMaxTokens > 0) return { tokens: b.totalTokens, percent: b.percentage, window: b.rawMaxTokens, basis: c.tokens }
-  const window = contextWindow(c.window, at)
+  const window = contextWindow(c.window, at, modelCompactWindow(compactWindows, model))
   return window > 0 ? { tokens: c.tokens, percent: c.tokens / window * 100, window, basis: c.tokens } : null
 }
 async function refreshUsage($: EngineInterface): Promise<void> {
@@ -2481,7 +2515,7 @@ export const register: Register = on => {
       const full = await read($, contextFull)
       // The count's own window is the one it draws; another window clears it in contextShare, and
       // a model or chat change is caught here before that poll (2026-10-25).
-      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await read($, compactAt))
+      const same = !!fullMark && countsHere(fullMark, live?.basis ?? null, await $.session.model(), await currentCompactAt($))
       const fresh = full?.breakdown && same ? full : null
       // The terminal's grid follows its width (5 wide under 80 columns); the desktop draws its own.
       const breakdown = fresh?.breakdown ?? (await $.session.usage({ breakdown: 'summary', ...(isRich(frame) ? {} : { columns: frame.columns }) })).context.breakdown ?? null
@@ -2499,7 +2533,10 @@ export const register: Register = on => {
       startTimers($)
       frame = await frameOf($, e)
       // The row the band gauges: the same reading, every provider account's windows.
-      return renderLimits($.ui.resolve(e), frame, { items: await read($, limits) ?? [] }) as RenderElement
+      const items = await read($, limits) ?? []
+      const save = await read($, saveUntil)
+      scheduleLimitsRedraw($, items, frame.now)
+      return renderLimits($.ui.resolve(e), frame, { items, ...(save !== null && save > frame.now ? { saveUntil: save } : {}) }, limitsActions($)) as RenderElement
     } catch (error) { return limitsRenderFailure($, e, error, frame) }
   }).catch(($, e, next) => limitsRenderFailure($, e, next.error.message ?? next.error.kind))
 }

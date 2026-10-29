@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { hottest, limitLabel, saveUntil, swamped, contextWindow, coldAlert, hotAlert, hotWindowMoved, swampAlert, keptAlert, bandPriority, claudeLimitsFrom, CLAUDE_USAGE_STALE_MS } from '../../packages/mod/hooks/session.ts'
+import { hottest, limitLabel, saveUntil, swamped, contextWindow, modelCompactWindow, coldAlert, hotAlert, hotWindowMoved, swampAlert, keptAlert, bandPriority, claudeLimitsFrom, CLAUDE_USAGE_STALE_MS } from '../../packages/mod/hooks/session.ts'
 const now = Date.parse('2026-10-10T00:00:00Z')
 const hot = { kind: 'five_hour', percent: 80, resetsAt: '2026-10-10T05:00:00Z' }
 
@@ -89,6 +89,22 @@ test('the context percent is measured against the compaction window when it is s
   assert.equal(swamped(at400k), 80)
   assert.equal(swampAlert(swamped(at400k), null), true)
   assert.equal(swamped({ ...at400k, tokens: 319_999, percent: 319_999 / 400_000 * 100 }), null)
+})
+
+test('fallback context windows follow the router model including effort variants and older routers', () => {
+  const body = { resolvedWindows: {
+    'claude-opus-5-5': { contextWindow: 1_000_000, compactWindow: 600_000 },
+    'claude-opus-4-7': { contextWindow: 475_000, compactWindow: 475_000 },
+    'gpt@high': { compactWindow: 300_000 },
+    gpt: { compactWindow: 475_000 },
+  } }
+  assert.equal(contextWindow(1_000_000, modelCompactWindow(body, 'claude-opus-5-5')), 600_000)
+  assert.equal(contextWindow(1_000_000, modelCompactWindow(body, 'claude-opus-4-7')), 475_000)
+  assert.equal(contextWindow(200_000, 600_000, modelCompactWindow(body, 'claude-opus-4-7')), 475_000)
+  assert.equal(modelCompactWindow(body, 'gpt@high'), 300_000)
+  assert.equal(modelCompactWindow(body, 'gpt@low'), 475_000)
+  assert.equal(modelCompactWindow({ resolvedWindows: { gpt: { contextWindow: 475_000 } } }, 'gpt'), null)
+  assert.equal(modelCompactWindow(null, 'gpt'), null)
 })
 
 test('dismissed hot returns at +10 points and swamp at +15 points of context, inclusively', () => {  assert.equal(hotAlert(hot, null), true)
