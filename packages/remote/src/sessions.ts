@@ -1920,8 +1920,11 @@ export class Sessions {
       if (!s) throw new Error("no such session");
       // This is a fresh conversation, not an SDK /clear: carry its label separately from the
       // empty prompt so persistence, the first SDK launch and the desktop handoff all retain it.
+      // A desktop session's mode is the app's latest, which the summary reads from its transcript;
+      // the record still holds the mode it was imported with. After a plain handoff the summary
+      // omits the mode, so the user's own choice on the record is what carries over.
       const record = this.records.get(id);
-      const permissionMode = record?.confirmedSettings?.permissionMode ?? record?.permissionMode ?? s.permissionMode ?? "default";
+      const permissionMode = (record?.desktopBridge ? s.permissionMode : undefined) ?? record?.confirmedSettings?.permissionMode ?? record?.permissionMode ?? s.permissionMode ?? "default";
       return this.create({ clientMsgId, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode, text: "" }, s.title);
     }
     // The composer's /exit archives the session (phase 2): a flag, not a close — nothing is deleted.
