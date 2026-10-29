@@ -19,30 +19,34 @@ import { isOurSignature } from "./reasoning.ts";
 type Block = { type?: unknown; signature?: unknown };
 type Message = { role?: unknown; content?: unknown };
 
-function foreign(block: unknown): boolean {
+function foreign(block: unknown, providerChanged = false): boolean {
   const b = block as Block | null;
-  if (!b || typeof b !== "object" || b.type !== "thinking") return false;
+  if (!b || typeof b !== "object") return false;
+  // Opaque vendor signatures (and encrypted redactions) cannot be validated by another provider.
+  if (providerChanged && (b.type === "thinking" || b.type === "redacted_thinking")) return true;
+  if (b.type !== "thinking") return false;
   // Unsigned: a translated provider's reasoning with nothing to carry, or an empty reasoning item.
   // Ours: a translated provider's envelope, which only its own adapter can read back.
   return !(typeof b.signature === "string" && b.signature.length > 0) || isOurSignature(b.signature);
 }
 
 /**
- * Removes unsigned thinking blocks from assistant turns, in place, and returns how many went.
+ * Removes foreign thinking blocks from assistant turns, in place, and returns how many went.
+ * A known provider change also removes opaque signed blocks; otherwise native signatures stay.
  * A turn left with no content is removed with them: Anthropic refuses an empty assistant turn,
  * and joins the two user turns that then meet.
  */
-export function dropForeignThinking(json: Record<string, unknown>): number {
+export function dropForeignThinking(json: Record<string, unknown>, providerChanged = false): number {
   const messages = json.messages;
   if (!Array.isArray(messages)) return 0;
   let removed = 0;
   const kept: unknown[] = [];
   for (const message of messages as Message[]) {
-    if (message?.role !== "assistant" || !Array.isArray(message.content) || !message.content.some(foreign)) {
+    if (message?.role !== "assistant" || !Array.isArray(message.content) || !message.content.some(block => foreign(block, providerChanged))) {
       kept.push(message);
       continue;
     }
-    const content = message.content.filter((block) => !foreign(block));
+    const content = message.content.filter((block) => !foreign(block, providerChanged));
     removed += message.content.length - content.length;
     if (content.length > 0) kept.push({ ...message, content });
   }

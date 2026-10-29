@@ -1031,8 +1031,9 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   A generic endpoint/thread 404/410 does not. `/api/status.providers[name].models[id]`
   exposes `{usable:false, reason, at}`; `/api/mod-options` supplies the same exclusion
   to the existing ladder's per-model skip path. Sibling models remain usable.
-  Retirement has **no TTL**: only a router restart clears it (after fixing the model
-  configuration); a successful sibling or unrelated config save cannot revive it.
+  Retirement has **no TTL**: a 2xx model response on the same provider and exact model,
+  a change to that provider's configuration (URL, models, credentials or wire), or a router
+  restart clears it. A successful sibling or unrelated config save cannot revive it.
   This is process-memory advisory state, not a persisted blacklist.
 
 - **Running worker ladder fallback (2026-10-29, #89).** A model id such as `x@high`
@@ -1042,13 +1043,18 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   in an encoded `clauderipple-ladder` comment at the task's top. Its pick id and
   fallback ids also go into the existing pick log. Explicit model/pin choices that
   did not use the ladder get no snapshot. No tier is inferred from the model id.
-  Only a request with the subagent header consumes it; it must match the original
+  Only a request with the subagent header consumes it, from the first user message's
+  first text block (or string content), at its start after any leading engine reminders;
+  later messages, quoted metadata and later blocks are never scanned. It must match the original
   requested model and resolved provider/model/effort. The router binds the snapshot
   to session + agent (bounded to 10,000 entries), so later compacted requests retain
   it without sharing another worker's tier. Restart loses this binding; a request
   still carrying the task comment can recreate it. Already-running workers created
   by an older mod, or compacted ones whose binding was lost/evicted, do not acquire
-  a guessed ladder. Changed settings apply to new picks, not these spawn snapshots.
+  a guessed ladder. Every fallback, including a bound snapshot's, must still match a rung's
+  provider/model/effort in the CURRENT saved effective ladder (active mode and domain rules
+  included), with provider and allow-list switches respected. Missing/unreadable settings mean
+  no ladder reroute. The snapshot preserves spawn order but never authorizes a removed rung.
   Before sending upstream, definite provider exhaustion, model retirement, or an
   OAuth adapter with no usable account/quota group permits the existing `chooseTarget`
   path to select the first usable remaining entry. Ordinary API-key rate limits do
@@ -1061,8 +1067,13 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   identity, thread replay, and Google's one-unwritten-fallback cap remain on the
   existing path; a started response is never replaced. Translators scope reasoning
   to their own provider/model as before. An Anthropic-compatible worker fallback
-  additionally runs the existing `dropForeignThinking` filter, so a translated
-  reasoning envelope cannot leak into a wire that cannot decode it.
+  additionally runs `dropForeignThinking`; when the provider changes, opaque signed
+  thinking and redacted-thinking blocks are dropped too, not only translated envelopes.
+  Configured route FAILOVER uses this same cross-provider filter (including native Claude
+  account-pool targets); same-provider native signatures remain intact. A changed provider's
+  credentials clear its exhaustion advisory on config reload. An explicitly configured key
+  pool with a ready credential also overrides that advisory at preflight; otherwise the
+  existing 30-minute/default or stated Retry-After exhaustion lifetime is unchanged.
   These fake-upstream tests verify routing and cached-prefix preservation, not a live
   vendor cache-hit percentage. The engine's `turn.complete` error has no API detail;
   terminal worker outcome records still say `reason:error` (proposal 3 is deferred).

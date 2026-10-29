@@ -26,6 +26,9 @@ import { exhaustionHeaders, ModelHealth, modelDeprecation, ProviderHealth, provi
 import type { HoldGate } from "./hold.ts";
 import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder.ts";
+import { routingSettings } from "../../mod/hooks/modes.ts";
+import { candidateKey, isAllowed } from "../../mod/hooks/settings.ts";
+import { readModSettings } from "./mod-settings.ts";
 import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
@@ -268,6 +271,7 @@ export class Proxy {
   private readonly routedMessageIds = new Set<string>();
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
+  private readonly healthConfig = new Map<string, { config: string; credentials: string; keys: Record<string, string> }>();
   /** Agent/session-scoped spawn snapshots survive compaction, never shared by model id. */
   private readonly workerLadders = new Map<string, WorkerLadderRoute>();
 
@@ -509,8 +513,40 @@ export class Proxy {
     return "unknown";
   }
 
+  /** ConfigStore calls this on reload; requests also reconcile injected/mutable configs. */
+  reconcileConfig(cfg: Config): void {
+    const digest = (value: unknown): string => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    for (const [name, provider] of Object.entries(cfg.providers)) {
+      const authentication = Object.entries(provider).filter(([field]) =>
+        ["type", "auth", "headers", "credentials", "apiKey", "accountPool", "home"].includes(field));
+      const credentials = digest(authentication);
+      const config = digest([...authentication, ...Object.entries(provider).filter(([field]) =>
+        ["url", "models", "wire"].includes(field))]);
+      const declared = "credentials" in provider ? provider.credentials : undefined;
+      const keys = declared?.length ? Object.fromEntries(declared.map(key => [key.id, digest(key.headers)])) : { default: credentials };
+      const previous = this.healthConfig.get(name);
+      if (previous && previous.config !== config) this.modelHealth.clear(name);
+      if (previous && previous.credentials !== credentials) {
+        this.providerHealth.clear(name);
+        // Preserve unchanged spent keys when a new one is added; only replaced generations revive.
+        for (const [id, generation] of Object.entries(previous.keys)) {
+          if (keys[id] !== generation) this.pool.clear(name, id);
+        }
+      }
+      this.healthConfig.set(name, { config, credentials, keys });
+    }
+    for (const name of this.healthConfig.keys()) {
+      if (cfg.providers[name]) continue;
+      this.healthConfig.delete(name);
+      this.modelHealth.clear(name);
+      this.providerHealth.clear(name);
+      this.pool.clear(name);
+    }
+  }
+
   constructor(deps: ProxyDeps) {
     this.deps = deps;
+    this.reconcileConfig(deps.config());
     this.claudeAccounts = new ClaudeAccountAuthPool({
       home: deps.home,
       log: deps.log,
@@ -754,6 +790,7 @@ export class Proxy {
     // The agent files' derived aliases join the config's own, so a marker naming a worker resolves
     // the same way here as it does everywhere else. Explicit aliases win; the scan is mtime-cached.
     const cfg = withAgentAliases(this.deps.config(), this.deps.agentDir ?? defaultAgentDir(), log);
+    this.reconcileConfig(cfg);
     const t0 = Date.now();
     const method = req.method ?? "?";
     const path = req.url ?? "/";
@@ -846,6 +883,9 @@ export class Proxy {
             const oldest = this.routedMessageIds.values().next().value;
             if (oldest !== undefined) this.routedMessageIds.delete(oldest);
           }
+        }
+        if (completed.ok && completed.kind === "messages" && numericStatus >= 200 && numericStatus < 300 && extra?.upstreamCalled !== false) {
+          this.modelHealth.success(completed.provider, completed.target);
         }
         this.deps.requests.add(completed);
       }
@@ -1087,10 +1127,12 @@ export class Proxy {
           // several protocols is one provider, and this is where the model's own shape is folded in so
           // the branches below pick the adapter it actually needs.
           const provider = providerFor(configured, route.model);
-          // Translators scope reasoning themselves; a compatible wire must not receive a
-          // translated model's envelope when a worker moves to its fallback.
-          if (resolved?.ladderPick && provider.type === "anthropic-compatible" &&
-              (route.provider !== resolved.provider || route.model !== resolved.model)) dropForeignThinking(json);
+          // Translators scope reasoning themselves. A native/compatible fallback cannot validate
+          // the original provider's opaque signatures, whether selected by a ladder or a route.
+          if (resolved && (provider.type === "anthropic-compatible" || provider.type === "anthropic") &&
+              (route.provider !== resolved.provider || route.model !== resolved.model)) {
+            dropForeignThinking(json, route.provider !== resolved.provider);
+          }
           // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
           if (!pristine && provider.type === "google") pristine = structuredClone(json);
           rewriteBody(json, route, cfg.effortClamp);
@@ -1933,14 +1975,13 @@ export class Proxy {
   private workerFallbacks(resolved: Resolved, json: Record<string, unknown>, cfg: Config, model: string, key?: string): Resolved {
     let snapshot = key ? this.workerLadders.get(key) : undefined;
     if (!snapshot && Array.isArray(json.messages)) {
-      for (const message of json.messages.slice(0, 8)) {
-        if (!message || typeof message !== "object" || message.role !== "user") continue;
-        const content: unknown = message.content;
-        const texts = typeof content === "string" ? [content] : Array.isArray(content)
-          ? content.flatMap((block: unknown) => block && typeof block === "object" && "text" in block && typeof block.text === "string" ? [block.text] : []) : [];
-        snapshot = texts.map(text => readWorkerLadder(text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ""))).find(Boolean);
-        if (snapshot) break;
-      }
+      // register.tsx prepends this line to the spawn prompt, not to later history or blocks.
+      // Only leading engine reminders may precede it; removing reminders elsewhere can expose prose.
+      const content: unknown = json.messages.find(message => message?.role === "user")?.content;
+      const first: unknown = Array.isArray(content) ? content[0] : undefined;
+      const text = typeof content === "string" ? content : first && typeof first === "object" &&
+        "type" in first && first.type === "text" && "text" in first && typeof first.text === "string" ? first.text : "";
+      snapshot = readWorkerLadder(text.replace(/^(?:\s*<system-reminder>[\s\S]*?<\/system-reminder>)+\s*/, ""));
     }
     // Never override an explicit marker/rule that resolved somewhere other than the spawn's model.
     if (!snapshot || snapshot.model !== model) return resolved;
@@ -1950,15 +1991,46 @@ export class Proxy {
       this.workerLadders.set(key, snapshot);
       if (this.workerLadders.size > 10_000) this.workerLadders.delete(this.workerLadders.keys().next().value!);
     }
+    const allowed = this.savedLadderTargets(cfg);
     const fallbacks = snapshot.fallbacks.flatMap(id => {
       const target = resolve(id, {}, cfg);
-      return target ? [{ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}) }] : [];
+      return target && allowed.some(step => step.provider === target.provider && step.model === target.model && step.effort === target.effort)
+        ? [{ provider: target.provider, model: target.model, ...(target.effort ? { effort: target.effort } : {}) }] : [];
     });
     return { ...resolved, fallbacks, ladderPick: snapshot.pick };
   }
 
+  /** Task text is not authority: even a bound snapshot must remain on the current saved worker set. */
+  private savedLadderTargets(cfg: Config): Resolved[] {
+    try {
+      const saved = readModSettings(this.deps.home);
+      if (!saved.stored) return [];
+      const settings = routingSettings(saved.settings);
+      const rules = [settings.rules.general, ...Object.values(settings.domainRules ?? {})];
+      return rules.flatMap(rule => Object.values(rule.rungs).flatMap(steps => (steps ?? []).flatMap(step => {
+        const model = step.target.agent === "general-purpose" ? step.target.model : cfg.aliases[step.target.agent];
+        if (!model) return [];
+        const target = resolve(`${model.replace(/@[^@]*$/, "")}@${step.effort}`, {}, cfg);
+        return target && settings.providers[target.provider] !== false &&
+          isAllowed(candidateKey(step.target), target.provider, settings.allow, settings.allowKnown) ? [target] : [];
+      })));
+    } catch (error) {
+      this.deps.log.warn(`worker ladder: saved settings unavailable; not rerouting (${(error as Error).message})`);
+      return [];
+    }
+  }
+
   private unavailableReason(target: Pick<Resolved, "provider" | "model">): string | undefined {
-    return this.modelHealth.get(target.provider, target.model)?.reason ?? this.providerHealth.snapshot()[target.provider]?.reason;
+    const retired = this.modelHealth.get(target.provider, target.model)?.reason;
+    if (retired) return retired;
+    const exhaustion = this.providerHealth.snapshot()[target.provider];
+    if (!exhaustion) return undefined;
+    const configured = this.deps.config().providers[target.provider];
+    const provider = configured && providerFor(configured, target.model);
+    // An explicit key pool knows more than a provider-wide advisory from one spent key.
+    if (provider && "credentials" in provider && provider.credentials?.length &&
+        this.pool.hasUsable(target.provider, this.credentialsOf(target.provider, provider))) return undefined;
+    return exhaustion.reason;
   }
 
   /**
