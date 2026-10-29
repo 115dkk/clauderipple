@@ -28,7 +28,7 @@ import { BOOTSTRAP_PATH, injectBootstrap } from "./bootstrap.ts";
 import { readWorkerLadder, type WorkerLadderRoute } from "../../mod/hooks/ladder.ts";
 import { routingSettings } from "../../mod/hooks/modes.ts";
 import { candidateKey, isAllowed } from "../../mod/hooks/settings.ts";
-import { readModSettings } from "./mod-settings.ts";
+import { readModRoutingSettings } from "./mod-settings.ts";
 import { THREAD_UNSUPPORTED, continuesTranslatedTurn, effortOf, isAutoModeClassifier, resolve, rewriteBody, stripThreadFields, threadDecision, unroutableReason, type Resolved } from "./routing.ts";
 import { defaultAgentDir, imageLine, withAgentAliases } from "./agents.ts";
 import { forwardCompatibleHeader, resolveCompatibleCaps, sanitizeForCompatible } from "./compat.ts";
@@ -2008,7 +2008,7 @@ export class Proxy {
   /** Task text is not authority: even a bound snapshot must remain on the current saved worker set. */
   private savedLadderTargets(cfg: Config): Resolved[] {
     try {
-      const saved = readModSettings(this.deps.home);
+      const saved = readModRoutingSettings(this.deps.home);
       if (!saved.stored) return [];
       const settings = routingSettings(saved.settings);
       const rules = [settings.rules.general, ...Object.values(settings.domainRules ?? {})];
