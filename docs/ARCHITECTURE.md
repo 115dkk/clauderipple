@@ -564,9 +564,17 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
 - **Worker definitions derive from the same list (2026-09-20).** A ticked model is
   also a subagent the operator can name: for every non-ingress provider's declared
   id, the router writes `~/.claude/agents/<name>.md` (`agents.ts`;
-  `name` = the id with anything outside `[a-z0-9-]` folded to `-`, frontmatter
+  `name` = the id lower-cased, then anything outside `[a-z0-9-]` folded to `-`, runs
+  of `-` collapsed to one and the ends trimmed, frontmatter
   `model:` = the exact id, `@high` when the provider offers any effort level —
-  `@medium` until 2026-10-02). For a duplicate id, the first outbound provider in
+  `@medium` until 2026-10-02). Without the lower-casing step a hosted id lost its
+  model name to dashes (`deepseek-ai/DeepSeek-V4.1-Flash-1017` →
+  `deepseek-ai--eep-eek--4-1--lash-1017`, fixed after 0.12.18, #111). A name the
+  0.12.18 algorithm gave a worker that now differs stays resolvable as a marker
+  alias, rungs and allow-list entries saved under it are renamed when the mod's
+  settings are read (admin.ts), and its file is removed like any stale generated
+  file — by the manifest, or, when that record is lost, by the generated mark and
+  the same `model:` line. For a duplicate id, the first outbound provider in
   config key order keeps that name; later providers use `<name>-<provider>` (the
   same filename sanitisation applies). **All** duplicate workers carry a qualified
   `model:` (`google-gemini:gemini-4-argon@high`), including the one keeping its old
@@ -1142,6 +1150,65 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   (char/4, floored by the last measured total for the conversation) so the app's
   token counter and the CLI's context accounting are not zero.
 
+- **Retired models (2026-10-29, #94).** Explicit `ModelDeprecated`, `model_deprecated`,
+  or "Model … has been deprecated" on HTTP 404/410 records
+  `model_deprecated` by provider and exact upstream model id in `ModelHealth`.
+  A generic endpoint/thread 404/410 does not. `/api/status.providers[name].models[id]`
+  exposes `{usable:false, reason, at}`; `/api/mod-options` supplies the same exclusion
+  to the existing ladder's per-model skip path. Sibling models remain usable.
+  Retirement has **no TTL**: a 2xx model response on the same provider and exact model,
+  a change to that provider's configuration (URL, models, credentials or wire), or a router
+  restart clears it. A successful sibling or unrelated config save cannot revive it.
+  This is process-memory advisory state, not a persisted blacklist.
+
+- **Running worker ladder fallback (2026-10-29, #89).** A model id such as `x@high`
+  does not identify a tier: several modes/domain ladders can select it concurrently,
+  and `worker-picks.jsonl` originally had no request-side join. The mod now snapshots
+  the selected tier's remaining installed, allowed entries (including each effort)
+  in an encoded `clauderipple-ladder` comment at the task's top. Its pick id and
+  fallback ids also go into the existing pick log. Explicit model/pin choices that
+  did not use the ladder get no snapshot. No tier is inferred from the model id.
+  Only a request with the subagent header consumes it, from the first user message's
+  first text block (or string content), at its start after any leading engine reminders;
+  later messages, quoted metadata and later blocks are never scanned. It must match the original
+  requested model and resolved provider/model/effort. The router binds the snapshot
+  to session + agent (bounded to 10,000 entries), so later compacted requests retain
+  it without sharing another worker's tier. Restart loses this binding; a request
+  still carrying the task comment can recreate it. Already-running workers created
+  by an older mod, or compacted ones whose binding was lost/evicted, do not acquire
+  a guessed ladder. Every fallback, including a bound snapshot's, must still match a rung's
+  provider/model/effort in the CURRENT saved effective ladder (active mode and domain rules
+  included), with provider and allow-list switches respected. Missing/unreadable settings mean
+  no ladder reroute. The snapshot preserves spawn order but never authorizes a removed rung.
+  Before sending upstream, definite provider exhaustion, model retirement, or an
+  OAuth adapter with no usable account/quota group permits the existing `chooseTarget`
+  path to select the first usable remaining entry. Ordinary API-key rate limits do
+  not trigger this worker preflight. The first request that *discovers* exhaustion
+  still returns the existing non-retryable error; the next request skips it.
+  Fallback ids must still resolve through current config: ambiguous, removed, and
+  ingress-only native Claude targets are not invented as outbound providers (§5).
+  With no usable fallback the original provider keeps its existing refusal contract.
+  A `LADDER` line and the request note name pick/from/to/reason. All adapters, cache
+  identity, thread replay, and Google's one-unwritten-fallback cap remain on the
+  existing path; a started response is never replaced. Translators scope reasoning
+  to their own provider/model as before. An Anthropic-compatible worker fallback
+  additionally runs `dropForeignThinking`; when the provider changes, each signed thinking
+  or redacted-thinking block is retained only if its signature/data digest was observed in
+  a response from the TARGET provider. The side-band JSON/SSE response observer records
+  provenance in a process-local, globally bounded 100,000-entry digest map, never rewriting
+  response bytes or retaining reasoning text. Unknown/evicted origins (including after a
+  restart) are foreign and dropped. This per-block decision preserves the fallback's own
+  replayed prefix across tool turns instead of stripping it again on every reroute.
+  Configured route FAILOVER uses this same cross-provider filter (including native Claude
+  account-pool targets); same-provider native signatures and never-rerouted requests retain
+  their existing behavior. Translated adapters still scope their own envelopes. A changed provider's
+  credentials clear its exhaustion advisory on config reload. An explicitly configured key
+  pool with a ready credential also overrides that advisory at preflight; otherwise the
+  existing 30-minute/default or stated Retry-After exhaustion lifetime is unchanged.
+  These fake-upstream tests verify routing and cached-prefix preservation, not a live
+  vendor cache-hit percentage. The engine's `turn.complete` error has no API detail;
+  terminal worker outcome records still say `reason:error` (proposal 3 is deferred).
+
 - **Credential pools (`providers.<name>.credentials`, 2026-09-17).** A provider may hold several
   credentials, each a complete header set. The conversation keeps the one it is on while that one
   is healthy — moving it moves the prompt cache with it, and ≥90% cache hit is an acceptance metric
@@ -1164,6 +1231,12 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     written. One key stays in `headers`; several use complete `credentials` entries with `headers`
     mirroring the first, retaining id `default` when converting a single key. OpenCode Go usage is
     fetched and cached separately per credential and exposed in configured order, with optional labels.
+  - **Google api-key pools (2026-10-29, #112).** The `google` wire's `api-key` mode uses the same
+    pool, stickiness and in-turn failover. Its keys are complete header sets like the compatible
+    adapters', except each key goes out on `x-goog-api-key` (moved from `authorization`/`x-api-key`
+    when the model is a relay's Gemini endpoint folded by `providerFor`), and `apiKey` mirrors the
+    first entry. Skips exhausted/paused keys, rests a 429's key until its stated reset, and records
+    and logs the key that answered. Antigravity rotates its own accounts (§4d-ii) and is unchanged.
   - **Shared operator controls (2026-10-23).** ChatGPT, Claude OAuth, Google CCA and compatible
     API-key pools share `preferred`, `paused`, `clearCooldown` and `inUse`. At most one stored
     account/key is preferred: only new conversations try it first while usable; existing healthy
@@ -1478,8 +1551,10 @@ what we do not have yet — so that adding a provider does not start with readin
   contract. A `google` entry folds into a `google`/`api-key` provider (2026-10-21): the
   provider's key moves from its headers to `apiKey`, the model's `url` becomes the base,
   and the provider's `sessionHeader` and every non-auth header travel with it. The key is
-  never restated in the model entry. A provider with no override for that model is returned
-  by identity.
+  never restated in the model entry. Since 2026-10-29 the provider's whole `credentials`
+  pool travels too, each key moved to `x-goog-api-key` (#112): folding only the first key
+  left a many-key provider unable to answer a spent one. A provider with no override for
+  that model is returned by identity.
   `authHeader` names a convention rather than restating the key: the provider's own
   credential is re-sent under the header that model's wire expects, so there is one copy
   of the key to rotate. Each endpoint follows the API it imitates — an Anthropic-wire
@@ -1597,6 +1672,15 @@ including the 2026-10-16 Antigravity measurement in §4d-ii, are identified sepa
   the session header OpenCode answers `400 MissingSessionID`. Plain AI Studio providers set
   neither and send no custom User-Agent. The provider's other headers are applied as given.
   Not live-measured as of this date.
+- **The api-key wire takes a key from the provider's pool (2026-10-29, #112).** A provider may
+  declare `credentials`; the proxy picks one by conversation affinity and configured order, the
+  adapter sends that key on `x-goog-api-key`, and a refusal another key could answer (a 429, an
+  exhaustion, a refused key) is retried on the next ready key before any status or byte reaches
+  the client — one key is charged for the refusal and the answer is charged to the key that
+  produced it. `KEY`/`RETRY` log lines and the request record's `credential` are the same as on
+  the other translated wires. A provider with one key (the AI Studio `apiKey`, or the single
+  `headers` set a folded relay model carries) sends exactly what it always did. The
+  `antigravity` accounts keep their own pool and rotation below.
 - `systemInstruction` takes `{role:"user"|"model", parts:[…]}`; `contents` is the
   `user`/`model` turn list; a part is `{text}`, `{inlineData:{mimeType,data}}`,
   `{functionCall:{name,args}}` or `{functionResponse:{name,response}}`. The `role` of a

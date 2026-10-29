@@ -300,6 +300,23 @@ test("OpenAI pools use generic validation and each model's auth convention", () 
   assert.equal(provider.credentials![0]!.headers.authorization, "Bearer opaque-first-key", "the config was not mutated");
 });
 
+test("a google-wire model keeps its provider's key pool when folded (#112)", () => {
+  const provider = openaiPooled(12345);
+  provider.models = [{ id: "g", wire: "google", url: "http://127.0.0.1:12345/inference/go/google" }];
+  const folded = providerFor(provider, "g");
+  if (folded.type !== "google") throw new Error(`expected a google provider, got ${folded.type}`);
+  assert.equal(folded.auth, "api-key");
+  assert.equal(folded.apiKey, "opaque-first-key", "the first key is still the provider's identity");
+  // Folding only `headers` left a many-key provider with one key on this wire, so its second key
+  // could never answer a spent first one (#112). Each key moves to the wire's own header.
+  assert.deepEqual(folded.credentials?.map((c) => c.headers), [
+    { "x-goog-api-key": "opaque-first-key" },
+    { "x-goog-api-key": "opaque-second-key" },
+  ]);
+  assert.deepEqual(folded.credentials?.map((c) => c.label), ["첫 번째", "두 번째"]);
+  assert.equal(provider.credentials![0]!.headers.authorization, "Bearer opaque-first-key", "the config was not mutated");
+});
+
 test("OpenAI pool: a 429 hops inside the turn, cools only that key and stays sticky", async () => {
   const up = await upstream((n) => n === 1 ? { status: 429, headers: { "retry-after": "300" }, body: '{}' } : chatAnswer);
   const r = await rig({ p: openaiPooled(up.port) }, { "claude-opus-4-8": { provider: "p", model: "m" } });

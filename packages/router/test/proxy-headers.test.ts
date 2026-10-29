@@ -49,7 +49,7 @@ async function roundTrip(
   providerHeaders: Record<string, string>,
   reply: ProviderReply,
   options: { provider?: Partial<Provider>; system?: unknown; body?: Record<string, unknown>; exhausted?: boolean } = {},
-): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; clientHeaders: http.IncomingHttpHeaders; providerCalls: number; health: Record<string, ProviderExhaustion> }> {
+): Promise<{ seen: http.IncomingHttpHeaders; seenBody: Record<string, unknown>; records: RequestRecord[]; clientStatus: number; clientBody: string; clientHeaders: http.IncomingHttpHeaders; providerCalls: number; health: Record<string, ProviderExhaustion>; models: Record<string, Record<string, { reason: string }>> }> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cr-proxy-headers-"));
   const ca = createCa({ cn: "clauderipple test" });
   fs.writeFileSync(path.join(home, "ca.pem"), ca.certPem);
@@ -128,8 +128,19 @@ async function roundTrip(
   await new Promise<void>((r) => provider.close(() => r()));
   const records = requests.list(10);
   fs.rmSync(home, { recursive: true, force: true });
-  return { seen, seenBody, records, clientStatus, clientBody, clientHeaders, providerCalls, health: proxy.providerHealth.snapshot() };
+  return { seen, seenBody, records, clientStatus, clientBody, clientHeaders, providerCalls, health: proxy.providerHealth.snapshot(), models: proxy.modelHealth.snapshot() };
 }
+
+test("retired models are recorded per provider/model on compatible and translated wires (#94)", async () => {
+  for (const type of ['anthropic-compatible', 'openai-compatible', 'google'] as const) {
+    const result = await roundTrip({}, {
+      status: 410, headers: { 'content-type': 'application/json' },
+      body: Buffer.from('{"error":{"type":"ModelDeprecated","message":"Model some-model has been deprecated."}}'),
+    }, { provider: { type, apiKey: 'test-key', auth: 'api-key' } as Partial<Provider> });
+    assert.deepEqual(result.health, {}, 'other models on the provider must stay usable');
+    assert.equal(result.models.p?.['some-model']?.reason, 'model_deprecated');
+  }
+});
 
 test("routed 402 and billing 429 teach provider health, but transient 429 does not; success clears it", async () => {
   for (const [status, message, exhausted] of [[402, 'Insufficient Balance', true], [429, 'insufficient_quota', true], [429, 'rate_limit_exceeded', false]] as const) {

@@ -50,8 +50,10 @@ let log: Logger | null = null;
 let tunnels: RemoteTunnels | null = null;
 /** The last config read's validation errors: the status and readiness report them (G-D14). */
 let configErrors: string[] = [];
+let reconcileProxyConfig: ((config: ReturnType<ConfigStore["get"]>) => void) | undefined;
 const store = new ConfigStore(undefined, (c, errors) => {
   configErrors = [...errors];
+  reconcileProxyConfig?.(c);
   for (const e of errors) (log ?? console).warn(`config: ${e}`);
   for (const w of targetWarnings(c)) (log ?? console).warn(`config: ${w}`);
   log?.info(`config loaded: ${Object.keys(c.routes).length} routes, ${Object.keys(c.providers).length} providers, direct=${c.direct.map((d) => d.prefix).join(",") || "-"}`);
@@ -126,6 +128,7 @@ const observedClaudeCodeAuth = new ObservedClaudeCodeAuth(path.join(home, "claud
 // Before any provider fetches: a reasoning model may stay silent past fetch's 300s default.
 allowLongSilences();
 const proxy = new Proxy({ config: () => store.get(), log, certs, health, home, requests, observedClaudeCodeAuth, hold });
+reconcileProxyConfig = config => proxy.reconcileConfig(config);
 const ingress = new OpenAiIngress({ config: () => store.get(), log, requests, home, observedClaudeCodeAuth, chatgpt: (name) => proxy.chatgptForCodex(name), hold });
 
 // Lid-closed awake and hotspot failover (macOS and Windows; no-ops elsewhere, off until configured).
@@ -284,6 +287,7 @@ proxy
       stats: () => proxy.stats,
       health: () => health.consecutiveFailures,
       providerHealth: () => proxy.providerHealth.snapshot(),
+      modelHealth: () => proxy.modelHealth.snapshot(),
       version: VERSION,
       requests,
       chatgpt: () => ({

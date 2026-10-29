@@ -36,6 +36,7 @@ async function withAdmin(
     clearCredentialCooldown?: NonNullable<AdminDeps["clearCredentialCooldown"]>;
     claudeClearCooldown?: NonNullable<AdminDeps["claudeClearCooldown"]>;
     providerHealth?: NonNullable<AdminDeps["providerHealth"]>;
+    modelHealth?: NonNullable<AdminDeps["modelHealth"]>;
     shutdown?: () => void;
     instance?: NonNullable<AdminDeps["instance"]>;
     runCli?: (args: string[], timeout?: number) => Promise<{ ok: boolean; output: string }>;
@@ -177,6 +178,26 @@ test("credential cooldown HTTP endpoint clears one key and status exposes all th
     assert.equal((await post({ provider: true, id: "default" })).status, 400);
     assert.equal((await post(null)).status, 400);
   }, { credentials: () => ({ p: pool.report("p", entries) }), clearCredentialCooldown: (provider, id) => pool.clear(provider, id) });
+});
+
+test('status and ladder options expose retirement without disabling sibling models (#94)', async () => {
+  const { ModelHealth, modelDeprecation } = await import('../src/health.ts');
+  const health = new ModelHealth();
+  health.observe('p', 'retired', modelDeprecation(410, 'ModelDeprecated', 100));
+  assert.equal(modelDeprecation(410, 'endpoint gone'), undefined);
+  assert.equal(modelDeprecation(429, 'ModelDeprecated'), undefined);
+  assert.equal(modelDeprecation(404, 'thread_not_found'), undefined);
+  assert.equal(modelDeprecation(404, 'model_not_found'), undefined, 'a key without access is not a retirement');
+  assert.equal(modelDeprecation(404, 'Model x has been deprecated.')?.reason, 'model_deprecated');
+  const cfg = makeCfg({ providers: { p: { type: 'anthropic-compatible', url: 'http://127.0.0.1:1', models: [{ id: 'retired' }, { id: 'active' }] } } });
+  await withAdmin(cfg, async ({ port }) => {
+    const options = await (await fetch(`${base()}:${port}/api/mod-options`)).json() as ModOptions;
+    assert.equal(options.providers[0]?.usable, true);
+    assert.deepEqual(options.providers[0]?.models, { retired: { reason: 'model_deprecated', exhaustedAt: 100 } });
+    const status = await (await fetch(`${base()}:${port}/api/status`)).json() as { providers: Record<string, { models: unknown }> };
+    assert.deepEqual(status.providers.p?.models, { retired: { usable: false, reason: 'model_deprecated', at: 100 } });
+  }, { modelHealth: () => health.snapshot(), modelScoresFetch: async () => new Response('{}') });
+  assert.deepEqual(new ModelHealth().snapshot(), {}, 'a router restart clears retirement');
 });
 
 test("mod options and status expose runtime provider exhaustion and clear it on recovery", async () => {
@@ -567,6 +588,70 @@ test("admin mod-settings refuses to overwrite corrupt persistence", async () => 
     assert.equal((await putModSettings(port, { settings: {} })).status, 500);
     assert.equal(fs.readFileSync(file, "utf8"), "{");
   });
+});
+
+test("admin mod-settings renames a rung and an allow-list entry saved under the 0.12.18 worker name (#111)", async () => {
+  const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agent-renames-"));
+  const cfg = makeCfg({ providers: { deepseek: { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "deepseek-ai/DeepSeek-V4.1-Flash-1017" }] } } });
+  const old = "deepseek-ai--eep-eek--4-1--lash-1017";
+  const now = "deepseek-ai-deepseek-v4-1-flash-1017";
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const steps = (agent: string) => [{ target: { agent }, effort: "high" }];
+      const saved = {
+        rules: { general: { mode: "ladder", rungs: { light: steps(old), standard: steps("gpt-6-1-sol") } } },
+        modes: [{ id: "saved", name: "Saved mode", rungs: { hard: steps(old) }, delegation: "normal", until: "none" }],
+        allow: [old, "gpt-6-1-sol"],
+        allowKnown: [old, "gpt-6-1-sol"],
+      };
+      fs.writeFileSync(path.join(home, "mod-settings.json"), JSON.stringify({ revision: 3, settings: normalizeSettings(saved) }));
+
+      const response = await fetch(`${base()}:${port}/api/mod-settings`);
+      assert.equal(response.status, 200);
+      const settings = ((await response.json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(settings.rules.general.rungs.light, steps(now), "the renamed worker, not a missing one");
+      assert.deepEqual(settings.rules.general.rungs.standard, steps("gpt-6-1-sol"), "a name that did not change is left alone");
+      assert.deepEqual(settings.modes[0]!.rungs.hard, steps(now), "a saved mode's rung too");
+      assert.deepEqual(settings.allow, [now, "gpt-6-1-sol"], "the ticked worker keeps its tick");
+      assert.deepEqual(settings.allowKnown, [now, "gpt-6-1-sol"]);
+    }, { agentDir: agents });
+  } finally {
+    fs.rmSync(agents, { recursive: true, force: true });
+  }
+});
+
+test("admin mod-settings leaves a hand-written worker at a 0.12.18 name, and every entry naming it, alone", async () => {
+  const agents = fs.mkdtempSync(path.join(os.tmpdir(), "cr-agent-hand-rename-"));
+  // Never generated by the router: a person's own file that happens to carry the name 0.12.18 gave
+  // Vendor/Model, so a saved rung or tick naming it means that worker, not a stale generated one.
+  const legacy = "-endor--odel";
+  const hand = `---\nname: ${legacy}\nmodel: unrelated-model\n---\nMy hand-written worker\n`;
+  fs.writeFileSync(path.join(agents, `${legacy}.md`), hand);
+  const cfg = makeCfg({ providers: { vendor: { type: "anthropic-compatible", url: "http://127.0.0.1:9", models: [{ id: "Vendor/Model" }] } } });
+  try {
+    await withAdmin(cfg, async ({ port, home }) => {
+      const steps = (agent: string) => [{ target: { agent }, effort: "high" }];
+      const saved = normalizeSettings({ rules: { general: { mode: "ladder", rungs: { light: steps(legacy) } } }, allow: [legacy], allowKnown: [legacy] });
+      const store = path.join(home, "mod-settings.json");
+      fs.writeFileSync(store, JSON.stringify({ revision: 3, settings: saved }));
+      const before = fs.readFileSync(store, "utf8");
+
+      const read = ((await (await fetch(`${base()}:${port}/api/mod-settings`)).json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(read.rules.general.rungs.light, steps(legacy), "the rung keeps the hand worker");
+      assert.deepEqual(read.allow, [legacy], "and so does the tick");
+      assert.equal(fs.readFileSync(store, "utf8"), before, "reading persists no migration");
+
+      assert.equal((await putModSettings(port, { settings: saved, revision: 3 })).status, 200);
+      const stored = (JSON.parse(fs.readFileSync(store, "utf8")) as { settings: ModSettingsSnapshot["settings"] }).settings;
+      assert.deepEqual(stored.rules.general.rungs.light, steps(legacy), "saving keeps it too");
+      assert.deepEqual(stored.allow, [legacy]);
+      const again = ((await (await fetch(`${base()}:${port}/api/mod-settings`)).json()) as ModSettingsSnapshot).settings;
+      assert.deepEqual(again, stored, "a repeated migration is idempotent");
+      assert.equal(fs.readFileSync(path.join(agents, `${legacy}.md`), "utf8"), hand, "the hand file is untouched");
+    }, { agentDir: agents });
+  } finally {
+    fs.rmSync(agents, { recursive: true, force: true });
+  }
 });
 
 test("admin mod-options offers owned workers, every provider model, judge candidates and attributed AA scores", async () => {

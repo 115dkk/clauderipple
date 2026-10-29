@@ -36,18 +36,18 @@ import type { Config, Provider, ProviderCredential, ProviderModel } from "./conf
 import { withFileLock } from "./locked-file.ts";
 import { adminPort, headerValueProblem, homeDir, searchProviderFor, ssidProblem, validate } from "./config.ts";
 export { adminPort } from "./config.ts";
-import { generatedAgents } from "./agents.ts";
+import { agentRenames, generatedAgents } from "./agents.ts";
 import { isJudgeOnlyModel } from "./model-policy.ts";
 import { ModSettingsInputError, readModSettings, validateSettings, validateSettingsSchema, writeAutoCompactWindow, writeModSettings } from "./mod-settings.ts";
 import { billingOf, claudeChoices, fillLadder, ladderNeedsFill } from "../../mod/hooks/ladder.ts";
 import { normalizeSettings, twoLevelRungs } from "../../mod/hooks/settings.ts";
-import type { Billing, DomainRules, Effort, LadderChoice, Settings } from "../../mod/types/index.d.ts";
+import type { Billing, DomainRules, Effort, LadderChoice, Rungs, Settings, Step } from "../../mod/types/index.d.ts";
 import { chatPickerModels } from "./picker.ts";
 import { declaredBy, resolve } from "./routing.ts";
 import type { Logger } from "./log.ts";
 import { CredentialPool } from "./pool.ts";
 import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
-import type { ProviderExhaustion } from "./health.ts";
+import type { ModelHealth, ProviderExhaustion } from "./health.ts";
 import type { Stats } from "./proxy.ts";
 import type { RequestLog } from "./requestlog.ts";
 import { PRESETS, type ProviderPreset } from "./presets.ts";
@@ -119,6 +119,7 @@ export type AdminDeps = {
   stats: () => Stats;
   health: () => number;
   providerHealth?: () => Record<string, ProviderExhaustion>;
+  modelHealth?: ModelHealth["snapshot"];
   version: string;
   /**
    * The installation identity this process captured at start: its home's opaque id (immutable for
@@ -609,7 +610,7 @@ export type ModOptions = {
 };
 
 /** One model out while its provider still answers others: a spent quota group, until it resets. */
-export type ModelUnavailable = { reason: string; exhaustedUntil: number };
+export type ModelUnavailable = { reason: string; exhaustedAt?: number; exhaustedUntil?: number };
 
 /**
  * An Antigravity provider's spent quota groups: a group resting on every account that is otherwise
@@ -710,14 +711,16 @@ async function modOptions(deps: AdminDeps, scores: ModelScoreCatalog): Promise<M
     let out: { reason: string; exhaustedAt?: number; exhaustedUntil: number } | undefined;
     if (exhausted) out = { reason: exhausted.reason, exhaustedAt: exhausted.at, exhaustedUntil: exhausted.until };
     if (usageOut && (!out || usageOut.until > out.exhaustedUntil)) out = { reason: usageOut.reason, exhaustedUntil: usageOut.until };
-    const modelsOut: Record<string, ModelUnavailable> = {};
+    const modelsOut: Record<string, ModelUnavailable> = Object.fromEntries(
+      Object.entries(deps.modelHealth?.()[name] ?? {}).map(([model, state]) => [model, { reason: state.reason, exhaustedAt: state.at }]),
+    );
     if (p.type === "google" && p.auth === "antigravity") {
       const groups = antigravityGroupsOut(google[name] ?? [], now);
       const scopeOf = deps.google?.().quotaScope;
       const ids = new Set([...(p.models ?? []).map(m => m.id), ...agents.filter(a => a.provider === name).map(a => a.model)]);
       for (const id of ids) {
         const scope = scopeOf?.(name, id);
-        if (scope && groups[scope]) modelsOut[id] = groups[scope];
+        if (scope && groups[scope] && !modelsOut[id]) modelsOut[id] = groups[scope];
       }
     }
     return { name, type: p.type, usable: usable && !out, billing: billingOf(p as { type: string; auth?: string; preset?: string; url?: string }),
@@ -756,10 +759,43 @@ function ladderChoices(options: ModOptions): LadderChoice[] {
 }
 
 /**
+ * Worker names saved by the build that sanitised a model id without lower-casing it first (#111):
+ * the ladder, the allow-list and the fallback name workers by their generated name, so a renamed
+ * worker would read as missing and its rung skipped. Migrated wherever settings are read or written,
+ * so a ladder the user saved keeps the worker it named; the next save stores the new name.
+ */
+function migrateWorkerNames(settings: Settings, renames: Record<string, string>): Settings {
+  if (Object.keys(renames).length === 0) return settings;
+  const agent = (name: string): string => renames[name] ?? name;
+  const steps = (list: Step[] | undefined): Step[] | undefined =>
+    list?.map(step => ({ ...step, target: { ...step.target, agent: agent(step.target.agent) } }));
+  const rungs = (saved: Rungs): Rungs =>
+    Object.fromEntries(Object.entries(saved).map(([rung, list]) => [rung, steps(list)])) as Rungs;
+  const domains = (rules: DomainRules): DomainRules =>
+    Object.fromEntries(Object.entries(rules).map(([domain, rule]) => [domain, { mode: "ladder", rungs: rungs(rule.rungs) }])) as DomainRules;
+  const names = (list: string[]): string[] => [...new Set(list.map(agent))];
+  const modes = settings.modes.map(mode => ({
+    ...mode,
+    rungs: rungs(mode.rungs),
+    ...(mode.domainRules ? { domainRules: domains(mode.domainRules) } : {}),
+  }));
+  return {
+    ...settings,
+    rules: { general: { mode: "ladder", rungs: rungs(settings.rules.general.rungs) } },
+    ...(settings.domainRules ? { domainRules: domains(settings.domainRules) } : {}),
+    modes,
+    allow: names(settings.allow),
+    allowKnown: names(settings.allowKnown),
+    fallback: { ...settings.fallback, agent: agent(settings.fallback.agent) },
+  };
+}
+
+/**
  * Fill empty ordered lists in Base and saved modes from the same ticked, connected choices.
  * Existing lists survive availability and allow-list changes; dispatch handles skips.
  */
 async function withFilledLadder(deps: AdminDeps, scores: ModelScoreCatalog, settings: Settings): Promise<Settings> {
+  settings = migrateWorkerNames(settings, agentRenames(deps.config(), deps.agentDir, deps.log));
   const general = settings.rules.general;
   const sets = [settings, ...settings.modes];
   const domains = sets.flatMap(set => Object.values(set.domainRules ?? {}));
@@ -799,6 +835,7 @@ async function buildStatus(deps: AdminDeps, opts: { refresh?: boolean } = {}): P
         reachable,
         usable: reachable && !health[name],
         ...(health[name] ? { exhaustion: health[name] } : {}),
+        ...(deps.modelHealth ? { models: Object.fromEntries(Object.entries(deps.modelHealth()[name] ?? {}).map(([model, state]) => [model, { usable: false, ...state }])) } : {}),
         // Whether the router could run a `WebSearch` side request through this provider, so the
         // Clients screen can say so beside a model name. Nothing on that screen said which ones
         // those are, and a `smallFast` slot pointed at one turns every search into a visible failure

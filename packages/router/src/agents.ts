@@ -32,11 +32,13 @@ export function defaultAgentDir(): string {
 
 /**
  * `cfg` with the agent files' derived aliases merged in. An explicit `cfg.aliases` entry wins, so a
- * hand-written alias is never overridden by a generated one.
+ * hand-written alias is never overridden by a generated one. The names the 0.12.18 build gave the
+ * same workers join as aliases too, so a marker written against one still resolves (#111); a current
+ * name wins over an old one, since the derived and explicit entries sit above them.
  */
 export function withAgentAliases(cfg: Config, dir: string, log?: AgentLog): Config {
   const derived = agentAliases(dir, log);
-  return { ...cfg, aliases: { ...derived, ...cfg.aliases } };
+  return { ...cfg, aliases: { ...legacyAgentAliases(cfg, dir, log), ...derived, ...cfg.aliases } };
 }
 
 /** The body every generated worker carries, verbatim. */
@@ -78,7 +80,7 @@ export function imageLine(port: number): string {
 const TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebFetch", "WebSearch", "Skill"];
 
 /** One parsed agent file. `model` is null when the file has no `model:` line. */
-type AgentEntry = { name: string; model: string | null; mtimeMs: number };
+type AgentEntry = { name: string; model: string | null; generated: boolean; mtimeMs: number };
 
 /**
  * Parsed `*.md` frontmatter per directory, keyed by file mtime so a request never re-reads the whole
@@ -139,7 +141,7 @@ function scanDir(dir: string, log?: AgentLog): Map<string, AgentEntry> {
       log?.warn(`agent ${file}: frontmatter has no name; skipped`);
       continue;
     }
-    next.set(file, { name, model: fm.model ?? null, mtimeMs: st.mtimeMs });
+    next.set(file, { name, model: fm.model ?? null, generated: isGenerated(text), mtimeMs: st.mtimeMs });
   }
   if (changed || prev.size !== next.size) cache.set(dir, next);
   return next;
@@ -158,9 +160,127 @@ export function agentAliases(dir: string, log?: AgentLog): Record<string, string
   return out;
 }
 
-/** The agent name (and file basename) a model id maps to: everything outside `[a-z0-9-]` becomes `-`. */
+/**
+ * The agent name (and file basename) a model id maps to: lower-cased first, everything outside
+ * `[a-z0-9-]` becomes `-`, runs of `-` collapse to one and the ends are trimmed. Lower-casing comes
+ * first because a hosted id keeps its vendor's capitals — `deepseek-ai/DeepSeek-V4.1-Flash-1017`
+ * must read as its own model. The 0.12.18 build sanitised without it, so each capital and its
+ * neighbours became one dash (`deepseek-ai--eep-eek--4-1--lash-1017`, #111), and a name that ends
+ * up empty falls back to `model` rather than writing a `.md` with no name.
+ */
 export function agentNameFor(modelId: string): string {
+  return modelId.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "") || "model";
+}
+
+/** The name the 0.12.18 build gave a model id: sanitised without lower-casing, nothing else. */
+function legacyAgentNameFor(modelId: string): string {
   return modelId.replace(/[^a-z0-9-]/g, "-");
+}
+
+/** A generated worker's current name and the name the 0.12.18 build gave the same target. */
+function workerNames(modelId: string, providerName: string, suffixed: boolean): { name: string; legacy: string } {
+  const suffix = (of: (id: string) => string): string => (suffixed ? `-${of(providerName)}` : "");
+  return { name: agentNameFor(modelId) + suffix(agentNameFor), legacy: legacyAgentNameFor(modelId) + suffix(legacyAgentNameFor) };
+}
+
+/** One generated worker: the config it comes from, and the two names it can be known by. */
+type AgentTarget = { modelId: string; title: string; provider: string; suffix: string; legacy: string };
+
+/**
+ * One worker per outbound provider/model declaration; the first owner keeps the bare name (#94), and
+ * a duplicate declaration's later provider gets `<model>-<provider>`. Two ids that sanitise alike,
+ * and a name a hand file already uses, are what the caller resolves.
+ */
+function agentTargets(cfg: Config, log?: AgentLog): Map<string, AgentTarget> {
+  const targets = new Map<string, AgentTarget>();
+  for (const [providerName, provider] of Object.entries(cfg.providers)) {
+    if (!isTargetProvider(provider)) continue;
+    for (const model of provider.models ?? []) {
+      if (isJudgeOnlyModel(model.id)) continue;
+      const owners = declaredBy(model.id, cfg);
+      const first = owners.find(name => {
+        const owner = cfg.providers[name]!;
+        return isTargetProvider(owner);
+      });
+      const duplicate = owners.length > 1;
+      const { name, legacy } = workerNames(model.id, providerName, duplicate && first !== providerName);
+      const clash = targets.get(name);
+      if (clash) {
+        log?.warn(`agent files: "${model.id}" and "${clash.modelId}" both map to "${name}"; skipping "${model.id}"`);
+        continue;
+      }
+      targets.set(name, { modelId: duplicate ? `${providerName}:${model.id}` : model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id), legacy });
+    }
+  }
+  return targets;
+}
+
+/** The names in `dir` whose file is a person's own, not one this router wrote: no generated mark. */
+function handAgentNames(dir: string, log?: AgentLog): Set<string> {
+  const names = new Set<string>();
+  for (const entry of scanDir(dir, log).values()) if (!entry.generated) names.add(entry.name);
+  return names;
+}
+
+/**
+ * Whether the 0.12.18 name `legacy` already belongs to a worker the rename is not about: a hand
+ * file's name, or any file at that name that is not our generated file for exactly `modelId`. Only
+ * that file is the duplicate the rename replaces; the same evidence dropRenamedAgent removes it by.
+ */
+function otherWorkerAt(dir: string, legacy: string, modelId: string, hand: Set<string>): boolean {
+  if (hand.has(legacy)) return true;
+  const file = path.join(dir, `${legacy}.md`);
+  let text: string;
+  try {
+    if (!fs.lstatSync(file).isFile()) return false;
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return false;
+  }
+  return !(isGenerated(text) && parseFrontmatter(text)?.model?.replace(/@[a-z]+$/i, "") === modelId);
+}
+
+/**
+ * Every target the name change renamed (#111), provided its 0.12.18 name is still free: no current
+ * worker name, no model any provider declares, no explicit alias, and no hand file (or another
+ * worker's file) holding the name. An alias or a rename for such a name would take it over — two
+ * ids that collapse to one name (`a//b` and `a--b` both shorten to `a-b`) leave the skipped one
+ * declared, and `a--b -> a//b` would send the real `a--b`'s markers to a different model — and a
+ * saved ladder rung naming a person's own worker would be rewritten to the generated one.
+ */
+function* renamedTargets(cfg: Config, dir: string, log?: AgentLog): Generator<{ name: string; legacy: string; modelId: string }> {
+  const targets = agentTargets(cfg);
+  const current = new Set(targets.keys());
+  let hand: Set<string> | undefined;
+  for (const [name, t] of targets) {
+    if (t.legacy === name || current.has(t.legacy)) continue;
+    if (Object.hasOwn(cfg.aliases, t.legacy) || declaredBy(t.legacy, cfg).length > 0) continue;
+    hand ??= handAgentNames(dir, log);
+    if (otherWorkerAt(dir, t.legacy, t.modelId, hand)) continue;
+    yield { name, legacy: t.legacy, modelId: t.modelId };
+  }
+}
+
+/**
+ * `{ [0.12.18 name]: model id }` for the workers the name change renamed (#111): a marker or a saved
+ * script that still says the old name resolves to the model instead of going out as a model id no
+ * provider declares. Derived from config, not the files, so it holds once the old file is gone —
+ * except for a name a hand file holds, which stays that file's own.
+ */
+export function legacyAgentAliases(cfg: Config, dir = defaultAgentDir(), log?: AgentLog): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { legacy, modelId } of renamedTargets(cfg, dir, log)) if (!(legacy in out)) out[legacy] = modelId;
+  return out;
+}
+
+/**
+ * `{ [0.12.18 name]: current name }` for the same workers, so a ladder rung or an allow-list entry
+ * saved before the change keeps pointing at its worker (admin.ts migrates them on read).
+ */
+export function agentRenames(cfg: Config, dir = defaultAgentDir(), log?: AgentLog): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { name, legacy } of renamedTargets(cfg, dir, log)) if (!(legacy in out)) out[legacy] = name;
+  return out;
 }
 
 function capsEffortLevels(provider: Provider): string[] | undefined {
@@ -325,6 +445,31 @@ export function syncAgentFiles(cfg: Config, dir: string, log?: AgentLog, opts: S
   }
 }
 
+/**
+ * Remove `dir/<legacy>.md` when it is a generated worker for the same model, now written as `name`:
+ * a file the 0.12.18 build named after a model id it had not lower-cased (#111). The name alone is
+ * never the evidence — the generated mark and the `model:` line must both agree.
+ */
+function dropRenamedAgent(dir: string, legacy: string, name: string, modelId: string, log?: AgentLog): boolean {
+  const file = path.join(dir, `${legacy}.md`);
+  let text: string;
+  try {
+    if (!fs.lstatSync(file).isFile()) return false;
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return false;
+  }
+  if (!isGenerated(text) || parseFrontmatter(text)?.model?.replace(/@[a-z]+$/i, "") !== modelId) return false;
+  try {
+    fs.rmSync(file);
+  } catch (e) {
+    log?.warn(`agent files: cannot remove ${file}: ${(e as Error).message}`);
+    return false;
+  }
+  log?.info?.(`agent files: removed ${legacy}.md (the same worker, now ${name}.md)`);
+  return true;
+}
+
 function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefined, opts: SyncOptions): string[] {
   const manifestFile = opts.manifestPath ?? path.join(homeDir(), "generated-agents.json");
   const manifest = readManifest(manifestFile);
@@ -336,26 +481,7 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
   for (const entry of scanned.values()) if (!owned.has(entry.name)) handNames.add(entry.name);
 
   // Targets: one worker per declaring outbound provider; the first owner keeps the old name (#94).
-  const targets = new Map<string, { modelId: string; title: string; provider: string; suffix: string }>();
-  for (const [providerName, provider] of Object.entries(cfg.providers)) {
-    if (!isTargetProvider(provider)) continue;
-    for (const model of provider.models ?? []) {
-      if (isJudgeOnlyModel(model.id)) continue;
-      const owners = declaredBy(model.id, cfg);
-      const first = owners.find(name => {
-        const owner = cfg.providers[name]!;
-        return isTargetProvider(owner);
-      });
-      const duplicate = owners.length > 1;
-      const name = agentNameFor(model.id) + (duplicate && first !== providerName ? `-${agentNameFor(providerName)}` : "");
-      const clash = targets.get(name);
-      if (clash) {
-        log?.warn(`agent files: "${model.id}" and "${clash.modelId}" both map to "${name}"; skipping "${model.id}"`);
-        continue;
-      }
-      targets.set(name, { modelId: duplicate ? `${providerName}:${model.id}` : model.id, title: shortName(model.name ?? model.id), provider: providerName, suffix: effortSuffix(provider, model.id) });
-    }
-  }
+  const targets = agentTargets(cfg, log);
 
   const imagePort = Object.values(cfg.providers).some((p) => p.type === "chatgpt") ? adminPort(cfg) : null;
   const nextOwned: string[] = [];
@@ -388,6 +514,16 @@ function syncAgentFilesLocked(cfg: Config, dir: string, log: AgentLog | undefine
     } catch (e) {
       log?.warn(`agent files: cannot write ${file}: ${(e as Error).message}`);
     }
+  }
+
+  // The name the 0.12.18 build wrote for a worker whose name has since changed (#111): once the
+  // renamed file is in place, the old one is the same worker twice. An owned one is removed by the
+  // loop below like any stale file; one outside the manifest (a lost ownership record) is removed
+  // here, where its mark and its `model:` line are the evidence that it is ours.
+  for (const name of nextOwned) {
+    const t = targets.get(name);
+    if (!t || t.legacy === name || owned.has(t.legacy) || nextOwned.includes(t.legacy)) continue;
+    if (dropRenamedAgent(dir, t.legacy, name, t.modelId, log)) changed = true;
   }
 
   // A model that is no longer ticked: remove the file this router wrote for it, and only that.

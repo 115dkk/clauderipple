@@ -8,7 +8,7 @@ import { decodeEnvelope, encodeEnvelope } from "../src/reasoning.ts";
 import type { AnthropicRequest } from "../src/providers/chatgpt/translate.ts";
 
 const seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] = [];
-let mode: "chat" | "responses" | "error" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" = "chat";
+let mode: "chat" | "responses" | "error" | "cut-responses" | "cut-chat" | "done-chat" | "refuse-reasoning" | "refuse-chat" | "sealed" | "sealed-chat" | "missing-thinking" = "chat";
 const sse = (records: Record<string, unknown>[]) => records.map((record) => `data: ${JSON.stringify(record)}\n\n`).join("");
 
 const upstream = http.createServer((req, res) => {
@@ -18,6 +18,10 @@ const upstream = http.createServer((req, res) => {
     seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
     if (req.headers.authorization === "Bearer hop-first") {
       res.writeHead(429, { "retry-after": "123" }).end('{"error":{"message":"hop-first limited"}}');
+      return;
+    }
+    if (mode === "missing-thinking") {
+      res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { message: "Upstream request failed: The `content[].thinking` in the thinking mode must be passed back to the API. (reasoning signature required)" } }));
       return;
     }
     if (mode === "error") {
@@ -537,6 +541,52 @@ for (const wire of ["chat", "responses"] as const) {
     }
   }
 }
+
+test("missing thinking 400 logs assistant shapes only and never retries (#109)", async () => {
+  mode = "missing-thinking";
+  const warnings: string[] = [];
+  class CaptureLogger extends Logger {
+    override warn(line: string): void { warnings.push(line); }
+  }
+  adapter = new OpenAiCompatibleAdapter("opencode-go", { type: "openai-compatible", url: `http://127.0.0.1:${upstreamPort}/v1`, wire: "responses" }, new CaptureLogger(null, 1000000, 1, false));
+  const before = seen.length;
+  let hops = 0;
+  credential = { headers: {}, next: () => { hops++; return null; } };
+  try {
+    const response = await call({ ...request, messages: [
+      { role: "user", content: "PRIVATE_USER" },
+      { role: "assistant", content: [
+        { type: "thinking", thinking: "PRIVATE_THOUGHT", signature: encodeEnvelope({ w: "responses", p: "opencode-go", m: "vendor-model", r: { type: "reasoning", encrypted_content: "PRIVATE_BLOB" } }) },
+        { type: "tool_use", id: "PRIVATE_ID", name: "PRIVATE_TOOL", input: { secret: "PRIVATE_ARGUMENT" } },
+        { type: "tool_use", id: "b", name: "Read", input: {} },
+      ] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "PRIVATE_ID", content: "PRIVATE_RESULT" }] },
+      { role: "assistant", content: "PRIVATE_TEXT" },
+      { role: "assistant", content: [] },
+      { role: "assistant", content: [{ type: "PRIVATE_TYPE", text: "PRIVATE_UNKNOWN" }] },
+    ] });
+    assert.equal(response.status, 400);
+    assert.equal(response.headers["x-should-retry"], "false");
+    assert.equal(seen.length - before, 1);
+    assert.equal(hops, 0);
+    const diagnostic = warnings.find((line) => line.includes("assistantTurns="));
+    assert.ok(diagnostic, "shape diagnostic is emitted at WARN");
+    const turns = JSON.parse(diagnostic.split("assistantTurns=")[1]!) as unknown;
+    assert.deepEqual(turns, [
+      { turn: 1, blocks: { thinking: 1, tool_use: 2 } },
+      { turn: 3, blocks: { text: 1 } },
+      { turn: 4, blocks: {} },
+      { turn: 5, blocks: { unknown: 1 } },
+    ]);
+    assert.doesNotMatch(warnings.join("\n"), /PRIVATE_/);
+    const noCarriers = await call(request);
+    assert.equal(noCarriers.status, 400);
+    assert.equal(noCarriers.headers["x-should-retry"], "false");
+    assert.equal(seen.length - before, 2, "replayed=0 also makes exactly one attempt");
+    assert.equal(hops, 0);
+    assert.ok(warnings.some((line) => line.endsWith("assistantTurns=[]")));
+  } finally { credential = undefined; }
+});
 
 test("cleanup", () => {
   front.close();

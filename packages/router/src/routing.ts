@@ -31,6 +31,8 @@ export type Resolved = {
   asked: string;
   /** Where this turn goes when the provider above has nothing usable left. Carried from the route. */
   fallbacks?: { provider: string; model: string; effort?: string }[];
+  /** Spawn snapshot identity, for worker-only preflight and diagnostics. */
+  ladderPick?: string;
 };
 
 export function requestKind(json: unknown, pathname: string): RequestKind {

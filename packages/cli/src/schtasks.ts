@@ -389,12 +389,15 @@ export function agentPid(name = taskName(), opts: { home?: string; expectedRoute
     deps,
   );
   if (!r.ok) return null;
-  let found: { pid?: unknown; commandLine?: unknown };
+  let found: { pid?: unknown; commandLine?: unknown } | null;
   try {
-    found = JSON.parse(r.out.trim()) as { pid?: unknown; commandLine?: unknown };
+    found = JSON.parse(r.out.trim()) as { pid?: unknown; commandLine?: unknown } | null;
   } catch {
     return null;
   }
+  // #110: no router yet prints 'null', which parses. Reading .pid off it threw out of install,
+  // start and repair right after the task was registered.
+  if (found === null || typeof found !== "object") return null;
   const pid = Number(found.pid);
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   // A process running another installation's router script is not this one's to wait on, even

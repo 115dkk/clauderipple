@@ -13,7 +13,7 @@ import { INLINE_CAP } from "../src/protocol.ts";
 import type { Effort, SessionEvent } from "../src/protocol.ts";
 import { Sessions, modelArg, nextAttention, summarize } from "../src/sessions.ts";
 import { BridgeClient, CLI_NOT_LOGGED_IN, DESKTOP_BUSY, DESKTOP_WAITING, DesktopBlockedError } from "../src/bridge-client.ts";
-import type { DesktopProcess } from "../src/desktop.ts";
+import { transcriptEvents, type DesktopProcess, type SubagentState } from "../src/desktop.ts";
 import type { CanUseTool, PermissionAnswer, QueryFn, SdkUserMessage, SessionsOptions } from "../src/sessions.ts";
 import { posixPaths } from "../../../test/capabilities.ts";
 import { claudeAppData } from "./app-data.ts";
@@ -134,6 +134,100 @@ function fixture(t: TestContext, script: Parameters<typeof scriptedQuery>[0] = {
     sessions.create({ clientMsgId, cwd, model, effort, text: "ping" });
   return { dir, cwd, permissionsFile, permissions, fake, sessions, instances, events, create };
 }
+
+test("clear after handoff retains the stored restrictive choice despite an unknown app mode", async t => {
+  for (const mode of ["plan", "default"] as const) {
+    let calls = 0;
+    const f = fixture(t, {}, { handoff: async () => { calls++; return "opened"; }, log() {} });
+    const id = await f.sessions.create({ clientMsgId: "restrictive", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping", permissionMode: mode });
+    await waitFor(() => calls === 1);
+    assert.equal(f.sessions.summaryOf(id)?.permissionMode, undefined);
+    for (const command of ["/clear", "/new"]) {
+      const fresh = await f.sessions.send(id, command, command);
+      assert.equal(f.sessions.summaryOf(fresh)?.permissionMode, mode);
+      await f.sessions.send(fresh, `first-${command}`, "continue");
+      await waitFor(() => f.fake.options.length === (command === "/clear" ? 2 : 3));
+      assert.equal(f.fake.options.at(-1)?.permissionMode, mode);
+      assert.equal(f.fake.options.at(-1)?.allowDangerouslySkipPermissions, undefined);
+    }
+  }
+});
+
+function launchBackground(query: ReturnType<typeof controlledQueries>["queries"][number]): void {
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-background" });
+  query.emit({ type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  query.emit({ type: "result", subtype: "success" });
+}
+
+test("a dead previous SDK worker cannot block recovered handoff", async t => {
+  const boundary = controlledQueries();
+  let calls = 0;
+  const handoff: NonNullable<SessionsOptions["handoff"]> = async () => { calls++; return "opened"; };
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, handoff, log() {} });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  launchBackground(boundary.queries[0]!);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 1);
+  assert.equal(calls, 0);
+  f.sessions.shutdown();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, handoff, log() {}, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered); recovered.recover();
+  assert.equal(recovered.summaryOf(id)?.tasks, 0);
+  await recovered.pollDesktop(); await waitFor(() => calls === 1);
+});
+
+for (const model of ["claude-test", "claude-next"]) for (const completion of ["inventory", "notification"] as const) test(`deferred ${model} settings stay honest until background ${completion} permits restart`, async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create(); await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  launchBackground(query);
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  const result = await f.sessions.setModel(id, model, "max", "deferred-pick");
+  assert.deepEqual(result, { status: "partial", model: "claude-test", effort: "high", pending: { model, effort: "max" } });
+  assert.equal(f.sessions.summaryOf(id)?.model, "claude-test");
+  assert.equal(f.sessions.summaryOf(id)?.effort, "high");
+  assert.deepEqual(f.sessions.summaryOf(id)?.pendingSettings, { model, effort: "max" });
+  const settingsEvent = f.sessions.log(id).tail().events.find(event => event.kind === "settings" && event.reqId === "deferred-pick");
+  assert.ok(settingsEvent?.kind === "settings");
+  assert.equal(settingsEvent.status, "partial");
+  assert.deepEqual(settingsEvent.pending, { model, effort: "max" });
+  await f.sessions.send(id, "during-pending", "keep working");
+  await waitFor(() => query.users.length === 2);
+  assert.equal(query.closed, false, "do not kill a genuinely running worker");
+  assert.equal(query.options.effort, "high");
+  const turn = f.sessions.log(id).tail().events.filter(event => event.kind === "turn").at(-1);
+  assert.equal(turn?.effort, "high");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  if (completion === "inventory") {
+    const hooks = query.options.hooks as { Stop: { hooks: ((input: Record<string, unknown>) => Promise<unknown>)[] }[] };
+    await hooks.Stop[0]!.hooks[0]!({ background_tasks: [], session_crons: [] });
+  } else query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" } });
+  await waitFor(() => query.closed);
+  assert.equal(f.sessions.summaryOf(id)?.tasks, 0);
+  assert.equal(f.sessions.summaryOf(id)?.pendingSettings, undefined);
+  await f.sessions.send(id, "after-pending", "use max now");
+  await waitFor(() => boundary.queries.length === 2);
+  assert.equal(boundary.queries[1]!.options.model, model);
+  assert.equal(boundary.queries[1]!.options.effort, "max");
+});
+
+test("all combined desktop terminal notifications close their own worker cards", () => {
+  const state = new Map<string, SubagentState>();
+  const resolve = () => ({ model: "test", steps: 1, description: "worker", terminal: null });
+  const convert = (value: unknown) => transcriptEvents(JSON.stringify(value), "/isolated", () => "worker", undefined, { state, resolve });
+  for (const id of ["one", "two"]) {
+    convert({ type: "assistant", message: { content: [{ type: "tool_use", id: `tool-${id}`, name: "Agent", input: {} }] } });
+    convert({ type: "user", toolUseResult: { isAsync: true, agentId: id }, message: { content: [{ type: "tool_result", tool_use_id: `tool-${id}`, content: "async launched" }] } });
+  }
+  const content = ["one", "two"].map(id => `<task-notification><task-id>${id}</task-id><status>stopped</status><result>${id} stopped</result></task-notification>`).join("\n");
+  const result = convert({ type: "user", isMeta: true, message: { content } });
+  assert.equal(state.size, 0);
+  assert.deepEqual(result.bodies.filter(event => event.kind === "subagent").map(event => [event.toolUseId, event.status]), [["tool-one", "stopped"], ["tool-two", "stopped"]]);
+  assert.deepEqual(result.bodies.filter(event => event.kind === "tool_result").map(event => event.text), ["one stopped", "two stopped"]);
+});
 
 test("an async SDK launch stays active until its own terminal notification, with stopped separate from failure", async t => {
   const boundary = controlledQueries();
@@ -268,7 +362,7 @@ test("a model plus effort change waits for writer exit and carries inputs accept
   const first = boundary.queries[0]!;
   first.emit({ type: "system", subtype: "init", session_id: "sdk-model-effort" });
   await nextTick();
-  assert.deepEqual(await f.sessions.setModel(id, "claude-next", "max", "model-and-effort"), { status: "applied", model: "claude-next", effort: "max" });
+  assert.deepEqual(await f.sessions.setModel(id, "claude-next", "max", "model-and-effort"), { status: "partial", model: "claude-test", effort: "high", pending: { model: "claude-next", effort: "max" } });
   await f.sessions.send(id, "next-turn", "use the new settings");
   first.emit({ type: "result", subtype: "success" });
   await waitFor(() => first.closed);
@@ -904,6 +998,100 @@ test("desktop handoff waits for idle, holds new input, persists once and names t
   recovered.decide(id, f.permissions.pending(id)[0]!.id, "allow");
   await waitFor(() => recovered.summaryOf(id)?.state === "idle");
   assert.equal(calls.length, 1);
+});
+
+for (const owner of ["new", "open", "bridge"] as const) test(`desktop handoff preserves active background work with ${owner} ownership`, async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-background-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  let calls = 0;
+  const bridgeClient = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async () => Response.json({ data: [], worker_status: "idle" }) });
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", bridgeClient,
+    handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: sdkId });
+  query.emit({ type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review", run_in_background: true } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  if (owner !== "new") registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle", ...(owner === "bridge" ? { bridgeSessionId: "bridge" } : {}) });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  await f.sessions.pollDesktop(); await nextTick();
+  assert.equal(query.closed, false, "main result and desktop adoption must not abort the worker");
+  assert.equal(calls, 0);
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><tool-use-id>agent</tool-use-id><status>completed</status><result>Review finished</result></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  await f.sessions.pollDesktop();
+  await waitFor(() => query.closed);
+  assert.equal(calls, owner === "new" ? 1 : 0);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "done");
+});
+
+test("a deferred handoff rechecks background activity before closing the SDK", async t => {
+  const boundary = controlledQueries();
+  let calls = 0;
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-race" });
+  query.emit({ type: "result", subtype: "success" });
+  query.emit({ type: "assistant", message: { id: "late-launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Late worker", run_in_background: true } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 1);
+  assert.equal(query.closed, false);
+  assert.equal(calls, 0);
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>stopped</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  await f.sessions.pollDesktop();
+  await waitFor(() => calls === 1);
+  assert.equal(reduce(f.sessions.log(id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+});
+
+test("settings restart waits for background work before closing the SDK", async t => {
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review" } }] } });
+  query.emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 1);
+  await f.sessions.setModel(id, "claude-test", "max");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => f.sessions.summaryOf(id)?.state === "idle");
+  assert.equal(query.closed, false);
+  query.emit({ type: "user", message: { content: "<task-notification><task-id>worker</task-id><status>completed</status></task-notification>" } });
+  await waitFor(() => f.sessions.summaryOf(id)?.tasks === 0);
+  await f.sessions.pollDesktop();
+  await waitFor(() => query.closed);
+});
+
+for (const toolId of [true, false]) test(`a handed-off SDK worker's stopped transcript notification closes its existing card (${toolId ? "tool id" : "task id"})`, async t => {
+  const f = await modFixture(t);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  const launch = { type: "assistant", message: { id: "launch", content: [{ type: "tool_use", id: "agent", name: "Agent", input: { description: "Review", run_in_background: true } }] } };
+  const started = { type: "user", toolUseResult: { isAsync: true, agentId: "worker" }, message: { content: [{ type: "tool_result", tool_use_id: "agent", content: '{"isAsync":true,"agentId":"worker"}' }] } };
+  // Reproduce a pre-fix host record whose worker was handed off while still running.
+  f.sessions.log(f.id).append({ kind: "subagent", toolUseId: "agent", sub: "sub-agent", description: "Review", model: "sol", status: "running", steps: 3 });
+  f.sessions.log(f.id).append({ kind: "assistant", msg: "launch", model: "sol", text: "", tools: [{ id: "agent", name: "Agent", summary: "Review", input: JSON.stringify(launch.message.content[0]!.input) }] });
+  f.sessions.log(f.id).append({ kind: "tool_result", toolUseId: "agent", ok: true, text: started.message.content[0]!.content });
+  fs.appendFileSync(file, transcriptLine(launch) + transcriptLine(started));
+  // Starting the tail after the SDK's launch lines must still remember that worker.
+  const records = JSON.parse(fs.readFileSync(path.join(f.dir, "sessions.json"), "utf8")) as { transcriptOffset?: number }[];
+  f.sessions.shutdown();
+  records[0]!.transcriptOffset = fs.statSync(file).size;
+  fs.writeFileSync(path.join(f.dir, "sessions.json"), JSON.stringify(records));
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", onEvent() {}, onSessions() {} });
+  f.instances.push(active);
+  fs.appendFileSync(file, transcriptLine({ type: "user", isMeta: true, message: { content: `<task-notification><task-id>worker</task-id>${toolId ? "<tool-use-id>agent</tool-use-id>" : ""}<status>stopped</status><result>didn't finish before the previous session ended</result></task-notification>` } }));
+  await active.pollDesktop();
+  assert.equal(reduce(active.log(f.id).readAfter(0).events).items.find(item => item.type === "subagent")?.status, "stopped");
+  assert.equal(active.summaryOf(f.id)?.tasks, 0);
+  assert.equal(active.summaryOf(f.id)?.taskHistory?.[0]?.state, "stopped");
 });
 
 test("desktop handoff waits until already queued turns finish", async t => {
@@ -1728,6 +1916,73 @@ test("an idle handed-off session tails app turns without a phone attached", asyn
   assert.ok(events.some(e => e.kind === "assistant" && e.text === "App answer"));
   await f.sessions.pollDesktop();
   assert.equal(f.sessions.log(f.id).readAfter(0).events.filter(e => e.kind === "assistant" && e.text === "App answer").length, 1);
+});
+
+test("handoff stops reporting the SDK's stored permission mode, including after restart", async t => {
+  const boundary = controlledQueries();
+  let calls = 0;
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, handoff: async () => { calls++; return "opened"; }, log() {} });
+  const id = await f.sessions.create({ clientMsgId: "bypass-handoff", cwd: f.cwd, model: "claude-test", effort: "high", text: "ping", permissionMode: "bypassPermissions" });
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: "sdk-bypass", permissionMode: "bypassPermissions" });
+  await f.sessions.setMode(id, "bypassPermissions");
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, "bypassPermissions");
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => calls === 1);
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, undefined, "the launcher did not confirm the app's permission mode");
+  f.sessions.shutdown();
+  const recovered = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: boundary.queryFn, onEvent() {}, onSessions() {} });
+  f.instances.push(recovered);
+  assert.equal(recovered.summaryOf(id)?.permissionMode, undefined);
+  await recovered.send(id, "host-again", "resume on host");
+  await waitFor(() => boundary.queries.length === 2);
+  assert.equal(boundary.queries[1]!.options.permissionMode, "bypassPermissions", "keep the user's choice for an actual SDK resume");
+  assert.equal(recovered.summaryOf(id)?.permissionMode, "bypassPermissions");
+});
+
+test("adopting an already open desktop session discards SDK-confirmed permission settings", async t => {
+  const projects = fs.mkdtempSync(path.join(os.tmpdir(), "permission-adoption-"));
+  t.after(() => fs.rmSync(projects, { recursive: true, force: true }));
+  const sdkId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const registry = new Map<string, DesktopProcess>();
+  const boundary = controlledQueries();
+  const f = fixture(t, {}, { queryFn: boundary.queryFn, desktopProjects: projects, desktopRegistry: () => registry, desktopProcesses: () => "", handoff: async () => "opened", log() {} });
+  const id = await f.create();
+  await waitFor(() => boundary.queries.length === 1);
+  const query = boundary.queries[0]!;
+  query.emit({ type: "system", subtype: "init", session_id: sdkId });
+  await nextTick();
+  await f.sessions.setMode(id, "bypassPermissions");
+  registry.set(sdkId, { sessionId: sdkId, pid: 42, status: "idle" });
+  query.emit({ type: "result", subtype: "success" });
+  await waitFor(() => query.closed);
+  assert.equal(f.sessions.summaryOf(id)?.permissionMode, undefined);
+});
+
+test("desktop bridge adoption replaces SDK permission confirmation with desktop evidence", async t => {
+  const f = await modFixture(t);
+  const file = path.join(f.projects, "project", `${f.sdkId}.jsonl`);
+  // A historical SDK confirmation must not outrank the new desktop transcript.
+  f.sessions.shutdown();
+  const recordsFile = path.join(f.dir, "sessions.json");
+  const records = JSON.parse(fs.readFileSync(recordsFile, "utf8")) as { confirmedSettings?: { permissionMode: string } }[];
+  records[0]!.confirmedSettings = { permissionMode: "bypassPermissions" };
+  fs.writeFileSync(recordsFile, JSON.stringify(records));
+  fs.appendFileSync(file, transcriptLine({ type: "user", cwd: f.cwd, uuid: "desktop-prompt", permissionMode: "plan", message: { content: "From desktop" } }));
+  f.registry.get(f.sdkId)!.bridgeSessionId = "bridge";
+  const client = new BridgeClient({ auth: () => ({ accessToken: "fake", organizationUuid: "org", expiresAt: Date.now() + 60_000 }), fetch: async (url, options) => {
+    if (String(url).includes("/stream")) return new Response(new ReadableStream({ start(controller) { options?.signal?.addEventListener("abort", () => controller.close(), { once: true }); } }));
+    return Response.json({ data: [], worker_status: "idle" });
+  } });
+  client.control = async () => {};
+  const active = new Sessions({ dir: f.dir, router, permissions: f.permissions, queryFn: f.boundary.queryFn, desktopProjects: f.projects, desktopRegistry: () => f.registry, desktopProcesses: () => "", bridgeClient: client, onEvent() {}, onSessions() {} });
+  f.instances.push(active);
+  await active.pollDesktop();
+  assert.equal(active.summaryOf(f.id)?.desktopBridge, true);
+  assert.equal(active.summaryOf(f.id)?.permissionMode, "plan");
+  await active.setMode(f.id, "default");
+  assert.equal(active.summaryOf(f.id)?.permissionMode, "default", "a desktop-confirmed control can still override historical transcript settings");
 });
 
 test("a handed-off session the app is running shows the app's state, and a stop says to use the app", async t => {

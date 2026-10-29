@@ -329,3 +329,20 @@ test("ResponseUsageTap drops an over-long SSE line whole and reads the events af
   tap.feed(Buffer.from('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}\n\n'));
   assert.deepEqual(tap.finish(), { usage: { input: 5, cached: 0, output: 9 }, stopReason: "end_turn" });
 });
+
+test("thinking provenance holds no oversized or unbounded fields while blocks are open", () => {
+  const seen: string[] = [];
+  const tap = new ResponseUsageTap("text/event-stream", undefined, block => seen.push(String(block.data ?? block.signature)));
+  const sse = (body: unknown): Buffer => Buffer.from(`data: ${JSON.stringify(body)}\n\n`);
+  // One field over the per-block bound is never held, so its origin stays unknown.
+  tap.feed(sse({ type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "x".repeat(64 * 1024 + 1) } }));
+  // Many open blocks under the per-block bound stop being held once the response-wide bound is reached.
+  for (let index = 1; index <= 8; index++) tap.feed(sse({ type: "content_block_start", index, content_block: { type: "redacted_thinking", data: `${index}:` + "y".repeat(60 * 1024) } }));
+  for (let index = 0; index <= 8; index++) tap.feed(sse({ type: "content_block_stop", index }));
+  assert.deepEqual(seen.map(data => data.split(":")[0]), ["1", "2", "3", "4"]);
+  // Closing them returns the budget: a later small block is held again.
+  tap.feed(sse({ type: "content_block_start", index: 9, content_block: { type: "thinking", signature: "" } }));
+  tap.feed(sse({ type: "content_block_delta", index: 9, delta: { type: "signature_delta", signature: "small" } }));
+  tap.feed(sse({ type: "content_block_stop", index: 9 }));
+  assert.equal(seen.at(-1), "small");
+});

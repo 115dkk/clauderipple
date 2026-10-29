@@ -65,6 +65,8 @@ export interface SettingsResult {
   model?: string;
   effort?: Effort | null;
   permissionMode?: PermissionMode;
+  /** Requested model/effort waiting for a safe SDK restart; values above remain in force. */
+  pending?: { model: string; effort: Effort | null };
   errors?: { model?: string; effort?: string; permissionMode?: string };
 }
 export interface SessionControls { model: boolean; effort: boolean; permissionModes: PermissionMode[] }
@@ -208,7 +210,10 @@ export interface SessionSummary {
   cwd: string;
   model: string;
   effort: Effort | null;
+  /** Absent means unknown, including a desktop handoff whose mode the host cannot confirm. */
   permissionMode?: PermissionMode;
+  /** Requested model/effort not yet in force while background work prevents restart. */
+  pendingSettings?: SettingsResult["pending"];
   /** Absent on older hosts: controls must stay disabled. Values above describe the next turn. */
   controls?: SessionControls;
   state: SessionState;

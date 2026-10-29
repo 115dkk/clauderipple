@@ -11,6 +11,7 @@ import { PERMISSION_MODES, type BackgroundTask, type EventBody, type Figures, ty
 import { WRAP_TOOL, wrapUpFields, type WrapUpFields } from "./wrap-up.ts";
 import { TaskPlan } from "./task-plan.ts";
 import { BackgroundActivity } from "./background-activity.ts";
+import { toolInput } from "./tool-details.ts";
 export { nextPlan } from "./task-plan.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -165,7 +166,7 @@ function title(value: string): string { return value.trim().replace(/\s+/g, " ")
 
 /** A subagent's running state while its parent transcript is converted; `input` lets a terminal
  * event re-resolve its model once its own transcript has written one. */
-export interface SubagentState { description: string; model: string | null; steps: number; bytes: number; input: RecordValue }
+export interface SubagentState { description: string; model: string | null; steps: number; bytes: number; input: RecordValue; taskId?: string }
 /** How to convert one transcript. Omitting it is the top-level session: sidechain records are skipped
  * and no subagent events are produced. The sub pass reads a subagent's own transcript instead. */
 export interface SubagentContext {
@@ -195,15 +196,19 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
   // A notification that arrives mid-turn is queued, not written as a user line (BackgroundTasks.accept).
   const queued = r.type === "attachment" && object(r.attachment)?.type === "queued_command" ? str(object(r.attachment)?.prompt) : "";
   if (r.type === "user" || queued) {
-    const p = queued || (sidechain ? text(message?.content).trim() : prompt(r));
+    const content = text(message?.content).trim();
+    const p = queued || (content.startsWith("<task-notification>") || sidechain ? content : prompt(r));
     const notification = /^<task-notification>[\s\S]*<\/task-notification>$/.test(p);
     if (notification) {
-      const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(p)?.[1];
-      const result = /<result>([\s\S]*)<\/result>/.exec(p)?.[1];
-      const status = /<status>([^<]+)<\/status>/.exec(p)?.[1];
-      // A notification without its tool call has nothing to attach to; it is not the user's words.
-      if (toolUseId) {
-        bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? p });
+      for (const [notice] of p.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
+        const taskId = /<task-id>([^<]+)<\/task-id>/.exec(notice)?.[1];
+        const toolUseId = /<tool-use-id>([^<]+)<\/tool-use-id>/.exec(notice)?.[1] ??
+          (taskId ? [...(state ?? [])].find(([, worker]) => worker.taskId === taskId)?.[0] : undefined);
+        const result = /<result>([\s\S]*?)<\/result>/.exec(notice)?.[1];
+        const status = /<status>([^<]+)<\/status>/.exec(notice)?.[1];
+        // A notification without its tool call has nothing to attach to; it is not the user's words.
+        if (!toolUseId) continue;
+        bodies.push({ kind: "tool_result", toolUseId, ok: status === "completed", text: result ?? notice });
         const running = state?.get(toolUseId);
         if (running && resolve) {
           const info = resolve(toolUseId, running.input);
@@ -222,7 +227,13 @@ export function transcriptEvents(line: string, cwd: string, summarize: Summarize
         bodies.push({ kind: "tool_result", toolUseId: b.tool_use_id, ok: b.is_error !== true, ...converted });
         // A synchronous worker finishes at its tool result; an async one only launches here and ends at its notification.
         const running = state?.get(b.tool_use_id);
-        const launched = object(r.toolUseResult)?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(typeof converted.text === "string" ? converted.text : "");
+        const resultText = typeof converted.text === "string" ? converted.text : "";
+        const result = object(r.toolUseResult) ?? toolInput(resultText);
+        const launched = result?.isAsync === true || /(?:launched asynchronously|async(?: agent)? launched)/i.test(resultText);
+        if (running && launched) {
+          const taskId = str(result?.agentId) || str(result?.taskId) || /(?:agentId|task[_ -]?id):\s*([\w-]+)/i.exec(resultText)?.[1];
+          if (taskId) running.taskId = taskId;
+        }
         if (running && resolve && !launched) {
           const info = resolve(b.tool_use_id, running.input);
           bodies.push({ kind: "subagent", toolUseId: b.tool_use_id, sub: `sub-${b.tool_use_id}`, description: running.description, model: info.model ?? running.model, status: b.is_error === true ? "failed" : "done", steps: info.steps });
@@ -511,8 +522,17 @@ export class DesktopSessions {
       const size = fs.fstatSync(fd).size;
       if (size < offset) throw new Error("Desktop transcript was truncated.");
       let state = this.tailSubs.get(id);
-      if (!state) { state = new Map(); this.tailSubs.set(id, state); }
       const resolve = (toolUseId: string, input: RecordValue) => this.subInfo(id, toolUseId, input);
+      if (!state) {
+        state = new Map();
+        this.tailSubs.set(id, state);
+        // A host handoff starts after the SDK's launch lines, unlike an imported desktop log.
+        // Rebuild lifecycle context once so later notifications can close those existing cards.
+        const seeded = state;
+        scanLines(fd, Math.min(offset, size), line => {
+          transcriptEvents(line, source.summary.cwd, this.opts.summarize, undefined, { state: seeded, resolve });
+        });
+      }
       const next = scanLines(fd, size, line => {
         for (const body of transcriptEvents(line, this.liveProcess(id)?.cwd ?? source.summary.cwd, this.opts.summarize, sink, { state, resolve }).bodies) visit(body);
       }, offset);

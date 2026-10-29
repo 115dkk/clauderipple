@@ -142,19 +142,39 @@ export function writeAutoCompactWindow(tokens: number | null): void {
   });
 }
 
-export function readModSettings(home = homeDir()): ModSettingsSnapshot {
-  let text: string;
-  try { text = fs.readFileSync(path.join(home, "mod-settings.json"), "utf8"); }
+type StoredModSettings = Omit<ModSettingsSnapshot, "compactAt">;
+const modSettingsCache = new Map<string, { version: string; snapshot: StoredModSettings }>();
+
+/** Worker authorization needs only this store, never Claude Code's compaction/ownership files. */
+export function readModRoutingSettings(home = homeDir()): StoredModSettings {
+  const file = path.join(home, "mod-settings.json");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(file); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { settings: normalizeSettings(null), revision: 0, stored: false, compactAt: readAutoCompactWindow() };
+    modSettingsCache.delete(file);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { settings: normalizeSettings(null), revision: 0, stored: false };
     throw error;
   }
-  // Corruption is not an empty store: fail rather than silently overwrite it.
-  const stored: unknown = JSON.parse(text);
+  // Atomic replacement and permission changes invalidate too, even if mtime is preserved.
+  const version = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}:${stat.size}:${stat.mode}`;
+  const cached = modSettingsCache.get(file);
+  if (cached?.version === version) return structuredClone(cached.snapshot);
+  modSettingsCache.delete(file);
+  // Corruption/unreadability is not an empty store, nor authority to reuse a previous good value.
+  const stored: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!object(stored) || !revision(stored.revision) || stored.revision < 1) throw new Error("invalid mod settings store");
   validateSettings(stored.settings);
-  // Auto and field rules are gone: the dashboard says so once, until the next save drops them.
-  return { settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true, compactAt: readAutoCompactWindow(), ...(hadRetiredRouting(stored.settings) ? { legacy: true } : {}) };
+  const snapshot: StoredModSettings = {
+    settings: normalizeSettings(stored.settings), revision: stored.revision, stored: true,
+    ...(hadRetiredRouting(stored.settings) ? { legacy: true } : {}),
+  };
+  modSettingsCache.set(file, { version, snapshot });
+  if (modSettingsCache.size > 32) modSettingsCache.delete(modSettingsCache.keys().next().value!);
+  return structuredClone(snapshot);
+}
+
+export function readModSettings(home = homeDir()): ModSettingsSnapshot {
+  return { ...readModRoutingSettings(home), compactAt: readAutoCompactWindow() };
 }
 
 /** Reject old writers before normalization/fill can erase evidence of their format. */

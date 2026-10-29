@@ -37,10 +37,13 @@ test("authoritative hook inventory exposes unfamiliar PR/CI work without inventi
   activity.inventory({ background_tasks: [{ id: "pr-ci", type: "pr_ci_subscription", status: "pending", description: "PR #9 CI subscription" }], session_crons: [{ id: "cron", schedule: "0 9 * * *", recurring: true, prompt: "Check PR" }] }, 30);
   assert.equal(activity.known, true);
   assert.equal(activity.active.find(task => task.id === "pr-ci")?.category, "pr_ci_subscription");
-  assert.equal(activity.active.find(task => task.id === "shell")?.state, "unknown", "absence is not proof of success or failure");
+  assert.equal(activity.active.some(task => task.id === "shell"), false, "unconfirmed work must not block the live query");
+  assert.equal(activity.history.find(task => task.id === "shell")?.state, "unknown", "absence is not proof of success or failure");
   activity.accept({ kind: "notice", code: "host_restarted" }, text => String(text));
   assert.equal(activity.known, false);
-  assert.ok(activity.active.every(task => task.state === "unknown"));
+  assert.equal(activity.active.length, 0);
+  assert.equal(activity.history.length, 3);
+  assert.ok(activity.history.every(task => task.state === "unknown"));
 });
 
 test("desktop records preserve Monitor and cron work after the main answer ends", () => {
