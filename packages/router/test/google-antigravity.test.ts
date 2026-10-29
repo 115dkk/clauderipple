@@ -25,7 +25,9 @@ import { GoogleOAuthSession, exchangeGoogleCode } from "../src/providers/google/
 import { createTransport } from "../src/providers/google/transport.ts";
 import {
   antigravitySessionId,
+  antigravityUserAgentFor,
   discoverProject,
+  fetchHostCatalogue,
   parseAvailableModels,
   resolveAntigravityWireModel,
   staticAntigravityModels,
@@ -219,7 +221,98 @@ test("fetchAvailableModels parsing collapses tiers and reads context windows", (
   assert.equal(ids.filter((id) => id.startsWith("gemini-3.8-flash")).length, 1);
   assert.deepEqual(models!.find((m) => m.id === "gemini-3.8-flash")!.effortLevels, ["low", "medium", "high"]);
   assert.equal(parseAvailableModels({ models: {} }), null, "an empty catalogue falls back, not empty");
-  assert.equal(staticAntigravityModels().length, 7);
+  assert.equal(staticAntigravityModels().length, 8);
+});
+
+// ── Gemini 4 Argon: served to the CLI client family only ────────────────────────────────────────
+
+test("Gemini 4 Argon resolves to its tier wire ids and defaults to medium", () => {
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-argon", "low"), { wire: "gemini-4-argon-low", known: true });
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-argon", "medium"), { wire: "gemini-4-argon-medium", known: true });
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-argon", "max"), { wire: "gemini-4-argon-high", known: true }, "the top of the ladder clamps to high");
+  assert.deepEqual(resolveAntigravityWireModel("gemini-4-argon", undefined), { wire: "gemini-4-argon-medium", known: true }, "no effort takes Argon's own default");
+  const argon = staticAntigravityModels().find((m) => m.id === "gemini-4-argon");
+  assert.deepEqual(argon, { id: "gemini-4-argon", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high"] });
+});
+
+test("an Argon request carries the CLI User-Agent and every other model keeps the IDE one", () => {
+  const saved = { CLAUDERIPPLE_ANTIGRAVITY_USER_AGENT: process.env.CLAUDERIPPLE_ANTIGRAVITY_USER_AGENT, GOOGLE_ANTIGRAVITY_USER_AGENT: process.env.GOOGLE_ANTIGRAVITY_USER_AGENT };
+  delete process.env.CLAUDERIPPLE_ANTIGRAVITY_USER_AGENT;
+  process.env.GOOGLE_ANTIGRAVITY_USER_AGENT = "custom-ide-ua";
+  try {
+    const transport = createTransport("antigravity", {});
+    const req: GeminiRequest = { contents: [{ role: "user", parts: [{ text: "hi" }] }], generationConfig: { thinkingConfig: { thinkingLevel: "high" } } };
+    const auth = { accessToken: "T", projectId: "p", conversationKey: "c" };
+    const argon = transport.build(req, { model: "gemini-4-argon", stream: true, effort: "high", antigravity: auth });
+    assert.match(argon.headers["user-agent"] ?? "", /^antigravity\/cli\/1\.3\.4 \(os_type=\w+; arch=\w+; aidev_client; auth_method=oauth\)$/, "the IDE override does not replace the CLI UA");
+    const body = JSON.parse(argon.body) as { model: string; request: { generationConfig?: { thinkingConfig?: unknown } } };
+    assert.equal(body.model, "gemini-4-argon-high");
+    assert.equal(body.request.generationConfig?.thinkingConfig, undefined, "the suffix names the tier, so no level is sent beside it");
+    const named = transport.build(req, { model: "gemini-4-argon-low", stream: false, antigravity: auth });
+    assert.match(named.headers["user-agent"] ?? "", /^antigravity\/cli\//, "a wire id named outright is Argon too");
+    const flash = transport.build(req, { model: "gemini-3.8-flash", stream: true, effort: "low", antigravity: auth });
+    assert.equal(flash.headers["user-agent"], "custom-ide-ua", "the IDE override still applies to the other models");
+    delete process.env.GOOGLE_ANTIGRAVITY_USER_AGENT;
+    assert.match(antigravityUserAgentFor("gemini-3.8-flash-low"), /^antigravity\/ide\//);
+    assert.match(antigravityUserAgentFor("gemini-4-argon"), /^antigravity\/cli\//);
+    assert.match(antigravityUserAgentFor("gemini-4-argonaut"), /^antigravity\/ide\//, "only Argon's own ids switch the family");
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  // The verification recheck pings the first static model when none is configured; it must be one
+  // every account is served under the IDE UA, not Argon.
+  assert.equal(staticAntigravityModels()[0]!.id, "gemini-3.8-flash");
+});
+
+test("the host catalogue adds Argon from the CLI answer and keeps the IDE answer for everything else", async () => {
+  // Measured 2026-10-27: the CLI answer is the IDE one plus gemini-4-argon-{low,medium,high}.
+  const ideBody = {
+    models: { "gemini-3.8-flash-low": { maxTokens: 1_048_576 }, "gemini-3.8-flash-medium": { maxTokens: 1_048_576 } },
+    agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium"] }] }],
+  };
+  const cliBody = {
+    models: {
+      ...ideBody.models,
+      "gemini-4-argon-low": { maxTokens: 1_048_576, displayName: "Gemini 4 Argon (Low)" },
+      "gemini-4-argon-medium": { maxTokens: 1_048_576 },
+      "gemini-4-argon-high": { maxTokens: 1_048_576 },
+      // A non-Argon id the CLI alone lists is not taken: its requests would go out under the IDE UA.
+      "gemini-cli-only": { maxTokens: 1000 },
+    },
+    agentModelSorts: [{ groups: [{ modelIds: ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-cli-only"] }] }],
+  };
+  const answer = (cli: Response | null, ide: Response | null) =>
+    (async (_url: string, init?: RequestInit) => {
+      const ua = (init?.headers as Record<string, string>)["user-agent"] ?? "";
+      const r = ua.startsWith("antigravity/cli/") ? cli : ide;
+      if (!r) throw new Error("network down");
+      return r;
+    }) as unknown as typeof fetch;
+
+  const both = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(Response.json(cliBody), Response.json(ideBody)));
+  assert.deepEqual(both?.models.map((m) => m.id), ["gemini-3.8-flash", "gemini-4-argon"]);
+  assert.deepEqual(both?.models.find((m) => m.id === "gemini-4-argon"), { id: "gemini-4-argon", name: "Gemini 4 Argon (Low)", contextWindow: 1_048_576, effortLevels: ["low", "medium", "high"] });
+  assert.deepEqual(both?.wireIds, ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"]);
+
+  const cliDown = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(new Response("no", { status: 404 }), Response.json(ideBody)));
+  assert.deepEqual(cliDown?.models.map((m) => m.id), ["gemini-3.8-flash"], "a failing CLI ask leaves the IDE catalogue as it was");
+
+  const ideDown = await fetchHostCatalogue("tok", "proj", "https://h.test", answer(Response.json(cliBody), null));
+  assert.equal(ideDown, null, "a failing IDE ask is unreadable as before, so the static fallback is not replaced by Argon alone");
+
+  // A CLI ask that stalls is cut off shortly after the IDE answer, not held for the request timeout.
+  const stalled = (async (_url: string, init?: RequestInit) => {
+    const ua = (init?.headers as Record<string, string>)["user-agent"] ?? "";
+    if (!ua.startsWith("antigravity/cli/")) return Response.json(ideBody);
+    return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+  }) as unknown as typeof fetch;
+  const started = performance.now();
+  const cut = await fetchHostCatalogue("tok", "proj", "https://h.test", stalled, undefined, 20);
+  assert.deepEqual(cut?.models.map((m) => m.id), ["gemini-3.8-flash"]);
+  assert.ok(performance.now() - started < 2_000, "the IDE catalogue is not held by a stalled CLI ask");
 });
 
 // ── OAuth sign-in ───────────────────────────────────────────────────────────────────────────────
