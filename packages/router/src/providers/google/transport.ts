@@ -64,6 +64,35 @@ export function googleBaseUrl(configured?: string): string {
   return (configured?.trim() || DEFAULT_BASE).replace(/\/+$/, "");
 }
 
+/**
+ * One pooled credential as the api-key wire takes it: the key, and the headers that travel beside
+ * it. A credential may state its key the way this wire does (`x-goog-api-key`), the way an
+ * OpenAI-wire provider does (`x-api-key`), or as a bearer; whichever it is, the key is sent once, on
+ * `x-goog-api-key` (`createTransport` puts it last), and the auth header it came from is not
+ * repeated. A credential with no key of its own leaves the provider's `apiKey` to answer, which is
+ * how a single-key provider keeps sending exactly what it always did (#112).
+ */
+export function credentialParts(headers: Record<string, string> | undefined): { apiKey: string | undefined; headers: Record<string, string> } {
+  const kept: Record<string, string> = {};
+  let apiKey: string | undefined;
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const lower = name.toLowerCase();
+    if (lower === "x-goog-api-key" || lower === "x-api-key") {
+      apiKey ??= value.trim() || undefined;
+      continue;
+    }
+    if (lower === "authorization") {
+      const bearer = /^\s*Bearer\s+(\S+)\s*$/i.exec(value)?.[1];
+      if (bearer) {
+        apiKey ??= bearer;
+        continue;
+      }
+    }
+    kept[name] = value;
+  }
+  return { apiKey, headers: kept };
+}
+
 /** The Cloud Code Assist base; the daily host, overridable by the provider's `url`. */
 export function antigravityBaseUrl(configured?: string): string {
   return (configured?.trim() || GOOGLE_OAUTH.dailyApi).replace(/\/+$/, "");

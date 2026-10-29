@@ -904,8 +904,9 @@ export class Proxy {
     const sideRequest = cacheRequest && !subagent && !cacheRequest.metadata?.user_id && cacheRequest.messages.length <= 1;
     const affinity = cacheRequest ? (!sideRequest ? requestConversationKey(json!, record.session, subagent ? agentId : undefined) : undefined) ?? conversationKey(cacheRequest) : undefined;
     const recordCredential = (name: string, using: Credential, credentials: readonly Credential[], retry = false): void => {
-      // count_tokens on the translated adapter is local: no key was actually sent.
-      if (pathname === "/v1/messages/count_tokens" && cfg.providers[name]?.type === "openai-compatible") return;
+      // count_tokens is answered locally by the translated adapters: no key was actually sent.
+      const type = cfg.providers[name]?.type;
+      if (pathname === "/v1/messages/count_tokens" && (type === "openai-compatible" || type === "google")) return;
       record.credential = this.credentialLabel(name, using, credentials);
       const first = this.pool.pick(name, credentials);
       const reason = retry ? "retry" : !first ? "all-unavailable" : first.id !== using.id ? "affinity" : "configured-order";
@@ -1166,8 +1167,38 @@ export class Proxy {
             const routeEffort = effortOf(json);
             if (routeEffort) record.effort = routeEffort;
             tag = `GOOGLE ${route.tag} effort=${routeEffort ?? "-"}`;
+            // The api-key wire takes its key from the provider's pool like every other translated
+            // wire: folding a relay's Gemini model into a `google` provider used to leave only its
+            // first key, so a spent key answered 429 to every turn, with no failover and no
+            // `credential` in the log (#112). The antigravity accounts are the adapter's own pool
+            // and rotate inside it, exactly as before.
+            const credentials = provider.auth === "api-key" ? this.credentialsOf(route.provider, provider) : [];
+            if (provider.auth === "api-key" && credentials.length === 0) {
+              const out = JSON.stringify({ type: "error", error: { type: "overloaded_error", message: "모든 API 키가 일시 중지되어 있습니다." } });
+              res.writeHead(503, { "content-type": "application/json" }).end(out);
+              finish("503", out.length, "all credentials paused", false, { upstreamCalled: false });
+              return;
+            }
+            const poolName = route.provider;
+            let using = provider.auth === "api-key" ? this.pool.pick(poolName, credentials, affinity) ?? credentials[0]! : null;
+            if (using) recordCredential(poolName, using, credentials);
+            const tried = new Set(using ? [using.id] : []);
+            // Nothing has reached the client here yet, so a refusal another key could answer is asked
+            // again inside the turn instead of being handed to the user to retry by hand.
+            const next = using && credentials.length > 1 ? (status: number, retryAfter: number | undefined, body: string): Record<string, string> | null => {
+              if (!classify(status, undefined, body).retryable) return null;
+              const current = using!;
+              const candidate = this.pool.pick(poolName, credentials.filter((c) => !tried.has(c.id)), affinity);
+              if (!candidate) return null;
+              this.pool.penalise(poolName, current.id, status, retryAfter, body);
+              log.info(`RETRY ${poolName}: ${this.credentialLabel(poolName, current, credentials)} answered ${status}, trying ${this.credentialLabel(poolName, candidate, credentials)}`);
+              using = candidate;
+              recordCredential(poolName, candidate, credentials, true);
+              tried.add(candidate.id);
+              return candidate.headers;
+            } : undefined;
             try {
-              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort);
+              const o = await this.google(route.provider, provider).handle(req, res, path, json as unknown as AnthropicRequest, route.model, routeEffort, using ? { headers: using.headers, ...(next ? { next } : {}) } : undefined);
               if (o.kind === "prompt-incompatible" || o.kind === "model-capacity") {
                 const why = o.kind === "prompt-incompatible" ? "prompt" : "capacity";
                 const alreadyRetried = unwrittenSeen;
@@ -1191,11 +1222,17 @@ export class Proxy {
                 finish(String(o.status), Buffer.byteLength(o.errorBody), o.note, true, o.kind === "prompt-incompatible" ? { refusal: "prompt-incompatible" } : undefined);
                 return;
               }
-              this.recordOutcome(route.provider, o.status);
+              // The answer is charged to the key that actually produced it, which after a retry is a
+              // later one than the turn started on.
+              if (using) {
+                if (o.status >= 400) this.pool.penalise(poolName, using.id, o.status);
+                else if (o.status > 0) this.pool.succeed(poolName, using.id);
+              } else this.recordOutcome(route.provider, o.status);
               if (!path.startsWith("/v1/messages/count_tokens")) this.providerHealth.observe(route.provider, o.status, o.exhaustion);
               finish(String(o.status), o.bytes, o.note, o.status >= 400, { ...o, ...(searchAttempted ? { upstreamCalled: undefined } : {}) });
             } catch (e) {
-              this.recordOutcome(route.provider, 0);
+              if (using) this.pool.penalise(poolName, using.id, 0);
+              else this.recordOutcome(route.provider, 0);
               finish("-", 0, `google error ${(e as NodeJS.ErrnoException).code ?? ""} ${(e as Error).message}`);
               if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "api_error", message: (e as Error).message } }));
               else res.destroy();

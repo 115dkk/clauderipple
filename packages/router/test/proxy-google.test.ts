@@ -30,18 +30,33 @@ function freePort(): Promise<number> {
   });
 }
 
-type Rig = { home: string; send: (body: unknown, path?: string) => Promise<{ status: number; headers: string; body: string }>; records: () => RequestRecord[]; stop: () => Promise<void>; seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] };
+type Rig = { home: string; logs: () => string; send: (body: unknown, path?: string) => Promise<{ status: number; headers: string; body: string }>; records: () => RequestRecord[]; stop: () => Promise<void>; seen: { path: string; headers: http.IncomingHttpHeaders; body: Record<string, unknown> }[] };
 
-async function rig(promptRefusal = false, argon?: "google" | "opencode", reply?: { status: number; body: string; headers?: Record<string, string> }): Promise<Rig> {
+/** What the fake upstream answers: fixed, or decided per request (1-based) — a credential differs per key. */
+type Reply = { status: number; body: string; headers?: Record<string, string> };
+
+type RigOptions = {
+  /** Sign in an Antigravity account and answer its SDK prompt with 429. */
+  promptRefusal?: boolean;
+  /** Which google wire the test drives: a native `google` provider, or OpenCode's folded `google` model. */
+  argon?: "google" | "opencode";
+  reply?: (n: number, headers: http.IncomingHttpHeaders) => Reply;
+  /** Several keys on the OpenCode provider, in configured order; `headers` mirrors the first. */
+  credentials?: { id: string; label?: string; headers: Record<string, string> }[];
+};
+
+async function rig(options: RigOptions = {}): Promise<Rig> {
+  const { promptRefusal = false, argon, credentials } = options;
   const seen: Rig["seen"] = [];
   const upstream = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       seen.push({ path: req.url ?? "", headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> });
-      if (reply) {
-        res.writeHead(reply.status, { "content-type": "application/json", ...reply.headers });
-        res.end(reply.body);
+      const answer = options.reply?.(seen.length, req.headers);
+      if (answer) {
+        res.writeHead(answer.status, { "content-type": "application/json", ...answer.headers });
+        res.end(answer.body);
         return;
       }
       if (promptRefusal && JSON.stringify(seen.at(-1)!.body).includes("You are a Claude agent, built on Anthropic's Claude Agent SDK.")) {
@@ -79,7 +94,9 @@ async function rig(promptRefusal = false, argon?: "google" | "opencode", reply?:
     listen: { host: "127.0.0.1", port: proxyPort },
     providers: argon === "opencode" ? { "opencode-go": {
       type: "openai-compatible", preset: go.id, ...(go.wire ? { wire: go.wire } : {}),
-      url: `http://127.0.0.1:${upstreamPort}/zen/go/v1`, headers: { authorization: "Bearer test-key" }, ...(go.sessionHeader ? { sessionHeader: go.sessionHeader } : {}),
+      url: `http://127.0.0.1:${upstreamPort}/zen/go/v1`, headers: credentials ? credentials[0]!.headers : { authorization: "Bearer test-key" },
+      ...(credentials ? { credentials } : {}),
+      ...(go.sessionHeader ? { sessionHeader: go.sessionHeader } : {}),
       models: [{ ...argonModel, url: `http://127.0.0.1:${upstreamPort}/inference/go/google`, effortLevels: ["low", "medium", "high"] }],
     } } : { google: { type: "google", auth: promptRefusal ? "antigravity" : "api-key", apiKey: "test-key", url: `http://127.0.0.1:${upstreamPort}`, models: [{ id: argon ? "gemini-4-argon" : "gemini-3-pro-preview" }] } },
     routes: {},
@@ -158,6 +175,7 @@ async function rig(promptRefusal = false, argon?: "google" | "opencode", reply?:
 
   return {
     home,
+    logs: () => fs.readFileSync(path.join(home, "router.log"), "utf8"),
     send,
     records: () => requests.list(20),
     seen,
@@ -170,7 +188,7 @@ async function rig(promptRefusal = false, argon?: "google" | "opencode", reply?:
 }
 
 test("an Antigravity SDK refusal is logged as an upstream request failure without disabling compatible requests", async () => {
-  const r = await rig(true);
+  const r = await rig({ promptRefusal: true });
   try {
     const body = { model: "gemini-3-pro-preview", max_tokens: 16, stream: true,
       system: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", messages: [{ role: "user", content: "hi" }] };
@@ -198,11 +216,11 @@ test("an Antigravity SDK refusal is logged as an upstream request failure withou
 // a rate limit — no retry inside that window can succeed — so the answer says not to (#89).
 test("a Google spending-cap 429 says not to retry; a bare 429 rate limit does not", async () => {
   const request = { model: "gemini-3-pro-preview", max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] };
-  const capped = await rig(false, undefined, {
+  const capped = await rig({ reply: () => ({
     status: 429,
     headers: { "retry-after": "120" },
     body: JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Your project has exceeded its monthly spending cap." } }),
-  });
+  }) });
   try {
     const res = await capped.send(request);
     assert.equal(res.status, 429);
@@ -213,11 +231,11 @@ test("a Google spending-cap 429 says not to retry; a bare 429 rate limit does no
     await capped.stop();
   }
 
-  const rate = await rig(false, undefined, {
+  const rate = await rig({ reply: () => ({
     status: 429,
     headers: { "retry-after": "2" },
     body: JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Resource has been exhausted (e.g. check quota)." } }),
-  });
+  }) });
   try {
     const res = await rate.send(request);
     assert.equal(res.status, 429);
@@ -248,7 +266,7 @@ test("a declared google model is routed to the provider over TLS and logged GOOG
 
 for (const provider of ["google", "opencode"] as const) {
   test(`Gemini 4 Argon @high reaches the ${provider} upstream as a thinkingLevel`, async () => {
-    const r = await rig(false, provider);
+    const r = await rig({ argon: provider });
     try {
       const model = provider === "google" ? "gemini-4-argon" : "gemini-4-argon-contributor";
       const response = await r.send({ model: `${model}@high`, max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] });
@@ -265,6 +283,52 @@ for (const provider of ["google", "opencode"] as const) {
     } finally { await r.stop(); }
   });
 }
+
+test("a spent key on the google wire retries the next key before anything is written (#112)", async () => {
+  // OpenCode Go answers a Gemini model on its own go/google path, keyed per workspace. Its keys share
+  // one provider, so the google wire must use that provider's pool the way every other wire does:
+  // pick by configured order, and on a spent key go to the next one inside the same turn.
+  const r = await rig({
+    argon: "opencode",
+    credentials: [
+      { id: "main", label: "메인", headers: { authorization: "Bearer key-main" } },
+      { id: "sub", label: "서브 1", headers: { authorization: "Bearer key-sub" } },
+    ],
+    reply: (n) => n === 1
+      ? {
+          status: 429,
+          body: JSON.stringify({ type: "error", error: { type: "GoUsageLimitError", message: "Go usage limit exceeded" }, metadata: { workspace: "org_main", limitName: "weekly" } }),
+        }
+      : {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: [
+            { candidates: [{ content: { parts: [{ text: "Hi" }] } }] },
+            { candidates: [{ finishReason: "STOP" }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 1 } },
+          ].map((record) => `data: ${JSON.stringify(record)}\n\n`).join(""),
+        },
+  });
+  const turn = { model: "gemini-4-argon-contributor", max_tokens: 16, stream: true, messages: [{ role: "user", content: "hi" }] };
+  try {
+    const first = await r.send(turn);
+    assert.equal(first.status, 200, "the second key answered the very first ask");
+    assert.deepEqual(r.seen.map((row) => row.headers["x-goog-api-key"]), ["key-main", "key-sub"]);
+    assert.deepEqual(r.seen.map((row) => row.headers.authorization), [undefined, undefined], "the key is sent once, on the wire's own header");
+    const record = r.records().find((row) => row.kind === "messages" && row.ok)!;
+    assert.equal(record.credential, "서브 1", "the record names the key that answered, not the one it started on");
+    const logs = r.logs();
+    assert.match(logs, /KEY opencode-go credential=메인 .* reason=configured-order candidates=\[메인:ready, 서브 1:ready\]/);
+    assert.match(logs, /RETRY opencode-go: 메인 answered 429, trying 서브 1/);
+    assert.match(logs, /KEY opencode-go credential=서브 1 .* reason=retry candidates=\[메인:cooling, 서브 1:ready\]/, "the spent key is rested");
+    for (const text of [logs, fs.readFileSync(path.join(r.home, "requests.jsonl"), "utf8")]) assert.doesNotMatch(text, /key-(?:main|sub)/);
+
+    // The conversation's next turn stays on the key that answered.
+    assert.equal((await r.send(turn)).status, 200);
+    assert.deepEqual(r.seen.map((row) => row.headers["x-goog-api-key"]), ["key-main", "key-sub", "key-sub"]);
+  } finally {
+    await r.stop();
+  }
+});
 
 test("a google model is refused a web_search side request, not sent upstream", async () => {
   const r = await rig();

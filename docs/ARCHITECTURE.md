@@ -1039,6 +1039,12 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
     written. One key stays in `headers`; several use complete `credentials` entries with `headers`
     mirroring the first, retaining id `default` when converting a single key. OpenCode Go usage is
     fetched and cached separately per credential and exposed in configured order, with optional labels.
+  - **Google api-key pools (2026-10-29, #112).** The `google` wire's `api-key` mode uses the same
+    pool, stickiness and in-turn failover. Its keys are complete header sets like the compatible
+    adapters', except each key goes out on `x-goog-api-key` (moved from `authorization`/`x-api-key`
+    when the model is a relay's Gemini endpoint folded by `providerFor`), and `apiKey` mirrors the
+    first entry. Skips exhausted/paused keys, rests a 429's key until its stated reset, and records
+    and logs the key that answered. Antigravity rotates its own accounts (§4d-ii) and is unchanged.
   - **Shared operator controls (2026-10-23).** ChatGPT, Claude OAuth, Google CCA and compatible
     API-key pools share `preferred`, `paused`, `clearCooldown` and `inUse`. At most one stored
     account/key is preferred: only new conversations try it first while usable; existing healthy
@@ -1349,8 +1355,10 @@ what we do not have yet — so that adding a provider does not start with readin
   contract. A `google` entry folds into a `google`/`api-key` provider (2026-10-21): the
   provider's key moves from its headers to `apiKey`, the model's `url` becomes the base,
   and the provider's `sessionHeader` and every non-auth header travel with it. The key is
-  never restated in the model entry. A provider with no override for that model is returned
-  by identity.
+  never restated in the model entry. Since 2026-10-29 the provider's whole `credentials`
+  pool travels too, each key moved to `x-goog-api-key` (#112): folding only the first key
+  left a many-key provider unable to answer a spent one. A provider with no override for
+  that model is returned by identity.
   `authHeader` names a convention rather than restating the key: the provider's own
   credential is re-sent under the header that model's wire expects, so there is one copy
   of the key to rotate. Each endpoint follows the API it imitates — an Anthropic-wire
@@ -1468,6 +1476,15 @@ including the 2026-10-16 Antigravity measurement in §4d-ii, are identified sepa
   the session header OpenCode answers `400 MissingSessionID`. Plain AI Studio providers set
   neither and send no custom User-Agent. The provider's other headers are applied as given.
   Not live-measured as of this date.
+- **The api-key wire takes a key from the provider's pool (2026-10-29, #112).** A provider may
+  declare `credentials`; the proxy picks one by conversation affinity and configured order, the
+  adapter sends that key on `x-goog-api-key`, and a refusal another key could answer (a 429, an
+  exhaustion, a refused key) is retried on the next ready key before any status or byte reaches
+  the client — one key is charged for the refusal and the answer is charged to the key that
+  produced it. `KEY`/`RETRY` log lines and the request record's `credential` are the same as on
+  the other translated wires. A provider with one key (the AI Studio `apiKey`, or the single
+  `headers` set a folded relay model carries) sends exactly what it always did. The
+  `antigravity` accounts keep their own pool and rotation below.
 - `systemInstruction` takes `{role:"user"|"model", parts:[…]}`; `contents` is the
   `user`/`model` turn list; a part is `{text}`, `{inlineData:{mimeType,data}}`,
   `{functionCall:{name,args}}` or `{functionResponse:{name,response}}`. The `role` of a
