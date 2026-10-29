@@ -57,7 +57,7 @@ import { ClaudeAccountAuthPool } from "./providers/anthropic-account-pool.ts";
 import { ClaudeModelCatalog } from "./providers/anthropic-models.ts";
 import { ClaudeUsage } from "./providers/anthropic-usage.ts";
 import { ClaudeCurrentIdentity } from "./providers/anthropic-identity.ts";
-import { dropForeignThinking } from "./thinking.ts";
+import { dropForeignThinking, ThinkingOrigins } from "./thinking.ts";
 
 const MAX_BODY = 64 * 1024 * 1024;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host", "content-length"]);
@@ -269,6 +269,7 @@ export class Proxy {
   private readonly implicitCredentialHeaders = new Map<string, string>();
   /** Recent non-Anthropic answers whose vendor ids cannot identify the route by their shape. */
   private readonly routedMessageIds = new Set<string>();
+  private readonly thinkingOrigins = new ThinkingOrigins();
   readonly providerHealth = new ProviderHealth();
   readonly modelHealth = new ModelHealth();
   private readonly healthConfig = new Map<string, { config: string; credentials: string; keys: Record<string, string> }>();
@@ -1131,7 +1132,9 @@ export class Proxy {
           // the original provider's opaque signatures, whether selected by a ladder or a route.
           if (resolved && (provider.type === "anthropic-compatible" || provider.type === "anthropic") &&
               (route.provider !== resolved.provider || route.model !== resolved.model)) {
-            dropForeignThinking(json, route.provider !== resolved.provider);
+            const targetProvider = route.provider;
+            dropForeignThinking(json, targetProvider !== resolved.provider
+              ? block => this.thinkingOrigins.owns(targetProvider, block) : undefined);
           }
           // Only the Google adapter can return a turn unwritten, so only it pays for the copy.
           if (!pristine && provider.type === "google") pristine = structuredClone(json);
@@ -1804,6 +1807,8 @@ export class Proxy {
         const tap = new ResponseUsageTap(
           typeof upRes.headers["content-type"] === "string" ? upRes.headers["content-type"] : undefined,
           typeof upRes.headers["content-encoding"] === "string" ? upRes.headers["content-encoding"] : undefined,
+          status >= 200 && status < 300 && pathname === "/v1/messages"
+            ? block => this.thinkingOrigins.remember(route?.provider ?? "anthropic", block) : undefined,
         );
         // An error body is the only thing that says why the provider refused; keep its head for the
         // log and the Logs page. A DeepSeek 401 went unexplained for a day because only the status

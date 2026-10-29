@@ -1067,10 +1067,16 @@ from, to}` at hour granularity — buckets whose hour start is in `[from, to)`. 
   identity, thread replay, and Google's one-unwritten-fallback cap remain on the
   existing path; a started response is never replaced. Translators scope reasoning
   to their own provider/model as before. An Anthropic-compatible worker fallback
-  additionally runs `dropForeignThinking`; when the provider changes, opaque signed
-  thinking and redacted-thinking blocks are dropped too, not only translated envelopes.
+  additionally runs `dropForeignThinking`; when the provider changes, each signed thinking
+  or redacted-thinking block is retained only if its signature/data digest was observed in
+  a response from the TARGET provider. The side-band JSON/SSE response observer records
+  provenance in a process-local, globally bounded 100,000-entry digest map, never rewriting
+  response bytes or retaining reasoning text. Unknown/evicted origins (including after a
+  restart) are foreign and dropped. This per-block decision preserves the fallback's own
+  replayed prefix across tool turns instead of stripping it again on every reroute.
   Configured route FAILOVER uses this same cross-provider filter (including native Claude
-  account-pool targets); same-provider native signatures remain intact. A changed provider's
+  account-pool targets); same-provider native signatures and never-rerouted requests retain
+  their existing behavior. Translated adapters still scope their own envelopes. A changed provider's
   credentials clear its exhaustion advisory on config reload. An explicitly configured key
   pool with a ready credential also overrides that advisory at preflight; otherwise the
   existing 30-minute/default or stated Retry-After exhaustion lifetime is unchanged.
