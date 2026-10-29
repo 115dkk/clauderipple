@@ -91,7 +91,8 @@ test("removing a provider clears each stage that named it and keeps the other", 
 
 // The row save from app.js, run against two stub selects. The router's GET and PUT wait until the test
 // lets each one through, and a landed save redraws the selects from what it stored, as the page does.
-function loadSave() {
+// `redraw` is the status refresh's redraw, which can come at any moment.
+function loadSave(stored: Record<string, unknown> = { providers }) {
   const source = fs.readFileSync(path.join(uiDir, "app.js"), "utf8");
   const block = (from: string, to: string) => {
     const start = source.indexOf(from), end = source.indexOf(to, start);
@@ -100,7 +101,7 @@ function loadSave() {
   };
   const h = {
     rows: { first: "", rest: "" } as Record<string, string>,
-    stored: { providers } as Record<string, unknown>,
+    stored,
     gets: [] as (() => void)[],
     puts: [] as (() => void)[],
     writes: [] as Record<string, unknown>[],
@@ -117,13 +118,13 @@ function loadSave() {
     const configRequest = (next) => new Promise((resolve) => h.puts.push(() => { h.stored = clone(next); h.writes.push(clone(next)); resolve({}); }));
     ${block("/** The two rows a setting shows", "// Claude Code refuses these")}
     const renderAutoClassifier = () => {
-      const rows = classifierRowsOf(currentConfig.autoModeClassifier);
+      const rows = classifierRowsShown();
       for (const stage of ["first", "rest"]) h.rows[stage] = rows[stage] ? JSON.stringify([rows[stage].provider, rows[stage].model]) : "";
     };
     ${block("function classifierRowValue(", "function clientPickerSelections(")}
-    return saveAutoClassifier;
-  `)(h) as () => Promise<void>;
-  return { h, save };
+    return { save: saveAutoClassifier, redraw: renderAutoClassifier };
+  `)(h) as { save: () => Promise<void>; redraw: () => void };
+  return { h, ...save };
 }
 
 test("overlapping classifier saves store the last choice", async () => {
@@ -162,6 +163,32 @@ test("overlapping classifier saves store the last choice", async () => {
     await second;
     assert.deepEqual(h.writes.map((write) => write.autoModeClassifier), [last], "an overtaken save is dropped");
   }
+});
+
+test("a status redraw between two classifier choices keeps the first one", async () => {
+  const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const pick = (target: Target) => JSON.stringify([target.provider, target.model]);
+  const terra = { provider: "chatgpt", model: "gpt-5.6-terra" };
+  const { h, save, redraw } = loadSave({ providers, autoModeClassifier: { provider: luna.provider, model: luna.model, stage1: sonnet } });
+  redraw();
+  assert.equal(h.rows.first, pick(sonnet));
+
+  // Haiku is chosen and its save waits on the config read while the status refresh redraws.
+  h.rows.first = pick(haiku);
+  void save();
+  await flush();
+  redraw();
+  assert.equal(h.rows.first, pick(haiku), "the redraw shows the choice being saved, not the stored one");
+
+  // The second row changes next, and that save carries both choices.
+  h.rows.rest = pick(terra);
+  const second = save();
+  h.gets.shift()!(); await flush();
+  h.gets.shift()!(); await flush(); h.puts.shift()!();
+  await second;
+  assert.deepEqual(h.writes.map((write) => write.autoModeClassifier), [{ ...terra, stage1: haiku }]);
+  redraw();
+  assert.deepEqual([h.rows.first, h.rows.rest], [pick(haiku), pick(terra)], "once stored, the rows are drawn from the config again");
 });
 
 test("every language the dashboard speaks has the classifier rows", () => {
