@@ -1809,11 +1809,13 @@ async function pickerModels(deps: AdminDeps): Promise<{ models: { id: string; na
 
 /**
  * Each model's context window for the phone and dashboard. ChatGPT-served models use the same
- * effective catalogue window as bootstrap/picker; an explicit route window still wins. Without a
- * catalogue window, the stored values retain their old precedence. Unknown is absent.
- * `catalogWindows` identifies values the picker window editor must not offer to override.
- * `resolvedWindows` binds a capacity (null when unknown) to its target/provider for usage readers;
- * unlike the legacy editor maps it never substitutes a native alias or global compaction window.
+ * effective resolution as bootstrap/picker: a window the operator saved on a picker entry wins, then
+ * the catalogue figure, and an explicit route window wins over both. Without a catalogue window, the
+ * stored values retain their old precedence. Unknown is absent. `catalogWindows` carries each
+ * catalogue-backed id's own figure — also when an override is in effect — for the picker editor's
+ * default; `windows` is the value actually resolved. `resolvedWindows` binds a capacity (null when
+ * unknown) to its target/provider for usage readers; unlike the legacy editor maps it never
+ * substitutes a native alias or global compaction window.
  */
 async function contextWindows(deps: AdminDeps): Promise<ReturnType<typeof contextWindowSnapshot>> {
   return contextWindowSnapshot(deps.config(), await claudeModelList(deps), deps.agentDir ? [deps.agentDir] : undefined);

@@ -711,12 +711,27 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     adapter publishes the last-read list process-wide (`providers/chatgpt/
     windows.ts`), and one resolver (`chatgptModelWindow`) hands it to bootstrap's
     `auto_compact_windows`, the picker's `context_window_by_model` and
-    `providerModelWindow` — ahead of any stored `contextWindow` and of
-    `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by id,
-    alias, prefix rule or as a route's target). An explicit
+    `providerModelWindow` — ahead of any stored `contextWindow` (except a picker entry's own
+    override, below) and of `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by
+    id, alias, prefix rule or as a route's target). An explicit
     `route.contextWindow` still wins; every non-chatgpt provider keeps the old
     fallback. The catalogue is now read at router start and every two hours, not
     only when the dashboard asks.
+  - **A picker entry's own window wins over the catalogue (2026-10-30).** The catalogue
+    figure stays the default for a model the dashboard has no override for, but the
+    window field is the operator's: `cli.extraModels[].contextWindow` now beats
+    `chatgptModelWindow` in `resolvedModelWindow`, `chatPickerModels`,
+    bootstrap's agent-file entries and the `GET /api/context-windows` snapshot;
+    an explicit `route.contextWindow` still beats both. Ticking a model copies the
+    provider's declared window onto the entry (`applyPickerSelections`), so an entry
+    equal to that declaration is not an override (`pickerWindowOverride`) — today's
+    configs carry 6.1 Sol's stale 272000 that way and must keep following the
+    catalogue. `catalogWindows` now carries every catalogue-backed id's own figure,
+    also while an override is in effect, so the editor prefills it as the default and
+    shows its note only while `windows` (the resolved value) equals it. The field is
+    editable for catalogue models too; an empty or catalogue-equal value saves no
+    override. Tests: `router/test/chatgpt-windows.test.ts`,
+    `chatgpt-windows-api.test.ts`, `ui-picker-selection.test.ts`.
   - **Effective compaction windows (2026-10-28, Claude Code 2.1.308).** The owner's
     measured `/context` reported `30.7k / 600k` on `claude-opus-4-7` routed to Sol
     (475000 capacity), despite bootstrap and `autoCompactWindowsCache` carrying 475000.
@@ -2105,6 +2120,7 @@ plan unless marked otherwise.
 | A closed lid was held awake on battery overnight (2026-10-24, owner-reported, `pmset -g log` + router.log): the lid closed and the Mac slept at 00:59 ("Clamshell Sleep"), but in two maintenance dark wakes (01:09 and 09:51) model calls ran — the mod's cache keep-warm pings (4-token turns on idle sessions) and a Claude app scheduled task — and `working` mode counted them as work: "sleep disabled (working: 1 model call running)" turned a ~45 s dark wake into 72 min (01:09–02:21) and 35 min (09:51–10:26) awake, 6 of the night's 10 battery points | A hold is never **started** in a dark wake: ioreg's IOPMrootDomain `System Capabilities` (read with the clamshell flags, no extra process) without Graphics (2) means the Mac is asleep to its user, and `decideAwake` answers "asleep: …" (logged once). A hold already taken is kept whatever the reading, and mode `on` is unaffected. Measured: 15 in a full wake; a held lid-closed Mac (2026-10-23 18:22–19:32) logged no transition to DarkWake. Tests: `awake.test.ts`. |
 | Our sleepnow overrode other processes keeping the Mac awake (2026-10-26, owner-reported, `pmset -g log` + router.log + unified log): in `working` mode the hold was released 10 min after the last call and, with the lid closed and `AppleClamshellCausesSleep` reading Yes although an awake TV was attached over HDMI, `pmset sleepnow` ran — at 18:48 under an Amphetamine session (remote sessions dropped overnight), and at 17:17 while audio played at the desk (coreaudiod's assertions released at the sleep). The log line claimed "nothing else holds the Mac awake" without checking | Before sleepnow, a non-guard release leaves the Mac to macOS when an external display is attached (ioreg framebuffers, not the flag) or another process holds PreventSystemSleep, or either read fails; the log names the reason. Guard releases (battery, heat, failed guard read) still sleep. Tests: `awake.test.ts`. |
 | A closed lid ran on battery for 4 hours because idle assertions were taken for sleep holds (2026-10-28, owner-reported, `pmset -g log` + router.log): a call at 05:14 set the bit, the lid was closed while it was set, and the 05:33:52 release logged "other processes prevent sleep (Amphetamine, powerd)" and skipped sleepnow. Both were PreventUserIdleSystemSleep — Amphetamine's indefinite session and powerd's "display is on" — which do not stop lid-close sleep (the Mac had slept every lid close that night under the same session) and, never letting go, kept idle sleep away too. No sleep was logged until AC at 09:19: 55% → 11% | Only PreventSystemSleep counts as another process's hold, beside an attached external display (the row above). Tests: `awake.test.ts` "idle-sleep holders … do not keep a released closed lid awake". |
+| A closed lid fell asleep although we were holding it, because another app writes the same bit: AlDente Pro's "Disable Sleep until Charge Limit" (`completelyDisableSleep`) sets it while AlDente charges below its limit and clears it when charging stops, so on 2026-10-30 the bit read 0 at 09:31:18 as its helper let go at the charge limit with AC still attached (our 15 s tick re-set it at 09:31:28 and logged "sleep was re-enabled outside ClaudeRipple"), and at 09:25:43.99 when a dock — power and two displays — was unplugged with the lid already closed, where macOS clamshell-slept at 09:25:44.44 (owner-reported, `pmset -g log` + ioreg + `defaults` reads) | A second writer of the bit is detected and named, not out-raced: a known-writer table (`SLEEP_SETTING_WRITERS`; now only AlDente's `completelyDisableSleep`) is read with `defaults` (no privilege, at most once a 60 s full tick, and at once after an outside re-enable); a match, or an outside re-enable with no known writer behind it and no boot since the hold (unknown cause, kept 24 h), is reported once in the log, `clauderipple power` and the laptop page, with the fix where one is known ("Stop Charging when Sleeping"). Re-asserting faster cannot win against an immediate clamshell sleep. AlDente's Calibration Mode and clamshell discharge disable sleep without this key, so those stay invisible (known limit). Tests: `awake.test.ts`. |
 | A new worker could not be spawned in a session that was open when it was added: the router wrote `zai-org-glm-5-3-flash.md` at 10:51:45, the MAMBO session (idle since 10:47) got its next message 26 s later, and the Agent tool answered "not found" at 10:52 and 11:12; after a `/clear` the mod rewrote `ripple:auto` to the worker and the CLI refused that too (11:24). The ClaudeRipple session, in use at the time, listed it by 10:55 (2026-10-23). CLI 2.1.308 polls `~/.claude/agents` every 2 s in use and 30 s after a minute idle; going back to 2 s rebuilds the watcher from the directory as it then is, and the catch-up compares only skills and commands, so a write in the last 30 s of idling is never read, and `/clear` keeps the process's list | Every sync that writes or removes a generated agent touches the generated files again `RETOUCH_AFTER_MS` (45 s) later (`agents.ts` `retouchLater`): any agent file's change makes a session reread all of them, and 45 s is past the idle poll. A session that already missed one is fixed the same way, by touching any file in `~/.claude/agents`. Tests: `agents.test.ts`. |
 | A routed request's `messages` array carried Anthropic-only shapes — a mid-conversation `role: "system"` message and `tool_addition`/`tool_removal` content blocks — and the compat layer cleaned only the top-level fields, so the vendor's Anthropic skin answered 400 `Invalid Anthropic Messages API request` on every turn once a SessionStart hook or a deferred MCP tool was in play (issue #92, CLI 2.1.308+, 2026-10-26) | A compat layer validates the **whole body** it forwards, `messages` included, not just the fields the CLI adds at the top level: a role an Anthropic-shaped vendor does not accept in `messages` is folded to `user` with the text untouched, a content block type only Anthropic defines is either converted into something the wire already has (a deferred tool's definition joins `tools`) or dropped, and a message left with no content goes whole. The request log counts each fold (`system_role×N`, `tool_addition×N`, `tool_removal×N`) so a vendor's next refusal can be read against what was sent. Same rule as the tool-schema row: what is forwarded must be valid for the wire it is forwarded to, not merely for the client that produced it. |
 
@@ -2216,6 +2232,34 @@ regardless.
 `<home>/awake.json` journals `{applied, since, reason, lastActivityAt}`; the journal is written
 before setting the bit and after clearing it. A bit that reads cleared while the journal says set
 (reboot, another tool) is re-applied if still wanted.
+
+**Other apps that write the sleep setting (2026-10-30).** The bit is global, so other apps set and clear
+it too. Known writers are a table in `awake.ts` (`SLEEP_SETTING_WRITERS`), each entry one unprivileged
+`defaults read <domain> <key>` whose trimmed stdout must equal the value:
+
+| app | name | macOS domain | key | value |
+|---|---|---|---|---|
+| `aldente` | AlDente | `com.apphousekitchen.aldente-pro` | `completelyDisableSleep` | `1` |
+
+AlDente Pro's "Disable Sleep until Charge Limit" is the measured entry: it is set while AlDente charges
+below its limit (this Mac: `chargeVal = 55`) and cleared when charging stops — at the limit AlDente has
+already let go, which is why unplugging at the end of a workday with the lid closed and the battery at
+55% never slept (owner-reported, the battery held at 55% for days). The clear can land behind our back
+and a closed lid sleeps at once (§5), so the probe runs on full ticks — at most once a minute, and not
+at all while the mode is off with nothing held — and a conflict is logged once (and its end once),
+named in `clauderipple power` and warned about in the laptop page; the "re-enabled outside" line names a
+known app when the probe says it is the cause, and that path asks again at once instead of waiting for
+the minute. The fix for the measured app is the owner's: "Stop Charging when Sleeping", which leaves
+`sleepInhibitCharge = 1`, a key that does not touch the bit.
+
+A clear with no known writer behind it is an unknown cause: it stays reported for 24 h
+(`CONFLICT_KEEP_MS`) from the last outside re-enable, then goes. On macOS a reboot explains it away —
+the bit never survives one — so if the system booted after the hold was set (boot time = now −
+`os.uptime`, compared with when the hold was set) it is a reboot, not a conflict. On Windows a recovered
+`stillHeld()` false means the lid-close action was changed outside us, which is always an unknown cause
+(there is no OS-wide bit, and nothing else writes a plan's lid action). A known match takes precedence
+over an unknown one. Known limit: AlDente also disables sleep itself in Calibration Mode and clamshell
+discharge ("required" in its help text), which this key cannot show.
 
 **Exit ordering (decided).** The router's exit does **not** clear the bit, in any mode. A restart is
 the common exit; clearing then setting again ~1s later is exactly the off-then-on window in which a
