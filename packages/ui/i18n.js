@@ -2958,7 +2958,7 @@ Object.assign(I18N.ko, {
   "mac.why.recent": "Claude가 {min}분 전에 일을 마쳤습니다 · 10분까지 깨어 있습니다", "mac.why.idle": "Claude가 10분 넘게 쉬고 있습니다", "mac.why.until": "정한 시각이 지났습니다",
   "mac.why.battery": "배터리가 {floor}% 미만이라 깨어 있기를 멈췄습니다", "mac.why.thermal": "노트북이 뜨거워져서 깨어 있기를 멈췄습니다", "mac.why.error": "배터리나 온도를 읽지 못해 안전하게 깨어 있기를 멈췄습니다",
   "mac.why.setup": "맥 암호 설정이 필요합니다", "mac.why.failed": "잠들지 않게 하는 설정을 바꾸지 못했습니다", "mac.why.starting": "확인하는 중…",
-  "mac.conflict.aldente": "AlDente의 ‘충전 한도까지 잠자기 비활성화’가 켜져 있어서, 충전이 멈출 때 잠자기 방지가 풀리고 덮개를 닫은 노트북이 잠들 수 있습니다. AlDente에서 이 항목을 ‘잠자기 중 충전 중지’로 바꿔 주세요.",
+  "mac.conflict.aldente": "AlDente의 ‘충전 한도까지 잠자기 비활성화’가 켜져 있어, 충전이 중단되면 잠자기 방지가 해제되어 덮개를 닫은 노트북이 잠들 수 있습니다. AlDente에서 이 항목을 ‘잠자기 중 충전 중지’로 변경해 주세요.",
   "mac.fact.battery": "배터리 {percent}%", "mac.fact.charging": "배터리 {percent}% · 전원 연결됨", "mac.fact.lidClosed": "덮개 닫힘", "mac.fact.lidOpen": "덮개 열림", "mac.fact.hot": "뜨거움",
   "mac.mode.label": "깨어 있기", "mac.mode.off": "끔", "mac.mode.working": "일할 때만", "mac.mode.on": "계속 켜 두기",
   "mac.mode.offHelp": "노트북이 평소처럼 잠듭니다.", "mac.mode.workingHelp": "Claude가 일하는 동안, 그리고 끝난 뒤 10분까지 깨어 있습니다.", "mac.mode.onHelp": "끄거나 정한 시각이 될 때까지 깨어 있습니다.",
