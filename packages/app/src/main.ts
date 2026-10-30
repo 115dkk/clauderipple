@@ -1611,6 +1611,12 @@ if (!app.requestSingleInstanceLock()) app.exit(0);
 app.on("second-instance", () => {
   if (app.isReady()) showWindow(last ? undefined : "health");
 });
+// macOS does not start a second instance for that: clicking the icon of a running app only sends
+// it a reopen, which Electron reports as `activate`. Without this the icon did nothing and the
+// window opened only from the tray menu (2026-10-30).
+app.on("activate", () => {
+  if (app.isReady()) showWindow(last ? undefined : "health");
+});
 
 app.whenReady().then(async () => {
   L = STRINGS[uiLang()];
