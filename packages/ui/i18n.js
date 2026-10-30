@@ -2689,7 +2689,7 @@ Object.assign(I18N.ko, {
   "phone.apply": "변경 사항 적용",
   "phone.restartRequired": "호스트를 다시 시작해야 변경 사항이 적용됩니다.", "phone.restart": "재시작", "phone.restartConfirm": "호스트를 다시 시작하시겠습니까? 휴대폰 연결과 진행 중인 원격 작업이 중단될 수 있습니다.", "phone.restarting": "호스트를 다시 시작했습니다. 잠시 후 상태를 확인합니다.", "phone.manualRestart": "이 운영체제에서는 터미널에서 다음 명령어를 실행해 주세요: {command}",
   "phone.phones": "연결된 휴대폰", "phone.connected": "연결됨", "phone.offline": "오프라인", "phone.lastSeen": "마지막 접속: {time}", "phone.unknownSeen": "마지막 접속 기록 없음", "phone.pushOn": "알림 켜짐", "phone.pushOff": "알림 꺼짐", "phone.empty": "아직 연결된 휴대폰이 없습니다. Ripple Remote 앱에서 QR 코드를 스캔해 주세요.",
-  "phone.rotate": "모든 휴대폰 연결 해제 (새 키 발급)", "phone.rotateConfirm": "모든 휴대폰의 연결을 해제하고 새 키를 발급하시겠습니까? 기존 QR 코드와 링크는 만료되며, 각 휴대폰을 다시 연결해야 합니다.", "phone.rotated": "모든 휴대폰의 연결을 해제하고 새 키를 발급했습니다.", "phone.sharedKey": "모든 휴대폰이 동일한 페어링 키를 공유하므로, 특정 기기만 개별적으로 연결을 해제할 수는 없습니다.",
+  "phone.rotate": "모든 휴대폰 연결 해제 (새 키 발급)", "phone.rotateConfirm": "모든 휴대폰의 연결과 알림을 해제하고 새 키를 발급하시겠습니까? 기존 QR 코드와 링크는 만료되며, 각 휴대폰을 다시 연결해야 합니다.", "phone.rotated": "모든 휴대폰의 연결을 해제하고 새 키를 발급했습니다.", "phone.sharedKey": "모든 휴대폰이 동일한 페어링 키를 공유하므로, 특정 기기만 개별적으로 연결을 해제할 수는 없습니다.",
   "phone.promo.eyebrow": "Ripple Remote · 무료 휴대폰 앱", "phone.promo.title": "GPT·DeepSeek·Gemini 세션을 휴대폰에서 이어 가세요",
   "phone.promo.lead": "리플에서 실행 중인 세션이라면 어떤 모델이든 휴대폰에서 그대로 제어할 수 있습니다. 30분이 지나도 연결이 끊기지 않습니다.",
   "phone.promo.models": "모델을 가리지 않습니다.", "phone.promo.modelsBody": "GPT·DeepSeek·Gemini·Claude 등 어떤 세션이든 동일한 화면에서 동일하게 제어할 수 있습니다. 다음 턴에 사용할 모델과 추론 강도도 휴대폰에서 바로 변경할 수 있습니다.",
