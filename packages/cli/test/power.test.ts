@@ -10,7 +10,7 @@ import type { SetupDeps } from "../src/awake-setup.ts";
 
 const STATUS: PowerStatus = {
   platform: "darwin",
-  awake: { mode: "working", applied: true, reason: "working: 1 model call running", setup: "ok", battery: { percent: 55, onBattery: false }, thermal: "normal", lidClosed: true, until: null },
+  awake: { mode: "working", applied: true, reason: "working: 1 model call running", setup: "ok", battery: { percent: 55, onBattery: false }, thermal: "normal", lidClosed: true, until: null, conflict: null },
   tether: { enabled: true, network: "hotspot", state: "hotspot-not-visible", pinned: false, hotspotSsid: "PBJ", lastSwitch: null, lastProbe: { at: "2026-10-20T03:00:00.000Z", ok: false, network: "wifi" }, hint: "Open Personal Hotspot" },
 };
 
@@ -30,6 +30,15 @@ test("status text names the state, the facts and the hint", () => {
   assert.match(text, /last probe FAILED/);
   assert.match(text, /→ Open Personal Hotspot/);
   assert.match(formatPower({ ...STATUS, awake: { ...STATUS.awake, setup: "needs-setup" } }).join("\n"), /needs setup: clauderipple awake setup/);
+});
+
+test("an AlDente conflict is named under the awake line, and nothing is printed without one", () => {
+  const text = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: "aldente-disable-sleep" } }).join("\n");
+  assert.match(text, /^ {8}conflict: AlDente "Disable Sleep until Charge Limit" clears the sleep bit when charging stops; choose "Stop Charging when Sleeping" in AlDente$/m);
+  // An older router sends no conflict field at all.
+  assert.doesNotMatch(formatPower(STATUS).join("\n"), /conflict:/);
+  const older = { platform: STATUS.platform, awake: { mode: STATUS.awake.mode }, tether: STATUS.tether } as unknown as PowerStatus;
+  assert.doesNotMatch(formatPower(older).join("\n"), /conflict:/);
 });
 
 function rig(answer: "router" | "down") {

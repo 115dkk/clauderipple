@@ -38,6 +38,8 @@ export function formatPower(s: PowerStatus): string[] {
   if (a.thermal) facts.push(`thermal ${a.thermal}`);
   if (a.lidClosed !== null) facts.push(`lid ${a.lidClosed ? "closed" : "open"}`);
   if (facts.length) lines.push(`        ${facts.join(" · ")}`);
+  // An older router sends no conflict field at all, which reads as none.
+  if (a.conflict === "aldente-disable-sleep") lines.push(`        conflict: AlDente "Disable Sleep until Charge Limit" clears the sleep bit when charging stops; choose "Stop Charging when Sleeping" in AlDente`);
   if (!t.enabled) lines.push(`tether  off${t.state === "unsupported" ? " (not supported here)" : ""}`);
   else {
     lines.push(`tether  on · ${t.network} · ${t.state}${t.pinned ? " (pinned)" : ""}${t.hotspotSsid ? ` · hotspot "${t.hotspotSsid}"` : ""}`);

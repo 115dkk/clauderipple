@@ -1879,8 +1879,14 @@ function macAwakeCard(a) {
     ? macStateRow("on", t("mac.awake.on"), why.text, macFacts(a))
     : macStateRow(why.warn ? "warn" : "off", t("mac.awake.off"), why.text, macFacts(a));
   const modes = [{ value: "off", label: t("mac.mode.off") }, { value: "working", label: t("mac.mode.working") }, { value: "on", label: t("mac.mode.on") }];
+  // AlDente's "Disable Sleep until Charge Limit" writes the same sleep bit (router awake.ts): it
+  // clears it when charging stops, so a closed lid sleeps. Only worth saying while we hold the bit.
+  const conflict = a.conflict === "aldente-disable-sleep" && a.mode !== "off"
+    ? macStateRow("warn", "AlDente", t("mac.conflict.aldente"))
+    : null;
   const rows = [
     state,
+    conflict,
     cell(el("span", { class: "cell-label", text: t("mac.mode.label") }),
       modSegmented("mac-mode", modes, a.mode, t("mac.mode.label"), (mode) => void macPut({ awake: { mode, until: null } })),
       t(`mac.mode.${a.mode}Help`), "wide"),

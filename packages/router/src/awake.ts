@@ -17,6 +17,10 @@
 //   - The router's exit does not touch the bit: a restart's successor reconciles within one tick,
 //     and clearing it here then setting it again a second later is exactly the off-then-on window in
 //     which a closed lid could sleep mid-work. `clauderipple stop`/`uninstall` clear it.
+//   - AlDente Pro's "Disable Sleep until Charge Limit" writes and clears the same bit, so it is
+//     detected (a `defaults` read, at most once a minute) and reported once in the log, the CLI and
+//     the app: clearing it as charging stops leaves a closed lid to sleep at once, and no re-assert
+//     is fast enough to win.
 //
 // Every command goes through an injected `Runner`, never a shell, so tests run against fakes.
 
@@ -44,7 +48,16 @@ export type Runner = (file: string, args: string[], opts?: RunOptions) => Promis
 export const PMSET = "/usr/bin/pmset";
 export const SUDO = "/usr/bin/sudo";
 export const IOREG = "/usr/sbin/ioreg";
+export const DEFAULTS = "/usr/bin/defaults";
 export const SUDOERS_FILE = "/etc/sudoers.d/clauderipple";
+
+/**
+ * AlDente Pro's preference domain and the key its "Disable Sleep until Charge Limit" option sets.
+ * Measured 2026-10-30: 1 while the option was on, 0 after switching AlDente to "Stop Charging when
+ * Sleeping". The option writes the same global bit as our `pmset -a disablesleep`.
+ */
+export const ALDENTE_DOMAIN = "com.apphousekitchen.aldente-pro";
+export const ALDENTE_DISABLE_SLEEP_KEY = "completelyDisableSleep";
 
 export function execRunner(): Runner {
   return (file, args, opts = {}) =>
@@ -262,6 +275,12 @@ export function sudoRefused(r: RunResult): boolean {
 
 // ---- Controller --------------------------------------------------------------------------------
 
+/**
+ * Another app that also writes the sleep bit we hold. AlDente's "Disable Sleep until Charge Limit"
+ * sets it while charging and clears it when charging stops, so a closed lid sleeps right after.
+ */
+export type AwakeConflict = "aldente-disable-sleep";
+
 export type AwakeStatus = {
   mode: AwakeSettings["mode"];
   applied: boolean;
@@ -271,6 +290,7 @@ export type AwakeStatus = {
   thermal: Thermal | null;
   lidClosed: boolean | null;
   until: string | null;
+  conflict: AwakeConflict | null;
 };
 
 export type Guards = { battery: Battery | null; thermal: Thermal | null; lidClosed: boolean | null; darkWake?: boolean; error?: string };
@@ -282,6 +302,11 @@ export interface AwakeBackend {
   readGuards(needed: boolean): Promise<Guards>;
   /** While the journal says held: false when it was undone outside us (nothing of ours left to undo). */
   stillHeld(): Promise<boolean>;
+  /**
+   * Read-only: another app that also writes the sleep bit we use (macOS: AlDente's
+   * "Disable Sleep until Charge Limit"). The controller spaces the calls; never privileged.
+   */
+  probeConflict(): Promise<AwakeConflict | null>;
   hold(): Promise<HoldOutcome>;
   release(): Promise<HoldOutcome>;
   /**
@@ -314,6 +339,8 @@ export type AwakeDeps = {
 export const AWAKE_TICK_MS = 15_000;
 /** Pause between clearing the bit and reading whether a closed lid now causes sleep. */
 export const SLEEPNOW_SETTLE_MS = 3_000;
+/** How often the conflict probe may run: it is a `defaults` child process on every full tick otherwise. */
+export const CONFLICT_PROBE_MS = 60_000;
 
 export class AwakeController {
   private applied = false;
@@ -321,6 +348,11 @@ export class AwakeController {
   private battery: Battery | null = null;
   private thermal: Thermal | null = null;
   private lidClosed: boolean | null = null;
+  private conflict: AwakeConflict | null = null;
+  /** When the conflict probe last ran; null until the first full evaluation. */
+  private conflictAt: number | null = null;
+  /** What the log last said about the conflict, so a change is logged once and not every tick. */
+  private conflictLogged: AwakeConflict | null = null;
   private sudoFailed = false;
   private lastActivityAt: number | undefined;
   private journaledActivityAt: number | undefined;
@@ -387,6 +419,7 @@ export class AwakeController {
       thermal: this.thermal,
       lidClosed: this.lidClosed,
       until: s.until ?? null,
+      conflict: this.conflict,
     };
   }
 
@@ -461,6 +494,11 @@ export class AwakeController {
       this.battery = null;
       this.thermal = null;
       this.lidClosed = null;
+      // Nothing of ours is held, so a conflict would be about a bit we are not setting: forget it
+      // quietly, and let the first tick after the next turn-on report it again.
+      this.conflict = null;
+      this.conflictAt = null;
+      this.conflictLogged = null;
       backend.shutdown();
       this.persist();
       return;
@@ -488,9 +526,16 @@ export class AwakeController {
     // not applied, so a wanted state is set again below — re-asserting at most once per tick — and an
     // unwanted one is not "cleared" twice.
     if (this.applied && !(await backend.stillHeld())) {
-      this.logOnce("awake: sleep was re-enabled outside ClaudeRipple (reboot or another tool)");
+      // Asked fresh (past the cache) because the answer decides who is named in the line below.
+      await this.probeConflict(true);
+      this.logOnce(this.conflict === "aldente-disable-sleep"
+        ? "awake: sleep was re-enabled outside ClaudeRipple (AlDente)"
+        : "awake: sleep was re-enabled outside ClaudeRipple (reboot or another tool)");
       this.applied = false;
     }
+    // The bit matters from here on (something wants it, or a hold is being released): check whether
+    // another app writes it too.
+    await this.probeConflict();
     const d = decide(guards);
     this.reason = d.reason;
     if (d.reason.startsWith("asleep:")) this.logOnce(`awake: ${d.reason}`);
@@ -499,6 +544,23 @@ export class AwakeController {
       if (await this.set(false, d.reason)) await backend.afterRelease(d.forced === true);
     }
     this.persist();
+  }
+
+  /**
+   * At most once a minute. `force`: after the wait for a re-enable outside us, where the answer
+   * decides who did it. The log says each change once (one line when AlDente's option turns up, one
+   * when it goes).
+   */
+  private async probeConflict(force = false): Promise<void> {
+    const now = this.now();
+    if (!force && this.conflictAt !== null && now - this.conflictAt < CONFLICT_PROBE_MS) return;
+    this.conflict = await this.backend!.probeConflict();
+    this.conflictAt = now;
+    if (this.conflict === this.conflictLogged) return;
+    this.conflictLogged = this.conflict;
+    this.deps.log.info(this.conflict === "aldente-disable-sleep"
+      ? `awake: AlDente's "Disable Sleep until Charge Limit" also sets and clears the sleep bit (it clears it when charging stops, and a closed lid then sleeps); choose "Stop Charging when Sleeping" in AlDente`
+      : `awake: AlDente's "Disable Sleep until Charge Limit" is no longer set; the sleep bit is ours again`);
   }
 
   /** Hold or release. The journal is written before holding and after releasing. */
@@ -566,6 +628,18 @@ class MacAwakeBackend implements AwakeBackend {
 
   async stillHeld(): Promise<boolean> {
     return this.clamshell?.sleepDisabled !== false;
+  }
+
+  /**
+   * `defaults read com.apphousekitchen.aldente-pro completelyDisableSleep` (no privilege). With
+   * AlDente's "Disable Sleep until Charge Limit" on, it is 1 and AlDente writes the same global bit we
+   * do: set while charging, cleared when charging stops — and a closed lid sleeps at once. A missing
+   * domain or key exits non-zero, and 0 means the option is off (measured 2026-10-30 after the owner
+   * switched to "Stop Charging when Sleeping"): both are no conflict.
+   */
+  async probeConflict(): Promise<AwakeConflict | null> {
+    const r = await this.deps.run(DEFAULTS, ["read", ALDENTE_DOMAIN, ALDENTE_DISABLE_SLEEP_KEY]);
+    return r.code === 0 && r.stdout.trim() === "1" ? "aldente-disable-sleep" : null;
   }
 
   private async readClamshell(): Promise<Clamshell | null> {

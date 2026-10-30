@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  AwakeController, decideAwake, parseBattery, parseClamshell, parseExternalDisplays, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
+  AwakeController, CONFLICT_PROBE_MS, decideAwake, parseBattery, parseClamshell, parseExternalDisplays, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
   type Activity, type AwakeInput, type RunResult,
 } from "../src/awake.ts";
 import { AWAKE_DEFAULTS, type AwakeSettings } from "../src/config.ts";
@@ -129,15 +129,23 @@ type FakeMac = {
   assertions: string | null;
   /** External displays attached; null fails the ioreg read. */
   externalDisplays: number | null;
+  /**
+   * `defaults read com.apphousekitchen.aldente-pro completelyDisableSleep`: the stdout it prints, or
+   * null for a non-zero exit (the domain or key does not exist, as without AlDente).
+   */
+  aldenteSleep: string | null;
 };
 
 function fakeMac(over: Partial<FakeMac> = {}): FakeMac & { run: (f: string, a: string[]) => Promise<RunResult> } {
-  const m: FakeMac = { calls: [], sleepDisabled: false, lid: false, causesSleepWhenReleased: true, batt: BATT_AC, battCode: 0, sudo: "ok", sleepnowUnprivileged: true, caps: FULL_WAKE, assertions: assertions(BACKGROUND_LINES), externalDisplays: 0, ...over };
+  const m: FakeMac = { calls: [], sleepDisabled: false, lid: false, causesSleepWhenReleased: true, batt: BATT_AC, battCode: 0, sudo: "ok", sleepnowUnprivileged: true, caps: FULL_WAKE, assertions: assertions(BACKGROUND_LINES), externalDisplays: 0, aldenteSleep: null, ...over };
   const ok = (stdout = ""): RunResult => ({ code: 0, stdout, stderr: "" });
   return Object.assign(m, {
     run: async (file: string, args: string[]): Promise<RunResult> => {
       const line = [file, ...args].join(" ");
       m.calls.push(line);
+      if (line === "/usr/bin/defaults read com.apphousekitchen.aldente-pro completelyDisableSleep") {
+        return m.aldenteSleep === null ? { code: 1, stdout: "", stderr: "The domain/default pair of (com.apphousekitchen.aldente-pro, completelyDisableSleep) does not exist\n" } : ok(`${m.aldenteSleep}\n`);
+      }
       if (line === "/usr/bin/pmset -g batt") return { code: m.battCode, stdout: m.battCode === 0 ? m.batt : "", stderr: "" };
       if (line === "/usr/bin/pmset -g therm") return ok(THERM_NONE);
       if (line === "/usr/bin/pmset -g assertions") return m.assertions === null ? { code: 1, stdout: "", stderr: "" } : ok(m.assertions);
@@ -188,11 +196,13 @@ test("off this Mac: nothing runs and the state says unsupported", async () => {
 });
 
 test("mode off with nothing applied runs no command at all", async () => {
-  const mac = fakeMac();
+  // The AlDente probe included: it is a command like any other.
+  const mac = fakeMac({ aldenteSleep: "1" });
   const { c } = controller(mac, { settings: settings({ mode: "off" }) });
   await c.start();
   assert.deepEqual(mac.calls, []);
   assert.equal(c.status().applied, false);
+  assert.equal(c.status().conflict, null);
 });
 
 test("working: a running call disables sleep (journal first), going idle re-enables it", async () => {
@@ -418,4 +428,68 @@ test("guards release a held Mac: battery under the floor, and a failed battery r
   await c.tick();
   assert.equal(c.status().applied, false);
   assert.match(c.status().reason, /^error: pmset -g batt failed/);
+});
+
+// ---- AlDente's conflict (2026-10-30) -----------------------------------------------------------
+
+const defaultsCalls = (mac: ReturnType<typeof fakeMac>): number => mac.calls.filter((l) => l.startsWith("/usr/bin/defaults read")).length;
+
+test("AlDente's 'Disable Sleep until Charge Limit' reads as a conflict; 0 and a missing key do not", async () => {
+  for (const [value, conflict] of [["1", "aldente-disable-sleep"], ["0", null], [null, null]] as const) {
+    const mac = fakeMac({ aldenteSleep: value });
+    const { c } = controller(mac, { settings: settings({ mode: "on" }) });
+    await c.tick();
+    assert.equal(c.status().conflict, conflict, `defaults said ${String(value)}`);
+  }
+});
+
+test("the AlDente probe runs at most once a minute, and says each change once", async () => {
+  const mac = fakeMac({ aldenteSleep: "0" });
+  const { c, clock, lines } = controller(mac, { settings: settings({ mode: "on" }) });
+  await c.tick();
+  assert.equal(defaultsCalls(mac), 1);
+  clock.t = NOW + 30_000;
+  await c.tick();
+  assert.equal(defaultsCalls(mac), 1, "inside the minute: cached");
+  mac.aldenteSleep = "1";
+  clock.t = NOW + CONFLICT_PROBE_MS + 1000;
+  await c.tick();
+  assert.equal(defaultsCalls(mac), 2, "probed again after a minute");
+  assert.equal(c.status().conflict, "aldente-disable-sleep");
+  assert.equal(lines.filter((l) => /AlDente's "Disable Sleep until Charge Limit" also sets/.test(l)).length, 1);
+  // The owner switches AlDente to "Stop Charging when Sleeping": that key goes to 0.
+  mac.aldenteSleep = "0";
+  clock.t += CONFLICT_PROBE_MS + 1000;
+  await c.tick();
+  clock.t += CONFLICT_PROBE_MS + 1000;
+  await c.tick();
+  assert.equal(c.status().conflict, null);
+  assert.equal(lines.filter((l) => /no longer set/.test(l)).length, 1, "gone once, not every tick");
+});
+
+test("a sleep bit cleared behind us probes at once and names AlDente", async () => {
+  // 2026-10-30 09:31: AlDente's helper released at the charge limit with AC still attached; the bit
+  // read 0 and the next tick logged the re-enable. Who did it is only knowable by asking at once.
+  const mac = fakeMac({ lid: true, aldenteSleep: "1" });
+  const { c, clock, lines } = controller(mac, { settings: settings({ mode: "on" }) });
+  await c.tick();
+  assert.equal(c.status().applied, true);
+  assert.equal(defaultsCalls(mac), 1);
+  clock.t = NOW + 30_000;
+  mac.sleepDisabled = false;
+  mac.calls.length = 0;
+  await c.tick();
+  assert.equal(defaultsCalls(mac), 1, "probed past the cache");
+  assert.ok(lines.includes("awake: sleep was re-enabled outside ClaudeRipple (AlDente)"));
+  assert.equal(c.status().applied, true, "re-asserted in the same tick");
+});
+
+test("a cleared bit with no AlDente option keeps the generic line", async () => {
+  const mac = fakeMac({ lid: true });
+  const { c, clock, lines } = controller(mac, { settings: settings({ mode: "on" }) });
+  await c.tick();
+  clock.t = NOW + 30_000;
+  mac.sleepDisabled = false;
+  await c.tick();
+  assert.ok(lines.includes("awake: sleep was re-enabled outside ClaudeRipple (reboot or another tool)"));
 });
