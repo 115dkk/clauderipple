@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  AwakeController, CONFLICT_PROBE_MS, decideAwake, parseBattery, parseClamshell, parseExternalDisplays, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
+  AwakeController, CONFLICT_KEEP_MS, CONFLICT_PROBE_MS, decideAwake, parseBattery, parseClamshell, parseExternalDisplays, parseSleepHolders, parseThermal, readJournal, SLEEPNOW_SETTLE_MS, WORKING_GRACE_MS,
   type Activity, type AwakeInput, type RunResult,
 } from "../src/awake.ts";
 import { AWAKE_DEFAULTS, type AwakeSettings } from "../src/config.ts";
@@ -165,7 +165,7 @@ function fakeMac(over: Partial<FakeMac> = {}): FakeMac & { run: (f: string, a: s
   });
 }
 
-function controller(mac: ReturnType<typeof fakeMac>, o: { settings: () => AwakeSettings; activity?: () => Activity; journalFile?: string; platform?: NodeJS.Platform; clock?: { t: number } }) {
+function controller(mac: ReturnType<typeof fakeMac>, o: { settings: () => AwakeSettings; activity?: () => Activity; journalFile?: string; platform?: NodeJS.Platform; clock?: { t: number }; uptime?: () => number }) {
   const clock = o.clock ?? { t: NOW };
   const journalFile = o.journalFile ?? path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cr-awake-")), "awake.json");
   const lines: string[] = [];
@@ -180,6 +180,8 @@ function controller(mac: ReturnType<typeof fakeMac>, o: { settings: () => AwakeS
     sleep: async (ms) => { clock.t += ms; },
     fileExists: () => true,
     schedule: () => () => {},
+    // A machine that booted a day before the test's clock: nothing here is a reboot unless a test says so.
+    uptime: o.uptime ?? (() => 86_400),
   });
   return { c, clock, journalFile, lines };
 }
@@ -430,20 +432,21 @@ test("guards release a held Mac: battery under the floor, and a failed battery r
   assert.match(c.status().reason, /^error: pmset -g batt failed/);
 });
 
-// ---- AlDente's conflict (2026-10-30) -----------------------------------------------------------
+// ---- Another app that writes the sleep setting (2026-10-30) ------------------------------------
 
 const defaultsCalls = (mac: ReturnType<typeof fakeMac>): number => mac.calls.filter((l) => l.startsWith("/usr/bin/defaults read")).length;
+const iso = (ms: number): string => new Date(ms).toISOString();
 
-test("AlDente's 'Disable Sleep until Charge Limit' reads as a conflict; 0 and a missing key do not", async () => {
-  for (const [value, conflict] of [["1", "aldente-disable-sleep"], ["0", null], [null, null]] as const) {
+test("a known writer from the table is a conflict; 0 and a missing key are not", async () => {
+  for (const [value, conflict] of [["1", { app: "aldente", name: "AlDente", at: iso(NOW) }], ["0", null], [null, null]] as const) {
     const mac = fakeMac({ aldenteSleep: value });
     const { c } = controller(mac, { settings: settings({ mode: "on" }) });
     await c.tick();
-    assert.equal(c.status().conflict, conflict, `defaults said ${String(value)}`);
+    assert.deepEqual(c.status().conflict, conflict, `defaults said ${String(value)}`);
   }
 });
 
-test("the AlDente probe runs at most once a minute, and says each change once", async () => {
+test("the probe runs at most once a minute, and says each change once", async () => {
   const mac = fakeMac({ aldenteSleep: "0" });
   const { c, clock, lines } = controller(mac, { settings: settings({ mode: "on" }) });
   await c.tick();
@@ -455,8 +458,8 @@ test("the AlDente probe runs at most once a minute, and says each change once", 
   clock.t = NOW + CONFLICT_PROBE_MS + 1000;
   await c.tick();
   assert.equal(defaultsCalls(mac), 2, "probed again after a minute");
-  assert.equal(c.status().conflict, "aldente-disable-sleep");
-  assert.equal(lines.filter((l) => /AlDente's "Disable Sleep until Charge Limit" also sets/.test(l)).length, 1);
+  assert.equal(c.status().conflict?.name, "AlDente");
+  assert.equal(lines.filter((l) => /AlDente also changes the sleep setting/.test(l)).length, 1);
   // The owner switches AlDente to "Stop Charging when Sleeping": that key goes to 0.
   mac.aldenteSleep = "0";
   clock.t += CONFLICT_PROBE_MS + 1000;
@@ -464,10 +467,10 @@ test("the AlDente probe runs at most once a minute, and says each change once", 
   clock.t += CONFLICT_PROBE_MS + 1000;
   await c.tick();
   assert.equal(c.status().conflict, null);
-  assert.equal(lines.filter((l) => /no longer set/.test(l)).length, 1, "gone once, not every tick");
+  assert.equal(lines.filter((l) => l === "awake: AlDente no longer changes the sleep setting").length, 1, "gone once, not every tick");
 });
 
-test("a sleep bit cleared behind us probes at once and names AlDente", async () => {
+test("a setting cleared behind us probes at once and names the known app", async () => {
   // 2026-10-30 09:31: AlDente's helper released at the charge limit with AC still attached; the bit
   // read 0 and the next tick logged the re-enable. Who did it is only knowable by asking at once.
   const mac = fakeMac({ lid: true, aldenteSleep: "1" });
@@ -484,12 +487,51 @@ test("a sleep bit cleared behind us probes at once and names AlDente", async () 
   assert.equal(c.status().applied, true, "re-asserted in the same tick");
 });
 
-test("a cleared bit with no AlDente option keeps the generic line", async () => {
+test("a clear with no known writer is an unknown cause, kept 24 h from the last outside re-enable", async () => {
   const mac = fakeMac({ lid: true });
   const { c, clock, lines } = controller(mac, { settings: settings({ mode: "on" }) });
   await c.tick();
   clock.t = NOW + 30_000;
   mac.sleepDisabled = false;
   await c.tick();
-  assert.ok(lines.includes("awake: sleep was re-enabled outside ClaudeRipple (reboot or another tool)"));
+  assert.ok(lines.includes("awake: sleep was re-enabled outside ClaudeRipple (another app or a settings change)"));
+  assert.deepEqual(c.status().conflict, { app: null, name: null, at: iso(NOW + 30_000) });
+  clock.t = NOW + 30_000 + CONFLICT_KEEP_MS - 1000;
+  await c.tick();
+  assert.ok(c.status().conflict, "still reported inside the 24 h");
+  clock.t += 2000;
+  await c.tick();
+  assert.equal(c.status().conflict, null, "cleared after 24 h");
+});
+
+test("a boot after the hold explains a cleared bit: a reboot, not a conflict", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cr-awake-"));
+  const journalFile = path.join(dir, "awake.json");
+  fs.writeFileSync(journalFile, JSON.stringify({ applied: true, since: iso(NOW - 3_600_000), reason: "on" }));
+  const mac = fakeMac({ sleepDisabled: false });
+  const { c, lines } = controller(mac, { settings: settings({ mode: "on" }), journalFile, uptime: () => 60 });
+  await c.tick();
+  assert.ok(lines.includes("awake: sleep was re-enabled outside ClaudeRipple (reboot)"));
+  assert.equal(c.status().conflict, null);
+  assert.equal(c.status().applied, true, "re-applied");
+});
+
+test("a known writer takes precedence over an unknown cause", async () => {
+  const mac = fakeMac({ lid: true });
+  const { c, clock } = controller(mac, { settings: settings({ mode: "on" }) });
+  await c.tick();
+  clock.t = NOW + 30_000;
+  mac.sleepDisabled = false;
+  await c.tick();
+  assert.deepEqual(c.status().conflict, { app: null, name: null, at: iso(NOW + 30_000) });
+  // AlDente's option turns up a minute later: the known app is shown instead.
+  mac.aldenteSleep = "1";
+  clock.t = NOW + CONFLICT_PROBE_MS + 31_000;
+  await c.tick();
+  assert.deepEqual(c.status().conflict, { app: "aldente", name: "AlDente", at: iso(NOW + CONFLICT_PROBE_MS + 31_000) });
+  // With its option off again the unknown cause is still ticking underneath, and shows for its 24 h.
+  mac.aldenteSleep = "0";
+  clock.t += CONFLICT_PROBE_MS + 1000;
+  await c.tick();
+  assert.deepEqual(c.status().conflict, { app: null, name: null, at: iso(NOW + 30_000) });
 });

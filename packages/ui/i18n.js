@@ -2958,7 +2958,10 @@ Object.assign(I18N.ko, {
   "mac.why.recent": "Claude가 {min}분 전에 일을 마쳤습니다 · 10분까지 깨어 있습니다", "mac.why.idle": "Claude가 10분 넘게 쉬고 있습니다", "mac.why.until": "정한 시각이 지났습니다",
   "mac.why.battery": "배터리가 {floor}% 미만이라 깨어 있기를 멈췄습니다", "mac.why.thermal": "노트북이 뜨거워져서 깨어 있기를 멈췄습니다", "mac.why.error": "배터리나 온도를 읽지 못해 안전하게 깨어 있기를 멈췄습니다",
   "mac.why.setup": "맥 암호 설정이 필요합니다", "mac.why.failed": "잠들지 않게 하는 설정을 바꾸지 못했습니다", "mac.why.starting": "확인하는 중…",
-  "mac.conflict.aldente": "AlDente의 ‘충전 한도까지 잠자기 비활성화’가 켜져 있어, 충전이 중단되면 잠자기 방지가 해제되어 덮개를 닫은 노트북이 잠들 수 있습니다. AlDente에서 이 항목을 ‘잠자기 중 충전 중지’로 변경해 주세요.",
+  "mac.conflict.title": "잠자기 설정 충돌",
+  "mac.conflict.app": "{app} 앱도 같은 잠자기 설정을 변경하고 있어, 해당 앱이 설정을 되돌리면 덮개를 닫은 노트북이 잠들 수 있습니다.",
+  "mac.conflict.fix.aldente": "AlDente에서 ‘충전 한도까지 잠자기 비활성화’를 ‘잠자기 중 충전 중지’로 변경해 주세요.",
+  "mac.conflict.unknown": "깨어 있는 동안 다른 앱의 동작이나 설정 변경으로 잠자기 방지가 해제되었습니다. 덮개를 닫은 노트북이 잠들 수 있으니, 잠자기를 관리하는 다른 앱을 사용 중이라면 해당 앱의 잠자기 관련 기능을 꺼 주세요.",
   "mac.fact.battery": "배터리 {percent}%", "mac.fact.charging": "배터리 {percent}% · 전원 연결됨", "mac.fact.lidClosed": "덮개 닫힘", "mac.fact.lidOpen": "덮개 열림", "mac.fact.hot": "뜨거움",
   "mac.mode.label": "깨어 있기", "mac.mode.off": "끔", "mac.mode.working": "일할 때만", "mac.mode.on": "계속 켜 두기",
   "mac.mode.offHelp": "노트북이 평소처럼 잠듭니다.", "mac.mode.workingHelp": "Claude가 일하는 동안, 그리고 끝난 뒤 10분까지 깨어 있습니다.", "mac.mode.onHelp": "끄거나 정한 시각이 될 때까지 깨어 있습니다.",
@@ -3007,7 +3010,10 @@ Object.assign(I18N.en, {
   "mac.why.recent": "Claude finished {min} min ago · stays awake for 10 min", "mac.why.idle": "Claude has been idle for over 10 minutes", "mac.why.until": "The end time has passed",
   "mac.why.battery": "Stopped staying awake: battery below {floor}%", "mac.why.thermal": "Stopped staying awake: the laptop is hot", "mac.why.error": "Stopped staying awake to be safe: battery or temperature could not be read",
   "mac.why.setup": "Needs your Mac password once", "mac.why.failed": "Could not change the sleep setting", "mac.why.starting": "Checking…",
-  "mac.conflict.aldente": "AlDente’s “Disable Sleep until Charge Limit” is on: when charging stops, it turns sleep back on and a closed laptop can fall asleep. In AlDente, choose “Stop Charging when Sleeping” instead.",
+  "mac.conflict.title": "Sleep setting conflict",
+  "mac.conflict.app": "{app} also changes the same sleep setting. If it changes that setting back, your laptop may go to sleep with the lid closed.",
+  "mac.conflict.fix.aldente": "In AlDente, change “Disable Sleep until Charge Limit” to “Stop Charging when Sleeping”.",
+  "mac.conflict.unknown": "While this feature was active, sleep prevention was turned off by another app or a settings change, so your laptop may go to sleep with the lid closed. If you use another app that manages sleep, turn off its sleep-related features.",
   "mac.fact.battery": "Battery {percent}%", "mac.fact.charging": "Battery {percent}% · plugged in", "mac.fact.lidClosed": "Lid closed", "mac.fact.lidOpen": "Lid open", "mac.fact.hot": "Hot",
   "mac.mode.label": "Stay awake", "mac.mode.off": "Off", "mac.mode.working": "While working", "mac.mode.on": "Always",
   "mac.mode.offHelp": "The laptop sleeps as usual.", "mac.mode.workingHelp": "Awake while Claude works, and for 10 minutes after.", "mac.mode.onHelp": "Awake until you turn it off or the end time comes.",
@@ -3056,7 +3062,10 @@ Object.assign(I18N.zh, {
   "mac.why.recent": "Claude 于 {min} 分钟前完成工作 · 保持唤醒 10 分钟", "mac.why.idle": "Claude 已空闲超过 10 分钟", "mac.why.until": "已过设定的结束时间",
   "mac.why.battery": "电量低于 {floor}%，已停止保持唤醒", "mac.why.thermal": "笔记本过热，已停止保持唤醒", "mac.why.error": "无法读取电池或温度，为安全起见已停止保持唤醒",
   "mac.why.setup": "需要输入一次 Mac 密码", "mac.why.failed": "无法更改睡眠设置", "mac.why.starting": "正在检查…",
-  "mac.conflict.aldente": "AlDente 的“Disable Sleep until Charge Limit”已开启：停止充电后，AlDente 会停止保持唤醒，合盖的笔记本电脑可能因此进入睡眠状态。请在 AlDente 中改选“Stop Charging when Sleeping”。",
+  "mac.conflict.title": "睡眠设置冲突",
+  "mac.conflict.app": "{app} 也会更改同一项睡眠设置。如果它将设置改回，合盖的笔记本电脑可能会进入睡眠状态。",
+  "mac.conflict.fix.aldente": "请在 AlDente 中将“Disable Sleep until Charge Limit”改为“Stop Charging when Sleeping”。",
+  "mac.conflict.unknown": "保持唤醒期间，其他应用或设置更改导致阻止电脑进入睡眠的功能被关闭，因此合盖的笔记本电脑可能会进入睡眠状态。如果你在使用其他管理睡眠的应用，请关闭其中与睡眠相关的功能。",
   "mac.fact.battery": "电量 {percent}%", "mac.fact.charging": "电量 {percent}% · 已接电源", "mac.fact.lidClosed": "已合盖", "mac.fact.lidOpen": "已开盖", "mac.fact.hot": "过热",
   "mac.mode.label": "保持唤醒", "mac.mode.off": "关闭", "mac.mode.working": "仅在工作时", "mac.mode.on": "始终开启",
   "mac.mode.offHelp": "笔记本照常睡眠。", "mac.mode.workingHelp": "Claude 工作期间及结束后 10 分钟内保持唤醒。", "mac.mode.onHelp": "保持唤醒，直到你关闭或到达结束时间。",
@@ -3105,7 +3114,10 @@ Object.assign(I18N.ja, {
   "mac.why.recent": "Claude は {min} 分前に作業を終えました · 10 分間はスリープしません", "mac.why.idle": "Claude は 10 分以上作業していません", "mac.why.until": "終了時刻を過ぎました",
   "mac.why.battery": "バッテリーが {floor}% 未満のため、スリープ防止をやめました", "mac.why.thermal": "ノートPC が熱くなったため、スリープ防止をやめました", "mac.why.error": "バッテリーや温度を読み取れないため、安全のためスリープ防止をやめました",
   "mac.why.setup": "Mac のパスワードが一度必要です", "mac.why.failed": "スリープ設定を変更できませんでした", "mac.why.starting": "確認中…",
-  "mac.conflict.aldente": "AlDente の「Disable Sleep until Charge Limit」がオンになっています。充電が止まるとスリープ防止が解除され、ふたを閉じたノートPC がスリープすることがあります。AlDente でこの項目を「Stop Charging when Sleeping」に変更してください。",
+  "mac.conflict.title": "スリープ設定の競合",
+  "mac.conflict.app": "{app} も同じスリープ設定を変更するため、{app} が設定を戻すと、ふたを閉じたノートPC がスリープすることがあります。",
+  "mac.conflict.fix.aldente": "AlDente で「Disable Sleep until Charge Limit」を「Stop Charging when Sleeping」に変更してください。",
+  "mac.conflict.unknown": "スリープ防止中に、ほかのアプリや設定の変更によってスリープ防止が解除されました。ふたを閉じたノートPC がスリープすることがあるため、スリープを管理するほかのアプリを使っている場合は、そのアプリのスリープ関連機能をオフにしてください。",
   "mac.fact.battery": "バッテリー {percent}%", "mac.fact.charging": "バッテリー {percent}% · 電源接続中", "mac.fact.lidClosed": "ふた閉", "mac.fact.lidOpen": "ふた開", "mac.fact.hot": "高温",
   "mac.mode.label": "スリープ防止", "mac.mode.off": "オフ", "mac.mode.working": "作業中のみ", "mac.mode.on": "常にオン",
   "mac.mode.offHelp": "ノートPC はいつもどおりスリープします。", "mac.mode.workingHelp": "Claude の作業中と、終わってから 10 分間はスリープしません。", "mac.mode.onHelp": "オフにするか終了時刻になるまでスリープしません。",
@@ -3154,7 +3166,10 @@ Object.assign(I18N.es, {
   "mac.why.recent": "Claude terminó hace {min} min · sigue despierto 10 min", "mac.why.idle": "Claude lleva más de 10 minutos sin trabajar", "mac.why.until": "Ya pasó la hora de fin",
   "mac.why.battery": "Dejó de mantenerse despierto: batería por debajo del {floor}%", "mac.why.thermal": "Dejó de mantenerse despierto: el portátil está caliente", "mac.why.error": "Dejó de mantenerse despierto por seguridad: no se pudo leer la batería o la temperatura",
   "mac.why.setup": "Necesita tu contraseña del Mac una vez", "mac.why.failed": "No se pudo cambiar el ajuste de reposo", "mac.why.starting": "Comprobando…",
-  "mac.conflict.aldente": "La opción «Disable Sleep until Charge Limit» de AlDente está activada: cuando deja de cargar, vuelve a permitir el reposo y un portátil con la tapa cerrada puede dormirse. En AlDente, elige «Stop Charging when Sleeping».",
+  "mac.conflict.title": "Conflicto con el ajuste de reposo",
+  "mac.conflict.app": "{app} también cambia el mismo ajuste de reposo, así que, cuando lo revierte, un portátil con la tapa cerrada puede entrar en reposo.",
+  "mac.conflict.fix.aldente": "En AlDente, cambia «Disable Sleep until Charge Limit» por «Stop Charging when Sleeping».",
+  "mac.conflict.unknown": "Mientras esta función estaba activa, otra app o un cambio en los ajustes desactivó la función que impide el reposo, por lo que tu portátil puede entrar en reposo con la tapa cerrada. Si usas otra app que gestiona el reposo, desactiva sus funciones relacionadas con el reposo.",
   "mac.fact.battery": "Batería {percent}%", "mac.fact.charging": "Batería {percent}% · conectado", "mac.fact.lidClosed": "Tapa cerrada", "mac.fact.lidOpen": "Tapa abierta", "mac.fact.hot": "Caliente",
   "mac.mode.label": "Mantener despierto", "mac.mode.off": "No", "mac.mode.working": "Mientras trabaja", "mac.mode.on": "Siempre",
   "mac.mode.offHelp": "El portátil entra en reposo como siempre.", "mac.mode.workingHelp": "Despierto mientras Claude trabaja y 10 minutos después.", "mac.mode.onHelp": "Despierto hasta que lo apagues o llegue la hora de fin.",
@@ -3203,7 +3218,10 @@ Object.assign(I18N.pt, {
   "mac.why.recent": "O Claude terminou há {min} min · fica acordado por 10 min", "mac.why.idle": "O Claude está parado há mais de 10 minutos", "mac.why.until": "O horário de fim já passou",
   "mac.why.battery": "Parou de manter acordado: bateria abaixo de {floor}%", "mac.why.thermal": "Parou de manter acordado: o notebook está quente", "mac.why.error": "Parou de manter acordado por segurança: não foi possível ler a bateria ou a temperatura",
   "mac.why.setup": "Precisa da sua senha do Mac uma vez", "mac.why.failed": "Não foi possível alterar o repouso", "mac.why.starting": "Verificando…",
-  "mac.conflict.aldente": "A opção “Disable Sleep until Charge Limit” do AlDente está ativada: quando o carregamento é interrompido, o AlDente volta a permitir o repouso e um notebook com a tampa fechada pode dormir. No AlDente, escolha “Stop Charging when Sleeping”.",
+  "mac.conflict.title": "Conflito na configuração de repouso",
+  "mac.conflict.app": "{app} também altera a mesma configuração de repouso; quando reverte essa alteração, um notebook com a tampa fechada pode entrar em repouso.",
+  "mac.conflict.fix.aldente": "No AlDente, troque “Disable Sleep until Charge Limit” por “Stop Charging when Sleeping”.",
+  "mac.conflict.unknown": "Enquanto esta função estava ativa, outro app ou uma alteração nas configurações desativou a função que impede o repouso, por isso seu notebook pode entrar em repouso com a tampa fechada. Se você usa outro app que gerencia o repouso, desative as funções dele relacionadas ao repouso.",
   "mac.fact.battery": "Bateria {percent}%", "mac.fact.charging": "Bateria {percent}% · na tomada", "mac.fact.lidClosed": "Tampa fechada", "mac.fact.lidOpen": "Tampa aberta", "mac.fact.hot": "Quente",
   "mac.mode.label": "Manter acordado", "mac.mode.off": "Não", "mac.mode.working": "Enquanto trabalha", "mac.mode.on": "Sempre",
   "mac.mode.offHelp": "O notebook entra em repouso normalmente.", "mac.mode.workingHelp": "Acordado enquanto o Claude trabalha e por 10 minutos depois.", "mac.mode.onHelp": "Acordado até você desligar ou chegar o horário de fim.",
@@ -3266,6 +3284,11 @@ function t(key, vars) {
   let text = dictionary[key] !== undefined ? dictionary[key] : (I18N.en[key] !== undefined ? I18N.en[key] : key);
   for (const [name, value] of Object.entries(vars || {})) text = text.split(`{${name}}`).join(String(value));
   return text;
+}
+/** Whether the current language itself has this key: t() falls back to English, so it cannot answer that. */
+function hasI18nKey(key) {
+  const dictionary = I18N[CURRENT_LANG] || I18N.en;
+  return dictionary[key] !== undefined;
 }
 function applyStaticI18n() {
   for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t(node.getAttribute("data-i18n"));

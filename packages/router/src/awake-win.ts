@@ -38,7 +38,7 @@
 
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
-import type { AwakeBackend, AwakeConflict, AwakeJournal, Battery, Guards, HoldOutcome, LidAction, Runner } from "./awake.ts";
+import type { AwakeBackend, AwakeJournal, Battery, ConflictApp, Guards, HoldOutcome, LidAction, Runner } from "./awake.ts";
 
 const SYSTEM_ROOT = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? "C:\\Windows";
 export const POWERCFG = path.win32.join(SYSTEM_ROOT, "System32", "powercfg.exe");
@@ -510,8 +510,8 @@ export class WinAwakeBackend implements AwakeBackend {
     }
   }
 
-  /** No second app writes Windows' idle-sleep hold or the plan's lid action, so there is no conflict to report. */
-  async probeConflict(): Promise<AwakeConflict | null> {
+  /** No second app writes Windows' idle-sleep hold or the plan's lid action, so no known writer is named here. */
+  async probeConflict(): Promise<ConflictApp | null> {
     return null;
   }
 

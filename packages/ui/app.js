@@ -1873,16 +1873,26 @@ function openMacRename(current) {
   ]));
 }
 
+/** The conflict row's body: the app and its own fix when we know it, else the unknown cause. */
+function macConflictBody(c) {
+  if (typeof c.name === "string" && c.name) {
+    const app = t("mac.conflict.app", { app: c.name });
+    const fixKey = `mac.conflict.fix.${c.app}`;
+    return typeof c.app === "string" && hasI18nKey(fixKey) ? `${app} ${t(fixKey)}` : app;
+  }
+  return t("mac.conflict.unknown");
+}
+
 function macAwakeCard(a) {
   const why = macAwakeWhy(a);
   const state = a.applied
     ? macStateRow("on", t("mac.awake.on"), why.text, macFacts(a))
     : macStateRow(why.warn ? "warn" : "off", t("mac.awake.off"), why.text, macFacts(a));
   const modes = [{ value: "off", label: t("mac.mode.off") }, { value: "working", label: t("mac.mode.working") }, { value: "on", label: t("mac.mode.on") }];
-  // AlDente's "Disable Sleep until Charge Limit" writes the same sleep bit (router awake.ts): it
-  // clears it when charging stops, so a closed lid sleeps. Only worth saying while we hold the bit.
-  const conflict = a.conflict === "aldente-disable-sleep" && a.mode !== "off"
-    ? macStateRow("warn", "AlDente", t("mac.conflict.aldente"))
+  // Another app can write the same sleep setting (router awake.ts): it clears the bit when it stops,
+  // so a closed lid sleeps. Only worth saying while we hold it; an older router's string is ignored.
+  const conflict = a.conflict && typeof a.conflict === "object" && a.mode !== "off"
+    ? macStateRow("warn", t("mac.conflict.title"), macConflictBody(a.conflict))
     : null;
   const rows = [
     state,

@@ -32,9 +32,14 @@ test("status text names the state, the facts and the hint", () => {
   assert.match(formatPower({ ...STATUS, awake: { ...STATUS.awake, setup: "needs-setup" } }).join("\n"), /needs setup: clauderipple awake setup/);
 });
 
-test("an AlDente conflict is named under the awake line, and nothing is printed without one", () => {
-  const text = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: "aldente-disable-sleep" } }).join("\n");
-  assert.match(text, /^ {8}conflict: AlDente "Disable Sleep until Charge Limit" clears the sleep bit when charging stops; choose "Stop Charging when Sleeping" in AlDente$/m);
+test("a conflict is named under the awake line in one line: the known app, the unknown cause, and an old router's string", () => {
+  const known = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: { app: "aldente", name: "AlDente", at: "2026-10-20T03:00:00.000Z" } } }).join("\n");
+  assert.match(known, /^ {8}conflict: AlDente also changes the sleep setting$/m);
+  const unknown = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: { app: null, name: null, at: "2026-10-20T03:00:00.000Z" } } }).join("\n");
+  assert.match(unknown, /^ {8}conflict: sleep was re-enabled outside ClaudeRipple at .+ by another app or a settings change$/m);
+  // A router of 0.12.22 sent the old string, which names the one app there was.
+  const old = formatPower({ ...STATUS, awake: { ...STATUS.awake, conflict: "aldente-disable-sleep" } } as unknown as PowerStatus).join("\n");
+  assert.match(old, /^ {8}conflict: AlDente also changes the sleep setting$/m);
   // An older router sends no conflict field at all.
   assert.doesNotMatch(formatPower(STATUS).join("\n"), /conflict:/);
   const older = { platform: STATUS.platform, awake: { mode: STATUS.awake.mode }, tether: STATUS.tether } as unknown as PowerStatus;
