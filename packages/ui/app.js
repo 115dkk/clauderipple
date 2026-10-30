@@ -190,8 +190,9 @@ function modelEffortTag(model) {
   if (!Array.isArray(model.effortLevels)) return null;
   return model.effortLevels.length ? t("providers.modelEffort") : t("providers.modelNoEffort");
 }
-// Routed models do not share a context window. ChatGPT's live effective window comes from the
-// router's shared resolver and is read-only; other providers keep the saved/discovered fallback.
+// Routed models do not share a context window. `windows` is the value the router resolved for each
+// model (a saved override included) and `catalogWindows` is the live Codex catalogue's own figure,
+// which the window editor prefills and annotates while no override is in effect.
 let pickerContextWindows = { windows: {}, catalogWindows: {} };
 function discoveredContextWindow(providerName, modelId) {
   const provider = currentConfig && currentConfig.providers && currentConfig.providers[providerName];
@@ -1021,6 +1022,7 @@ function renderClientPickerModels(enabled) {
     groups.map((group) => [group.name, providerLabel(group.name, group.provider), group.models.map((model) => [
       model.id, labelOf(model), discoveredContextWindow(group.name, model.id) ?? null,
       savedContextWindow(model.id) ?? null, pickerContextWindows.catalogWindows[model.id] ?? null,
+      pickerContextWindows.windows[model.id] ?? null,
     ])]),
   ]);
   // Typing in a window changes none of this, and the catalogue arrives once with the screen, so a
@@ -1040,16 +1042,19 @@ function renderClientPickerModels(enabled) {
     const discovered = discoveredContextWindow(group.name, model.id);
     const saved = savedContextWindow(model.id);
     const catalogWindow = pickerContextWindows.catalogWindows[model.id];
+    // The catalogue's figure is the one in use while the router resolves exactly it; a saved
+    // override (or a route window) makes the two differ, and the field then shows the resolved value.
+    const catalogApplied = catalogWindow !== undefined && pickerContextWindows.windows[model.id] === catalogWindow;
     const draft = pickerWindowDrafts.get(model.id);
-    // Blank means "use the fallback" except when the live catalogue owns the value.
+    // Always editable. It shows the number the router uses; emptying it, or typing the catalogue's
+    // own figure, saves no override and goes back to the official value (2026-10-30).
     const windowField = el("input", {
       type: "number", class: "model-window", min: "1", step: "1000",
-      value: draft !== undefined ? draft : catalogWindow !== undefined ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
+      value: draft !== undefined ? draft : catalogApplied ? String(catalogWindow) : saved !== undefined ? String(saved) : "",
       placeholder: discovered !== undefined ? String(discovered) : t("slots.windowGlobal"),
-      title: t(catalogWindow !== undefined ? "slots.windowCodex" : "slots.windowHelp"),
-      readonly: catalogWindow !== undefined ? "" : undefined,
+      title: t(catalogApplied ? "slots.windowCodex" : "slots.windowHelp"),
     });
-    const windowNote = catalogWindow !== undefined ? el("small", { text: t("slots.windowCodex"), style: "grid-row: 3; grid-column: 1 / -1" }) : null;
+    const windowNote = catalogApplied ? el("small", { class: "pm-note", text: t("slots.windowCodex") }) : null;
     windowField.hidden = !input.checked;
     if (windowNote) windowNote.hidden = !input.checked;
     windowField.dataset.model = model.id;
@@ -1061,8 +1066,10 @@ function renderClientPickerModels(enabled) {
       void saveClientPickerModels();
     });
     // Two lines: the name owns the first — on one line it was the thing that collapsed, down to
-    // "GPT…" — and the provider and the window share the second. The field sits outside the
-    // <label>, because inside it every click toggles the checkbox instead of reaching the field.
+    // "GPT…" — and the provider and the window share the second; the catalogue note, when there is
+    // one, takes a third of its own (style.css places it: an inline style is dropped by the CSP).
+    // The field sits outside the <label>, because inside it every click toggles the checkbox instead
+    // of reaching the field.
     box.appendChild(el("div", { class: "picker-model", title: model.id }, [
       el("label", { class: "pm-main" }, [input, el("span", { text: labelOf(model) })]),
       el("small", { text: providerLabel(group.name, group.provider) }),
@@ -1383,10 +1390,15 @@ function saveAutoClassifier() {
 function clientPickerSelections() {
   return $all("#client-picker-models input[type=checkbox]:checked").map((input) => {
     const field = $(`#client-picker-models input.model-window[data-model="${CSS.escape(input.dataset.model)}"]`);
-    // A catalogue value is display-only, not a new override persisted by an unrelated checkbox.
-    const typed = field && !field.readOnly && field.value.trim() ? Number(field.value) : NaN;
-    const contextWindow = field && field.readOnly ? savedContextWindow(input.dataset.model)
-      : Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : discoveredContextWindow(input.dataset.provider, input.dataset.model);
+    const catalogWindow = pickerContextWindows.catalogWindows[input.dataset.model];
+    const typed = field && field.value.trim() ? Number(field.value) : NaN;
+    const value = Number.isFinite(typed) && typed > 0 ? Math.floor(typed) : undefined;
+    // An empty field, or the catalogue's own figure, is no override for a catalogue-backed model:
+    // the entry stores no window and the router keeps following the catalogue. Another provider
+    // keeps its old fallback to the window its provider declares (2026-10-30).
+    const contextWindow = value !== undefined && value !== catalogWindow
+      ? value
+      : catalogWindow !== undefined ? undefined : discoveredContextWindow(input.dataset.provider, input.dataset.model);
     return { id: input.dataset.model, name: input.dataset.name, provider: input.dataset.provider, contextWindow };
   });
 }
@@ -1396,6 +1408,9 @@ async function saveClientPickerModels() {
   try {
     const out = await configRequest(next);
     currentConfig = next;
+    // The override changes which window the router resolves; the rows read that map to decide
+    // whether the catalogue is in effect, so read it again before the next redraw.
+    pickerContextWindows = await api("/api/context-windows").catch(() => pickerContextWindows);
     // Everything the fields held, drafts included, is now the saved copy: there is nothing left to
     // carry over the next rebuild.
     pickerWindowDrafts.clear();

@@ -686,12 +686,27 @@ must preserve **Data: Artificial Analysis (artificialanalysis.ai)** attribution.
     adapter publishes the last-read list process-wide (`providers/chatgpt/
     windows.ts`), and one resolver (`chatgptModelWindow`) hands it to bootstrap's
     `auto_compact_windows`, the picker's `context_window_by_model` and
-    `providerModelWindow` — ahead of any stored `contextWindow` and of
-    `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by id,
-    alias, prefix rule or as a route's target). An explicit
+    `providerModelWindow` — ahead of any stored `contextWindow` (except a picker entry's own
+    override, below) and of `cli.autoCompactWindow`, for models served by a `chatgpt` provider (by
+    id, alias, prefix rule or as a route's target). An explicit
     `route.contextWindow` still wins; every non-chatgpt provider keeps the old
     fallback. The catalogue is now read at router start and every two hours, not
     only when the dashboard asks.
+  - **A picker entry's own window wins over the catalogue (2026-10-30).** The catalogue
+    figure stays the default for a model the dashboard has no override for, but the
+    window field is the operator's: `cli.extraModels[].contextWindow` now beats
+    `chatgptModelWindow` in `resolvedModelWindow`, `chatPickerModels`,
+    bootstrap's agent-file entries and the `GET /api/context-windows` snapshot;
+    an explicit `route.contextWindow` still beats both. Ticking a model copies the
+    provider's declared window onto the entry (`applyPickerSelections`), so an entry
+    equal to that declaration is not an override (`pickerWindowOverride`) — today's
+    configs carry 6.1 Sol's stale 272000 that way and must keep following the
+    catalogue. `catalogWindows` now carries every catalogue-backed id's own figure,
+    also while an override is in effect, so the editor prefills it as the default and
+    shows its note only while `windows` (the resolved value) equals it. The field is
+    editable for catalogue models too; an empty or catalogue-equal value saves no
+    override. Tests: `router/test/chatgpt-windows.test.ts`,
+    `chatgpt-windows-api.test.ts`, `ui-picker-selection.test.ts`.
   - **Effective compaction windows (2026-10-28, Claude Code 2.1.308).** The owner's
     measured `/context` reported `30.7k / 600k` on `claude-opus-4-7` routed to Sol
     (475000 capacity), despite bootstrap and `autoCompactWindowsCache` carrying 475000.
